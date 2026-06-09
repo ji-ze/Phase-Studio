@@ -1780,6 +1780,7 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
     log_path = cycle_dir / f"{prefix}.superflip.log"
     model_for_input: Optional[Path] = None
     if model_file is not None:
+        repeatmode = 1
         suffix = model_file.suffix.lower() or ".dat"
         if suffix == ".xplor":
             viewer_model = cycle_dir / "current_modelfile.xplor"
