@@ -1,0 +1,5 @@
+documentation/
+examples/
+__pycache__/
+*.py[cod]
+.vscode/

@@ -1,0 +1,16 @@
+[project]
+name = "phase-studio"
+version = "0.1.0"
+description = "Qt application for iterative Superflip, SharpED server deblurring and EDMA crystallographic reconstruction."
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "matplotlib",
+  "gemmi",
+]
+
+[project.scripts]
+phase-studio = "phase_studio.app:main"
+
+[tool.setuptools]
+packages = ["phase_studio"]
