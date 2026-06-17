@@ -1616,6 +1616,15 @@ def write_superflip_input(
         perform = "CF"
     fmt = normalize_output_format(output_format)
     best_metric = "symmetry" if bestdensities_symmetry else normalize_bestdensities_metric(bestdensities_metric)
+    effective_repeatmode = int(repeatmode)
+    write_randomseed = True
+    if model_file is not None:
+        if effective_repeatmode != 1 and log is not None:
+            log("  Superflip modelfile is set; using repeatmode 1 because repeated model-seeded runs are deterministic.")
+        effective_repeatmode = 1
+        write_randomseed = False
+        if log is not None:
+            log("  Superflip modelfile is set; randomseed keyword omitted.")
     bestdensities_line = f"bestdensities {max(1, int(bestdensities_count))} {best_metric}"
     data_mode = normalize_reflection_data_mode(reflection_data_mode)
     voxel_line = superflip_voxel_keyword_line(voxel, ref_ctx.cell, log)
@@ -1663,11 +1672,12 @@ def write_superflip_input(
         f.write("endsymmetry\n")
         f.write(f"composition {ref_ctx.composition}\n\n")
         f.write("# Keywords for density modification\n")
-        f.write(f"repeatmode {int(repeatmode)}\n{bestdensities_line}\nmaxcycles {int(maxcycles)}\n")
+        f.write(f"repeatmode {effective_repeatmode}\n{bestdensities_line}\nmaxcycles {int(maxcycles)}\n")
         f.write(f"delta {delta_value}\nweakratio {weakratio_value}\nBiso {biso_value}\n")
         if polish:
             f.write("polish yes\n")
-        f.write(f"randomseed {randomseed}\n")
+        if write_randomseed:
+            f.write(f"randomseed {randomseed}\n")
         for line in normalize_lines:
             f.write(line + "\n")
         if missing.strip():
@@ -2196,27 +2206,42 @@ def parse_superflip_log_metrics(log_path: Path) -> SuperflipLogMetrics:
     text_log = Path(log_path).read_text(encoding="utf-8", errors="replace")
     lines = text_log.splitlines()
 
-    # Match rows under:
-    # Run  Rvalue   Peaks  Symm.    Der.SG  Ref.match      Origin shift
-    #   1   41.58    1.72    5.18     P21/n    13.35   ...
-    row_re = re.compile(
-        r"^\s*\d+\s+"
-        r"(?P<rvalue>[-+]?\d+(?:\.\d+)?)\s+"
-        r"(?P<peaks>[-+]?\d+(?:\.\d+)?)\s+"
-        r"(?P<symm>[-+]?\d+(?:\.\d+)?)\s+"
-        r"\S+"
-        r"(?:\s+(?P<refmatch>[-+]?\d+(?:\.\d+)?))?"
-    )
+    def is_float_token(value: str) -> bool:
+        try:
+            float(value)
+            return True
+        except Exception:
+            return False
+
+    # Parse rows only under the exact saved-density table.  Ref.match is the
+    # token immediately before the three origin-shift coordinates, so this also
+    # survives Der.SG values that contain spaces.
+    in_saved_density_table = False
     for line in lines:
-        m = row_re.match(line)
-        if not m:
+        if (
+            "Run" in line
+            and "Rvalue" in line
+            and "Peaks" in line
+            and "Symm." in line
+            and "Ref.match" in line
+            and "Origin shift" in line
+        ):
+            in_saved_density_table = True
+            continue
+        if not in_saved_density_table:
+            continue
+        tokens = line.split()
+        if not tokens:
+            in_saved_density_table = False
+            continue
+        if len(tokens) < 8 or not tokens[0].isdigit():
             continue
         try:
-            metrics.rvalue = float(m.group("rvalue"))
-            metrics.peaks = float(m.group("peaks"))
-            metrics.symm = float(m.group("symm"))
-            if m.group("refmatch") is not None:
-                metrics.ref_match = float(m.group("refmatch"))
+            metrics.rvalue = float(tokens[1])
+            metrics.peaks = float(tokens[2])
+            metrics.symm = float(tokens[3])
+            if len(tokens) >= 8 and all(is_float_token(t) for t in tokens[-4:]):
+                metrics.ref_match = float(tokens[-4])
         except Exception:
             pass
 
