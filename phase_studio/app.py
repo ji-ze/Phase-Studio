@@ -1095,9 +1095,10 @@ def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]
         return None
     mode = normalize_reflection_data_mode(data_mode)
     if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
-        if value <= 0:
-            return None
-        return value / (2.0 * sigma)
+        amplitude = abs(value)
+        if amplitude <= 0:
+            return 0.0
+        return amplitude / (2.0 * sigma)
     return value / sigma
 
 def reflection_amplitude_signal_to_noise(r: Reflection) -> Optional[float]:
@@ -1122,16 +1123,10 @@ def reflection_sigma_label(data_mode: str) -> str:
     return "sigma(Iobs)"
 
 def reflection_primary_snr_label(data_mode: str) -> str:
-    mode = normalize_reflection_data_mode(data_mode)
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
-        return "F/sigma(F)"
     return "I/sigma(I)"
 
 def reflection_primary_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
-    mode = normalize_reflection_data_mode(data_mode)
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
-        return reflection_amplitude_signal_to_noise(r)
-    return reflection_signal_to_noise(r, mode)
+    return reflection_signal_to_noise(r, data_mode)
 
 def theoretical_unique_hkls_from_observed(
     reflections: Sequence[Reflection],
@@ -4083,24 +4078,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if d_full_stl is not None:
             ax1.axvline(d_full_stl, color="#7c3aed", linewidth=1.1, linestyle=":", label="d_full 98%")
             ax1.text(d_full_stl, 103.0, "d_full", rotation=90, va="top", ha="left", color="#7c3aed", fontsize=8)
-        ax1.set_ylabel("Completeness (%)")
+        ax1.set_ylabel("Completeness (%)", labelpad=6, fontsize=9)
         ax1.set_xlabel("sin(theta)/lambda")
         ax1.set_ylim(0, 105)
         ax1.grid(True, axis="y", alpha=0.25)
         ax1b = ax1.twinx()
         ax1b.plot(centers, mean_signal, marker="o", color="#047857", linewidth=1.8, label=f"Mean {signal_label}")
-        ax1b.set_ylabel(f"Mean {signal_label}")
+        ax1b.set_ylabel(f"Mean {signal_label}", labelpad=6, fontsize=9)
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax1b.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=8)
+        histogram_denominator = max(1, len(analysis.reflections_unique))
         if signal_values:
-            ax2.hist(signal_values, bins=min(50, max(10, int(math.sqrt(len(signal_values))))), color="#0f766e", alpha=0.82)
+            histogram_bins = np.arange(0.0, 16.0, 1.0)
+            histogram_weights = np.full(len(signal_values), 100.0 / float(histogram_denominator), dtype=np.float64)
+            ax2.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#0f766e", alpha=0.82)
         else:
             ax2.text(0.5, 0.5, "No sigma values available", transform=ax2.transAxes, ha="center", va="center")
         ax2.set_xlabel(signal_label)
-        ax2.set_ylabel("Frequency")
+        ax2.set_ylabel("Reflections (%)", labelpad=6, fontsize=9)
+        ax2.set_xlim(0.0, 15.0)
+        ax2.set_xticks(np.arange(0.0, 16.0, 1.0))
         ax2.grid(True, axis="y", alpha=0.25)
-        figure.tight_layout()
+        figure.tight_layout(pad=1.1)
+        figure.subplots_adjust(left=0.08, right=0.91)
         layout.addWidget(canvas, 1)
         headers = ["sin(theta)/lambda bin", "Observed", "Theoretical", "Completeness %", f"Mean {signal_label}"]
         table = QTableWidget(len(analysis.bins), len(headers))
