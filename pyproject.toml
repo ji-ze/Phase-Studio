@@ -1,12 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "phase-studio"
-version = "0.1.0"
+version = "0.1.13"
 description = "Qt application for iterative Superflip, SharpED server deblurring and EDMA crystallographic reconstruction."
+readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "numpy",
   "matplotlib",
   "gemmi",
+]
+
+[project.optional-dependencies]
+app = [
+  "PySide6",
+  "qtvscodestyle",
+]
+qt = [
+  "PySide6",
+  "qtvscodestyle",
+]
+build = [
+  "pyinstaller",
+]
+dev = [
+  "PySide6",
+  "qtvscodestyle",
+  "pyinstaller",
 ]
 
 [project.scripts]

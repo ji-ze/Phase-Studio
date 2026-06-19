@@ -3,14 +3,14 @@
 """
 Phase Studio Qt application.
 
-Iterative Superflip -> SharpED server deblur -> EDMA reconstruction with
+Iterative Superflip -> optional SharpED server deblur -> EDMA reconstruction with
 persistent settings and standardized metric plotting.
 
 Reference CIF supplies cell, symmetry, composition and metrics. Superflip
-referencefile is optional and can be omitted, guessed from the working CIF, or
-provided as an explicit XPLOR density map. The first Superflip run has no
-modelfile. Later cycles can use either EDMA CIF coordinates or the deblurred
-XPLOR density map as Superflip modelfile.
+referencefile is optional and is written only when the user explicitly
+selects a Superflip referencefile (CIF structure or XPLOR density map). The first Superflip run has no
+modelfile. Later cycles can use EDMA CIF coordinates, raw Superflip XPLOR, or
+deblurred XPLOR as Superflip modelfile.
 
 Each cycle saves:
   cycle_NNN/cycle_NNN_superflip.xplor
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import collections
 import csv
+import locale
 import math
 import os
 import queue
@@ -39,7 +40,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -51,39 +52,47 @@ except Exception:
 try:
     import gemmi
 except Exception as exc:
-    raise SystemExit("This script requires gemmi. Install with: conda install -c conda-forge gemmi") from exc
+    raise RuntimeError(
+        "Gemmi could not be loaded. Install it with: "
+        "conda install -c conda-forge gemmi. "
+        f"Original error: {exc}"
+    ) from exc
 
-try:
-    import matplotlib
-    matplotlib.use("QtAgg")
-    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-    from matplotlib.figure import Figure
-    from matplotlib.ticker import MaxNLocator
-except Exception as exc:
-    raise SystemExit("This script requires matplotlib with Tk support.") from exc
-
-
+# Import the selected Qt binding before Matplotlib's Qt backend.
+# The application and the frozen executable use PySide6 exclusively.
 try:
     from PySide6.QtCore import Qt, QTimer, QSettings
     from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
         QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-        QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QSplashScreen,
-        QStyleFactory, QTabWidget, QTextEdit, QVBoxLayout, QWidget
+        QDialog, QDialogButtonBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QSplashScreen,
+        QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QTextEdit, QVBoxLayout, QWidget
     )
+except Exception as exc:
+    raise RuntimeError(
+        "PySide6 could not be loaded. Verify the PySide6 installation and "
+        "Qt DLL dependencies. "
+        f"Original error: {exc}"
+    ) from exc
+
+try:
+    from phase_studio.ui_style import apply_phase_studio_style
 except Exception:
-    try:
-        from PyQt5.QtCore import Qt, QTimer, QSettings
-        from PyQt5.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-        from PyQt5.QtWidgets import (
-            QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-            QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-            QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QSplashScreen,
-            QStyleFactory, QTabWidget, QTextEdit, QVBoxLayout, QWidget
-        )
-    except Exception as exc:
-        raise SystemExit("This GUI version requires PySide6 or PyQt5. Install one of them, e.g. conda install -c conda-forge pyside6 matplotlib") from exc
+    from ui_style import apply_phase_studio_style
+
+try:
+    import matplotlib
+
+    matplotlib.use("QtAgg", force=True)
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.figure import Figure
+    from matplotlib.ticker import MaxNLocator
+except Exception as exc:
+    raise RuntimeError(
+        "Matplotlib QtAgg backend could not be loaded. "
+        f"Original error: {exc}"
+    ) from exc
 
 COMMENT_PREFIXES = ("#", "!", ";")
 REFLECTION_DATA_MODE_AUTO = "auto"
@@ -126,9 +135,11 @@ class ReferenceContext:
 
 @dataclass
 class SuperflipLogMetrics:
+    saved_run: Optional[int] = None
     rvalue: Optional[float] = None
     peaks: Optional[float] = None
     symm: Optional[float] = None
+    derived_sg: str = ""
     ref_match: Optional[float] = None
     fom: Optional[float] = None
     success_rate: Optional[float] = None
@@ -147,20 +158,47 @@ class CycleResult:
     deblur_map: Path
     deblur_edma_cif: Path
     deblur_metric: Optional[float]
+    superflip_saved_run: Optional[int] = None
     superflip_rvalue: Optional[float] = None
     superflip_peaks: Optional[float] = None
     superflip_symm: Optional[float] = None
+    superflip_derived_sg: str = ""
     superflip_ref_match: Optional[float] = None
     superflip_fom: Optional[float] = None
     superflip_success_rate: Optional[float] = None
     superflip_mean_cycles: Optional[float] = None
+
+
+INPUT_MODE_INFLIP = "jana_inflip"
+INPUT_MODE_INFLIP_OVERRIDES = "jana_inflip_overrides"
+INPUT_MODE_EXTERNAL = "external_hkl_cif"
+
+INPUT_MODE_LABELS = {
+    INPUT_MODE_INFLIP: "Jana .inflip",
+    INPUT_MODE_INFLIP_OVERRIDES: "Jana .inflip with external HKL/CIF overrides",
+    INPUT_MODE_EXTERNAL: "External HKL + reference CIF",
+}
+
+def normalize_input_source_mode(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if text in {INPUT_MODE_INFLIP, "inflip", "jana", "jana .inflip"}:
+        return INPUT_MODE_INFLIP
+    if text in {INPUT_MODE_INFLIP_OVERRIDES, "inflip_overrides"} or ("inflip" in text and "override" in text):
+        return INPUT_MODE_INFLIP_OVERRIDES
+    if text in {INPUT_MODE_EXTERNAL, "external"} or text.startswith("external"):
+        return INPUT_MODE_EXTERNAL
+    return INPUT_MODE_INFLIP
 
 @dataclass
 class RunConfig:
     hkl: Path
     reference_cif: Path
     superflip_reference_xplor: Optional[Path]
+    superflip_referencefile: Optional[Path]
     first_cycle_modelfile: Optional[Path]
+    input_source_mode: str
+    jana_inflip: Optional[Path]
+    jana_return_to_jana: bool
     work_dir: Path
     cycles: int
     superflip_exe: str
@@ -235,6 +273,20 @@ class XplorMap:
     cell: Tuple[float, float, float, float, float, float]
     axis_order: str
     data: np.ndarray
+
+@dataclass
+class HklAnalysis:
+    hkl_path: Path
+    data_mode: str
+    cell: gemmi.UnitCell
+    spacegroup: gemmi.SpaceGroup
+    spacegroup_hm: str
+    reflections_raw: List[Reflection]
+    reflections_unique: List[Reflection]
+    d_min: float
+    d_full_98: Optional[float]
+    bins: List[Dict[str, float]]
+    source_note: str
 
 # -----------------------------------------------------------------------------
 # CIF / crystallographic helpers
@@ -539,7 +591,9 @@ def parse_cif_cell_and_sg(cif_path: Path) -> Tuple[gemmi.UnitCell, gemmi.SpaceGr
 
     cell = gemmi.UnitCell(*[float(x) for x in vals])
     hm = (hm or "P 1").strip().strip("'\"")
-    sg = get_spacegroup_from_name(hm)
+    sg = get_spacegroup_from_number(hm) if re.fullmatch(r"\d+(?:\.0+)?", str(hm).strip()) else None
+    if sg is None:
+        sg = get_spacegroup_from_name(hm)
     if sg.number == 1 and hm.replace(" ", "").lower() not in {"p1", "p-1"}:
         sg_from_number = get_spacegroup_from_number(sg_number)
         if sg_from_number is not None:
@@ -652,14 +706,63 @@ def load_reference_context(reference_cif: Path, work_dir: Path, composition_over
         raise ValueError(f"Unphysical reference cell parsed from CIF: {cell.a} {cell.b} {cell.c}")
     atoms = parse_cif_atoms(reference_cif)
     if not atoms:
-        raise ValueError(f"Could not read atom sites from reference CIF: {reference_cif}")
+        # Jana .inflip files can provide a complete cell/space-group/reflection
+        # definition without atomic coordinates.  In that mode Phase Studio can
+        # still run Superflip, SharpED, EDMA and parse Superflip quality metrics;
+        # only reference-coordinate RMSD is unavailable.
+        atoms = []
     formula_comp = composition_from_formula(raw_cif_value(reference_cif, ["_chemical_formula_sum", "_chemical_formula_moiety"]))
     comp = composition_override.strip() if composition_override.strip() else (formula_comp or composition_from_atoms(atoms))
-    work_ref = work_dir / "referencefile.cif"
+    work_ref = work_dir / "phase_studio_reference_for_metrics.cif"
     # Write a clean reference CIF for EDMA metrics and downstream structure handling. This is
     # safer than copying database CIFs with multiple blocks or unusual tags.
     write_structure_cif(work_ref, cell, sg, hm, atoms)
     return ReferenceContext(reference_cif, work_ref, cell, sg, hm, comp, atoms)
+
+
+
+def reference_context_with_external_atom_sites(
+    ref_ctx: ReferenceContext,
+    external_cif: Optional[Path],
+    work_dir: Path,
+    composition_override: str = "",
+    log: Optional[Callable[[str], None]] = None,
+) -> ReferenceContext:
+    """Use atom sites from an explicit reference CIF without replacing Jana HKL.
+
+    In Jana .inflip mode, Phase Studio can synthesize a metadata-only CIF from
+    cell/spacegroup/composition.  That file is useful for setting up the run,
+    but it has zero atom sites and is invalid as a Superflip reference density.
+    When the user explicitly selects a real CIF as Superflip referencefile, keep
+    Jana cell/spacegroup as the run metadata but use the selected CIF's atoms for
+    metrics/EDMA reference handling.
+    """
+    if external_cif is None or Path(external_cif).suffix.lower() != ".cif":
+        return ref_ctx
+    try:
+        atoms = parse_cif_atoms(Path(external_cif))
+    except Exception:
+        atoms = []
+    if not atoms:
+        return ref_ctx
+    comp = composition_override.strip() or composition_from_formula(
+        raw_cif_value(Path(external_cif), ["_chemical_formula_sum", "_chemical_formula_moiety"])
+    ) or composition_from_atoms(atoms) or ref_ctx.composition
+    work_ref = work_dir / "phase_studio_reference_atoms_from_selected_cif.cif"
+    write_structure_cif(work_ref, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms)
+    if log is not None:
+        log(f"Reference atom sites taken from selected Superflip reference CIF: {external_cif}")
+        log(f"Working reference CIF with atom sites: {work_ref}")
+    return ReferenceContext(
+        cif_path=Path(external_cif),
+        work_ref_cif=work_ref,
+        cell=ref_ctx.cell,
+        spacegroup=ref_ctx.spacegroup,
+        spacegroup_hm=ref_ctx.spacegroup_hm,
+        composition=comp,
+        atoms=atoms,
+    )
+
 
 def expanded_unique_atoms(atoms: Sequence[AtomSite], cell: gemmi.UnitCell, sg: gemmi.SpaceGroup, merge_tol_a: float = 0.25) -> List[AtomSite]:
     ops = sg.operations().sym_ops
@@ -800,10 +903,15 @@ def reflection_columns_for_mode(data_mode: str) -> Tuple[int, Optional[int], boo
 
 def merge_duplicate_reflections(reflections: Sequence[Reflection]) -> List[Reflection]:
     buckets: Dict[Tuple[int, int, int], List[Reflection]] = collections.defaultdict(list)
+    order: List[Tuple[int, int, int]] = []
     for r in reflections:
-        buckets[(int(r.h), int(r.k), int(r.l))].append(r)
+        key = (int(r.h), int(r.k), int(r.l))
+        if key not in buckets:
+            order.append(key)
+        buckets[key].append(r)
     merged: List[Reflection] = []
-    for (h, k, l), items in sorted(buckets.items()):
+    for h, k, l in order:
+        items = buckets[(h, k, l)]
         if len(items) == 1:
             merged.append(items[0])
             continue
@@ -872,34 +980,390 @@ def reflection_d_spacing(cell: gemmi.UnitCell, h: int, k: int, l: int) -> float:
         return math.inf
     return 1.0 / math.sqrt(inv_d2)
 
+def reflection_sintheta_over_lambda(cell: gemmi.UnitCell, h: int, k: int, l: int) -> float:
+    d = reflection_d_spacing(cell, h, k, l)
+    if not math.isfinite(d) or d <= 0:
+        return 0.0
+    return 1.0 / (2.0 * d)
+
+def _parse_triplet_translation(expr: str) -> float:
+    text = re.sub(r"[+-]?(?:x|y|z)", "", str(expr or "").strip().lower().replace(" ", ""))
+    if not text:
+        return 0.0
+    if text[0] not in "+-":
+        text = "+" + text
+    value = 0.0
+    for sign, number in re.findall(r"([+-])(\d+(?:/\d+)?|\d*\.\d+)", text):
+        if "/" in number:
+            num, den = number.split("/", 1)
+            term = float(num) / float(den)
+        else:
+            term = float(number)
+        value += -term if sign == "-" else term
+    return value
+
+def direct_rotation_translation_from_triplet(triplet: str) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    rows: List[List[int]] = []
+    translations: List[float] = []
+    for expr in str(triplet or "").split(","):
+        text = expr.strip().lower().replace(" ", "")
+        coeffs = [0, 0, 0]
+        for sign, axis in re.findall(r"([+-]?)(x|y|z)", text):
+            idx = {"x": 0, "y": 1, "z": 2}[axis]
+            coeffs[idx] += -1 if sign == "-" else 1
+        rows.append(coeffs)
+        translations.append(_parse_triplet_translation(text))
+    if len(rows) != 3:
+        return None
+    matrix = np.asarray(rows, dtype=np.int64)
+    det = round(float(np.linalg.det(matrix)))
+    if abs(det) != 1:
+        return None
+    return matrix, np.asarray(translations, dtype=np.float64)
+
+def direct_rotation_matrix_from_triplet(triplet: str) -> Optional[np.ndarray]:
+    parsed = direct_rotation_translation_from_triplet(triplet)
+    return None if parsed is None else parsed[0]
+
+def transform_hkl_by_direct_rotation(rotation: np.ndarray, hkl: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    # Direct-space operation x' = R x transforms reciprocal indices as R^-T h.
+    reciprocal = np.linalg.inv(np.asarray(rotation, dtype=np.float64)).T
+    transformed = reciprocal @ np.asarray([int(hkl[0]), int(hkl[1]), int(hkl[2])], dtype=np.float64)
+    rounded = np.rint(transformed).astype(int)
+    return int(rounded[0]), int(rounded[1]), int(rounded[2])
+
+def apply_symmetry_to_hkl(op: gemmi.Op, hkl: Tuple[int, int, int]) -> Optional[Tuple[int, int, int]]:
+    h, k, l = hkl
+    for attr in ("apply_to_hkl", "apply_to_miller"):
+        fn = getattr(op, attr, None)
+        if fn is None:
+            continue
+        try:
+            out = fn([int(h), int(k), int(l)])
+            return int(out[0]), int(out[1]), int(out[2])
+        except Exception:
+            pass
+    try:
+        rotation = direct_rotation_matrix_from_triplet(op.triplet())
+        if rotation is not None:
+            return transform_hkl_by_direct_rotation(rotation, hkl)
+    except Exception:
+        pass
+    return None
+
+def is_systematically_absent_hkl(hkl: Tuple[int, int, int], sg: gemmi.SpaceGroup) -> bool:
+    try:
+        ops = full_spacegroup_ops(sg)
+    except Exception:
+        ops = []
+    for op in ops:
+        try:
+            transformed = apply_symmetry_to_hkl(op, hkl)
+            if transformed != hkl:
+                continue
+            parsed = direct_rotation_translation_from_triplet(op.triplet())
+            if parsed is None:
+                continue
+            _rotation, translation = parsed
+            phase = int(hkl[0]) * float(translation[0]) + int(hkl[1]) * float(translation[1]) + int(hkl[2]) * float(translation[2])
+            if abs(phase - round(phase)) > 1e-6:
+                return True
+        except Exception:
+            continue
+    return False
+
+def canonical_hkl(hkl: Tuple[int, int, int], sg: Optional[gemmi.SpaceGroup] = None) -> Tuple[int, int, int]:
+    equivalents = [tuple(int(x) for x in hkl), tuple(-int(x) for x in hkl)]
+    if sg is not None:
+        try:
+            for op in full_spacegroup_ops(sg):
+                transformed = apply_symmetry_to_hkl(op, hkl)
+                if transformed is None:
+                    continue
+                equivalents.append(transformed)
+                equivalents.append(tuple(-int(x) for x in transformed))
+        except Exception:
+            pass
+    return min(equivalents)
+
+def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
+    if r.sigma is None:
+        return None
+    sigma = float(r.sigma)
+    value = float(r.value)
+    if sigma <= 0 or not math.isfinite(sigma) or not math.isfinite(value):
+        return None
+    mode = normalize_reflection_data_mode(data_mode)
+    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        if value <= 0:
+            return None
+        return value / (2.0 * sigma)
+    return value / sigma
+
+def theoretical_unique_hkls_from_observed(
+    reflections: Sequence[Reflection],
+    cell: gemmi.UnitCell,
+    sg: gemmi.SpaceGroup,
+    d_min: float,
+) -> List[Tuple[int, int, int]]:
+    if not reflections or not math.isfinite(d_min) or d_min <= 0:
+        return []
+    hmax = max(abs(int(r.h)) for r in reflections)
+    kmax = max(abs(int(r.k)) for r in reflections)
+    lmax = max(abs(int(r.l)) for r in reflections)
+    unique: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
+    for h in range(-hmax, hmax + 1):
+        for k in range(-kmax, kmax + 1):
+            for l in range(-lmax, lmax + 1):
+                if (h, k, l) == (0, 0, 0):
+                    continue
+                d = reflection_d_spacing(cell, h, k, l)
+                if not math.isfinite(d) or d < d_min - 1e-9:
+                    continue
+                if is_systematically_absent_hkl((h, k, l), sg):
+                    continue
+                key = canonical_hkl((h, k, l), sg)
+                unique.setdefault(key, (h, k, l))
+    return list(unique.values())
+
+def analyze_hkl_data(
+    hkl_path: Path,
+    data_mode: str,
+    cell: gemmi.UnitCell,
+    sg: gemmi.SpaceGroup,
+    sg_hm: str,
+    source_note: str = "",
+    bin_count: int = 12,
+) -> HklAnalysis:
+    mode = normalize_reflection_data_mode(data_mode)
+    value_col, sigma_col, include_000 = reflection_columns_for_mode(mode)
+    raw = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
+    unique = merge_duplicate_reflections(raw)
+    ds = [
+        reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l))
+        for r in unique
+        if not (int(r.h) == 0 and int(r.k) == 0 and int(r.l) == 0)
+    ]
+    ds = [d for d in ds if math.isfinite(d) and d > 0]
+    if not ds:
+        raise ValueError("No non-zero HKL reflections with finite d-spacing were found.")
+    d_min = min(ds)
+    theory = theoretical_unique_hkls_from_observed(unique, cell, sg, d_min)
+    theory_records = [
+        (canonical_hkl((int(h), int(k), int(l)), sg), reflection_sintheta_over_lambda(cell, int(h), int(k), int(l)))
+        for h, k, l in theory
+    ]
+    theory_records = [(key, stl) for key, stl in theory_records if math.isfinite(stl) and stl > 0]
+    observed_records = [
+        (
+            canonical_hkl((int(r.h), int(r.k), int(r.l)), sg),
+            reflection_sintheta_over_lambda(cell, int(r.h), int(r.k), int(r.l)),
+            reflection_signal_to_noise(r, mode),
+        )
+        for r in unique
+    ]
+    observed_records = [(key, stl, ios) for key, stl, ios in observed_records if math.isfinite(stl) and stl > 0]
+    max_stl = max([stl for _, stl, _ in observed_records] or [0.0])
+    if max_stl <= 0:
+        raise ValueError("Could not calculate sin(theta)/lambda values for the HKL data.")
+    bins: List[Dict[str, float]] = []
+    edges = np.linspace(0.0, max_stl, max(2, int(bin_count)) + 1)
+    for idx in range(len(edges) - 1):
+        lo = float(edges[idx])
+        hi = float(edges[idx + 1])
+        if idx == 0:
+            theory_bin = {key for key, stl in theory_records if lo <= stl <= hi}
+            observed_bin = {key for key, stl, _ in observed_records if lo <= stl <= hi}
+            ios_values = [ios for _, stl, ios in observed_records if lo <= stl <= hi and ios is not None]
+        else:
+            theory_bin = {key for key, stl in theory_records if lo < stl <= hi}
+            observed_bin = {key for key, stl, _ in observed_records if lo < stl <= hi}
+            ios_values = [ios for _, stl, ios in observed_records if lo < stl <= hi and ios is not None]
+        observed_in_theory = observed_bin & theory_bin if theory_bin else observed_bin
+        completeness = 100.0 * len(observed_in_theory) / len(theory_bin) if theory_bin else 0.0
+        mean_ios = float(np.mean(np.asarray(ios_values, dtype=np.float64))) if ios_values else math.nan
+        bins.append(
+            {
+                "lo": lo,
+                "hi": hi,
+                "center": 0.5 * (lo + hi),
+                "theory": float(len(theory_bin)),
+                "observed": float(len(observed_in_theory)),
+                "completeness": completeness,
+                "mean_i_over_sigma": mean_ios,
+            }
+        )
+    d_full_98: Optional[float] = None
+    for item in bins:
+        edge = float(item["hi"])
+        theory_cum = {key for key, stl in theory_records if stl <= edge}
+        observed_cum = {key for key, stl, _ in observed_records if stl <= edge}
+        if theory_cum and 100.0 * len(observed_cum & theory_cum) / len(theory_cum) >= 98.0:
+            d_full_98 = 1.0 / (2.0 * edge) if edge > 0 else None
+    return HklAnalysis(
+        hkl_path=Path(hkl_path),
+        data_mode=mode,
+        cell=cell,
+        spacegroup=sg,
+        spacegroup_hm=sg_hm,
+        reflections_raw=raw,
+        reflections_unique=unique,
+        d_min=d_min,
+        d_full_98=d_full_98,
+        bins=bins,
+        source_note=source_note,
+    )
+
+def _phase_studio_float7(value: float) -> str:
+    try:
+        x = float(value)
+        if not math.isfinite(x):
+            x = 0.0
+    except Exception:
+        x = 0.0
+    return f"{x:.7f}"
+
+
+def calculate_superflip_dataitemwidths(records: Sequence[Tuple[int, int, int, float, float, float]]) -> Tuple[int, int, int]:
+    """Return safe dataitemwidths for the exact Jana/Superflip fbegin records.
+
+    Superflip's legacy fixed-width reader is sensitive to negative indices.
+    Therefore the h/k/l field width is chosen large enough to keep at least
+    one leading character before the longest signed index.  The floating-item
+    width is chosen from the actual decimal strings that will be written.
+    """
+    if not records:
+        return 4, 14, 14
+    max_index_len = 1
+    max_float_len = 1
+    for h, k, l, value, phase, sigma in records:
+        max_index_len = max(max_index_len, len(str(int(h))), len(str(int(k))), len(str(int(l))))
+        max_float_len = max(
+            max_float_len,
+            len(_phase_studio_float7(value)),
+            len(_phase_studio_float7(phase)),
+            len(_phase_studio_float7(sigma)),
+        )
+    hkl_width = max(4, max_index_len + 1)
+    item_width = max(14, max_float_len + 1)
+    return hkl_width, item_width, item_width
+
+
+def format_superflip_fixed_reflection(
+    h: int,
+    k: int,
+    l: int,
+    value: float,
+    phase: float,
+    sigma: float,
+    widths: Tuple[int, int, int],
+) -> str:
+    hkl_width, value_width, sigma_width = widths
+    # Use the same width for phase as for sigma; this matches the traditional
+    # Jana/Superflip Fobs/phase/sigma layout while still allowing the width to
+    # grow automatically for large values.
+    phase_width = sigma_width
+    return (
+        f"{int(h):{hkl_width}d}"
+        f"{int(k):{hkl_width}d}"
+        f"{int(l):{hkl_width}d}"
+        f"{float(value):{value_width}.7f}"
+        f"{float(phase):{phase_width}.7f}"
+        f"{float(sigma):{sigma_width}.7f}"
+    )
+
+
+def _passes_reflection_filters(
+    r: Reflection,
+    i_over_sigma_min: float,
+    cell: Optional[gemmi.UnitCell],
+    resolution_d_min: float,
+) -> bool:
+    if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
+        if float(r.value) / float(r.sigma) < i_over_sigma_min:
+            return False
+    d_min = max(0.0, float(resolution_d_min or 0.0))
+    if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
+        return False
+    return True
+
+
+def infer_dataitemwidths_from_hkl(hkl_path: Path, fallback: str = "4 14 14") -> str:
+    """Infer Superflip dataitemwidths from the exact records to be copied into fbegin."""
+    try:
+        lines = Path(hkl_path).read_text(encoding="utf-8", errors="ignore").splitlines()
+    except Exception:
+        return fallback
+
+    # Prefer the explicit Phase Studio header written by write_observed_reflections().
+    for raw in lines[:20]:
+        low = raw.lower()
+        if "phase studio auto dataitemwidths:" in low:
+            tail = raw.split(":", 1)[1].strip()
+            parts = tail.split()
+            if len(parts) >= 3 and all(part.lstrip("+-").isdigit() for part in parts[:3]):
+                return " ".join(parts[:3])
+
+    records: List[Tuple[int, int, int, float, float, float]] = []
+    for raw in lines:
+        if not raw.strip() or raw.lstrip().startswith(COMMENT_PREFIXES):
+            continue
+        parts = raw.split()
+        if len(parts) < 4:
+            continue
+        try:
+            h = int(float(parts[0]))
+            k = int(float(parts[1]))
+            l = int(float(parts[2]))
+            value = float(parts[3])
+            phase = float(parts[4]) if len(parts) >= 5 else 0.0
+            sigma = float(parts[5]) if len(parts) >= 6 else 0.0
+            records.append((h, k, l, value, phase, sigma))
+        except Exception:
+            continue
+    if not records:
+        return fallback
+    return " ".join(str(x) for x in calculate_superflip_dataitemwidths(records))
+
+
 def write_observed_reflections(out_hkl: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0, data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None, resolution_d_min: float = 0.0) -> int:
     out_hkl.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
-    d_min = max(0.0, float(resolution_d_min or 0.0))
-    n = 0
+    filtered = [
+        r for r in reflections
+        if _passes_reflection_filters(r, i_over_sigma_min, cell, resolution_d_min)
+    ]
     with out_hkl.open("w", encoding="utf-8") as f:
         if mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
             f.write("# h k l Fobs sigma(Fobs)\n")
             f.write("# Superflip dataformat: amplitude dummy; sigma is ignored by Superflip\n")
         elif mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA:
+            records = [
+                (
+                    int(r.h),
+                    int(r.k),
+                    int(r.l),
+                    max(0.0, float(r.value)),
+                    0.0 if r.phase is None else float(r.phase),
+                    0.0 if r.sigma is None else max(0.0, float(r.sigma)),
+                )
+                for r in filtered
+            ]
+            widths = calculate_superflip_dataitemwidths(records)
             f.write("# h k l Fobs phase sigma(Fobs)\n")
             f.write("# legacy mode: phase fixed to 0, sigma ignored by Superflip\n")
+            f.write(f"# Phase Studio auto dataitemwidths: {widths[0]} {widths[1]} {widths[2]}\n")
+            for h, k, l, value, phase, sigma in records:
+                f.write(format_superflip_fixed_reflection(h, k, l, value, phase, sigma, widths) + "\n")
+            return len(records)
         else:
             f.write("# h k l I\n")
-        for r in reflections:
-            if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
-                if float(r.value) / float(r.sigma) < i_over_sigma_min:
-                    continue
-            if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
-                continue
+        n = 0
+        for r in filtered:
             value = max(0.0, float(r.value))
             if mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
                 sigma = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
                 f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {sigma:14.7f}\n")
-            elif mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA:
-                sigma = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
-                phase = 0.0 if r.phase is None else float(r.phase)
-                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {phase:14.7f} {sigma:14.7f}\n")
             else:
                 f.write(f"{r.h:d} {r.k:d} {r.l:d} {value:.6f}\n")
             n += 1
@@ -1077,7 +1541,7 @@ def apply_map_feedback_to_reflections(
                 new_reflections.append(Reflection(key[0], key[1], key[2], value, sigma, phase if mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA else None))
                 existing.add(key)
                 added += 1
-            current = sorted(new_reflections, key=lambda r: (int(r.h), int(r.k), int(r.l)))
+            current = new_reflections
     log(
         "Map feedback: "
         f"scale={scale:.6g}, corrected={corrected}, added_missing={added}, "
@@ -1092,10 +1556,14 @@ def normalize_modelfile_source(value: str) -> str:
     text = str(value or "").strip().lower()
     if text in {"none", "omit", "no", "off"}:
         return "none"
-    if wants_xplor_modelfile(text):
+    if text in {"superflip_xplor", "raw_superflip_xplor", "superflip", "raw_xplor"}:
+        return "superflip_xplor"
+    if text in {"deblurred_xplor", "deblur_xplor", "deblurred", "sharped_xplor"}:
         return "deblurred_xplor"
     if text in {"deblurred_edma_cif", "edma_cif", "cif"}:
         return "deblurred_edma_cif"
+    if wants_xplor_modelfile(text):
+        return "deblurred_xplor"
     return "deblurred_edma_cif"
 
 def parse_atom_label_list(value: str) -> List[str]:
@@ -1306,6 +1774,10 @@ def blend_xplor_maps(previous_model: Path, deblurred_map: Path, output_map: Path
         log(f"Damped XPLOR modelfile: {output_map} (factor {factor:g})")
     return output_map
 
+def effective_xplor_damping_factor(inverse_value: float) -> float:
+    inverse = max(0.001, min(1.0, float(inverse_value)))
+    return max(1.0, 1.0 / inverse)
+
 def clean_keyword_lines(value: str) -> List[str]:
     lines: List[str] = []
     for raw in str(value or "").splitlines():
@@ -1314,6 +1786,36 @@ def clean_keyword_lines(value: str) -> List[str]:
             continue
         lines.append(line)
     return lines
+
+
+def clean_extra_superflip_keywords(value: str, log: Optional[Callable[[str], None]] = None) -> List[str]:
+    """Return safe user/legacy extra Superflip keywords.
+
+    The main writer owns structural keywords such as referencefile, modelfile,
+    cell and outputfile.  If a stale keyword is left in the extra box or was
+    parsed from an older .inflip, old Superflip builds may obey the later line
+    and read referencefile.cif instead of the explicitly selected
+    superflip_referencefile.cif.
+    """
+    blocked = {
+        "title", "perform", "outputfile", "outputformat",
+        "referencefile", "referenceformat",
+        "modelfile", "modelformat",
+        "dimension", "cell", "spacegroup", "centro",
+        "centers", "endcenters", "symmetry", "endsymmetry",
+        "composition", "repeatmode", "bestdensities", "maxcycles",
+        "randomseed", "dataformat", "dataitemwidths", "fbegin", "endf",
+    }
+    safe: List[str] = []
+    for line in clean_keyword_lines(value):
+        parts = split_inflip_line(line)
+        key = parts[0].lower() if parts else ""
+        if key in blocked:
+            if log is not None:
+                log(f"  Ignored duplicate/managed Superflip keyword from Extra keywords: {key}")
+            continue
+        safe.append(line)
+    return safe
 
 def split_inflip_line(line: str) -> List[str]:
     text = str(line or "")
@@ -1327,6 +1829,271 @@ def split_inflip_line(line: str) -> List[str]:
         return shlex.split(text)
     except Exception:
         return text.split()
+
+def inflip_first_token(line: str) -> str:
+    parts = split_inflip_line(line)
+    return parts[0].lower() if parts else ""
+
+
+def insert_before_fbegin(lines: Sequence[str], new_line: str) -> List[str]:
+    out: List[str] = []
+    inserted = False
+    for line in lines:
+        if not inserted and inflip_first_token(line) == "fbegin":
+            out.append(new_line)
+            inserted = True
+        out.append(line)
+    if not inserted:
+        out.append(new_line)
+    return out
+
+
+def without_inflip_keywords(lines: Sequence[str], keywords: Iterable[str]) -> List[str]:
+    blocked = {str(k).lower() for k in keywords}
+    return [line for line in lines if inflip_first_token(line) not in blocked]
+
+
+def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Path:
+    lines = Path(inflip_path).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    reflections: List[str] = []
+    in_block = False
+    for line in lines:
+        key = inflip_first_token(line)
+        if key == "fbegin":
+            in_block = True
+            continue
+        if in_block and key == "endf":
+            break
+        if in_block and line.strip() and not line.lstrip().startswith(COMMENT_PREFIXES):
+            reflections.append(line.rstrip())
+    if not reflections:
+        raise ValueError(f"No fbegin/endf reflection block was found in Jana .inflip: {inflip_path}")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out = output_dir / f"{Path(inflip_path).stem}_embedded_reflections.hkl"
+    out.write_text(
+        "# Reflections exported from the Jana2020 .inflip fbegin/endf block.\n"
+        + "\n".join(reflections)
+        + "\n",
+        encoding="utf-8",
+    )
+    return out
+
+
+def inflip_declared_reference(inflip_path: Path) -> Optional[Path]:
+    for raw in Path(inflip_path).read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = split_inflip_line(raw)
+        if parts and parts[0].lower() == "referencefile" and len(parts) > 1:
+            p = Path(parts[1].strip().strip('"'))
+            if not p.is_absolute():
+                p = Path(inflip_path).parent / p
+            return p.resolve()
+    return None
+
+
+
+
+def superflip_reference_format_for_path(reference_path: Optional[Path]) -> str:
+    """Return an explicit Superflip referenceformat keyword for supported files."""
+    if reference_path is None:
+        return ""
+    suffix = reference_path.suffix.lower()
+    if suffix == ".xplor":
+        return "xplor"
+    if suffix == ".cif":
+        return "cif"
+    return ""
+
+
+def parse_inflip_crystallography(inflip_path: Path) -> Tuple[gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
+    cell_values: Optional[List[float]] = None
+    hm = "P 1"
+    composition = "C1"
+    for raw in Path(inflip_path).read_text(encoding="utf-8", errors="replace").splitlines():
+        parts = split_inflip_line(raw)
+        if not parts:
+            continue
+        key = parts[0].lower()
+        if key == "cell" and len(parts) >= 7:
+            vals = []
+            for item in parts[1:7]:
+                vals.append(parse_cif_number(item, math.nan))
+            if all(np.isfinite(vals)):
+                cell_values = [float(v) for v in vals]
+        elif key == "spacegroup" and len(parts) > 1:
+            hm = " ".join(parts[1:]).strip().strip("'\"") or hm
+        elif key == "composition" and len(parts) > 1:
+            composition = " ".join(parts[1:]).strip() or composition
+    if cell_values is None:
+        raise ValueError(f"Jana .inflip does not contain a readable cell keyword: {inflip_path}")
+    sg = get_spacegroup_from_number(hm) if re.fullmatch(r"\d+(?:\.0+)?", str(hm).strip()) else None
+    if sg is None:
+        sg = get_spacegroup_from_name(hm)
+    try:
+        hm_out = str(sg.hm).strip() or hm
+    except Exception:
+        hm_out = hm
+    return gemmi.UnitCell(*cell_values), sg, hm_out, composition
+
+def reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Optional[str]:
+    if inflip_path is None or not Path(inflip_path).is_file():
+        return None
+    try:
+        parsed = parse_inflip_settings(Path(inflip_path))
+    except Exception:
+        return None
+    mode = parsed.get("reflection_data_mode", "")
+    if not mode:
+        return None
+    return normalize_reflection_data_mode(mode)
+
+def resolve_reflection_data_mode_from_sources(
+    hkl_path: Path,
+    configured_mode: str,
+    inflip_path: Optional[Path] = None,
+) -> str:
+    mode = normalize_reflection_data_mode(configured_mode)
+    if mode != REFLECTION_DATA_MODE_AUTO:
+        return mode
+    inflip_mode = reflection_data_mode_from_inflip(inflip_path)
+    if inflip_mode and inflip_mode != REFLECTION_DATA_MODE_AUTO:
+        return inflip_mode
+    return resolve_reflection_data_mode(hkl_path, mode)
+
+
+def write_reference_cif_from_inflip(inflip_path: Path, output_cif: Path) -> Path:
+    cell, sg, hm, composition = parse_inflip_crystallography(inflip_path)
+    output_cif.parent.mkdir(parents=True, exist_ok=True)
+    write_structure_cif(output_cif, cell, sg, hm, [])
+    # Add formula tags used by Phase Studio/Superflip composition handling.
+    with output_cif.open("a", encoding="utf-8") as f:
+        f.write(f"_chemical_formula_sum '{composition}'\n")
+    return output_cif
+
+
+def inflip_header_for_m80(lines: Sequence[str]) -> List[str]:
+    header: List[str] = []
+    marker = "# Keywords for charge flipping"
+    for line in lines:
+        if marker in line:
+            break
+        if inflip_first_token(line) == "fbegin":
+            break
+        header.append(line)
+    return header
+
+
+def define_m80_inflip_from_model(header_lines: Sequence[str], base_name: str, model_name: str) -> List[str]:
+    out: List[str] = []
+    saw_perform = False
+    saw_outputfile = False
+    drop = {
+        "modelfile", "modelformat", "repeatmode", "randomseed",
+        "polish", "maxcycles", "searchsymmetry", "derivesymmetry", "voxel",
+    }
+    for line in header_lines:
+        key = inflip_first_token(line)
+        if key in drop:
+            continue
+        if key == "perform" and not saw_perform:
+            out.append("perform symmetry")
+            saw_perform = True
+            continue
+        if key == "outputfile" and not saw_outputfile:
+            body = str(line).split("#", 1)[0].rstrip()
+            ready = f'{base_name}-ready.xplor'
+            if ready.lower() not in body.lower():
+                spacer = "" if body.endswith((" ", "\t")) else " "
+                body = f'{body}{spacer}"{ready}"'
+            out.append(body)
+            saw_outputfile = True
+            continue
+        out.append(line)
+    if not saw_perform:
+        out = insert_before_fbegin(out, "perform symmetry")
+    if not saw_outputfile:
+        out = insert_before_fbegin(out, f'outputfile "{base_name}-ready.xplor"')
+    out.extend([
+        "repeatmode 1",
+        "modelformat xplor",
+        f'modelfile "{model_name}"',
+        "polish no",
+        "maxcycles 0",
+        "searchsymmetry average",
+        "derivesymmetry yes",
+    ])
+    return out
+
+
+def write_text_lines_platform(path: Path, lines: Sequence[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "\r\n".join(str(line) for line in lines).rstrip("\r\n") + "\r\n"
+    encoding = "mbcs" if os.name == "nt" else (locale.getpreferredencoding(False) or "utf-8")
+    path.write_bytes(text.encode(encoding, errors="replace"))
+
+
+def return_phase_studio_result_to_jana(
+    cfg: RunConfig,
+    result: CycleResult,
+    log: Callable[[str], None],
+    stop_event: Optional[threading.Event] = None,
+    map_source: str = "deblurred",
+) -> None:
+    if not cfg.jana_return_to_jana or cfg.jana_inflip is None:
+        raise RuntimeError("Jana2020 hand-off requires a Jana .inflip primary input.")
+    inflip_path = Path(cfg.jana_inflip)
+    if not inflip_path.is_file():
+        raise RuntimeError(f"Jana2020 .inflip no longer exists: {inflip_path}")
+    jana_cwd = inflip_path.parent
+    base_name = inflip_path.stem
+    source_key = str(map_source or "deblurred").strip().lower()
+    if source_key.startswith("super"):
+        source_map = Path(result.superflip_map)
+        target_map = jana_cwd / f"{base_name}-phase-studio-superflip-cycle_{int(result.cycle):03d}.xplor"
+        source_label = "Superflip map"
+    else:
+        source_map = Path(result.deblur_map)
+        target_map = jana_cwd / f"{base_name}-deb.xplor"
+        source_label = "deblurred map"
+    if not source_map.is_file():
+        raise RuntimeError(f"Selected Jana2020 hand-off map not found: {source_map}")
+    if source_map.resolve() != target_map.resolve():
+        shutil.copy2(source_map, target_map)
+    log(f"Jana2020 hand-off source: cycle {int(result.cycle):03d}, {source_label}")
+    log(f"Jana2020 hand-off map: {target_map}")
+    original = Path(str(cfg.superflip_exe)).expanduser()
+    calc_dir = original.parent / "deblurrer"
+    calc_inflip = calc_dir / "calc_m80.inflip"
+    original_lines = inflip_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    final_lines = define_m80_inflip_from_model(inflip_header_for_m80(original_lines), base_name, target_map.name)
+    write_text_lines_platform(calc_inflip, final_lines)
+    log(f"Jana2020 final Superflip input: {calc_inflip}")
+    run_command([str(original), str(calc_inflip)], cwd=jana_cwd, log_path=Path(cfg.work_dir) / "jana2020_return_superflip.log", log=log, stop_event=stop_event)
+    log("Jana2020 final Superflip hand-off completed.")
+
+
+
+def perform_jana_handoff(
+    cfg: RunConfig,
+    result: CycleResult,
+    map_source: str,
+    log: Callable[[str], None],
+    stop_event: Optional[threading.Event] = None,
+) -> None:
+    """Compatibility wrapper used by the full Phase Studio hand-off button.
+
+    Earlier builds called perform_jana_handoff() from the GUI worker thread,
+    while the actual implementation was renamed to return_phase_studio_result_to_jana().
+    Keeping this small wrapper prevents a NameError and ensures both call paths use
+    the same Jana2020 final hand-off implementation.
+    """
+    return_phase_studio_result_to_jana(
+        cfg=cfg,
+        result=result,
+        log=log,
+        stop_event=stop_event,
+        map_source=map_source,
+    )
+
 
 def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
     settings: Dict[str, str] = {}
@@ -1462,9 +2229,9 @@ def superflip_default_voxel_triplet(cell: gemmi.UnitCell, step_angstrom: float =
 
 def superflip_voxel_keyword_line(value: str, cell: gemmi.UnitCell, log: Optional[Callable[[str], None]] = None) -> str:
     text = str(value or "").strip()
-    if text.lower() in {"none", "no", "off", "omit"}:
+    if not text or text.lower() in {"none", "no", "off", "omit"}:
         return ""
-    if not text or text.lower() == "auto":
+    if text.lower() == "auto":
         dims = superflip_default_voxel_triplet(cell)
         return f"voxel {dims[0]} {dims[1]} {dims[2]}"
     parts = text.replace(",", " ").split()
@@ -1504,13 +2271,15 @@ def write_structure_cif(output_cif: Path, cell: gemmi.UnitCell, sg: gemmi.SpaceG
         f.write("loop_\n_space_group_symop_operation_xyz\n")
         for op in ops:
             f.write(f"'{op.triplet()}'\n")
-        f.write("loop_\n_atom_site_label\n_atom_site_type_symbol\n_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n")
-        counts: Dict[str, int] = collections.Counter()
-        for a in atoms:
-            elem = clean_element_symbol(a.element)
-            counts[elem] += 1
-            f0 = wrap_frac(a.frac)
-            f.write(f"{elem}{counts[elem]} {elem} {f0[0]:.6f} {f0[1]:.6f} {f0[2]:.6f}\n")
+        if atoms:
+            f.write("loop_\n_atom_site_label\n_atom_site_type_symbol\n_atom_site_fract_x\n_atom_site_fract_y\n_atom_site_fract_z\n")
+            counts: Dict[str, int] = collections.Counter()
+            for a in atoms:
+                elem = clean_element_symbol(a.element)
+                counts[elem] += 1
+                f0 = wrap_frac(a.frac)
+                f.write(f"{elem}{counts[elem]} {elem} {f0[0]:.6f} {f0[1]:.6f} {f0[2]:.6f}\n")
+
 
 def fractional_to_cartesian(cell: gemmi.UnitCell, frac: Sequence[float]) -> Tuple[float, float, float]:
     x, y, z = [float(v) for v in wrap_frac(frac)]
@@ -1683,21 +2452,32 @@ def write_superflip_input(
         if missing.strip():
             f.write(f"missing {missing.strip()}\n")
         f.write(f"searchsymmetry {searchsymmetry_value}\nderivesymmetry {derivesymmetry_value}\n")
-        for line in clean_keyword_lines(extra_superflip_keywords):
+        for line in clean_extra_superflip_keywords(extra_superflip_keywords, log):
             f.write(line + "\n")
         if str(electrons or "").strip():
             f.write(f"electrons {str(electrons).strip()}\n")
         if data_mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
             f.write("dataformat amplitude dummy\n")
         elif data_mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA:
-            f.write(f"dataitemwidths {dataitemwidths.strip() or '4 14 14'}\n")
+            requested_widths = str(dataitemwidths or "").strip()
+            if requested_widths.lower() in {"", "auto", "automatic", "generated", "4 14 14"}:
+                effective_widths = infer_dataitemwidths_from_hkl(observed_hkl)
+                if log is not None:
+                    log(f"  Superflip dataitemwidths automatically set to {effective_widths} from the fbegin reflection records.")
+            else:
+                effective_widths = requested_widths
+            f.write(f"dataitemwidths {effective_widths}\n")
         else:
             f.write("dataformat intensity\n")
         f.write("fbegin\n")
         with observed_hkl.open("r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
-                s = line.strip()
-                if s and not s.startswith(COMMENT_PREFIXES):
+                # Preserve leading spaces in fixed-width Jana/Superflip reflection records.
+                # With dataitemwidths 4 14 14, stripping a line such as
+                # "  -9 -28   1 ..." turns it into "-9 -28   1 ...", and older
+                # Superflip builds can read this as a broken "- 9" / "- 28" index.
+                s = line.rstrip("\r\n")
+                if s.strip() and not s.lstrip().startswith(COMMENT_PREFIXES):
                     f.write(s + "\n")
         f.write("endf\n")
 
@@ -1818,17 +2598,42 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
     reference_for_input: Optional[Path] = None
     if reference_file is not None:
         suffix = ".xplor" if str(reference_format or "").strip().lower() == "xplor" else reference_file.suffix.lower()
-        reference_for_input = cycle_dir / f"referencefile{suffix or '.dat'}"
+        # Keep the Superflip referencefile separate from ref_ctx.work_ref_cif.
+        # In Jana .inflip mode ref_ctx.work_ref_cif can be a synthetic metadata-only CIF
+        # named referencefile.cif with zero atoms.  Using the same filename would overwrite
+        # the explicit user-selected Superflip reference CIF and Superflip would stop with
+        # "no atoms found in the CIF file".
+        reference_for_input = cycle_dir / f"superflip_referencefile{suffix or '.dat'}"
         if reference_file.resolve() != reference_for_input.resolve():
             shutil.copy2(reference_file, reference_for_input)
-    shutil.copy2(ref_ctx.work_ref_cif, cycle_dir / ref_ctx.work_ref_cif.name)
+    work_ref_dst = cycle_dir / ref_ctx.work_ref_cif.name
+    if reference_for_input is None or work_ref_dst.resolve() != reference_for_input.resolve():
+        shutil.copy2(ref_ctx.work_ref_cif, work_ref_dst)
     write_superflip_input(inp, prefix, ref_ctx, observed_hkl, output_name, model_for_input, reference_for_input, reference_format, perform_algorithm, output_format, write_auxiliary_outputs, export_superflip_xplor, export_superflip_ccp4, export_superflip_jana, voxel, bestdensities_count, bestdensities_metric, bestdensities_symmetry, polish, maxcycles, repeatmode, randomseed, delta, weakratio, biso, reflection_data_mode, normalize, nresshells, missing, searchsymmetry, derivesymmetry, electrons, dataitemwidths, extra_superflip_keywords, log)
     log(f"[Superflip] input: {inp}")
-    run_command([superflip_exe, inp.name], cwd=cycle_dir, log_path=log_path, log=log, stop_event=stop_event)
     out = cycle_dir / output_name
+    for stale in (out, cycle_dir / f"{prefix}.sflog"):
+        try:
+            if stale.is_file():
+                stale.unlink()
+                log(f"  Removed stale Superflip output before run: {stale.name}")
+        except Exception as exc:
+            log(f"  Could not remove stale Superflip output {stale}: {exc}")
+    run_started_at = time.time()
+    run_command([superflip_exe, inp.name], cwd=cycle_dir, log_path=log_path, log=log, stop_event=stop_event)
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
         raise RuntimeError(f"Superflip did not create expected XPLOR map: {out}\n" + "\n".join(tail))
+    try:
+        if out.stat().st_mtime < run_started_at - 1.0:
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
+            raise RuntimeError(
+                f"Superflip output map is older than the current run and was probably stale: {out}\n" + "\n".join(tail)
+            )
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
     return out
 
 def sharped_elements_from_composition(composition: str) -> str:
@@ -2193,11 +2998,14 @@ def export_jana2020_project(
     return export_dir
 
 def parse_superflip_log_metrics(log_path: Path) -> SuperflipLogMetrics:
-    """Extract the best/saved-density R factor and run summary from a Superflip log.
+    """Extract the saved-density metrics from a Superflip log.
 
-    The log can contain many attempted runs. Superflip repeatedly prints
-    "Properties of the saved density"; the last such table describes the final
-    best saved density, even when the last attempt itself was worse.
+    Superflip can perform several repeatmode attempts in one .sflog.  The map
+    that Jana/Phase Studio actually uses is described by the last printed
+    "Properties of the saved density" table, not necessarily by attempt 1
+    and not necessarily by the last attempted run.  This parser therefore keeps
+    the last valid table row and records the saved run number together with
+    Rvalue, Peaks, Symm. and Der.SG.
     """
     metrics = SuperflipLogMetrics()
     if not Path(log_path).is_file():
@@ -2206,26 +3014,19 @@ def parse_superflip_log_metrics(log_path: Path) -> SuperflipLogMetrics:
     text_log = Path(log_path).read_text(encoding="utf-8", errors="replace")
     lines = text_log.splitlines()
 
-    def is_float_token(value: str) -> bool:
+    def as_float(value: str) -> Optional[float]:
         try:
-            float(value)
-            return True
+            return float(str(value).replace(",", "."))
         except Exception:
-            return False
+            return None
 
-    # Parse rows only under the exact saved-density table.  Ref.match is the
-    # token immediately before the three origin-shift coordinates, so this also
-    # survives Der.SG values that contain spaces.
+    def is_float_token(value: str) -> bool:
+        return as_float(value) is not None
+
+    # Parse all saved-density summary tables and keep the last valid row.
     in_saved_density_table = False
     for line in lines:
-        if (
-            "Run" in line
-            and "Rvalue" in line
-            and "Peaks" in line
-            and "Symm." in line
-            and "Ref.match" in line
-            and "Origin shift" in line
-        ):
+        if ("Run" in line and "Rvalue" in line and "Peaks" in line and "Symm" in line):
             in_saved_density_table = True
             continue
         if not in_saved_density_table:
@@ -2234,19 +3035,33 @@ def parse_superflip_log_metrics(log_path: Path) -> SuperflipLogMetrics:
         if not tokens:
             in_saved_density_table = False
             continue
-        if len(tokens) < 8 or not tokens[0].isdigit():
+        if len(tokens) < 4:
             continue
         try:
-            metrics.rvalue = float(tokens[1])
-            metrics.peaks = float(tokens[2])
-            metrics.symm = float(tokens[3])
-            if len(tokens) >= 8 and all(is_float_token(t) for t in tokens[-4:]):
-                metrics.ref_match = float(tokens[-4])
+            saved_run = int(float(tokens[0]))
         except Exception:
-            pass
+            continue
+        rvalue = as_float(tokens[1])
+        peaks = as_float(tokens[2])
+        symm = as_float(tokens[3])
+        if rvalue is None or peaks is None or symm is None:
+            continue
+        metrics.saved_run = saved_run
+        metrics.rvalue = rvalue
+        metrics.peaks = peaks
+        metrics.symm = symm
+        # Standard Jana/Superflip table: Run Rvalue Peaks Symm. Der.SG
+        if len(tokens) >= 5 and not is_float_token(tokens[4]):
+            metrics.derived_sg = tokens[4]
+        # Extended variants can contain Ref.match near the end.
+        if len(tokens) >= 8 and all(is_float_token(t) for t in tokens[-4:]):
+            try:
+                metrics.ref_match = float(tokens[-4])
+            except Exception:
+                pass
 
-    sr_re = re.compile(r"Success rate \(SR\) \[%\]\s*:\s*([-+]?\d+(?:\.\d+)?)")
-    mean_re = re.compile(r"Mean cycles per convergence\(beta\)\s*:\s*([-+]?\d+(?:\.\d+)?)")
+    sr_re = re.compile(r"Success rate(?:\s*\(SR\))?\s*\[%\]\s*:\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
+    mean_re = re.compile(r"Mean cycles per convergence\(beta\)\s*:\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
     score_re = re.compile(r"\bScore:\s*([-+]?\d+(?:\.\d+)?)")
     fom_re = re.compile(r"\bFOM\b[^-+0-9]*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
     for line in lines:
@@ -2277,6 +3092,26 @@ def parse_superflip_log_metrics(log_path: Path) -> SuperflipLogMetrics:
 
     return metrics
 
+def parse_superflip_cycle_metrics(cycle_dir: Path, prefix: str) -> SuperflipLogMetrics:
+    candidates = [
+        Path(cycle_dir) / f"{prefix}.sflog",
+        Path(cycle_dir) / f"{prefix}.superflip.log",
+    ]
+    # Some Superflip builds use the title/output base rather than the input stem.
+    candidates.extend(sorted(Path(cycle_dir).glob("*.sflog"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True))
+    seen = set()
+    fallback = SuperflipLogMetrics()
+    for candidate in candidates:
+        key = str(candidate.resolve()) if candidate.exists() else str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        m = parse_superflip_log_metrics(candidate)
+        if m.rvalue is not None or m.peaks is not None or m.symm is not None:
+            return m
+        fallback = m
+    return fallback
+
 
 def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -2293,9 +3128,11 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
             "deblur_map",
             "deblur_edma_cif",
             "deblur_rmsd_A",
+            "superflip_saved_run",
             "superflip_rvalue",
             "superflip_peaks",
             "superflip_symm",
+            "superflip_derived_sg",
             "superflip_ref_match",
             "superflip_fom",
             "superflip_success_rate_percent",
@@ -2313,9 +3150,11 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
                 r.deblur_map,
                 r.deblur_edma_cif,
                 "" if r.deblur_metric is None else r.deblur_metric,
+                "" if r.superflip_saved_run is None else r.superflip_saved_run,
                 "" if r.superflip_rvalue is None else r.superflip_rvalue,
                 "" if r.superflip_peaks is None else r.superflip_peaks,
                 "" if r.superflip_symm is None else r.superflip_symm,
+                r.superflip_derived_sg or "",
                 "" if r.superflip_ref_match is None else r.superflip_ref_match,
                 "" if r.superflip_fom is None else r.superflip_fom,
                 "" if r.superflip_success_rate is None else r.superflip_success_rate,
@@ -2365,13 +3204,16 @@ class PathRow(QWidget):
         self.button.setToolTip("Browse for " + self.label.text())
 
 INPUT_TOOLTIPS = {
-    "hkl": "Reflection file used for Superflip. For intensity mode use h k l I [sigma]; for amplitude_dummy_sigma use h k l Fobs sigma(Fobs).",
-    "reference_cif": "Reference crystallographic model. Cell parameters, space group, symmetry operators and chemical composition are extracted from this CIF for Superflip input and EDMA metrics.",
+    "input_source_mode": "Choose how crystallographic input is supplied: use the Jana .inflip as the primary source, use it with selected external HKL/CIF replacements, or use an external HKL plus reference CIF without a Jana input file.",
+    "jana_inflip": "Jana2020 Superflip input file. In Jana modes its fbegin/endf reflection block is the default HKL source, and its cell/space-group/composition keywords can provide the reference metadata.",
+    "hkl": "External reflection file. In Jana override mode it replaces only the fbegin/endf reflection block; in external mode it is the required reflection source.",
+    "reference_cif": "External reference CIF. In Jana override mode it replaces only the reference structure; in external mode it is the required crystallographic reference model for cell, symmetry, composition and RMSD metrics.",
     "superflip_reference_xplor": "Optional XPLOR density map used only when Superflip referencefile mode is reference_xplor.",
+    "superflip_referencefile": "Optional Superflip referencefile used without replacing the Jana .inflip HKL or metadata. Accepts CIF structures or XPLOR density maps; useful in Jana .inflip mode for bestdensities/reference scoring.",
     "first_cycle_modelfile": "Optional external density or structure model for cycle 1. Supported Superflip modelfile inputs are XPLOR, CCP4 and CIF.",
     "work_dir": "Output directory for generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics.",
-    "superflip_exe": "Executable name or absolute path for Superflip. The program is run in each cycle directory with the generated .inflip file.",
-    "edma_exe": "Executable name or absolute path for EDMA peak extraction from XPLOR density maps.",
+    "superflip_exe": "Absolute path to the original Jana2020 Superflip executable. Default: C:\\Jana2020\\SUPERFLIP\\superflip_original.exe. Do not select the Phase Studio wrapper named superflip.exe.",
+    "edma_exe": "Absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps. Default: C:\\Jana2020\\SUPERFLIP\\EDMA.exe.",
     "workflow_preset": "High-level starting preset for common crystallographic workflows. It sets only basic defaults; all advanced Superflip and EDMA keywords remain editable.",
     "cycles": "Number of iterative Superflip -> EDMA -> SharpED -> EDMA cycles to run.",
     "composition_override": "Optional Superflip composition string. Leave blank to derive composition from the reference CIF formula or atom list.",
@@ -2385,8 +3227,8 @@ INPUT_TOOLTIPS = {
     "edma_chlimit": "EDMA chlimit keyword. Minimum integrated charge for exported maxima; useful for suppressing noise peaks in rough or over-sharpened maps.",
     "edma_chlimlist": "EDMA chlimlist keyword. Charge-list threshold, for example '0.0057 relative', used together with numberofatoms and composition-based export.",
     "extra_edma_keywords": "Additional raw EDMA keyword lines appended to the generated EDMA input. Use this for documented EDMA options not exposed above.",
-    "damping_factor": "Weighted averaging factor for XPLOR modelfiles. 1 uses only the previous deblurred map; values above 1 mix it with the previous model map as ((X-1)*old + new)/X. Ignored for CIF modelfiles.",
-    "modelfile_source": "Source used as the next-cycle Superflip modelfile. deblurred_edma_cif writes a CIF structure modelfile and lets Superflip infer CIF from the .cif extension; deblurred_xplor writes an XPLOR density map.",
+    "damping_factor": "Inverse XPLOR damping value 1/x. 1.0 means no damping; 0.5 is equivalent to the previous factor 2.0; 0.25 is equivalent to factor 4.0. Disabled/ignored for CIF or none.",
+    "modelfile_source": "Authoritative source for cycle 2 and later. none forces the run to one cycle; superflip_xplor cycles without SharpED deblurring; deblurred_xplor uses the SharpED XPLOR map; deblurred_edma_cif ignores XPLOR damping.",
     "exclude_atoms": "Optional atom labels to remove from CIF modelfiles before the next Superflip cycle. Use comma, semicolon or whitespace separation.",
     "run_edma_superflip": "Run EDMA peak search on the raw Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
@@ -2399,8 +3241,8 @@ INPUT_TOOLTIPS = {
     "export_superflip_jana": "Request Jana density and reflection outputs from Superflip: m81 density map and m80 phased-reflection list.",
     "export_standard_hkl": "Write a standardized observed-reflection export with h k l I sigma(I) phase(deg). Phase is 0 unless supplied by the selected input mode.",
     "export_jana_project": "Create a Jana2020 export folder for each cycle with Superflip m80/m81, EDMA m40, maps, CIF and logs.",
-    "referencefile_mode": "Optional Superflip referencefile keyword. reference_cif writes referencefile.cif without referenceformat; omit skips it; reference_xplor writes referencefile.xplor with referenceformat xplor.",
-    "voxel": "Superflip voxel grid. This Windows executable expects three integers, for example 180 80 160. AUTO or blank computes a 0.2 A grid from the unit cell; omit/no/off skips the keyword.",
+    "referencefile_mode": "Internal automatic setting. Superflip referencefile is written only when a Superflip referencefile path is selected; otherwise it is omitted.",
+    "voxel": "Superflip voxel grid. The default omit/blank skips the keyword. Use three integers, for example 180 80 160, or AUTO to compute a 0.2 A grid from the unit cell.",
     "bestdensities_count": "First argument of bestdensities: how many best density maps Superflip keeps.",
     "bestdensities_metric": "Second argument of bestdensities: rvalue, peakiness, symmetry or reference.",
     "bestdensities_symmetry": "Adds the 'symmetry' modifier to 'bestdensities 1', biasing saved-density selection toward symmetry-consistent solutions.",
@@ -2411,8 +3253,8 @@ INPUT_TOOLTIPS = {
     "delta": "Superflip delta keyword. AUTO lets Superflip estimate the flip threshold.",
     "weakratio": "Superflip weakratio keyword.",
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
-    "reflection_data_mode": "How HKL values are written into the Superflip fbegin block. Auto maps Fobs/sigma files to manual-compliant dataformat amplitude dummy.",
-    "first_cycle_like_attachment": "Force later cycles to use the deblurred XPLOR map as Superflip modelfile. Superflip keyword values still come from the editable fields.",
+    "reflection_data_mode": "HKL data format for Superflip fbegin/endf. Auto first reads dataformat/dataitemwidths from a Jana .inflip when available, then detects from HKL headers. intensity uses h k l I sigma(I); amplitude dummy uses h k l Fobs sigma(Fobs); Fobs/phase/sigma uses fixed-width h k l Fobs phase sigma records.",
+    "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic v3 -> Next-cycle modelfile instead.",
     "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
     "normalize": "Optional Superflip reflection normalization keyword. For this Windows executable, none is the safest default and local is omitted.",
@@ -2421,7 +3263,7 @@ INPUT_TOOLTIPS = {
     "searchsymmetry": "Superflip searchsymmetry keyword: no, shift or average.",
     "derivesymmetry": "Superflip derivesymmetry keyword. Common values are yes, no or use, depending on Superflip version.",
     "electrons": "Superflip electrons keyword. Leave blank to omit.",
-    "dataitemwidths": "Legacy column widths used only for fobs_zero_phase_sigma mode. Manual-compliant amplitude_dummy_sigma uses dataformat amplitude dummy instead.",
+    "dataitemwidths": "Always automatic. Phase Studio generates dataitemwidths from the exact fbegin records written to the Superflip input.",
     "extra_superflip_keywords": "Additional raw Superflip keyword lines inserted before fbegin. Use this for advanced/manual keywords not represented by a widget.",
     "map_feedback_missing_from_cycle": "First completed cycle whose final map is used to add missing reflections for the next cycle. Use 0 to disable missing-reflection completion.",
     "map_feedback_missing_percent_limit": "Maximum number of added missing reflections, expressed as a percent of the current HKL count. This prevents map feedback from overwhelming measured data.",
@@ -2481,13 +3323,14 @@ for example:
 class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Phase Studio v3")
+        self.setWindowTitle("Phase Studio for Jana2020")
         self.resize(1420, 880)
         self.msg_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
         self.worker: Optional[threading.Thread] = None
         self.stop_after_cycle = threading.Event()
         self.stop_now = threading.Event()
         self.results: List[CycleResult] = []
+        self.last_run_config: Optional[RunConfig] = None
         self.reference_atoms_for_plot: List[AtomSite] = []
         self.superflip_atoms_for_plot: List[AtomSite] = []
         self.deblur_atoms_for_plot: List[AtomSite] = []
@@ -2614,13 +3457,45 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         paths_tab = add_settings_tab("Paths")
         paths_box = QGroupBox("Input/output paths")
         paths_layout = QVBoxLayout(paths_box)
-        self._add_path(paths_layout, "hkl", "HKL", str(cwd / "sharped-ll.hkl"), "file", "HKL files (*.hkl);;All files (*)")
-        self._add_path(paths_layout, "reference_cif", "Reference CIF", str(cwd / "reference.cif"), "file", "CIF files (*.cif);;All files (*)")
-        self._add_path(paths_layout, "superflip_reference_xplor", "Reference XPLOR", "", "file", "XPLOR maps (*.xplor);;All files (*)")
+        input_mode_form = QFormLayout()
+        paths_layout.addLayout(input_mode_form)
+        self._add_combo(
+            input_mode_form,
+            "input_source_mode",
+            "Input data mode",
+            [
+                INPUT_MODE_LABELS[INPUT_MODE_INFLIP],
+                INPUT_MODE_LABELS[INPUT_MODE_INFLIP_OVERRIDES],
+                INPUT_MODE_LABELS[INPUT_MODE_EXTERNAL],
+            ],
+            INPUT_MODE_LABELS[INPUT_MODE_INFLIP],
+        )
+        try:
+            self.inputs["input_source_mode"].currentTextChanged.connect(self._sync_input_source_mode_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self._add_path(paths_layout, "jana_inflip", "Jana .inflip", "", "file", "Superflip input (*.inflip *.inp);;All files (*)")
+        self._add_path(paths_layout, "hkl", "External HKL", "", "file", "HKL files (*.hkl);;All files (*)")
+        hkl_tools_form = QFormLayout()
+        paths_layout.addLayout(hkl_tools_form)
+        self._add_combo(hkl_tools_form, "reflection_data_mode", "HKL data format", [REFLECTION_DATA_MODE_AUTO, REFLECTION_DATA_MODE_INTENSITY, REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA], REFLECTION_DATA_MODE_AUTO)
+        hkl_button_row = QHBoxLayout()
+        test_hkl_btn = QPushButton("Test HKL load")
+        analyze_hkl_btn = QPushButton("Analyze completeness")
+        test_hkl_btn.setToolTip("Parse the selected HKL or Jana .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
+        analyze_hkl_btn.setToolTip("Open completeness and data-statistics plots for the selected HKL data.")
+        test_hkl_btn.clicked.connect(self.test_hkl_load_dialog)
+        analyze_hkl_btn.clicked.connect(self.open_hkl_completeness_dialog)
+        hkl_button_row.addWidget(test_hkl_btn)
+        hkl_button_row.addWidget(analyze_hkl_btn)
+        hkl_tools_form.addRow("", hkl_button_row)
+        self._add_path(paths_layout, "reference_cif", "External reference CIF", "", "file", "CIF files (*.cif);;All files (*)")
+        self._add_path(paths_layout, "superflip_reference_xplor", "External reference XPLOR", "", "file", "XPLOR maps (*.xplor);;All files (*)")
+        self._add_path(paths_layout, "superflip_referencefile", "Superflip referencefile", "", "file", "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)")
         self._add_path(paths_layout, "first_cycle_modelfile", "First-cycle modelfile", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
         self._add_path(paths_layout, "work_dir", "Work directory", str(cwd / "iterative_superflip_qt_run"), "dir")
-        self._add_path(paths_layout, "superflip_exe", "Superflip exe/path", "superflip", "file", "Executables (*);;All files (*)")
-        self._add_path(paths_layout, "edma_exe", "EDMA exe/path", "EDMA", "file", "Executables (*);;All files (*)")
+        self._add_path(paths_layout, "superflip_exe", "Superflip exe/path", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
+        self._add_path(paths_layout, "edma_exe", "EDMA exe/path", r"C:\Jana2020\SUPERFLIP\EDMA.exe", "file", "Executables (*.exe);;All files (*)")
         paths_tab.addWidget(paths_box)
         paths_tab.addStretch(1)
 
@@ -2635,9 +3510,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_spin(workflow_form, "cycles", "Cycles to run", 1, 1, 999, 1)
         self.inputs["cycles"].valueChanged.connect(self._update_plot)  # type: ignore[attr-defined]
         self._add_text(workflow_form, "composition_override", "Composition override (blank = from reference)", "")
-        self._add_dspin(workflow_form, "damping_factor", "XPLOR damping factor", 1.0, 1.0, 1000.0, 0.1, 3)
-        self._add_combo(workflow_form, "modelfile_source", "Next-cycle modelfile", ["deblurred_edma_cif", "deblurred_xplor", "none"], "deblurred_edma_cif")
+        self._add_combo(workflow_form, "modelfile_source", "Next-cycle modelfile", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "superflip_xplor")
+        try:
+            self.inputs["modelfile_source"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self._add_dspin(workflow_form, "damping_factor", "XPLOR damping 1/x", 1.0, 0.001, 1.0, 0.05, 3)
         self._add_text(workflow_form, "exclude_atoms", "Exclude atoms from model CIF", "none")
+        workflow_note = QLabel(
+            "Next-cycle modelfile is authoritative: 'none' forces a one-cycle run. "
+            "superflip_xplor cycles without SharpED deblurring; XPLOR damping is active for XPLOR modes only."
+        )
+        workflow_note.setWordWrap(True)
+        workflow_form.addRow("", workflow_note)
         workflow_tab.addWidget(workflow_box)
         optional_box = QGroupBox("Optional functions")
         optional_form = QFormLayout(optional_box)
@@ -2650,8 +3535,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         superflip_tab = add_settings_tab("Advanced: Superflip")
         superflip_box = QGroupBox("Superflip")
         superflip_form = QFormLayout(superflip_box)
-        self._add_combo(superflip_form, "reflection_data_mode", "HKL data mode", [REFLECTION_DATA_MODE_AUTO, REFLECTION_DATA_MODE_INTENSITY, REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA], REFLECTION_DATA_MODE_AUTO)
-        self._add_checkbox(superflip_form, "first_cycle_like_attachment", "Use deblurred XPLOR as next modelfile", False)
         self._add_combo(superflip_form, "perform_algorithm", "perform", ["CF", "AAR", "lde", "general", "fourier", "symmetry"], "CF")
         self.inputs["perform_algorithm"].setToolTip(
             INPUT_TOOLTIPS["perform_algorithm"]
@@ -2663,8 +3546,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(superflip_form, "export_superflip_jana", "Save Superflip m80/m81", False)
         self._add_checkbox(superflip_form, "export_standard_hkl", "Save standardized HKL I/sigma/phase", False)
         self._add_checkbox(superflip_form, "export_jana_project", "Export complete Jana2020 project folder", False)
-        self._add_combo(superflip_form, "referencefile_mode", "referencefile", ["reference_cif", "omit", "reference_xplor"], "reference_cif")
-        self._add_text(superflip_form, "voxel", "voxel", "AUTO")
+        referencefile_note = QLabel(
+            "referencefile is automatic: omitted by default; written only when a Superflip referencefile is selected on the Paths tab."
+        )
+        referencefile_note.setWordWrap(True)
+        superflip_form.addRow("referencefile", referencefile_note)
+        self._add_text(superflip_form, "voxel", "voxel", "omit")
         self._add_spin(superflip_form, "bestdensities_count", "bestdensities count", 1, 1, 100, 1)
         self._add_combo(superflip_form, "bestdensities_metric", "bestdensities metric", ["rvalue", "peakiness", "symmetry", "reference"], "rvalue")
         self._add_checkbox(superflip_form, "bestdensities_symmetry", "bestdensities symmetry", False)
@@ -2686,7 +3573,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_combo(superflip_form, "searchsymmetry", "searchsymmetry", ["average", "shift", "no"], "average")
         self._add_text(superflip_form, "derivesymmetry", "derivesymmetry", "yes")
         self._add_text(superflip_form, "electrons", "electrons", "")
-        self._add_text(superflip_form, "dataitemwidths", "dataitemwidths", "4 14 14")
+        dataitemwidths_note = QLabel("dataitemwidths is generated automatically from the exact fbegin/endf records.")
+        dataitemwidths_note.setWordWrap(True)
+        superflip_form.addRow("dataitemwidths", dataitemwidths_note)
         self._add_multiline(superflip_form, "extra_superflip_keywords", "Extra Superflip keywords", "", 110)
         load_inflip_btn = QPushButton("Load settings from .inflip")
         load_inflip_btn.setToolTip("Read Superflip keyword settings from an existing .inflip file. Reflection data blocks are ignored.")
@@ -2765,17 +3654,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_btn = QPushButton("Stop after current cycle")
         self.stop_now_btn = QPushButton("Stop now")
         self.clear_btn = QPushButton("Clear")
+        self.handoff_btn = QPushButton("Pass data to Jana2020")
+        self.handoff_btn.setEnabled(False)
         self.run_btn.setToolTip("Start the complete iterative crystallographic reconstruction workflow.")
         self.stop_btn.setToolTip("Request a graceful stop after the currently running cycle has completed.")
         self.stop_now_btn.setToolTip("Terminate the currently running external Superflip/EDMA process and stop the pipeline as soon as possible.")
         self.clear_btn.setToolTip("Clear the log panel and reset the plotted metrics for the current GUI session.")
+        self.handoff_btn.setToolTip("After a completed run started from a Jana .inflip, select a cycle and pass either its Superflip map or deblurred map back to Jana2020.")
         self.run_btn.clicked.connect(self.start_run)
         self.stop_btn.clicked.connect(self.stop_after_cycle.set)
         self.stop_now_btn.clicked.connect(self.request_immediate_stop)
         self.clear_btn.clicked.connect(self.clear_log_plot)
+        self.handoff_btn.clicked.connect(self.open_jana_handoff_dialog)
         buttons.addWidget(self.run_btn)
         buttons.addWidget(self.stop_btn)
         buttons.addWidget(self.stop_now_btn)
+        buttons.addWidget(self.handoff_btn)
         buttons.addWidget(self.clear_btn)
         left_layout.addLayout(buttons)
 
@@ -2807,10 +3701,49 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.log_text.setLineWrapMode(QTextEdit.NoWrap)
         self.log_text.setToolTip("Execution log with generated file paths, crystallographic metadata and external-command status messages.")
         right_layout.addWidget(self.log_text, 1)
-        self.log_text.append("Ready. Reference CIF supplies cell, symmetry, composition and metrics.")
-        self.log_text.append("Defaults: later-cycle Superflip modelfiles can use EDMA CIF or deblurred XPLOR.")
+        self.log_text.append("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL + CIF input mode.")
+        self.log_text.append("Defaults: later-cycle Superflip modelfiles can use raw Superflip XPLOR, deblurred XPLOR, or EDMA CIF.")
         self._update_plot()
         self._update_structure_views()
+        self._sync_input_source_mode_widgets()
+        self._sync_workflow_widgets()
+
+    def _sync_workflow_widgets(self) -> None:
+        mode = normalize_modelfile_source(self._combo_value("modelfile_source") if "modelfile_source" in self.inputs else "")
+        cycles_widget = self.inputs.get("cycles")
+        damping_widget = self.inputs.get("damping_factor")
+        if isinstance(cycles_widget, QSpinBox):
+            if mode == "none":
+                if cycles_widget.value() != 1:
+                    cycles_widget.setValue(1)
+                cycles_widget.setEnabled(False)
+                cycles_widget.setToolTip("Next-cycle modelfile is none, so there is no feedback model for later cycles. The run is therefore forced to one cycle.")
+            else:
+                cycles_widget.setEnabled(True)
+                cycles_widget.setToolTip(INPUT_TOOLTIPS.get("cycles", ""))
+        if isinstance(damping_widget, QDoubleSpinBox):
+            damping_widget.setEnabled(mode in {"superflip_xplor", "deblurred_xplor"})
+            if mode in {"superflip_xplor", "deblurred_xplor"}:
+                damping_widget.setToolTip(INPUT_TOOLTIPS.get("damping_factor", ""))
+            else:
+                damping_widget.setToolTip("XPLOR damping is used only when Next-cycle modelfile is superflip_xplor or deblurred_xplor.")
+        self._update_plot()
+
+    def _sync_input_source_mode_widgets(self) -> None:
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
+        jana_enabled = mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}
+        override_enabled = mode == INPUT_MODE_INFLIP_OVERRIDES
+        external_enabled = mode == INPUT_MODE_EXTERNAL
+        for key, enabled in (
+            ("jana_inflip", jana_enabled),
+            ("hkl", override_enabled or external_enabled),
+            ("reference_cif", override_enabled or external_enabled),
+            ("superflip_reference_xplor", override_enabled),
+            ("superflip_referencefile", True),
+        ):
+            widget = self.inputs.get(key)
+            if hasattr(widget, "setEnabled"):
+                widget.setEnabled(bool(enabled))  # type: ignore[attr-defined]
 
     def _widget_value_as_string(self, widget: object) -> str:
         if isinstance(widget, PathRow):
@@ -2857,6 +3790,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             value = self.settings.value(f"inputs/{key}", None)
             if value is not None:
                 self._set_widget_value_from_string(widget, str(value))
+
+        # Migrate legacy generic executable names to the Jana2020 installation
+        # defaults while preserving any explicit custom absolute path.
+        executable_defaults = {
+            "superflip_exe": r"C:\Jana2020\SUPERFLIP\superflip_original.exe",
+            "edma_exe": r"C:\Jana2020\SUPERFLIP\EDMA.exe",
+        }
+        generic_values = {
+            "superflip_exe": {"", "superflip", "superflip.exe"},
+            "edma_exe": {"", "edma", "edma.exe"},
+        }
+        for key, default_path in executable_defaults.items():
+            widget = self.inputs.get(key)
+            if widget is None:
+                continue
+            current = self._widget_value_as_string(widget).strip()
+            if current.lower() in generic_values[key]:
+                self._set_widget_value_from_string(widget, default_path)
         # Backward compatibility with older GUI versions that had one common
         # EDMA plimit field named "plimit".
         old_plimit = self.settings.value("inputs/plimit", None)
@@ -2865,6 +3816,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._set_widget_value_from_string(self.inputs["plimit_superflip"], str(old_plimit))
             if self.settings.value("inputs/plimit_deblur", None) is None and "plimit_deblur" in self.inputs:
                 self._set_widget_value_from_string(self.inputs["plimit_deblur"], str(old_plimit))
+        self._sync_input_source_mode_widgets()
         geom = self.settings.value("window/geometry", None)
         if geom is not None:
             try:
@@ -2885,9 +3837,181 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     continue
                 self._set_widget_value_from_string(widget, value)
                 applied += 1
-            QMessageBox.information(self, "Loaded .inflip settings", f"Loaded {applied} GUI settings from:\n{path}\n\nReflection data and crystallographic blocks were ignored.")
+            QMessageBox.information(self, "Loaded .inflip settings", f"Loaded {applied} GUI settings from:\n{path}\n\nHKL data format was imported when dataformat/dataitemwidths were present. Reflection records and crystallographic blocks were not copied into editable fields.")
         except Exception as exc:
             QMessageBox.critical(self, "Load .inflip failed", str(exc))
+
+    def _hkl_analysis_inputs(self) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
+        hkl_text = self._path_value("hkl").strip() if "hkl" in self.inputs else ""
+        jana_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
+        ref_text = self._path_value("reference_cif").strip() if "reference_cif" in self.inputs else ""
+        work_text = self._path_value("work_dir").strip() if "work_dir" in self.inputs else ""
+        work_dir = Path(work_text).expanduser().resolve() if work_text else Path.cwd()
+        jana_path = Path(jana_text).expanduser().resolve() if jana_text else None
+        use_inflip_hkl = mode == INPUT_MODE_INFLIP or (mode == INPUT_MODE_INFLIP_OVERRIDES and not hkl_text)
+        if use_inflip_hkl:
+            if jana_path is None or not jana_path.is_file():
+                raise FileNotFoundError("Jana .inflip is required to test or analyze embedded HKL data.")
+            hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
+            cell, sg, hm, _composition = parse_inflip_crystallography(jana_path)
+            source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
+        else:
+            if not hkl_text:
+                raise FileNotFoundError("Select an external HKL file or a Jana .inflip with embedded reflections.")
+            hkl_path = Path(hkl_text).expanduser().resolve()
+            if not hkl_path.is_file():
+                raise FileNotFoundError(f"HKL file not found: {hkl_path}")
+            if ref_text and Path(ref_text).expanduser().is_file():
+                cell, sg, hm = parse_cif_cell_and_sg(Path(ref_text).expanduser().resolve())
+                source_note = f"HKL source: {hkl_path}; cell/symmetry source: {Path(ref_text).expanduser().resolve()}"
+            elif jana_path is not None and jana_path.is_file():
+                cell, sg, hm, _composition = parse_inflip_crystallography(jana_path)
+                source_note = f"HKL source: {hkl_path}; cell/symmetry source: {jana_path}"
+            else:
+                raise FileNotFoundError("Select a reference CIF or Jana .inflip so Phase Studio can calculate d-spacings and completeness.")
+        configured_mode = self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO
+        data_mode = resolve_reflection_data_mode_from_sources(hkl_path, configured_mode, jana_path)
+        return hkl_path, data_mode, cell, sg, hm, source_note
+
+    def test_hkl_load_dialog(self) -> None:
+        try:
+            hkl_path, data_mode, cell, sg, hm, source_note = self._hkl_analysis_inputs()
+            value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
+            reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
+            unique = merge_duplicate_reflections(reflections)
+        except Exception as exc:
+            QMessageBox.critical(self, "HKL load test failed", str(exc))
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("HKL Load Test")
+        dialog.resize(860, 560)
+        layout = QVBoxLayout(dialog)
+        sigma_count = sum(1 for r in reflections if r.sigma is not None)
+        phase_count = sum(1 for r in reflections if r.phase is not None)
+        summary = QLabel(
+            f"{source_note}\n"
+            f"HKL data format: {data_mode}; value column: {value_col}; "
+            f"sigma column: {sigma_col if sigma_col is not None else 'none'}; include 000: {'yes' if include_000 else 'no'}\n"
+            f"Cell: {cell.a:.5g} {cell.b:.5g} {cell.c:.5g} {cell.alpha:.4g} {cell.beta:.4g} {cell.gamma:.4g}; space group: {hm}\n"
+            f"Parsed reflections: {len(reflections)}; unique HKL after duplicate merge: {len(unique)}; with sigma: {sigma_count}; with phase: {phase_count}"
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        headers = ["h", "k", "l", "value", "sigma", "phase", "d", "sin(theta)/lambda"]
+        rows = min(50, len(reflections))
+        table = QTableWidget(rows, len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        for row, r in enumerate(reflections[:rows]):
+            d = reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l))
+            stl = reflection_sintheta_over_lambda(cell, int(r.h), int(r.k), int(r.l))
+            values = [
+                str(int(r.h)),
+                str(int(r.k)),
+                str(int(r.l)),
+                f"{float(r.value):.7g}",
+                "n/a" if r.sigma is None else f"{float(r.sigma):.7g}",
+                "n/a" if r.phase is None else f"{float(r.phase):.7g}",
+                "n/a" if not math.isfinite(d) else f"{d:.5g}",
+                f"{stl:.5g}",
+            ]
+            for col, text in enumerate(values):
+                table.setItem(row, col, QTableWidgetItem(text))
+        layout.addWidget(table, 1)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.button(QDialogButtonBox.Close).clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
+
+    def open_hkl_completeness_dialog(self) -> None:
+        try:
+            hkl_path, data_mode, cell, sg, hm, source_note = self._hkl_analysis_inputs()
+            analysis = analyze_hkl_data(hkl_path, data_mode, cell, sg, hm, source_note)
+        except Exception as exc:
+            QMessageBox.critical(self, "HKL completeness analysis failed", str(exc))
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("HKL Completeness and Intensity Statistics")
+        dialog.resize(1040, 760)
+        layout = QVBoxLayout(dialog)
+        d_full = "n/a" if analysis.d_full_98 is None else f"{analysis.d_full_98:.4g} A"
+        summary = QLabel(
+            f"{analysis.source_note}\n"
+            f"HKL data format: {analysis.data_mode}; parsed: {len(analysis.reflections_raw)}; unique: {len(analysis.reflections_unique)}; "
+            f"d_min: {analysis.d_min:.4g} A; d_full at 98% cumulative completeness: {d_full}"
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        figure = Figure(figsize=(8.4, 6.2), dpi=100)
+        canvas = FigureCanvas(figure)
+        ax1 = figure.add_subplot(211)
+        ax2 = figure.add_subplot(212)
+        centers = [float(b["center"]) for b in analysis.bins]
+        widths = [max(0.0001, float(b["hi"]) - float(b["lo"])) for b in analysis.bins]
+        completeness = [float(b["completeness"]) for b in analysis.bins]
+        mean_ios = [float(b["mean_i_over_sigma"]) if math.isfinite(float(b["mean_i_over_sigma"])) else np.nan for b in analysis.bins]
+        ios_values = [
+            reflection_signal_to_noise(r, analysis.data_mode)
+            for r in analysis.reflections_unique
+        ]
+        ios_values = [float(v) for v in ios_values if v is not None and math.isfinite(float(v))]
+        d_min_stl = 1.0 / (2.0 * analysis.d_min) if analysis.d_min > 0 else None
+        d_full_stl = 1.0 / (2.0 * analysis.d_full_98) if analysis.d_full_98 is not None and analysis.d_full_98 > 0 else None
+        ax1.bar(centers, completeness, width=widths, align="center", color="#2563eb", alpha=0.72, label="Completeness")
+        ax1.axhline(98.0, color="#be123c", linewidth=1.0, linestyle="--")
+        if d_min_stl is not None:
+            ax1.axvline(d_min_stl, color="#111827", linewidth=1.1, linestyle="-", label="d_min")
+            ax1.text(d_min_stl, 103.0, "d_min", rotation=90, va="top", ha="right", color="#111827", fontsize=8)
+        if d_full_stl is not None:
+            ax1.axvline(d_full_stl, color="#7c3aed", linewidth=1.1, linestyle=":", label="d_full 98%")
+            ax1.text(d_full_stl, 103.0, "d_full", rotation=90, va="top", ha="left", color="#7c3aed", fontsize=8)
+        ax1.set_ylabel("Completeness (%)")
+        ax1.set_xlabel("sin(theta)/lambda")
+        ax1.set_ylim(0, 105)
+        ax1.grid(True, axis="y", alpha=0.25)
+        ax1b = ax1.twinx()
+        ax1b.plot(centers, mean_ios, marker="o", color="#047857", linewidth=1.8, label="Mean I/sigma")
+        ax1b.set_ylabel("Mean I/sigma")
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax1b.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=8)
+        if ios_values:
+            ax2.hist(ios_values, bins=min(50, max(10, int(math.sqrt(len(ios_values))))), color="#0f766e", alpha=0.82)
+        else:
+            ax2.text(0.5, 0.5, "No sigma values available", transform=ax2.transAxes, ha="center", va="center")
+        ax2.set_xlabel("I/sigma")
+        ax2.set_ylabel("Frequency")
+        ax2.grid(True, axis="y", alpha=0.25)
+        figure.tight_layout()
+        layout.addWidget(canvas, 1)
+        headers = ["sin(theta)/lambda bin", "Observed", "Theoretical", "Completeness %", "Mean I/sigma"]
+        table = QTableWidget(len(analysis.bins), len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        for row, item in enumerate(analysis.bins):
+            values = [
+                f"{float(item['lo']):.4g} - {float(item['hi']):.4g}",
+                str(int(item["observed"])),
+                str(int(item["theory"])),
+                f"{float(item['completeness']):.2f}",
+                "n/a" if not math.isfinite(float(item["mean_i_over_sigma"])) else f"{float(item['mean_i_over_sigma']):.3g}",
+            ]
+            for col, text in enumerate(values):
+                table.setItem(row, col, QTableWidgetItem(text))
+        layout.addWidget(table)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.button(QDialogButtonBox.Close).clicked.connect(dialog.accept)
+        layout.addWidget(buttons)
+        dialog.exec()
 
     def save_settings(self) -> None:
         for key, widget in self.inputs.items():
@@ -2903,22 +4027,40 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return self.inputs[key].value()  # type: ignore[attr-defined]
 
     def _line_value(self, key: str) -> str:
-        return self.inputs[key].text().strip()  # type: ignore[attr-defined]
+        widget = self.inputs.get(key)
+        if widget is None or not hasattr(widget, "text"):
+            return ""
+        return widget.text().strip()  # type: ignore[attr-defined]
 
     def _multiline_value(self, key: str) -> str:
-        return self.inputs[key].toPlainText().strip()  # type: ignore[attr-defined]
+        widget = self.inputs.get(key)
+        if widget is None or not hasattr(widget, "toPlainText"):
+            return ""
+        return widget.toPlainText().strip()  # type: ignore[attr-defined]
 
     def _combo_value(self, key: str) -> str:
-        return self.inputs[key].currentText().strip()  # type: ignore[attr-defined]
+        widget = self.inputs.get(key)
+        if widget is None or not hasattr(widget, "currentText"):
+            return ""
+        return widget.currentText().strip()  # type: ignore[attr-defined]
 
     def _check_value(self, key: str) -> bool:
-        return bool(self.inputs[key].isChecked())  # type: ignore[attr-defined]
+        widget = self.inputs.get(key)
+        if widget is None or not hasattr(widget, "isChecked"):
+            return False
+        return bool(widget.isChecked())  # type: ignore[attr-defined]
 
     def _spin_value(self, key: str) -> int:
-        return int(self.inputs[key].value())  # type: ignore[attr-defined]
+        widget = self.inputs.get(key)
+        if widget is None or not hasattr(widget, "value"):
+            return 0
+        return int(widget.value())  # type: ignore[attr-defined]
 
     def _dspin_value(self, key: str) -> float:
-        return float(self.inputs[key].value())  # type: ignore[attr-defined]
+        widget = self.inputs.get(key)
+        if widget is None or not hasattr(widget, "value"):
+            return 0.0
+        return float(widget.value())  # type: ignore[attr-defined]
 
     def clear_log_plot(self) -> None:
         self.log_text.clear()
@@ -2929,6 +4071,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Idle")
+        if hasattr(self, "handoff_btn"):
+            self.handoff_btn.setEnabled(False)
+        self.last_run_config = None
         self._update_plot()
         self._update_structure_views()
 
@@ -2995,6 +4140,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("plimit_superflip", "1.0")
             set_value("plimit_deblur", "1.0")
             set_value("bestdensities_symmetry", "true")
+        self._sync_workflow_widgets()
 
     def _poll_queue(self) -> None:
         try:
@@ -3041,6 +4187,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         widget.setCurrentIndex(idx if idx >= 0 else 0)
                         widget.blockSignals(False)
                     self.log_text.append("SharpED models refreshed.")
+                elif kind == "handoff_done":
+                    self.log_text.append("\nJana2020 hand-off completed. Phase Studio will close automatically.")
+                    self.handoff_btn.setEnabled(False)
+                    QTimer.singleShot(400, QApplication.instance().quit)
+                elif kind == "handoff_error":
+                    QMessageBox.critical(self, "Jana2020 hand-off failed", str(payload))
+                    self.log_text.append("\nJana2020 hand-off ERROR: " + str(payload))
+                    self.handoff_btn.setEnabled(bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None))
                 elif kind == "progress_setup":
                     total = max(1, int(payload))
                     self.progress_bar.setRange(0, total)
@@ -3055,6 +4209,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log_text.append("\nERROR: " + str(payload))
                     self.progress_bar.setFormat("Error")
                     self.run_btn.setEnabled(True)
+                    self.handoff_btn.setEnabled(False)
                     self.run_btn.setText("Run")
                 elif kind == "done":
                     self.log_text.append("\nDone.")
@@ -3063,8 +4218,186 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.progress_bar.setFormat("Done")
                     self.run_btn.setEnabled(True)
                     self.run_btn.setText("Run")
+                    can_handoff = bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None)
+                    self.handoff_btn.setEnabled(can_handoff)
+                    if can_handoff:
+                        self.log_text.append("Jana2020 hand-off is ready. Use 'Pass data to Jana2020' to select the cycle and map source.")
         except queue.Empty:
             pass
+
+    def _recommended_handoff_index(self) -> int:
+        if not self.results:
+            return -1
+        finite_symm = [
+            (idx, float(r.superflip_symm))
+            for idx, r in enumerate(self.results)
+            if r.superflip_symm is not None and np.isfinite(float(r.superflip_symm))
+        ]
+        if finite_symm:
+            # Superflip's Symm. column is an agreement residual; lower values mean better symmetry agreement.
+            return min(finite_symm, key=lambda item: item[1])[0]
+        finite_ref = [
+            (idx, float(r.superflip_ref_match))
+            for idx, r in enumerate(self.results)
+            if r.superflip_ref_match is not None and np.isfinite(float(r.superflip_ref_match))
+        ]
+        if finite_ref:
+            return min(finite_ref, key=lambda item: item[1])[0]
+        return len(self.results) - 1
+
+    def open_jana_handoff_dialog(self) -> None:
+        cfg = self.last_run_config
+        if cfg is None or cfg.jana_inflip is None:
+            QMessageBox.warning(self, "Jana2020 hand-off", "This run was not started from a Jana .inflip file.")
+            return
+        if not self.results:
+            QMessageBox.warning(self, "Jana2020 hand-off", "No completed cycle is available for hand-off.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Pass Phase Studio result to Jana2020")
+        dialog.resize(1180, 560)
+        layout = QVBoxLayout(dialog)
+        info = QLabel(
+            "Select the completed Phase Studio cycle and the map that should be used "
+            "as the model for Jana2020's final Superflip hand-off. The table shows "
+            "all Superflip metrics currently parsed from every completed cycle. Rvalue, "
+            "Peaks, Symm. and Der.SG come from the saved-density run actually used by Superflip."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        headers = [
+            "Cycle",
+            "Saved run",
+            "Rvalue",
+            "Peaks",
+            "Symm.",
+            "Der.SG",
+            "Ref.match",
+            "FoM / Score",
+            "Success rate %",
+            "Mean cycles",
+            "Superflip map",
+            "Deblurred map",
+        ]
+        metrics_table = QTableWidget(len(self.results), len(headers))
+        metrics_table.setHorizontalHeaderLabels(headers)
+        metrics_table.setAlternatingRowColors(True)
+        metrics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        metrics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        metrics_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        metrics_table.verticalHeader().setVisible(False)
+        metrics_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        metrics_table.horizontalHeader().setStretchLastSection(False)
+
+        def fmt(value: object) -> str:
+            if value is None:
+                return "n/a"
+            try:
+                value_f = float(value)
+                if not np.isfinite(value_f):
+                    return "n/a"
+                return f"{value_f:.3f}"
+            except Exception:
+                return str(value) if str(value) else "n/a"
+
+        for row, result in enumerate(self.results):
+            values = [
+                f"{int(result.cycle):03d}",
+                "n/a" if result.superflip_saved_run is None else str(int(result.superflip_saved_run)),
+                fmt(result.superflip_rvalue),
+                fmt(result.superflip_peaks),
+                fmt(result.superflip_symm),
+                result.superflip_derived_sg or "n/a",
+                fmt(result.superflip_ref_match),
+                fmt(result.superflip_fom),
+                fmt(result.superflip_success_rate),
+                fmt(result.superflip_mean_cycles),
+                "available" if Path(result.superflip_map).is_file() else "missing",
+                "available" if Path(result.deblur_map).is_file() else "missing",
+            ]
+            for col, text in enumerate(values):
+                item = QTableWidgetItem(text)
+                if col == 0:
+                    item.setData(Qt.UserRole, int(result.cycle))
+                metrics_table.setItem(row, col, item)
+        layout.addWidget(metrics_table, 1)
+
+        form = QFormLayout()
+        cycle_combo = QComboBox()
+        for result in self.results:
+            symm = "n/a" if result.superflip_symm is None else f"{float(result.superflip_symm):.3f}"
+            rvalue = "n/a" if result.superflip_rvalue is None else f"{float(result.superflip_rvalue):.3f}"
+            run_label = "n/a" if result.superflip_saved_run is None else str(int(result.superflip_saved_run))
+            label = f"Cycle {int(result.cycle):03d} — saved run {run_label}, Symm. {symm}, Rvalue {rvalue}"
+            cycle_combo.addItem(label, int(result.cycle))
+        recommended = self._recommended_handoff_index()
+        if recommended >= 0:
+            cycle_combo.setCurrentIndex(recommended)
+            metrics_table.selectRow(recommended)
+
+        map_combo = QComboBox()
+        map_combo.addItem("Deblurred map (SharpED output)", "deblurred")
+        map_combo.addItem("Superflip map", "superflip")
+        try:
+            rec = self.results[recommended]
+            if not Path(rec.deblur_map).is_file():
+                map_combo.setCurrentIndex(1)
+        except Exception:
+            pass
+
+        def sync_table_from_combo(index: int) -> None:
+            if 0 <= index < metrics_table.rowCount():
+                metrics_table.selectRow(index)
+
+        def sync_combo_from_table() -> None:
+            row = metrics_table.currentRow()
+            if 0 <= row < cycle_combo.count() and row != cycle_combo.currentIndex():
+                cycle_combo.setCurrentIndex(row)
+
+        cycle_combo.currentIndexChanged.connect(sync_table_from_combo)
+        metrics_table.itemSelectionChanged.connect(sync_combo_from_table)
+
+        form.addRow("Cycle", cycle_combo)
+        form.addRow("Map source", map_combo)
+        layout.addLayout(form)
+
+        note = QLabel(
+            "The suggested cycle is selected by the best Superflip symmetry agreement "
+            "(lowest Symm. residual). You can override it manually. After a successful "
+            "hand-off Phase Studio closes automatically."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText("Pass to Jana2020")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        selected_cycle = int(cycle_combo.currentData())
+        selected_map = str(map_combo.currentData() or "deblurred")
+        selected_result = next((r for r in self.results if int(r.cycle) == selected_cycle), None)
+        if selected_result is None:
+            QMessageBox.warning(self, "Jana2020 hand-off", "Selected cycle is no longer available.")
+            return
+
+        self.handoff_btn.setEnabled(False)
+        self.log_text.append(f"\nStarting Jana2020 hand-off from cycle {selected_cycle:03d} ({selected_map}).")
+
+        def worker() -> None:
+            try:
+                perform_jana_handoff(cfg, selected_result, selected_map, log=self.log)
+                self.msg_queue.put(("handoff_done", None))
+            except Exception as exc:
+                self.msg_queue.put(("handoff_error", exc))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _update_plot(self) -> None:
         self.figure.clear()
@@ -3245,20 +4578,44 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.draw_idle()
 
     def get_config(self) -> RunConfig:
+        input_source_mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
         reference_xplor_text = self._path_value("superflip_reference_xplor")
         reference_xplor = Path(reference_xplor_text).expanduser().resolve() if reference_xplor_text else None
+        superflip_referencefile_text = self._path_value("superflip_referencefile") if "superflip_referencefile" in self.inputs else ""
+        superflip_referencefile = Path(superflip_referencefile_text).expanduser().resolve() if superflip_referencefile_text else None
         first_model_text = self._path_value("first_cycle_modelfile")
         first_model = Path(first_model_text).expanduser().resolve() if first_model_text else None
-        referencefile_mode = (self._combo_value("referencefile_mode") or "reference_cif").strip().lower()
-        if referencefile_mode == "none":
+        jana_inflip_text = self._path_value("jana_inflip") if "jana_inflip" in self.inputs else ""
+        jana_inflip = Path(jana_inflip_text).expanduser().resolve() if jana_inflip_text else None
+        hkl_text = self._path_value("hkl")
+        reference_cif_text = self._path_value("reference_cif")
+        hkl_path = Path(hkl_text).expanduser().resolve() if hkl_text else Path("__phase_studio_no_external_hkl_selected__").resolve()
+        reference_cif_path = Path(reference_cif_text).expanduser().resolve() if reference_cif_text else Path("__phase_studio_no_external_reference_cif_selected__").resolve()
+        if input_source_mode == INPUT_MODE_INFLIP:
+            hkl_path = Path("__phase_studio_use_hkl_from_inflip__").resolve()
+            reference_cif_path = Path("__phase_studio_use_reference_from_inflip__").resolve()
+            reference_xplor = None
+        if superflip_referencefile is not None:
+            referencefile_mode = "reference_xplor" if superflip_referencefile.suffix.lower() == ".xplor" else "reference_cif"
+        elif reference_xplor is not None:
+            referencefile_mode = "reference_xplor"
+        else:
             referencefile_mode = "omit"
+        modelfile_source_value = normalize_modelfile_source(self._combo_value("modelfile_source"))
+        cycles_value = max(1, self._spin_value("cycles"))
+        if modelfile_source_value == "none":
+            cycles_value = 1
         return RunConfig(
-            hkl=Path(self._path_value("hkl")).expanduser().resolve(),
-            reference_cif=Path(self._path_value("reference_cif")).expanduser().resolve(),
+            hkl=hkl_path,
+            reference_cif=reference_cif_path,
             superflip_reference_xplor=reference_xplor,
+            superflip_referencefile=superflip_referencefile,
             first_cycle_modelfile=first_model,
+            input_source_mode=input_source_mode,
+            jana_inflip=jana_inflip,
+            jana_return_to_jana=bool(jana_inflip is not None),
             work_dir=Path(self._path_value("work_dir")).expanduser().resolve(),
-            cycles=self._spin_value("cycles"),
+            cycles=cycles_value,
             superflip_exe=self._path_value("superflip_exe") or "superflip",
             edma_exe=self._path_value("edma_exe") or "EDMA",
             composition_override=self._line_value("composition_override"),
@@ -3273,7 +4630,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             edma_chlimlist=self._line_value("edma_chlimlist") or "0.0057 relative",
             extra_edma_keywords=self._multiline_value("extra_edma_keywords"),
             damping_factor=self._dspin_value("damping_factor"),
-            modelfile_source=normalize_modelfile_source(self._combo_value("modelfile_source")),
+            modelfile_source=modelfile_source_value,
             exclude_atoms=self._line_value("exclude_atoms") or "none",
             perform_algorithm=self._combo_value("perform_algorithm") or "CF",
             output_format=normalize_output_format(self._combo_value("output_format")),
@@ -3296,7 +4653,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             weakratio=self._line_value("weakratio") or "0.000",
             biso=self._line_value("biso") or "0.000",
             reflection_data_mode=normalize_reflection_data_mode(self._combo_value("reflection_data_mode")),
-            first_cycle_like_attachment=self._check_value("first_cycle_like_attachment"),
+            first_cycle_like_attachment=False,
             i_over_sigma_min=self._dspin_value("i_over_sigma_min"),
             resolution_d_min=self._dspin_value("resolution_d_min"),
             normalize=self._combo_value("normalize") or "local",
@@ -3305,14 +4662,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             searchsymmetry=self._combo_value("searchsymmetry") or "average",
             derivesymmetry=self._line_value("derivesymmetry") or "yes",
             electrons=self._line_value("electrons"),
-            dataitemwidths=self._line_value("dataitemwidths") or "4 14 14",
+            dataitemwidths="auto",
             extra_superflip_keywords=self._multiline_value("extra_superflip_keywords"),
             map_feedback_missing_from_cycle=self._spin_value("map_feedback_missing_from_cycle"),
             map_feedback_missing_percent_limit=self._dspin_value("map_feedback_missing_percent_limit"),
             map_feedback_intensity_from_cycle=self._spin_value("map_feedback_intensity_from_cycle"),
             map_feedback_intensity_damping=self._dspin_value("map_feedback_intensity_damping"),
             map_feedback_intensity_max_i_over_sigma=self._dspin_value("map_feedback_intensity_max_i_over_sigma"),
-            run_sharped=self._check_value("run_sharped"),
+            run_sharped=self._check_value("run_sharped") and modelfile_source_value != "superflip_xplor",
             run_edma_superflip=self._check_value("run_edma_superflip"),
             run_edma_deblurred=self._check_value("run_edma_deblurred"),
             sharped_base_url=self._line_value("sharped_base_url") or "https://jana.fzu.cz",
@@ -3331,12 +4688,38 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         try:
             cfg = self.get_config()
-            for p, label in [(cfg.hkl, "HKL"), (cfg.reference_cif, "Reference CIF")]:
-                if not p.is_file():
-                    raise FileNotFoundError(f"{label} not found: {p}")
+            mode = normalize_input_source_mode(cfg.input_source_mode)
+            hkl_text = self._path_value("hkl").strip()
+            ref_text = self._path_value("reference_cif").strip()
+            xplor_text = self._path_value("superflip_reference_xplor").strip()
+            if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
+                if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
+                    raise FileNotFoundError("Jana .inflip input mode requires a readable Jana .inflip file.")
+                if mode == INPUT_MODE_INFLIP:
+                    self.log_text.append("Input mode: Jana .inflip. HKL and reference metadata will be taken from the .inflip file.")
+                else:
+                    if hkl_text and not cfg.hkl.is_file():
+                        raise FileNotFoundError(f"HKL override not found: {cfg.hkl}")
+                    if ref_text and not cfg.reference_cif.is_file():
+                        raise FileNotFoundError(f"Reference CIF override not found: {cfg.reference_cif}")
+                    if xplor_text and (cfg.superflip_reference_xplor is None or not cfg.superflip_reference_xplor.is_file()):
+                        raise FileNotFoundError(f"Reference XPLOR override not found: {cfg.superflip_reference_xplor}")
+                    if not hkl_text:
+                        self.log_text.append("HKL override is empty; the Jana .inflip fbegin/endf block will be used.")
+                    if not ref_text:
+                        self.log_text.append("Reference CIF override is empty; the Jana .inflip cell/space group/composition will be used.")
+            else:
+                for p, label in [(cfg.hkl, "External HKL"), (cfg.reference_cif, "External reference CIF")]:
+                    if not p.is_file():
+                        raise FileNotFoundError(f"{label} not found: {p}")
             if cfg.first_cycle_modelfile is not None and not cfg.first_cycle_modelfile.is_file():
                 raise FileNotFoundError(f"First-cycle modelfile not found: {cfg.first_cycle_modelfile}")
-            if cfg.referencefile_mode == "reference_xplor":
+            if cfg.superflip_referencefile is not None:
+                if not cfg.superflip_referencefile.is_file():
+                    raise FileNotFoundError(f"Superflip referencefile not found: {cfg.superflip_referencefile}")
+                if cfg.superflip_referencefile.suffix.lower() not in {".cif", ".xplor"}:
+                    raise ValueError("Superflip referencefile must be a CIF structure or an XPLOR density map.")
+            if cfg.referencefile_mode == "reference_xplor" and cfg.superflip_referencefile is None and (mode == INPUT_MODE_EXTERNAL or bool(xplor_text)):
                 if cfg.superflip_reference_xplor is None:
                     raise FileNotFoundError("Superflip referencefile mode is reference_xplor, but Reference XPLOR path is empty.")
                 if not cfg.superflip_reference_xplor.is_file():
@@ -3350,6 +4733,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if missing is None:
                     raise FileNotFoundError(f"{label} executable not found: {exe}")
             cfg.work_dir.mkdir(parents=True, exist_ok=True)
+            self.last_run_config = cfg
             self.save_settings()
         except Exception as exc:
             QMessageBox.critical(self, "Input error", str(exc))
@@ -3360,6 +4744,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Starting...")
         self.run_btn.setEnabled(False)
+        self.handoff_btn.setEnabled(False)
         self.run_btn.setText("Running...")
         self.log_text.append("\nStarting pipeline...")
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
@@ -3370,7 +4755,48 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         try:
             self.log("=== Phase Studio pipeline started ===")
             self.log(f"Work dir: {cfg.work_dir}")
+            mode = normalize_input_source_mode(cfg.input_source_mode)
+            self.log(f"Input data mode: {INPUT_MODE_LABELS.get(mode, mode)}")
+            if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
+                if cfg.jana_inflip is None:
+                    raise RuntimeError("Jana input mode selected, but no Jana .inflip file is configured.")
+                self.log(f"Jana2020 .inflip primary input: {cfg.jana_inflip}")
+                if mode == INPUT_MODE_INFLIP or not cfg.hkl.is_file():
+                    cfg.hkl = extract_embedded_hkl_from_inflip(cfg.jana_inflip, cfg.work_dir)
+                    self.log(f"HKL source exported from Jana .inflip: {cfg.hkl}")
+                else:
+                    self.log(f"HKL source override: {cfg.hkl}")
+
+                declared_ref = inflip_declared_reference(cfg.jana_inflip)
+                if mode == INPUT_MODE_INFLIP or not cfg.reference_cif.is_file():
+                    if declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() == ".cif" and mode != INPUT_MODE_INFLIP_OVERRIDES:
+                        cfg.reference_cif = declared_ref
+                        self.log(f"Reference CIF declared by Jana .inflip: {cfg.reference_cif}")
+                    else:
+                        cfg.reference_cif = write_reference_cif_from_inflip(cfg.jana_inflip, cfg.work_dir / f"{cfg.jana_inflip.stem}_embedded_reference.cif")
+                        self.log(f"Reference CIF synthesized from Jana .inflip cell/space group/composition: {cfg.reference_cif}")
+                else:
+                    self.log(f"Reference CIF override: {cfg.reference_cif}")
+
+                if mode == INPUT_MODE_INFLIP:
+                    cfg.superflip_reference_xplor = None
+                if cfg.superflip_reference_xplor is None and declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() == ".xplor":
+                    cfg.superflip_reference_xplor = declared_ref
+                    cfg.referencefile_mode = "reference_xplor"
+                    self.log(f"Reference XPLOR declared by Jana .inflip: {cfg.superflip_reference_xplor}")
+            else:
+                self.log(f"External HKL source: {cfg.hkl}")
+                self.log(f"External reference CIF: {cfg.reference_cif}")
+            if str(cfg.referencefile_mode).strip().lower() == "reference_xplor" and cfg.superflip_reference_xplor is None and cfg.superflip_referencefile is None:
+                cfg.referencefile_mode = "omit"
             ref_ctx = load_reference_context(cfg.reference_cif, cfg.work_dir, cfg.composition_override)
+            # If the user selected a real CIF as Superflip referencefile in Jana .inflip mode,
+            # do not turn it into an empty metadata-only reference.  Use its atom sites for
+            # metrics/EDMA while preserving the Jana .inflip cell/spacegroup/reflection setup.
+            if cfg.superflip_referencefile is not None and cfg.superflip_referencefile.suffix.lower() == ".cif":
+                ref_ctx = reference_context_with_external_atom_sites(
+                    ref_ctx, cfg.superflip_referencefile, cfg.work_dir, cfg.composition_override, self.log
+                )
             self.msg_queue.put(("reference_atoms", expand_atoms_by_symmetry(ref_ctx.atoms, ref_ctx.spacegroup)))
             self.log(f"Reference CIF: {cfg.reference_cif}")
             self.log(f"Working reference CIF for EDMA/metrics: {ref_ctx.work_ref_cif}")
@@ -3386,19 +4812,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"SharpED model: {cfg.sharped_model or 'default'}")
             self.log(f"SharpED elements: {sharped_elements}")
             requested_modelfile_mode = normalize_modelfile_source(cfg.modelfile_source)
-            force_deblurred_xplor_modelfile = bool(cfg.first_cycle_like_attachment)
             modelfile_mode = requested_modelfile_mode
-            if force_deblurred_xplor_modelfile:
-                modelfile_mode = "deblurred_xplor"
-            use_xplor_modelfile = modelfile_mode == "deblurred_xplor"
+            use_xplor_modelfile = modelfile_mode in {"superflip_xplor", "deblurred_xplor"}
+            use_superflip_xplor_modelfile = modelfile_mode == "superflip_xplor"
             use_cif_modelfile = modelfile_mode == "deblurred_edma_cif"
             self.log(f"Next-cycle modelfile source: {modelfile_mode}")
             if use_xplor_modelfile:
-                self.log(f"XPLOR damping factor: {max(1.0, float(cfg.damping_factor)):g}")
+                self.log(
+                    f"XPLOR damping 1/x: {max(0.001, min(1.0, float(cfg.damping_factor))):g} "
+                    f"(effective old factor {effective_xplor_damping_factor(cfg.damping_factor):g})"
+                )
+            if use_superflip_xplor_modelfile:
+                self.log("Next-cycle XPLOR modelfile uses the raw Superflip map; SharpED deblurring is not required for cycling.")
             if use_cif_modelfile:
                 self.log("CIF modelfiles are written without an explicit CIF format keyword; Superflip infers CIF from the .cif extension.")
-            if force_deblurred_xplor_modelfile and requested_modelfile_mode != "deblurred_xplor":
-                self.log("Deblurred-XPLOR modelfile option forces next-cycle modelfile source to deblurred_xplor.")
             self.log(f"Superflip perform: {cfg.perform_algorithm.upper()}")
             self.log(f"Superflip requested outputformat: {cfg.output_format}")
             self.log(
@@ -3413,16 +4840,32 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, EDMA/deblurred={'yes' if cfg.run_edma_deblurred else 'no'}")
             if cfg.first_cycle_modelfile is not None:
                 self.log(f"First-cycle external modelfile: {cfg.first_cycle_modelfile}")
+            explicit_superflip_referencefile = cfg.superflip_referencefile
+            if explicit_superflip_referencefile is not None:
+                self.log(f"Explicit Superflip referencefile: {explicit_superflip_referencefile}")
+                if explicit_superflip_referencefile.suffix.lower() == ".cif" and not parse_cif_atoms(explicit_superflip_referencefile):
+                    raise ValueError(
+                        "The selected Superflip referencefile CIF contains no readable atom sites. "
+                        "Use a real structure CIF with atom coordinates, or omit the Superflip referencefile keyword."
+                    )
             referencefile_mode = str(cfg.referencefile_mode or "none").strip().lower()
+            if explicit_superflip_referencefile is not None:
+                referencefile_mode = "reference_xplor" if explicit_superflip_referencefile.suffix.lower() == ".xplor" else "reference_cif"
+            elif referencefile_mode == "reference_cif" and explicit_superflip_referencefile is None:
+                referencefile_mode = "omit"
+                self.log("Superflip referencefile keyword omitted: no explicit Superflip referencefile was selected.")
             if referencefile_mode == "reference_cif":
-                self.log(f"Superflip referencefile CIF: {ref_ctx.work_ref_cif} (no referenceformat; CIF support is Superflip-build-specific)")
-            elif referencefile_mode == "reference_xplor" and cfg.superflip_reference_xplor is not None:
-                self.log(f"Superflip referencefile XPLOR: {cfg.superflip_reference_xplor}")
+                if explicit_superflip_referencefile is not None:
+                    self.log(f"Superflip referencefile CIF: {explicit_superflip_referencefile} (referenceformat cif)")
+                else:
+                    self.log(f"Superflip referencefile CIF: {ref_ctx.work_ref_cif} (referenceformat cif)")
+            elif referencefile_mode == "reference_xplor" and (explicit_superflip_referencefile is not None or cfg.superflip_reference_xplor is not None):
+                self.log(f"Superflip referencefile XPLOR: {explicit_superflip_referencefile or cfg.superflip_reference_xplor}")
             else:
                 self.log("Superflip referencefile keyword: no")
             self.log(f"Superflip bestdensities: {cfg.bestdensities_count} {'symmetry' if cfg.bestdensities_symmetry else cfg.bestdensities_metric}")
             self.log(f"Superflip polish: {'yes' if cfg.polish else 'no'}")
-            configured_data_mode = resolve_reflection_data_mode(cfg.hkl, cfg.reflection_data_mode)
+            configured_data_mode = resolve_reflection_data_mode_from_sources(cfg.hkl, cfg.reflection_data_mode, cfg.jana_inflip)
             self.log(f"Superflip HKL data mode: {configured_data_mode}")
             if cfg.resolution_d_min > 0:
                 self.log(f"Superflip resolution cutoff: d >= {cfg.resolution_d_min:g} A")
@@ -3470,9 +4913,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     model_for_sf = cfg.first_cycle_modelfile
                     self.log(f"Using external first-cycle modelfile: {model_for_sf}")
                 elif current_model is not None and use_xplor_modelfile:
-                    model_source = "deblurred_xplor"
+                    model_source = modelfile_mode
                     model_for_sf = current_model
-                    self.log(f"Using deblurred XPLOR as modelfile: {model_for_sf}")
+                    self.log(f"Using {modelfile_mode} as modelfile: {model_for_sf}")
                     self.log("  CIF-only exclude settings skipped for XPLOR modelfile.")
                 elif current_model is not None and use_cif_modelfile:
                     model_source = "deblurred_edma_cif"
@@ -3489,21 +4932,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 reference_file_for_cycle: Optional[Path] = None
                 reference_format_for_cycle = ""
                 if referencefile_mode == "reference_cif":
-                    reference_file_for_cycle = ref_ctx.work_ref_cif
+                    reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else ref_ctx.work_ref_cif
+                    reference_format_for_cycle = superflip_reference_format_for_path(reference_file_for_cycle)
                 elif referencefile_mode == "reference_xplor":
-                    reference_file_for_cycle = cfg.superflip_reference_xplor
-                    reference_format_for_cycle = "xplor"
+                    reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else cfg.superflip_reference_xplor
+                    reference_format_for_cycle = superflip_reference_format_for_path(reference_file_for_cycle)
                 sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, cfg.output_format, cfg.write_auxiliary_outputs or cfg.export_jana_project, cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana or cfg.export_jana_project, cfg.voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, cfg.extra_superflip_keywords, self.log, self.stop_now)
                 self.log(f"Superflip map: {sf_map}")
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
-                sf_log_metrics = parse_superflip_log_metrics(cycle_dir / f"{sf_prefix}.superflip.log")
+                sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
                 if sf_log_metrics.rvalue is not None:
                     self.log(
                         "Superflip metrics: "
                         f"R={sf_log_metrics.rvalue:.3f}, "
                         f"Peaks={sf_log_metrics.peaks if sf_log_metrics.peaks is not None else 'n/a'}, "
                         f"Symm={sf_log_metrics.symm if sf_log_metrics.symm is not None else 'n/a'}, "
+                        f"Der.SG={sf_log_metrics.derived_sg or 'n/a'}, "
+                        f"Saved run={sf_log_metrics.saved_run if sf_log_metrics.saved_run is not None else 'n/a'}, "
                         f"Ref.match={sf_log_metrics.ref_match if sf_log_metrics.ref_match is not None else 'n/a'}, "
                         f"SR={sf_log_metrics.success_rate if sf_log_metrics.success_rate is not None else 'n/a'}%"
                     )
@@ -3528,17 +4974,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.msg_queue.put(("structure_update", ("superflip", sf_edma_cif)))
                 self.log(f"EDMA after Superflip RMSD: {sf_metric if sf_metric is not None else 'n/a'} Å")
                 deblur_map = cycle_dir / f"cycle_{cyc:03d}_deblurred.xplor"
-                if cfg.run_sharped:
+                if cfg.run_sharped and not use_superflip_xplor_modelfile:
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
                     run_sharped_deblur(sf_map, deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model, sharped_elements, cfg.sharped_outres, cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log)
                 else:
                     shutil.copy2(sf_map, deblur_map)
-                    self.log("SharpED disabled; deblurred map is a copy of the Superflip map.")
+                    if use_superflip_xplor_modelfile:
+                        self.log("SharpED deblurring skipped; raw Superflip XPLOR is used for the next-cycle modelfile.")
+                    else:
+                        self.log("SharpED disabled; deblurred map is a copy of the Superflip map.")
                 self.log(f"Deblurred map: {deblur_map}")
                 deblur_prefix = f"cycle_{cyc:03d}_deblurred"
                 deblur_edma_dir = cycle_dir / "edma_deblurred"
-                if cfg.run_edma_deblurred:
+                if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
                     deblur_edma_cif = run_edma_on_xplor(
                         deblur_map, deblur_edma_dir, deblur_prefix, ref_ctx, cfg.plimit_deblur,
                         cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
@@ -3550,7 +4999,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     deblur_edma_dir.mkdir(parents=True, exist_ok=True)
                     deblur_edma_cif = deblur_edma_dir / f"{deblur_prefix}_edma.cif"
                     write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
-                    self.log("EDMA after deblurred map disabled; empty placeholder CIF/XYZ/PDB written.")
+                    if use_superflip_xplor_modelfile:
+                        self.log("EDMA after deblurred map skipped for raw Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
+                    else:
+                        self.log("EDMA after deblurred map disabled; empty placeholder CIF/XYZ/PDB written.")
                 if cfg.export_jana_project and cfg.run_edma_deblurred:
                     export_jana2020_project(cycle_dir / "jana2020_deblurred", deblur_prefix, cycle_dir, deblur_edma_dir, deblur_map, deblur_edma_cif, ref_ctx, self.log)
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
@@ -3568,9 +5020,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     deblur_map=deblur_map,
                     deblur_edma_cif=deblur_edma_cif,
                     deblur_metric=deblur_metric,
+                    superflip_saved_run=sf_log_metrics.saved_run,
                     superflip_rvalue=sf_log_metrics.rvalue,
                     superflip_peaks=sf_log_metrics.peaks,
                     superflip_symm=sf_log_metrics.symm,
+                    superflip_derived_sg=sf_log_metrics.derived_sg,
                     superflip_ref_match=sf_log_metrics.ref_match,
                     superflip_fom=sf_log_metrics.fom,
                     superflip_success_rate=sf_log_metrics.success_rate,
@@ -3610,12 +5064,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         observed_hkls[configured_data_mode] = feedback_hkl
                         self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
                 if use_xplor_modelfile:
-                    if current_model is not None and float(cfg.damping_factor) > 1.0:
+                    next_xplor_model = sf_map if use_superflip_xplor_modelfile else deblur_map
+                    effective_damping = effective_xplor_damping_factor(cfg.damping_factor)
+                    if current_model is not None and effective_damping > 1.0:
                         damped_model = cycle_dir / f"cycle_{cyc:03d}_damped_modelfile.xplor"
-                        current_model = blend_xplor_maps(current_model, deblur_map, damped_model, cfg.damping_factor, self.log)
+                        current_model = blend_xplor_maps(current_model, next_xplor_model, damped_model, effective_damping, self.log)
                     else:
-                        current_model = deblur_map
-                    current_model_metric = deblur_metric
+                        current_model = next_xplor_model
+                    current_model_metric = sf_metric if use_superflip_xplor_modelfile else deblur_metric
                 elif use_cif_modelfile:
                     if cfg.run_edma_deblurred:
                         current_model = deblur_edma_cif
@@ -3677,9 +5133,7 @@ def create_startup_splash() -> QSplashScreen:
 
 def main() -> None:
     app = QApplication(sys.argv)
-    style = QStyleFactory.create("Fusion")
-    if style is not None:
-        app.setStyle(style)
+    apply_phase_studio_style(app)
     splash = create_startup_splash()
     splash.show()
     app.processEvents()
