@@ -1128,6 +1128,11 @@ def reflection_primary_snr_label(data_mode: str) -> str:
 def reflection_primary_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
     return reflection_signal_to_noise(r, data_mode)
 
+def format_resolution_d(value: Optional[float], digits: int = 5) -> str:
+    if value is None or not math.isfinite(float(value)) or float(value) <= 0:
+        return "n/a"
+    return f"{float(value):.{digits}g} A"
+
 def theoretical_unique_hkls_from_observed(
     reflections: Sequence[Reflection],
     cell: gemmi.UnitCell,
@@ -1222,11 +1227,28 @@ def analyze_hkl_data(
                 "mean_signal_to_noise": mean_signal,
             }
         )
+    theory_stl_by_key: Dict[Tuple[int, int, int], float] = {}
+    for key, stl in theory_records:
+        theory_stl_by_key[key] = min(stl, theory_stl_by_key.get(key, stl))
+    observed_stl_by_key: Dict[Tuple[int, int, int], float] = {}
+    for key, stl, _ios in observed_records:
+        if key in theory_stl_by_key:
+            observed_stl_by_key[key] = min(stl, observed_stl_by_key.get(key, stl))
+    theory_sorted = sorted((stl, key) for key, stl in theory_stl_by_key.items())
+    observed_sorted = sorted((stl, key) for key, stl in observed_stl_by_key.items())
     d_full_98: Optional[float] = None
-    for item in bins:
-        edge = float(item["hi"])
-        theory_cum = {key for key, stl in theory_records if stl <= edge}
-        observed_cum = {key for key, stl, _ in observed_records if stl <= edge}
+    theory_cum: set[Tuple[int, int, int]] = set()
+    observed_cum: set[Tuple[int, int, int]] = set()
+    obs_idx = 0
+    theory_idx = 0
+    while theory_idx < len(theory_sorted):
+        edge = float(theory_sorted[theory_idx][0])
+        while theory_idx < len(theory_sorted) and theory_sorted[theory_idx][0] <= edge + 1e-12:
+            theory_cum.add(theory_sorted[theory_idx][1])
+            theory_idx += 1
+        while obs_idx < len(observed_sorted) and observed_sorted[obs_idx][0] <= edge + 1e-12:
+            observed_cum.add(observed_sorted[obs_idx][1])
+            obs_idx += 1
         if theory_cum and 100.0 * len(observed_cum & theory_cum) / len(theory_cum) >= 98.0:
             d_full_98 = 1.0 / (2.0 * edge) if edge > 0 else None
     return HklAnalysis(
@@ -4018,7 +4040,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog.setWindowTitle("HKL Completeness and Intensity Statistics")
         dialog.resize(1120, 820)
         layout = QVBoxLayout(dialog)
-        d_full = "n/a" if analysis.d_full_98 is None else f"{analysis.d_full_98:.4g} A"
+        d_min_text = format_resolution_d(analysis.d_min)
+        d_full = format_resolution_d(analysis.d_full_98)
         sigma_label = reflection_sigma_label(analysis.data_mode)
         signal_label = reflection_primary_snr_label(analysis.data_mode)
         raw_sigma_count = sum(1 for r in analysis.reflections_raw if r.sigma is not None)
@@ -4027,6 +4050,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         primary_snr_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
         primary_snr_values = [float(v) for v in primary_snr_values if v is not None and math.isfinite(float(v))]
         median_signal = "n/a" if not primary_snr_values else f"{float(np.median(np.asarray(primary_snr_values, dtype=np.float64))):.3g}"
+        signal_threshold = 3.0
+        threshold_stl: Optional[float] = None
+        threshold_d: Optional[float] = None
+        signal_points = [
+            (float(b["center"]), float(b["mean_signal_to_noise"]))
+            for b in analysis.bins
+            if math.isfinite(float(b["center"])) and math.isfinite(float(b["mean_signal_to_noise"]))
+        ]
+        for idx, (stl, signal) in enumerate(signal_points):
+            if signal >= signal_threshold:
+                continue
+            if idx > 0:
+                prev_stl, prev_signal = signal_points[idx - 1]
+                if prev_signal >= signal_threshold and stl > prev_stl and not math.isclose(signal, prev_signal):
+                    fraction = (signal_threshold - prev_signal) / (signal - prev_signal)
+                    threshold_stl = prev_stl + fraction * (stl - prev_stl)
+                else:
+                    threshold_stl = stl
+            else:
+                threshold_stl = stl
+            break
+        if threshold_stl is not None and threshold_stl > 0:
+            threshold_d = 1.0 / (2.0 * threshold_stl)
+        threshold_d_text = format_resolution_d(threshold_d)
         stats_box = QGroupBox("Reflection Data Summary")
         stats_layout = QVBoxLayout(stats_box)
         source_label = QLabel(analysis.source_note)
@@ -4039,9 +4086,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("Parsed / unique reflections", f"{len(analysis.reflections_raw)} / {len(analysis.reflections_unique)}"),
             (f"{sigma_label} coverage", f"{raw_sigma_count}/{len(analysis.reflections_raw)} raw; {unique_sigma_count}/{len(analysis.reflections_unique)} unique"),
             ("Phase values", f"{phase_count}/{len(analysis.reflections_raw)} raw"),
-            ("d_min", f"{analysis.d_min:.4g} A"),
+            ("d_min", d_min_text),
             ("d_full at 98% cumulative completeness", d_full),
             (f"Median {signal_label}", median_signal),
+            (f"d where mean {signal_label} falls below {signal_threshold:.1f}", threshold_d_text),
         ]
         stats_rows = int(math.ceil(len(stats) / 2.0))
         stats_table = QTableWidget(stats_rows, 4)
@@ -4074,17 +4122,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ax1.axhline(98.0, color="#be123c", linewidth=1.0, linestyle="--")
         if d_min_stl is not None:
             ax1.axvline(d_min_stl, color="#111827", linewidth=1.1, linestyle="-", label="d_min")
-            ax1.text(d_min_stl, 103.0, "d_min", rotation=90, va="top", ha="right", color="#111827", fontsize=8)
+            ax1.text(d_min_stl, 103.0, f"d_min\n{d_min_text}", rotation=90, va="top", ha="right", color="#111827", fontsize=8)
         if d_full_stl is not None:
             ax1.axvline(d_full_stl, color="#7c3aed", linewidth=1.1, linestyle=":", label="d_full 98%")
-            ax1.text(d_full_stl, 103.0, "d_full", rotation=90, va="top", ha="left", color="#7c3aed", fontsize=8)
+            ax1.text(d_full_stl, 103.0, f"d_full\n{d_full}", rotation=90, va="top", ha="left", color="#7c3aed", fontsize=8)
         ax1.set_ylabel("Completeness (%)", labelpad=6, fontsize=9)
         ax1.set_xlabel("sin(theta)/lambda")
         ax1.set_ylim(0, 105)
         ax1.grid(True, axis="y", alpha=0.25)
         ax1b = ax1.twinx()
         ax1b.plot(centers, mean_signal, marker="o", color="#047857", linewidth=1.8, label=f"Mean {signal_label}")
+        ax1b.axhline(signal_threshold, color="#f97316", linewidth=1.0, linestyle="--", label=f"{signal_label} = {signal_threshold:.1f}")
         ax1b.set_ylabel(f"Mean {signal_label}", labelpad=6, fontsize=9)
+        if threshold_stl is not None:
+            ax1.axvline(threshold_stl, color="#f97316", linewidth=1.1, linestyle="-.", label=f"{signal_label} < {signal_threshold:.1f}")
+            threshold_label = f"I/sigma<3\n{threshold_d_text}" if threshold_d is not None else "I/sigma<3"
+            ax1.text(threshold_stl, 103.0, threshold_label, rotation=90, va="top", ha="left", color="#c2410c", fontsize=8)
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax1b.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=8)
