@@ -1100,6 +1100,33 @@ def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]
         return value / (2.0 * sigma)
     return value / sigma
 
+def reflection_amplitude_signal_to_noise(r: Reflection) -> Optional[float]:
+    if r.sigma is None:
+        return None
+    sigma = float(r.sigma)
+    value = float(r.value)
+    if sigma <= 0 or not math.isfinite(sigma) or not math.isfinite(value):
+        return None
+    return value / sigma
+
+def reflection_value_label(data_mode: str) -> str:
+    mode = normalize_reflection_data_mode(data_mode)
+    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        return "Fobs"
+    return "Iobs"
+
+def reflection_sigma_label(data_mode: str) -> str:
+    mode = normalize_reflection_data_mode(data_mode)
+    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        return "sigma(Fobs)"
+    return "sigma(Iobs)"
+
+def reflection_primary_snr_label(data_mode: str) -> str:
+    mode = normalize_reflection_data_mode(data_mode)
+    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        return "F/sigma(F)"
+    return "I/sigma(I)"
+
 def theoretical_unique_hkls_from_observed(
     reflections: Sequence[Reflection],
     cell: gemmi.UnitCell,
@@ -3889,16 +3916,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         layout = QVBoxLayout(dialog)
         sigma_count = sum(1 for r in reflections if r.sigma is not None)
         phase_count = sum(1 for r in reflections if r.phase is not None)
+        value_label = reflection_value_label(data_mode)
+        sigma_label = reflection_sigma_label(data_mode)
+        snr_label = reflection_primary_snr_label(data_mode)
         summary = QLabel(
             f"{source_note}\n"
             f"HKL data format: {data_mode}; value column: {value_col}; "
             f"sigma column: {sigma_col if sigma_col is not None else 'none'}; include 000: {'yes' if include_000 else 'no'}\n"
             f"Cell: {cell.a:.5g} {cell.b:.5g} {cell.c:.5g} {cell.alpha:.4g} {cell.beta:.4g} {cell.gamma:.4g}; space group: {hm}\n"
-            f"Parsed reflections: {len(reflections)}; unique HKL after duplicate merge: {len(unique)}; with sigma: {sigma_count}; with phase: {phase_count}"
+            f"Parsed reflections: {len(reflections)}; unique HKL after duplicate merge: {len(unique)}; "
+            f"{sigma_label} loaded: {sigma_count}/{len(reflections)}; phase values loaded: {phase_count}/{len(reflections)}"
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
-        headers = ["h", "k", "l", "value", "sigma", "phase", "d", "sin(theta)/lambda"]
+        headers = ["h", "k", "l", value_label, sigma_label, "phase", snr_label, "derived I/sigma", "d", "sin(theta)/lambda"]
         rows = min(50, len(reflections))
         table = QTableWidget(rows, len(headers))
         table.setHorizontalHeaderLabels(headers)
@@ -3909,6 +3940,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         for row, r in enumerate(reflections[:rows]):
             d = reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l))
             stl = reflection_sintheta_over_lambda(cell, int(r.h), int(r.k), int(r.l))
+            primary_snr = reflection_amplitude_signal_to_noise(r) if normalize_reflection_data_mode(data_mode) in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA} else reflection_signal_to_noise(r, data_mode)
+            derived_ios = reflection_signal_to_noise(r, data_mode)
             values = [
                 str(int(r.h)),
                 str(int(r.k)),
@@ -3916,6 +3949,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"{float(r.value):.7g}",
                 "n/a" if r.sigma is None else f"{float(r.sigma):.7g}",
                 "n/a" if r.phase is None else f"{float(r.phase):.7g}",
+                "n/a" if primary_snr is None else f"{float(primary_snr):.7g}",
+                "n/a" if derived_ios is None else f"{float(derived_ios):.7g}",
                 "n/a" if not math.isfinite(d) else f"{d:.5g}",
                 f"{stl:.5g}",
             ]
@@ -3937,16 +3972,51 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         dialog = QDialog(self)
         dialog.setWindowTitle("HKL Completeness and Intensity Statistics")
-        dialog.resize(1040, 760)
+        dialog.resize(1120, 820)
         layout = QVBoxLayout(dialog)
         d_full = "n/a" if analysis.d_full_98 is None else f"{analysis.d_full_98:.4g} A"
-        summary = QLabel(
-            f"{analysis.source_note}\n"
-            f"HKL data format: {analysis.data_mode}; parsed: {len(analysis.reflections_raw)}; unique: {len(analysis.reflections_unique)}; "
-            f"d_min: {analysis.d_min:.4g} A; d_full at 98% cumulative completeness: {d_full}"
-        )
-        summary.setWordWrap(True)
-        layout.addWidget(summary)
+        sigma_label = reflection_sigma_label(analysis.data_mode)
+        signal_label = reflection_primary_snr_label(analysis.data_mode)
+        raw_sigma_count = sum(1 for r in analysis.reflections_raw if r.sigma is not None)
+        unique_sigma_count = sum(1 for r in analysis.reflections_unique if r.sigma is not None)
+        phase_count = sum(1 for r in analysis.reflections_raw if r.phase is not None)
+        primary_snr_values = [
+            reflection_amplitude_signal_to_noise(r)
+            if normalize_reflection_data_mode(analysis.data_mode) in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}
+            else reflection_signal_to_noise(r, analysis.data_mode)
+            for r in analysis.reflections_unique
+        ]
+        primary_snr_values = [float(v) for v in primary_snr_values if v is not None and math.isfinite(float(v))]
+        median_signal = "n/a" if not primary_snr_values else f"{float(np.median(np.asarray(primary_snr_values, dtype=np.float64))):.3g}"
+        stats_box = QGroupBox("Reflection Data Summary")
+        stats_layout = QVBoxLayout(stats_box)
+        source_label = QLabel(analysis.source_note)
+        source_label.setWordWrap(True)
+        stats_layout.addWidget(source_label)
+        stats = [
+            ("HKL data format", analysis.data_mode),
+            ("Unit cell", f"{analysis.cell.a:.5g} {analysis.cell.b:.5g} {analysis.cell.c:.5g} {analysis.cell.alpha:.4g} {analysis.cell.beta:.4g} {analysis.cell.gamma:.4g}"),
+            ("Space group", analysis.spacegroup_hm),
+            ("Parsed / unique reflections", f"{len(analysis.reflections_raw)} / {len(analysis.reflections_unique)}"),
+            (f"{sigma_label} coverage", f"{raw_sigma_count}/{len(analysis.reflections_raw)} raw; {unique_sigma_count}/{len(analysis.reflections_unique)} unique"),
+            ("Phase values", f"{phase_count}/{len(analysis.reflections_raw)} raw"),
+            ("d_min", f"{analysis.d_min:.4g} A"),
+            ("d_full at 98% cumulative completeness", d_full),
+            (f"Median {signal_label}", median_signal),
+        ]
+        stats_table = QTableWidget(len(stats), 2)
+        stats_table.setHorizontalHeaderLabels(["Statistic", "Value"])
+        stats_table.setAlternatingRowColors(True)
+        stats_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        stats_table.verticalHeader().setVisible(False)
+        stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        stats_table.horizontalHeader().setStretchLastSection(True)
+        for row, (name, value) in enumerate(stats):
+            stats_table.setItem(row, 0, QTableWidgetItem(name))
+            stats_table.setItem(row, 1, QTableWidgetItem(value))
+        stats_table.setMaximumHeight(260)
+        stats_layout.addWidget(stats_table)
+        layout.addWidget(stats_box)
         figure = Figure(figsize=(8.4, 6.2), dpi=100)
         canvas = FigureCanvas(figure)
         ax1 = figure.add_subplot(211)
