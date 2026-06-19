@@ -1127,6 +1127,12 @@ def reflection_primary_snr_label(data_mode: str) -> str:
         return "F/sigma(F)"
     return "I/sigma(I)"
 
+def reflection_primary_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
+    mode = normalize_reflection_data_mode(data_mode)
+    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        return reflection_amplitude_signal_to_noise(r)
+    return reflection_signal_to_noise(r, mode)
+
 def theoretical_unique_hkls_from_observed(
     reflections: Sequence[Reflection],
     cell: gemmi.UnitCell,
@@ -1185,7 +1191,7 @@ def analyze_hkl_data(
         (
             canonical_hkl((int(r.h), int(r.k), int(r.l)), sg),
             reflection_sintheta_over_lambda(cell, int(r.h), int(r.k), int(r.l)),
-            reflection_signal_to_noise(r, mode),
+            reflection_primary_signal_to_noise(r, mode),
         )
         for r in unique
     ]
@@ -1208,7 +1214,7 @@ def analyze_hkl_data(
             ios_values = [ios for _, stl, ios in observed_records if lo < stl <= hi and ios is not None]
         observed_in_theory = observed_bin & theory_bin if theory_bin else observed_bin
         completeness = 100.0 * len(observed_in_theory) / len(theory_bin) if theory_bin else 0.0
-        mean_ios = float(np.mean(np.asarray(ios_values, dtype=np.float64))) if ios_values else math.nan
+        mean_signal = float(np.mean(np.asarray(ios_values, dtype=np.float64))) if ios_values else math.nan
         bins.append(
             {
                 "lo": lo,
@@ -1217,7 +1223,8 @@ def analyze_hkl_data(
                 "theory": float(len(theory_bin)),
                 "observed": float(len(observed_in_theory)),
                 "completeness": completeness,
-                "mean_i_over_sigma": mean_ios,
+                "mean_i_over_sigma": mean_signal,
+                "mean_signal_to_noise": mean_signal,
             }
         )
     d_full_98: Optional[float] = None
@@ -1972,6 +1979,45 @@ def reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Optional[st
     if not mode:
         return None
     return normalize_reflection_data_mode(mode)
+
+def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Optional[str]:
+    if inflip_path is None or not Path(inflip_path).is_file():
+        return None
+    saw_dataitemwidths = False
+    saw_dataformat_amplitude = False
+    saw_dataformat_intensity = False
+    sample_widths: List[int] = []
+    in_block = False
+    try:
+        for raw in Path(inflip_path).read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = split_inflip_line(raw)
+            key = parts[0].strip().lower() if parts else ""
+            if key == "dataitemwidths":
+                saw_dataitemwidths = True
+            elif key == "dataformat":
+                items = {p.strip().lower() for p in parts[1:]}
+                saw_dataformat_intensity = "intensity" in items
+                saw_dataformat_amplitude = "amplitude" in items
+            if key == "fbegin":
+                in_block = True
+                continue
+            if in_block and key == "endf":
+                break
+            if in_block and raw.strip() and not raw.lstrip().startswith(COMMENT_PREFIXES):
+                fields = raw.split()
+                if len(fields) >= 4:
+                    sample_widths.append(len(fields))
+                    if len(sample_widths) >= 20:
+                        break
+    except Exception:
+        return None
+    if saw_dataitemwidths and sample_widths and max(sample_widths) >= 6:
+        return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+    if saw_dataformat_intensity:
+        return REFLECTION_DATA_MODE_INTENSITY
+    if saw_dataformat_amplitude:
+        return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
+    return None
 
 def resolve_reflection_data_mode_from_sources(
     hkl_path: Path,
@@ -3898,7 +3944,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             else:
                 raise FileNotFoundError("Select a reference CIF or Jana .inflip so Phase Studio can calculate d-spacings and completeness.")
         configured_mode = self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO
-        data_mode = resolve_reflection_data_mode_from_sources(hkl_path, configured_mode, jana_path)
+        if use_inflip_hkl:
+            data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, configured_mode, jana_path)
+        else:
+            data_mode = resolve_reflection_data_mode_from_sources(hkl_path, configured_mode, jana_path)
         return hkl_path, data_mode, cell, sg, hm, source_note
 
     def test_hkl_load_dialog(self) -> None:
@@ -3940,7 +3989,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         for row, r in enumerate(reflections[:rows]):
             d = reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l))
             stl = reflection_sintheta_over_lambda(cell, int(r.h), int(r.k), int(r.l))
-            primary_snr = reflection_amplitude_signal_to_noise(r) if normalize_reflection_data_mode(data_mode) in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA} else reflection_signal_to_noise(r, data_mode)
+            primary_snr = reflection_primary_signal_to_noise(r, data_mode)
             derived_ios = reflection_signal_to_noise(r, data_mode)
             values = [
                 str(int(r.h)),
@@ -3980,12 +4029,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         raw_sigma_count = sum(1 for r in analysis.reflections_raw if r.sigma is not None)
         unique_sigma_count = sum(1 for r in analysis.reflections_unique if r.sigma is not None)
         phase_count = sum(1 for r in analysis.reflections_raw if r.phase is not None)
-        primary_snr_values = [
-            reflection_amplitude_signal_to_noise(r)
-            if normalize_reflection_data_mode(analysis.data_mode) in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}
-            else reflection_signal_to_noise(r, analysis.data_mode)
-            for r in analysis.reflections_unique
-        ]
+        primary_snr_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
         primary_snr_values = [float(v) for v in primary_snr_values if v is not None and math.isfinite(float(v))]
         median_signal = "n/a" if not primary_snr_values else f"{float(np.median(np.asarray(primary_snr_values, dtype=np.float64))):.3g}"
         stats_box = QGroupBox("Reflection Data Summary")
@@ -4004,17 +4048,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("d_full at 98% cumulative completeness", d_full),
             (f"Median {signal_label}", median_signal),
         ]
-        stats_table = QTableWidget(len(stats), 2)
-        stats_table.setHorizontalHeaderLabels(["Statistic", "Value"])
+        stats_rows = int(math.ceil(len(stats) / 2.0))
+        stats_table = QTableWidget(stats_rows, 4)
+        stats_table.setHorizontalHeaderLabels(["Statistic", "Value", "Statistic", "Value"])
         stats_table.setAlternatingRowColors(True)
         stats_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         stats_table.verticalHeader().setVisible(False)
-        stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        stats_table.horizontalHeader().setStretchLastSection(True)
-        for row, (name, value) in enumerate(stats):
-            stats_table.setItem(row, 0, QTableWidgetItem(name))
-            stats_table.setItem(row, 1, QTableWidgetItem(value))
-        stats_table.setMaximumHeight(260)
+        stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        for idx, (name, value) in enumerate(stats):
+            row = idx % stats_rows
+            col = 0 if idx < stats_rows else 2
+            stats_table.setItem(row, col, QTableWidgetItem(name))
+            stats_table.setItem(row, col + 1, QTableWidgetItem(value))
+        stats_table.setMaximumHeight(190)
         stats_layout.addWidget(stats_table)
         layout.addWidget(stats_box)
         figure = Figure(figsize=(8.4, 6.2), dpi=100)
@@ -4024,12 +4070,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         centers = [float(b["center"]) for b in analysis.bins]
         widths = [max(0.0001, float(b["hi"]) - float(b["lo"])) for b in analysis.bins]
         completeness = [float(b["completeness"]) for b in analysis.bins]
-        mean_ios = [float(b["mean_i_over_sigma"]) if math.isfinite(float(b["mean_i_over_sigma"])) else np.nan for b in analysis.bins]
-        ios_values = [
-            reflection_signal_to_noise(r, analysis.data_mode)
-            for r in analysis.reflections_unique
-        ]
-        ios_values = [float(v) for v in ios_values if v is not None and math.isfinite(float(v))]
+        mean_signal = [float(b["mean_signal_to_noise"]) if math.isfinite(float(b["mean_signal_to_noise"])) else np.nan for b in analysis.bins]
+        signal_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
+        signal_values = [float(v) for v in signal_values if v is not None and math.isfinite(float(v))]
         d_min_stl = 1.0 / (2.0 * analysis.d_min) if analysis.d_min > 0 else None
         d_full_stl = 1.0 / (2.0 * analysis.d_full_98) if analysis.d_full_98 is not None and analysis.d_full_98 > 0 else None
         ax1.bar(centers, completeness, width=widths, align="center", color="#2563eb", alpha=0.72, label="Completeness")
@@ -4045,21 +4088,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ax1.set_ylim(0, 105)
         ax1.grid(True, axis="y", alpha=0.25)
         ax1b = ax1.twinx()
-        ax1b.plot(centers, mean_ios, marker="o", color="#047857", linewidth=1.8, label="Mean I/sigma")
-        ax1b.set_ylabel("Mean I/sigma")
+        ax1b.plot(centers, mean_signal, marker="o", color="#047857", linewidth=1.8, label=f"Mean {signal_label}")
+        ax1b.set_ylabel(f"Mean {signal_label}")
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax1b.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=8)
-        if ios_values:
-            ax2.hist(ios_values, bins=min(50, max(10, int(math.sqrt(len(ios_values))))), color="#0f766e", alpha=0.82)
+        if signal_values:
+            ax2.hist(signal_values, bins=min(50, max(10, int(math.sqrt(len(signal_values))))), color="#0f766e", alpha=0.82)
         else:
             ax2.text(0.5, 0.5, "No sigma values available", transform=ax2.transAxes, ha="center", va="center")
-        ax2.set_xlabel("I/sigma")
+        ax2.set_xlabel(signal_label)
         ax2.set_ylabel("Frequency")
         ax2.grid(True, axis="y", alpha=0.25)
         figure.tight_layout()
         layout.addWidget(canvas, 1)
-        headers = ["sin(theta)/lambda bin", "Observed", "Theoretical", "Completeness %", "Mean I/sigma"]
+        headers = ["sin(theta)/lambda bin", "Observed", "Theoretical", "Completeness %", f"Mean {signal_label}"]
         table = QTableWidget(len(analysis.bins), len(headers))
         table.setHorizontalHeaderLabels(headers)
         table.setAlternatingRowColors(True)
@@ -4072,7 +4115,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 str(int(item["observed"])),
                 str(int(item["theory"])),
                 f"{float(item['completeness']):.2f}",
-                "n/a" if not math.isfinite(float(item["mean_i_over_sigma"])) else f"{float(item['mean_i_over_sigma']):.3g}",
+                "n/a" if not math.isfinite(float(item["mean_signal_to_noise"])) else f"{float(item['mean_signal_to_noise']):.3g}",
             ]
             for col, text in enumerate(values):
                 table.setItem(row, col, QTableWidgetItem(text))
