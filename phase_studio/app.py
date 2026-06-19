@@ -255,6 +255,7 @@ class RunConfig:
     map_feedback_intensity_damping: float
     map_feedback_intensity_max_i_over_sigma: float
     run_sharped: bool
+    symmetrize_deblurred_map: bool
     run_edma_superflip: bool
     run_edma_deblurred: bool
     sharped_base_url: str
@@ -1237,8 +1238,8 @@ def analyze_hkl_data(
     theory_sorted = sorted((stl, key) for key, stl in theory_stl_by_key.items())
     observed_sorted = sorted((stl, key) for key, stl in observed_stl_by_key.items())
     d_full_98: Optional[float] = None
-    theory_cum: set[Tuple[int, int, int]] = set()
-    observed_cum: set[Tuple[int, int, int]] = set()
+    theory_cum = set()
+    observed_cum = set()
     obs_idx = 0
     theory_idx = 0
     while theory_idx < len(theory_sorted):
@@ -2571,6 +2572,56 @@ def write_superflip_input(
                     f.write(s + "\n")
         f.write("endf\n")
 
+def write_superflip_symmetry_input(
+    inp_path: Path,
+    prefix: str,
+    ref_ctx: ReferenceContext,
+    model_file: Path,
+    output_xplor: str,
+    output_format: str,
+    voxel: str,
+    searchsymmetry: str,
+    derivesymmetry: str,
+    log: Optional[Callable[[str], None]] = None,
+) -> None:
+    inp_path.parent.mkdir(parents=True, exist_ok=True)
+    ops = ref_ctx.spacegroup.operations()
+    voxel_line = superflip_voxel_keyword_line(voxel, ref_ctx.cell, log)
+    searchsymmetry_value = str(searchsymmetry or "average").strip().lower() or "average"
+    if searchsymmetry_value not in {"no", "shift", "average"}:
+        searchsymmetry_value = "average"
+    derivesymmetry_value = str(derivesymmetry or "yes").strip() or "yes"
+    fmt = normalize_output_format(output_format)
+    with inp_path.open("w", encoding="utf-8") as f:
+        f.write(f"title {prefix}\n")
+        f.write("perform symmetry\n")
+        f.write(f'outputfile "{output_xplor}"\n')
+        f.write(f"outputformat {fmt}\n")
+        f.write("dimension  3\n")
+        c = ref_ctx.cell
+        f.write(f"cell {c.a:.6f} {c.b:.6f} {c.c:.6f} {c.alpha:.4f} {c.beta:.4f} {c.gamma:.4f}\n")
+        f.write(f"spacegroup {ref_ctx.spacegroup_hm}\n")
+        f.write("centro yes\n" if ops.is_centrosymmetric() else "centro no\n")
+        f.write("centers\n")
+        for cen in ops.cen_ops:
+            f.write(center_vector_to_float_string(cen) + "\n")
+        f.write("endcenters\nsymmetry\n")
+        for op in ops.sym_ops:
+            f.write("  " + parse_triplet_for_superflip(op.triplet()) + "\n")
+        f.write("endsymmetry\n")
+        f.write(f"composition {ref_ctx.composition}\n\n")
+        f.write(f'modelfile "{model_file.name}"\n')
+        if model_file.suffix.lower() == ".xplor":
+            f.write("modelformat xplor\n")
+        elif model_file.suffix.lower() == ".ccp4":
+            f.write("modelformat ccp4\n")
+        f.write("polish no\n")
+        f.write("maxcycles 0\n")
+        f.write(f"searchsymmetry {searchsymmetry_value}\n")
+        f.write(f"derivesymmetry {derivesymmetry_value}\n")
+        if voxel_line:
+            f.write(voxel_line + "\n")
+
 def run_command(cmd: Sequence[str], cwd: Path, log_path: Path, log: Callable[[str], None], timeout: Optional[int] = None, stop_event: Optional[threading.Event] = None) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log("  $ " + " ".join(str(x) for x in cmd))
@@ -2725,6 +2776,68 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
     except Exception:
         pass
     return out
+
+def run_superflip_symmetrize_map(
+    cycle_dir: Path,
+    prefix: str,
+    ref_ctx: ReferenceContext,
+    input_map: Path,
+    superflip_exe: str,
+    output_format: str,
+    voxel: str,
+    searchsymmetry: str,
+    derivesymmetry: str,
+    log: Callable[[str], None],
+    stop_event: Optional[threading.Event] = None,
+) -> Path:
+    sym_dir = cycle_dir / "superflip_symmetrized_deblur"
+    sym_dir.mkdir(parents=True, exist_ok=True)
+    model_for_input = sym_dir / "deblurred_modelfile_for_symmetry.xplor"
+    normalize_xplor_for_superflip_modelfile(input_map, model_for_input, log)
+    output_name = f"{prefix}.xplor"
+    inp = sym_dir / f"{prefix}.inflip"
+    log_path = sym_dir / f"{prefix}.superflip.log"
+    out = sym_dir / output_name
+    write_superflip_symmetry_input(
+        inp_path=inp,
+        prefix=prefix,
+        ref_ctx=ref_ctx,
+        model_file=model_for_input,
+        output_xplor=output_name,
+        output_format=output_format,
+        voxel=voxel,
+        searchsymmetry=searchsymmetry,
+        derivesymmetry=derivesymmetry,
+        log=log,
+    )
+    log(f"[Superflip symmetry] input: {inp}")
+    for stale in (out, sym_dir / f"{prefix}.sflog"):
+        try:
+            if stale.is_file():
+                stale.unlink()
+                log(f"  Removed stale Superflip symmetry output before run: {stale.name}")
+        except Exception as exc:
+            log(f"  Could not remove stale Superflip symmetry output {stale}: {exc}")
+    run_started_at = time.time()
+    run_command([superflip_exe, inp.name], cwd=sym_dir, log_path=log_path, log=log, stop_event=stop_event)
+    if not out.is_file() or out.stat().st_size == 0:
+        tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
+        raise RuntimeError(f"Superflip did not create expected symmetrized XPLOR map: {out}\n" + "\n".join(tail))
+    try:
+        if out.stat().st_mtime < run_started_at - 1.0:
+            tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
+            raise RuntimeError(
+                f"Superflip symmetrized map is older than the current run and was probably stale: {out}\n" + "\n".join(tail)
+            )
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+    final_map = cycle_dir / f"{prefix}.xplor"
+    if out.resolve() != final_map.resolve():
+        shutil.copy2(out, final_map)
+    log(f"Symmetrized deblurred map: {final_map}")
+    return final_map
 
 def sharped_elements_from_composition(composition: str) -> str:
     elements: List[str] = []
@@ -3322,6 +3435,7 @@ INPUT_TOOLTIPS = {
     "exclude_atoms": "Optional atom labels to remove from CIF modelfiles before the next Superflip cycle. Use comma, semicolon or whitespace separation.",
     "run_edma_superflip": "Run EDMA peak search on the raw Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
+    "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
     "output_format": "Superflip outputformat keyword. Imported Jana/Superflip templates commonly use jana while still listing an .xplor output file.",
@@ -3618,6 +3732,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         optional_form = QFormLayout(optional_box)
         self._add_checkbox(optional_form, "run_edma_superflip", "Run EDMA after Superflip map", True)
         self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True)
+        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize deblurred map with Superflip", False)
         self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA after deblurred map", True)
         workflow_tab.addWidget(optional_box)
         workflow_tab.addStretch(1)
@@ -3802,6 +3917,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         mode = normalize_modelfile_source(self._combo_value("modelfile_source") if "modelfile_source" in self.inputs else "")
         cycles_widget = self.inputs.get("cycles")
         damping_widget = self.inputs.get("damping_factor")
+        symmetrize_widget = self.inputs.get("symmetrize_deblurred_map")
         if isinstance(cycles_widget, QSpinBox):
             if mode == "none":
                 if cycles_widget.value() != 1:
@@ -3817,6 +3933,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 damping_widget.setToolTip(INPUT_TOOLTIPS.get("damping_factor", ""))
             else:
                 damping_widget.setToolTip("XPLOR damping is used only when Next-cycle modelfile is superflip_xplor or deblurred_xplor.")
+        if isinstance(symmetrize_widget, QCheckBox):
+            symmetrize_widget.setEnabled(mode != "superflip_xplor")
+            if mode == "superflip_xplor":
+                symmetrize_widget.setToolTip("Raw Superflip XPLOR cycling skips the deblurred-map branch, so post-deblur symmetry averaging is not used.")
+            else:
+                symmetrize_widget.setToolTip(INPUT_TOOLTIPS.get("symmetrize_deblurred_map", ""))
         self._update_plot()
 
     def _sync_input_source_mode_widgets(self) -> None:
@@ -4837,6 +4959,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             map_feedback_intensity_damping=self._dspin_value("map_feedback_intensity_damping"),
             map_feedback_intensity_max_i_over_sigma=self._dspin_value("map_feedback_intensity_max_i_over_sigma"),
             run_sharped=self._check_value("run_sharped") and modelfile_source_value != "superflip_xplor",
+            symmetrize_deblurred_map=self._check_value("symmetrize_deblurred_map") and modelfile_source_value != "superflip_xplor",
             run_edma_superflip=self._check_value("run_edma_superflip"),
             run_edma_deblurred=self._check_value("run_edma_deblurred"),
             sharped_base_url=self._line_value("sharped_base_url") or "https://jana.fzu.cz",
@@ -5004,7 +5127,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             if cfg.export_jana_project:
                 self.log("Jana2020 project export: yes")
-            self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, EDMA/deblurred={'yes' if cfg.run_edma_deblurred else 'no'}")
+            self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, Superflip symmetry/deblurred={'yes' if cfg.symmetrize_deblurred_map else 'no'}, EDMA/deblurred={'yes' if cfg.run_edma_deblurred else 'no'}")
             if cfg.first_cycle_modelfile is not None:
                 self.log(f"First-cycle external modelfile: {cfg.first_cycle_modelfile}")
             explicit_superflip_referencefile = cfg.superflip_referencefile
@@ -5152,6 +5275,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     else:
                         self.log("SharpED disabled; deblurred map is a copy of the Superflip map.")
                 self.log(f"Deblurred map: {deblur_map}")
+                if cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
+                    if self.stop_now.is_set():
+                        raise RuntimeError("Immediate stop requested.")
+                    sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
+                    deblur_map = run_superflip_symmetrize_map(
+                        cycle_dir=cycle_dir,
+                        prefix=sym_prefix,
+                        ref_ctx=ref_ctx,
+                        input_map=deblur_map,
+                        superflip_exe=cfg.superflip_exe,
+                        output_format=cfg.output_format,
+                        voxel=cfg.voxel,
+                        searchsymmetry=cfg.searchsymmetry,
+                        derivesymmetry=cfg.derivesymmetry,
+                        log=self.log,
+                        stop_event=self.stop_now,
+                    )
+                    self.log(f"Deblurred map after Superflip symmetry averaging: {deblur_map}")
                 deblur_prefix = f"cycle_{cyc:03d}_deblurred"
                 deblur_edma_dir = cycle_dir / "edma_deblurred"
                 if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
