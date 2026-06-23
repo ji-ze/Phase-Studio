@@ -263,6 +263,7 @@ class RunConfig:
     sharped_model: str
     sharped_elements: str
     sharped_outres: float
+    sharped_max_upload_mb: float
     sharped_timeout_seconds: int
     sharped_poll_seconds: int
     sharped_max_polls: int
@@ -1780,6 +1781,107 @@ def normalize_xplor_for_superflip_modelfile(xplor_map: Path, output_map: Path, l
 def normalize_xplor_for_edma(xplor_map: Path, output_map: Path, log: Optional[Callable[[str], None]] = None) -> Path:
     return normalize_xplor_for_strict_reader(xplor_map, output_map, log)
 
+def xplor_grid_dimensions(xmap: XplorMap) -> Tuple[int, int, int]:
+    grid = tuple(int(v) for v in xmap.grid)
+    return int(grid[0]), int(grid[3]), int(grid[6])
+
+def xplor_voxel_keyword_from_grid(xplor_map: Path) -> str:
+    xmap = read_xplor_map(xplor_map)
+    nx, ny, nz = xplor_grid_dimensions(xmap)
+    return f"voxel {nx} {ny} {nz}"
+
+def resample_density_axis(data: np.ndarray, new_len: int, axis: int) -> np.ndarray:
+    arr = np.moveaxis(np.asarray(data, dtype=np.float64), axis, 0)
+    old_len = int(arr.shape[0])
+    new_len = int(new_len)
+    if new_len == old_len:
+        return np.moveaxis(arr, 0, axis)
+    if old_len <= 1 or new_len <= 1:
+        indices = np.zeros(max(1, new_len), dtype=np.int64)
+        return np.moveaxis(arr[indices, ...], 0, axis)
+    positions = np.linspace(0.0, float(old_len - 1), new_len, dtype=np.float64)
+    lo = np.floor(positions).astype(np.int64)
+    hi = np.minimum(lo + 1, old_len - 1)
+    weights_shape = (new_len,) + (1,) * (arr.ndim - 1)
+    weights = (positions - lo).reshape(weights_shape)
+    out = (1.0 - weights) * arr[lo, ...] + weights * arr[hi, ...]
+    return np.moveaxis(out, 0, axis)
+
+def resample_xplor_map(xmap: XplorMap, nx: int, ny: int, nz: int, title: Optional[str] = None) -> XplorMap:
+    old_nx, old_ny, old_nz = xplor_grid_dimensions(xmap)
+    nx = max(2, int(nx))
+    ny = max(2, int(ny))
+    nz = max(2, int(nz))
+    data = np.asarray(xmap.data, dtype=np.float64).reshape((old_nz, old_ny, old_nx))
+    data = resample_density_axis(data, nz, axis=0)
+    data = resample_density_axis(data, ny, axis=1)
+    data = resample_density_axis(data, nx, axis=2)
+    grid = tuple(int(v) for v in xmap.grid)
+    new_grid = (
+        nx, int(grid[1]), int(grid[1]) + nx - 1,
+        ny, int(grid[4]), int(grid[4]) + ny - 1,
+        nz, int(grid[7]), int(grid[7]) + nz - 1,
+    )
+    return XplorMap(
+        title=title or xmap.title,
+        grid=new_grid,
+        cell=xmap.cell,
+        axis_order=xmap.axis_order,
+        data=data.reshape(-1),
+    )
+
+def prepare_xplor_for_sharped_upload(
+    input_map: Path,
+    output_dir: Path,
+    max_upload_mb: float,
+    log: Callable[[str], None],
+) -> Path:
+    limit_mb = float(max_upload_mb or 0.0)
+    if limit_mb <= 0:
+        return input_map
+    limit_bytes = int(limit_mb * 1024.0 * 1024.0)
+    try:
+        current_bytes = int(Path(input_map).stat().st_size)
+    except Exception:
+        return input_map
+    if current_bytes <= limit_bytes:
+        return input_map
+    xmap = read_xplor_map(input_map)
+    nx, ny, nz = xplor_grid_dimensions(xmap)
+    scale = min(0.995, max(0.1, (float(limit_bytes) / float(current_bytes)) ** (1.0 / 3.0) * 0.985))
+    candidate = input_map
+    for attempt in range(8):
+        new_nx = max(2, int(math.floor(nx * scale)))
+        new_ny = max(2, int(math.floor(ny * scale)))
+        new_nz = max(2, int(math.floor(nz * scale)))
+        if (new_nx, new_ny, new_nz) == (nx, ny, nz):
+            new_nx = max(2, nx - 1)
+            new_ny = max(2, ny - 1)
+            new_nz = max(2, nz - 1)
+        reduced = resample_xplor_map(
+            xmap,
+            new_nx,
+            new_ny,
+            new_nz,
+            title=f"{xmap.title} SharpED upload {new_nx}x{new_ny}x{new_nz}",
+        )
+        candidate = output_dir / f"{Path(input_map).stem}_sharped_upload_{new_nx}x{new_ny}x{new_nz}.xplor"
+        write_xplor_map(candidate, reduced, title=reduced.title, values_per_line=6)
+        candidate_bytes = int(candidate.stat().st_size)
+        if candidate_bytes <= limit_bytes:
+            log(
+                "SharpED upload map reduced to fit size limit: "
+                f"{current_bytes / (1024.0 * 1024.0):.1f} MB -> {candidate_bytes / (1024.0 * 1024.0):.1f} MB; "
+                f"grid {nx}x{ny}x{nz} -> {new_nx}x{new_ny}x{new_nz}."
+            )
+            return candidate
+        scale *= max(0.5, (float(limit_bytes) / float(candidate_bytes)) ** (1.0 / 3.0) * 0.97)
+    log(
+        "SharpED upload map still exceeds the configured size limit after resampling; "
+        f"using the smallest generated map: {candidate}"
+    )
+    return candidate
+
 def xplor_tail_mean_sigma(xplor_map: Path) -> Tuple[Optional[float], Optional[float]]:
     try:
         lines = Path(xplor_map).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -2587,6 +2689,10 @@ def write_superflip_symmetry_input(
     inp_path.parent.mkdir(parents=True, exist_ok=True)
     ops = ref_ctx.spacegroup.operations()
     voxel_line = superflip_voxel_keyword_line(voxel, ref_ctx.cell, log)
+    if not voxel_line:
+        voxel_line = xplor_voxel_keyword_from_grid(model_file)
+        if log:
+            log(f"  Superflip symmetry voxel grid taken from input XPLOR map: {voxel_line}")
     searchsymmetry_value = str(searchsymmetry or "average").strip().lower() or "average"
     if searchsymmetry_value not in {"no", "shift", "average"}:
         searchsymmetry_value = "average"
@@ -2848,7 +2954,7 @@ def sharped_elements_from_composition(composition: str) -> str:
         elements.append(elem)
     return " ".join(elements) or "C N O"
 
-def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_token: str, model: str, elements: str, outres: float, timeout_seconds: int, poll_seconds: int, max_polls: int, log: Callable[[str], None]) -> Path:
+def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_token: str, model: str, elements: str, outres: float, max_upload_mb: float, timeout_seconds: int, poll_seconds: int, max_polls: int, log: Callable[[str], None]) -> Path:
     output_map.parent.mkdir(parents=True, exist_ok=True)
     log_path = output_map.parent / f"{output_map.stem}.sharped.log"
     log_lines: List[str] = []
@@ -2862,6 +2968,9 @@ def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_tok
 
     timeout = max(600, int(timeout_seconds))
     log_both(f"SharpED server HTTP timeout: {timeout} seconds")
+    upload_map = prepare_xplor_for_sharped_upload(input_map, output_map.parent, max_upload_mb, log_both)
+    if upload_map != input_map:
+        log_both(f"SharpED upload map: {upload_map}")
     client = SharpEDServerClient(base_url=base_url, timeout=float(timeout))
     selected_model = model.strip()
     if not selected_model or selected_model.lower() in {"default", "server default", "sharped default"}:
@@ -2872,7 +2981,7 @@ def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_tok
         log_both(f"SharpED server default model: {selected_model}")
 
     client.execute(
-        file_path=input_map,
+        file_path=upload_map,
         bearer_token=api_token.strip(),
         out_path=output_map,
         elements=elements.strip() or "C N O",
@@ -3479,6 +3588,7 @@ INPUT_TOOLTIPS = {
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
     "sharped_elements": "Chemical elements sent to the SharpED server. Leave blank to derive unique non-H elements from the reference composition.",
     "sharped_outres": "Output resolution sent as the outres multipart field.",
+    "sharped_max_upload_mb": "Maximum XPLOR map size uploaded to the SharpED server in megabytes. Use 100 MB for the current public server limit. If the map is larger, Phase Studio writes a slightly coarser resampled upload copy with a larger voxel step; 0 disables automatic resizing.",
     "sharped_timeout_seconds": "HTTP timeout in seconds for SharpED model query, upload, status and download requests. Phase Studio enforces at least 600 seconds for large XPLOR uploads.",
     "sharped_poll_seconds": "Seconds between status polling requests.",
     "sharped_max_polls": "Maximum number of status polls. Use -1 to wait without a fixed polling limit.",
@@ -3848,6 +3958,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_form.addRow("", refresh_models_btn)
         self._add_text(sharped_form, "sharped_elements", "Elements", "")
         self._add_dspin(sharped_form, "sharped_outres", "outres", 0.2, 0.001, 10.0, 0.05, 4)
+        self._add_dspin(sharped_form, "sharped_max_upload_mb", "Max upload size MB", 100.0, 0.0, 100000.0, 10.0, 1)
         self._add_spin(sharped_form, "sharped_timeout_seconds", "HTTP timeout seconds", 600, 600, 7200, 60)
         self._add_spin(sharped_form, "sharped_poll_seconds", "Poll seconds", 2, 1, 3600, 1)
         self._add_spin(sharped_form, "sharped_max_polls", "Max polls (-1 = no limit)", -1, -1, 1000000, 1)
@@ -4967,6 +5078,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sharped_model=self._combo_value("sharped_model") or "default",
             sharped_elements=self._line_value("sharped_elements"),
             sharped_outres=self._dspin_value("sharped_outres"),
+            sharped_max_upload_mb=self._dspin_value("sharped_max_upload_mb"),
             sharped_timeout_seconds=self._spin_value("sharped_timeout_seconds"),
             sharped_poll_seconds=self._spin_value("sharped_poll_seconds"),
             sharped_max_polls=self._spin_value("sharped_max_polls"),
@@ -5101,6 +5213,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"SharpED inference server: {cfg.sharped_base_url}")
             self.log(f"SharpED model: {cfg.sharped_model or 'default'}")
             self.log(f"SharpED elements: {sharped_elements}")
+            self.log(f"SharpED maximum upload size: {cfg.sharped_max_upload_mb:g} MB" if cfg.sharped_max_upload_mb > 0 else "SharpED maximum upload size: disabled")
             requested_modelfile_mode = normalize_modelfile_source(cfg.modelfile_source)
             modelfile_mode = requested_modelfile_mode
             use_xplor_modelfile = modelfile_mode in {"superflip_xplor", "deblurred_xplor"}
@@ -5267,7 +5380,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.run_sharped and not use_superflip_xplor_modelfile:
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
-                    run_sharped_deblur(sf_map, deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model, sharped_elements, cfg.sharped_outres, cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log)
+                    run_sharped_deblur(sf_map, deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model, sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log)
                 else:
                     shutil.copy2(sf_map, deblur_map)
                     if use_superflip_xplor_modelfile:
