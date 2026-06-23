@@ -30,14 +30,18 @@ class StatusResult:
     download_url: str
     error_message: str
     raw_json: str
+    download_bytes: Optional[bytes] = None
 
     @property
     def completed(self) -> bool:
-        return self.status == "completed"
+        status = str(self.status or "").strip().lower()
+        if status in {"completed", "complete", "done", "ready", "finished", "success", "succeeded"}:
+            return True
+        return bool(self.download_url or self.output_file_name)
 
     @property
     def failed(self) -> bool:
-        return self.status == "failed"
+        return str(self.status or "").strip().lower() in {"failed", "failure", "error", "errored", "cancelled", "canceled"}
 
 
 @dataclass
@@ -84,7 +88,9 @@ class SharpEDServerClient:
         poll_seconds: int = 2,
         max_polls: int = -1,
         log: ProgressLog = None,
+        stop_event: object = None,
     ) -> Path:
+        self._raise_if_stopped(stop_event)
         upload = self.upload(file_path, bearer_token, elements, model, outres, log=log)
         status = self.wait_for_completion(
             upload.status_url,
@@ -93,10 +99,17 @@ class SharpEDServerClient:
             poll_seconds=poll_seconds,
             max_polls=max_polls,
             log=log,
+            stop_event=stop_event,
         )
         if not status.download_url:
             status.download_url = self._url(f"/api/user/sharp-ed/download/{upload.token}")
-        self.download(status.download_url, out_path, primary_token=upload.token, fallback_token=bearer_token, log=log)
+        self._raise_if_stopped(stop_event)
+        if status.download_bytes is not None:
+            if log:
+                log(f"SharpED server: downloading result to {out_path}")
+            self._write_download_body(status.download_bytes, out_path)
+        else:
+            self.download(status.download_url, out_path, primary_token=upload.token, fallback_token=bearer_token, log=log)
         return out_path
 
     def upload(
@@ -155,9 +168,11 @@ class SharpEDServerClient:
         poll_seconds: int = 2,
         max_polls: int = -1,
         log: ProgressLog = None,
+        stop_event: object = None,
     ) -> StatusResult:
         polls = 0
         while max_polls < 0 or polls < max_polls:
+            self._raise_if_stopped(stop_event)
             status = self.get_status(status_url, job_token, bearer_token)
             if log:
                 log(f"SharpED server status: {status.status or '<empty>'}")
@@ -165,22 +180,38 @@ class SharpEDServerClient:
                 return status
             if status.failed:
                 raise SharpEDServerError(f"SharpED processing failed: {status.error_message}")
+            probe = self._probe_download(job_token, bearer_token)
+            if probe is not None:
+                if log:
+                    log("SharpED server: result is downloadable although status still reports processing; continuing.")
+                return StatusResult(
+                    status=status.status or "downloadable",
+                    output_file_name=status.output_file_name,
+                    download_url=self._url(f"/api/user/sharp-ed/download/{job_token}"),
+                    error_message="",
+                    raw_json=status.raw_json,
+                    download_bytes=probe,
+                )
             polls += 1
-            time.sleep(max(1, int(poll_seconds)))
+            deadline = time.monotonic() + max(1, int(poll_seconds))
+            while time.monotonic() < deadline:
+                self._raise_if_stopped(stop_event)
+                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
         raise SharpEDServerError("SharpED processing did not finish within the polling limit.")
 
     def get_status(self, status_url: str, job_token: str, bearer_token: str) -> StatusResult:
         text = self._request_text_with_auth_candidates(status_url, [bearer_token, job_token])
         data = self._loads_json(text, "Status")
-        status = str(data.get("status") or "")
-        download_url = str(data.get("download_url") or "")
+        status = self._find_string(data, {"status", "state", "phase"})
+        download_url = self._find_string(data, {"downloadurl", "downloadlink", "resulturl"})
+        output_file_name = self._find_string(data, {"outputfilename", "outputfile", "filename", "resultfile"})
         if download_url:
             download_url = self._absolute_url(download_url)
-        if not download_url and status == "completed" and job_token:
+        if not download_url and job_token and (str(status).strip().lower() in {"completed", "complete", "done", "ready", "finished", "success", "succeeded"} or output_file_name):
             download_url = self._url(f"/api/user/sharp-ed/download/{job_token}")
         return StatusResult(
             status=status,
-            output_file_name=str(data.get("output_file_name") or ""),
+            output_file_name=output_file_name,
             download_url=download_url,
             error_message=str(data.get("error_message") or ""),
             raw_json=text,
@@ -197,10 +228,16 @@ class SharpEDServerClient:
         if log:
             log(f"SharpED server: downloading result to {out_path}")
         body = self._request_bytes_with_auth_candidates(download_url, [primary_token, fallback_token])
+        self._write_download_body(body, out_path)
+
+    def _write_download_body(self, body: bytes, out_path: Path) -> None:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_bytes(body)
         if not out_path.is_file() or out_path.stat().st_size == 0:
             raise SharpEDServerError(f"SharpED download produced an empty output map: {out_path}")
+        if not self._looks_like_map_payload(body):
+            snippet = body[:200].decode("utf-8", errors="replace").replace("\n", " ")
+            raise SharpEDServerError(f"SharpED download did not look like an XPLOR/CCP4 map. Response starts with: {snippet}")
 
     def _url(self, path: str) -> str:
         return urljoin(self.base_url + "/", path.lstrip("/"))
@@ -209,6 +246,52 @@ class SharpEDServerClient:
         if url.startswith(("http://", "https://")):
             return url
         return self._url(url)
+
+    def _raise_if_stopped(self, stop_event: object = None) -> None:
+        if stop_event is not None and getattr(stop_event, "is_set", lambda: False)():
+            raise SharpEDServerError("Immediate stop requested during SharpED server processing.")
+
+    def _probe_download(self, job_token: str, bearer_token: str) -> Optional[bytes]:
+        if not job_token:
+            return None
+        try:
+            body = self._request_bytes_with_auth_candidates(
+                self._url(f"/api/user/sharp-ed/download/{job_token}"),
+                [job_token, bearer_token],
+            )
+        except SharpEDServerError:
+            return None
+        return body if self._looks_like_map_payload(body) else None
+
+    def _looks_like_map_payload(self, body: bytes) -> bool:
+        if not body:
+            return False
+        head = body[:512].lstrip()
+        if not head:
+            return False
+        if head[:1] in {b"{", b"["} or head[:1] == b"<":
+            return False
+        lower = head.decode("utf-8", errors="ignore").lower()
+        if "not ready" in lower or lower.startswith(("error", "failed")):
+            return False
+        return True
+
+    def _find_string(self, value: object, keys: set[str]) -> str:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = str(key).replace("_", "").replace("-", "").lower()
+                if normalized in keys and item not in (None, ""):
+                    return str(item)
+            for item in value.values():
+                found = self._find_string(item, keys)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for item in value:
+                found = self._find_string(item, keys)
+                if found:
+                    return found
+        return ""
 
     def _request_text(self, method: str, url: str, data: Optional[bytes] = None, headers: Optional[dict[str, str]] = None) -> str:
         return self._request_bytes(method, url, data=data, headers=headers).decode("utf-8", errors="replace")

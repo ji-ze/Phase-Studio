@@ -702,6 +702,28 @@ def composition_from_atoms(atoms: Sequence[AtomSite], elements: Optional[Sequenc
         return " ".join(parts)
     return "C1"
 
+def composition_from_full_cell_atoms(atoms: Sequence[AtomSite], cell: gemmi.UnitCell, sg: gemmi.SpaceGroup) -> str:
+    if not atoms:
+        return ""
+    ops = full_spacegroup_ops(sg)
+    if not ops:
+        ops = list(sg.operations().sym_ops)
+    expanded: List[AtomSite] = []
+    for atom in atoms:
+        elem = clean_element_symbol(atom.element)
+        if elem in {"H", "D"}:
+            continue
+        for op in ops:
+            frac = apply_gemmi_op(op, atom.frac)
+            duplicate = False
+            for old in expanded:
+                if clean_element_symbol(old.element) == elem and frac_distance_angstrom(cell, frac, old.frac) < 0.25:
+                    duplicate = True
+                    break
+            if not duplicate:
+                expanded.append(AtomSite(label=atom.label, element=elem, frac=frac, density=atom.density))
+    return composition_from_atoms(expanded) if expanded else ""
+
 def load_reference_context(reference_cif: Path, work_dir: Path, composition_override: str = "") -> ReferenceContext:
     cell, sg, hm = parse_cif_cell_and_sg(reference_cif)
     if min(cell.a, cell.b, cell.c) <= 2.0:
@@ -714,7 +736,8 @@ def load_reference_context(reference_cif: Path, work_dir: Path, composition_over
         # only reference-coordinate RMSD is unavailable.
         atoms = []
     formula_comp = composition_from_formula(raw_cif_value(reference_cif, ["_chemical_formula_sum", "_chemical_formula_moiety"]))
-    comp = composition_override.strip() if composition_override.strip() else (formula_comp or composition_from_atoms(atoms))
+    full_cell_comp = composition_from_full_cell_atoms(atoms, cell, sg)
+    comp = composition_override.strip() if composition_override.strip() else (full_cell_comp or formula_comp or composition_from_atoms(atoms))
     work_ref = work_dir / "phase_studio_reference_for_metrics.cif"
     # Write a clean reference CIF for EDMA metrics and downstream structure handling. This is
     # safer than copying database CIFs with multiple blocks or unusual tags.
@@ -747,7 +770,8 @@ def reference_context_with_external_atom_sites(
         atoms = []
     if not atoms:
         return ref_ctx
-    comp = composition_override.strip() or composition_from_formula(
+    full_cell_comp = composition_from_full_cell_atoms(atoms, ref_ctx.cell, ref_ctx.spacegroup)
+    comp = composition_override.strip() or full_cell_comp or composition_from_formula(
         raw_cif_value(Path(external_cif), ["_chemical_formula_sum", "_chemical_formula_moiety"])
     ) or composition_from_atoms(atoms) or ref_ctx.composition
     work_ref = work_dir / "phase_studio_reference_atoms_from_selected_cif.cif"
@@ -1846,41 +1870,13 @@ def prepare_xplor_for_sharped_upload(
         return input_map
     if current_bytes <= limit_bytes:
         return input_map
-    xmap = read_xplor_map(input_map)
-    nx, ny, nz = xplor_grid_dimensions(xmap)
-    scale = min(0.995, max(0.1, (float(limit_bytes) / float(current_bytes)) ** (1.0 / 3.0) * 0.985))
-    candidate = input_map
-    for attempt in range(8):
-        new_nx = max(2, int(math.floor(nx * scale)))
-        new_ny = max(2, int(math.floor(ny * scale)))
-        new_nz = max(2, int(math.floor(nz * scale)))
-        if (new_nx, new_ny, new_nz) == (nx, ny, nz):
-            new_nx = max(2, nx - 1)
-            new_ny = max(2, ny - 1)
-            new_nz = max(2, nz - 1)
-        reduced = resample_xplor_map(
-            xmap,
-            new_nx,
-            new_ny,
-            new_nz,
-            title=f"{xmap.title} SharpED upload {new_nx}x{new_ny}x{new_nz}",
-        )
-        candidate = output_dir / f"{Path(input_map).stem}_sharped_upload_{new_nx}x{new_ny}x{new_nz}.xplor"
-        write_xplor_map(candidate, reduced, title=reduced.title, values_per_line=6)
-        candidate_bytes = int(candidate.stat().st_size)
-        if candidate_bytes <= limit_bytes:
-            log(
-                "SharpED upload map reduced to fit size limit: "
-                f"{current_bytes / (1024.0 * 1024.0):.1f} MB -> {candidate_bytes / (1024.0 * 1024.0):.1f} MB; "
-                f"grid {nx}x{ny}x{nz} -> {new_nx}x{new_ny}x{new_nz}."
-            )
-            return candidate
-        scale *= max(0.5, (float(limit_bytes) / float(candidate_bytes)) ** (1.0 / 3.0) * 0.97)
-    log(
-        "SharpED upload map still exceeds the configured size limit after resampling; "
-        f"using the smallest generated map: {candidate}"
+    raise RuntimeError(
+        "The XPLOR map is still larger than the configured SharpED upload limit "
+        f"({current_bytes / 1_000_000.0:.1f} MB > {limit_mb:g} MB). "
+        "For Superflip-generated maps, leave the voxel field empty/omit so Phase Studio can ask Superflip "
+        "to calculate a coarser SharpED-compatible grid directly. For external maps, generate a lower-grid "
+        "XPLOR map before uploading."
     )
-    return candidate
 
 def xplor_tail_mean_sigma(xplor_map: Path) -> Tuple[Optional[float], Optional[float]]:
     try:
@@ -2047,14 +2043,18 @@ def inflip_declared_reference(inflip_path: Path) -> Optional[Path]:
 
 
 def superflip_reference_format_for_path(reference_path: Optional[Path]) -> str:
-    """Return an explicit Superflip referenceformat keyword for supported files."""
+    """Return an explicit Superflip referenceformat only when Superflip needs it.
+
+    CIF reference files are deliberately left without referenceformat.  Some
+    Jana/Superflip builds interpret ``referenceformat cif`` as a density
+    reference request and then fail while opening the CIF as a map.  With a
+    .cif suffix, Superflip can infer the structure reference correctly.
+    """
     if reference_path is None:
         return ""
     suffix = reference_path.suffix.lower()
     if suffix == ".xplor":
         return "xplor"
-    if suffix == ".cif":
-        return "cif"
     return ""
 
 
@@ -2420,9 +2420,67 @@ def superflip_default_voxel_triplet(cell: gemmi.UnitCell, step_angstrom: float =
         dims.append(int(math.ceil(raw / 10.0) * 10))
     return int(dims[0]), int(dims[1]), int(dims[2])
 
+def voxel_keyword_is_omitted(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    return not text or text in {"none", "no", "off", "omit"}
+
+def sharped_upload_limit_bytes(max_upload_mb: float) -> int:
+    return int(max(0.0, float(max_upload_mb or 0.0)) * 1_000_000.0)
+
+def estimate_xplor_text_bytes(nx: int, ny: int, nz: int) -> int:
+    values = max(1, int(nx)) * max(1, int(ny)) * max(1, int(nz))
+    # Jana/Superflip XPLOR maps are text maps.  The observed public-server
+    # cases are about 12 bytes per density value; use a conservative margin.
+    return int(values * 13.2 + max(1, int(nz)) * 16 + 4096)
+
+def sharped_limited_superflip_voxel(
+    voxel: str,
+    cell: gemmi.UnitCell,
+    max_upload_mb: float,
+    log: Optional[Callable[[str], None]] = None,
+) -> str:
+    if max_upload_mb <= 0 or not voxel_keyword_is_omitted(voxel):
+        return voxel
+    limit_bytes = sharped_upload_limit_bytes(max_upload_mb)
+    if limit_bytes <= 0:
+        return voxel
+    default_step = 0.2
+    default_dims = superflip_default_voxel_triplet(cell, default_step)
+    default_estimate = estimate_xplor_text_bytes(*default_dims)
+    # Leave the keyword omitted if the normal Superflip grid should fit with
+    # some room.  This preserves the historical default for ordinary cells.
+    if default_estimate <= int(limit_bytes * 0.92):
+        return voxel
+    target_bytes = int(limit_bytes * 0.86)
+    scale = max(0.2, min(0.98, (float(target_bytes) / float(default_estimate)) ** (1.0 / 3.0)))
+    step = default_step / scale
+    dims = superflip_default_voxel_triplet(cell, step)
+    for _ in range(40):
+        if estimate_xplor_text_bytes(*dims) <= target_bytes:
+            break
+        step *= 1.025
+        dims = superflip_default_voxel_triplet(cell, step)
+    if log is not None:
+        log(
+            "SharpED upload limit: Superflip voxel/finevoxel keywords added before map calculation "
+            f"to avoid post-hoc XPLOR resampling: default estimate {default_dims[0]}x{default_dims[1]}x{default_dims[2]} "
+            f"({default_estimate / 1_000_000.0:.1f} MB) -> voxel {dims[0]} {dims[1]} {dims[2]} "
+            f"(estimated {estimate_xplor_text_bytes(*dims) / 1_000_000.0:.1f} MB; limit {max_upload_mb:g} MB)."
+        )
+    return f"{dims[0]} {dims[1]} {dims[2]}"
+
+def append_superflip_keyword(extra_keywords: str, line: str) -> str:
+    base = str(extra_keywords or "").strip()
+    addition = str(line or "").strip()
+    if not addition:
+        return base
+    if not base:
+        return addition
+    return base + "\n" + addition
+
 def superflip_voxel_keyword_line(value: str, cell: gemmi.UnitCell, log: Optional[Callable[[str], None]] = None) -> str:
     text = str(value or "").strip()
-    if not text or text.lower() in {"none", "no", "off", "omit"}:
+    if voxel_keyword_is_omitted(text):
         return ""
     if text.lower() == "auto":
         dims = superflip_default_voxel_triplet(cell)
@@ -2679,6 +2737,8 @@ def write_superflip_symmetry_input(
     prefix: str,
     ref_ctx: ReferenceContext,
     model_file: Path,
+    reference_file: Optional[Path],
+    reference_format: str,
     output_xplor: str,
     output_format: str,
     voxel: str,
@@ -2697,7 +2757,10 @@ def write_superflip_symmetry_input(
     if searchsymmetry_value not in {"no", "shift", "average"}:
         searchsymmetry_value = "average"
     derivesymmetry_value = str(derivesymmetry or "yes").strip() or "yes"
-    fmt = normalize_output_format(output_format)
+    # The symmetry-only post-processing result is consumed as a map by EDMA,
+    # Jana export and later Superflip modelfiles, therefore it must be a real
+    # XPLOR map even when the main Superflip run uses outputformat jana.
+    fmt = "xplor"
     with inp_path.open("w", encoding="utf-8") as f:
         f.write(f"title {prefix}\n")
         f.write("perform symmetry\n")
@@ -2721,6 +2784,11 @@ def write_superflip_symmetry_input(
             f.write("modelformat xplor\n")
         elif model_file.suffix.lower() == ".ccp4":
             f.write("modelformat ccp4\n")
+        if reference_file is not None:
+            f.write(f'referencefile "{reference_file.name}"\n')
+            ref_fmt = str(reference_format or superflip_reference_format_for_path(reference_file)).strip().lower()
+            if ref_fmt:
+                f.write(f"referenceformat {ref_fmt}\n")
         f.write("polish no\n")
         f.write("maxcycles 0\n")
         f.write(f"searchsymmetry {searchsymmetry_value}\n")
@@ -2888,6 +2956,7 @@ def run_superflip_symmetrize_map(
     prefix: str,
     ref_ctx: ReferenceContext,
     input_map: Path,
+    reference_file: Optional[Path],
     superflip_exe: str,
     output_format: str,
     voxel: str,
@@ -2900,6 +2969,15 @@ def run_superflip_symmetrize_map(
     sym_dir.mkdir(parents=True, exist_ok=True)
     model_for_input = sym_dir / "deblurred_modelfile_for_symmetry.xplor"
     normalize_xplor_for_superflip_modelfile(input_map, model_for_input, log)
+    reference_for_input: Optional[Path] = None
+    reference_format = ""
+    if reference_file is not None and reference_file.is_file():
+        suffix = reference_file.suffix.lower() or ".dat"
+        reference_for_input = sym_dir / f"symmetry_referencefile{suffix}"
+        if reference_file.resolve() != reference_for_input.resolve():
+            shutil.copy2(reference_file, reference_for_input)
+        reference_format = superflip_reference_format_for_path(reference_for_input)
+        log(f"  Superflip symmetry referencefile: {reference_for_input.name} ({reference_format or 'auto'})")
     output_name = f"{prefix}.xplor"
     inp = sym_dir / f"{prefix}.inflip"
     log_path = sym_dir / f"{prefix}.superflip.log"
@@ -2909,6 +2987,8 @@ def run_superflip_symmetrize_map(
         prefix=prefix,
         ref_ctx=ref_ctx,
         model_file=model_for_input,
+        reference_file=reference_for_input,
+        reference_format=reference_format,
         output_xplor=output_name,
         output_format=output_format,
         voxel=voxel,
@@ -2954,7 +3034,7 @@ def sharped_elements_from_composition(composition: str) -> str:
         elements.append(elem)
     return " ".join(elements) or "C N O"
 
-def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_token: str, model: str, elements: str, outres: float, max_upload_mb: float, timeout_seconds: int, poll_seconds: int, max_polls: int, log: Callable[[str], None]) -> Path:
+def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_token: str, model: str, elements: str, outres: float, max_upload_mb: float, timeout_seconds: int, poll_seconds: int, max_polls: int, log: Callable[[str], None], stop_event: Optional[threading.Event] = None) -> Path:
     output_map.parent.mkdir(parents=True, exist_ok=True)
     log_path = output_map.parent / f"{output_map.stem}.sharped.log"
     log_lines: List[str] = []
@@ -2968,6 +3048,17 @@ def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_tok
 
     timeout = max(600, int(timeout_seconds))
     log_both(f"SharpED server HTTP timeout: {timeout} seconds")
+    if stop_event is not None and stop_event.is_set():
+        raise RuntimeError("Immediate stop requested.")
+    if max_upload_mb <= 0 and "jana.fzu.cz" in str(base_url).lower():
+        input_bytes = int(Path(input_map).stat().st_size)
+        public_limit_bytes = 100_000_000
+        if input_bytes > public_limit_bytes:
+            raise RuntimeError(
+                "The selected XPLOR map is larger than the current public SharpED server upload limit "
+                f"({input_bytes / 1_000_000:.1f} MB > 100 MB). Set 'Max upload size MB' to 100, "
+                "or use a private SharpED endpoint with a higher upload limit."
+            )
     upload_map = prepare_xplor_for_sharped_upload(input_map, output_map.parent, max_upload_mb, log_both)
     if upload_map != input_map:
         log_both(f"SharpED upload map: {upload_map}")
@@ -2990,6 +3081,7 @@ def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_tok
         poll_seconds=poll_seconds,
         max_polls=max_polls,
         log=log_both,
+        stop_event=stop_event,
     )
     if not output_map.is_file() or output_map.stat().st_size == 0:
         raise RuntimeError(f"SharpED did not create output map: {output_map}")
@@ -3108,6 +3200,7 @@ def symmetry_merge_peaks(frac: np.ndarray, density: np.ndarray, ref_ctx: Referen
     order = np.argsort(density)[::-1]
     selected: List[np.ndarray] = []
     selected_d: List[float] = []
+    selected_orbits: List[List[np.ndarray]] = []
     ops = full_spacegroup_ops(ref_ctx.spacegroup)
     if not ops:
         ops = list(ref_ctx.spacegroup.operations().sym_ops)
@@ -3115,13 +3208,19 @@ def symmetry_merge_peaks(frac: np.ndarray, density: np.ndarray, ref_ctx: Referen
         f = wrap_frac(frac[idx])
         orbit = [apply_gemmi_op(op, f) for op in ops]
         duplicate = False
-        for old in selected:
-            if min(frac_distance_angstrom(ref_ctx.cell, o, old) for o in orbit) < merge_distance_a:
+        for old_orbit in selected_orbits:
+            min_orbit_distance = min(
+                frac_distance_angstrom(ref_ctx.cell, new_pos, old_pos)
+                for new_pos in orbit
+                for old_pos in old_orbit
+            )
+            if min_orbit_distance < merge_distance_a:
                 duplicate = True
                 break
         if not duplicate:
             selected.append(f)
             selected_d.append(float(density[idx]))
+            selected_orbits.append(orbit)
     return np.asarray(selected, dtype=np.float64), np.asarray(selected_d, dtype=np.float64)
 
 def run_edma_on_xplor(
@@ -3483,6 +3582,7 @@ class PathRow(QWidget):
         super().__init__()
         self.mode = mode
         self.file_filter = file_filter
+        self.on_change: Optional[Callable[[], None]] = None
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.label = QLabel(label)
@@ -3494,6 +3594,7 @@ class PathRow(QWidget):
         layout.addWidget(self.edit, 1)
         layout.addWidget(self.button)
         self.button.clicked.connect(self.browse)
+        self.edit.editingFinished.connect(self._notify_changed)
 
     def browse(self) -> None:
         if self.mode == "dir":
@@ -3502,6 +3603,11 @@ class PathRow(QWidget):
             path, _ = QFileDialog.getOpenFileName(self, "Select file", self.edit.text() or str(Path.cwd()), self.file_filter)
         if path:
             self.edit.setText(path)
+            self._notify_changed()
+
+    def _notify_changed(self) -> None:
+        if self.on_change is not None:
+            self.on_change()
 
     def value(self) -> str:
         return self.edit.text().strip()
@@ -3588,7 +3694,7 @@ INPUT_TOOLTIPS = {
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
     "sharped_elements": "Chemical elements sent to the SharpED server. Leave blank to derive unique non-H elements from the reference composition.",
     "sharped_outres": "Output resolution sent as the outres multipart field.",
-    "sharped_max_upload_mb": "Maximum XPLOR map size uploaded to the SharpED server in megabytes. Use 100 MB for the current public server limit. If the map is larger, Phase Studio writes a slightly coarser resampled upload copy with a larger voxel step; 0 disables automatic resizing.",
+    "sharped_max_upload_mb": "Maximum XPLOR map size uploaded to the SharpED server in megabytes. Use 100 MB for the current public server limit. If voxel is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits. Set 0 to disable this check.",
     "sharped_timeout_seconds": "HTTP timeout in seconds for SharpED model query, upload, status and download requests. Phase Studio enforces at least 600 seconds for large XPLOR uploads.",
     "sharped_poll_seconds": "Seconds between status polling requests.",
     "sharped_max_polls": "Maximum number of status polls. Use -1 to wait without a fixed polling limit.",
@@ -3662,6 +3768,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _add_path(self, parent: QVBoxLayout, key: str, label: str, default: str, mode: str = "file", file_filter: str = "All files (*)") -> None:
         row = PathRow(label, default, mode, file_filter)
+        row.on_change = self.save_settings
         parent.addWidget(row)
         self.inputs[key] = row
         self._apply_input_tooltip(key, row)
@@ -5259,9 +5366,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log("Superflip referencefile keyword omitted: no explicit Superflip referencefile was selected.")
             if referencefile_mode == "reference_cif":
                 if explicit_superflip_referencefile is not None:
-                    self.log(f"Superflip referencefile CIF: {explicit_superflip_referencefile} (referenceformat cif)")
+                    self.log(f"Superflip referencefile CIF: {explicit_superflip_referencefile} (CIF inferred from .cif suffix)")
                 else:
-                    self.log(f"Superflip referencefile CIF: {ref_ctx.work_ref_cif} (referenceformat cif)")
+                    self.log(f"Superflip referencefile CIF: {ref_ctx.work_ref_cif} (CIF inferred from .cif suffix)")
             elif referencefile_mode == "reference_xplor" and (explicit_superflip_referencefile is not None or cfg.superflip_reference_xplor is not None):
                 self.log(f"Superflip referencefile XPLOR: {explicit_superflip_referencefile or cfg.superflip_reference_xplor}")
             else:
@@ -5340,7 +5447,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 elif referencefile_mode == "reference_xplor":
                     reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else cfg.superflip_reference_xplor
                     reference_format_for_cycle = superflip_reference_format_for_path(reference_file_for_cycle)
-                sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, cfg.output_format, cfg.write_auxiliary_outputs or cfg.export_jana_project, cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana or cfg.export_jana_project, cfg.voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, cfg.extra_superflip_keywords, self.log, self.stop_now)
+                sf_voxel = cfg.voxel
+                sf_extra_superflip_keywords = cfg.extra_superflip_keywords
+                if cfg.run_sharped and not use_superflip_xplor_modelfile:
+                    sf_voxel = sharped_limited_superflip_voxel(cfg.voxel, ref_ctx.cell, cfg.sharped_max_upload_mb, self.log)
+                    if sf_voxel != cfg.voxel and cfg.polish:
+                        sf_extra_superflip_keywords = append_superflip_keyword(
+                            sf_extra_superflip_keywords,
+                            f"finevoxel {sf_voxel}",
+                        )
+                sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, cfg.output_format, cfg.write_auxiliary_outputs or cfg.export_jana_project, cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana or cfg.export_jana_project, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
                 self.log(f"Superflip map: {sf_map}")
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
@@ -5380,7 +5496,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.run_sharped and not use_superflip_xplor_modelfile:
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
-                    run_sharped_deblur(sf_map, deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model, sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log)
+                    run_sharped_deblur(sf_map, deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model, sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log, self.stop_now)
                 else:
                     shutil.copy2(sf_map, deblur_map)
                     if use_superflip_xplor_modelfile:
@@ -5392,11 +5508,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
                     sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
+                    symmetry_reference_file: Optional[Path] = None
+                    if explicit_superflip_referencefile is not None:
+                        symmetry_reference_file = explicit_superflip_referencefile
+                    elif ref_ctx.atoms and ref_ctx.work_ref_cif.is_file():
+                        symmetry_reference_file = ref_ctx.work_ref_cif
+                    elif sf_edma_cif is not None and sf_edma_cif.is_file():
+                        symmetry_reference_file = sf_edma_cif
+                        self.log("  Superflip symmetry uses the current EDMA CIF as referencefile because no atom-site reference CIF is available.")
                     deblur_map = run_superflip_symmetrize_map(
                         cycle_dir=cycle_dir,
                         prefix=sym_prefix,
                         ref_ctx=ref_ctx,
                         input_map=deblur_map,
+                        reference_file=symmetry_reference_file,
                         superflip_exe=cfg.superflip_exe,
                         output_format=cfg.output_format,
                         voxel=cfg.voxel,
