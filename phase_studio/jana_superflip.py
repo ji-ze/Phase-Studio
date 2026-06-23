@@ -381,19 +381,14 @@ def add_modelseed_modelfile(lines: Sequence[str], model_name: str, suffix: str =
 
     A model-seeded Superflip run is deterministic. Therefore repeated attempts
     are disabled and the randomseed keyword is omitted, matching the logic used
-    by the full Phase Studio pipeline. XPLOR and CCP4 maps need an explicit
-    modelformat; CIF modelfiles are left for Superflip to infer from extension.
+    by the full Phase Studio pipeline. Phase Studio writes only modelfile and
+    lets Superflip infer the format from the file extension.
     """
     cleaned = without_keywords(
         lines,
         {"modelfile", "modelformat", "repeatmode", "randomseed"},
     )
     cleaned = insert_before_fbegin(cleaned, "repeatmode 1")
-    suffix = str(suffix or "").lower()
-    if suffix == ".xplor":
-        cleaned = insert_before_fbegin(cleaned, "modelformat xplor")
-    elif suffix == ".ccp4":
-        cleaned = insert_before_fbegin(cleaned, "modelformat ccp4")
     cleaned = insert_before_fbegin(cleaned, f"modelfile {model_name}")
     return cleaned
 
@@ -436,22 +431,11 @@ def replace_fbegin_with_hkl(lines: Sequence[str], hkl_path: Path) -> List[str]:
     return out
 
 
-def superflip_reference_format_for_path(reference_path: Path) -> str:
-    """Return the explicit Superflip referenceformat for a reference file path."""
-    suffix = reference_path.suffix.lower()
-    if suffix == ".xplor":
-        return "xplor"
-    if suffix == ".cif":
-        return "cif"
-    return ""
-
-
 def apply_reference_override(lines: Sequence[str], reference_path: Path) -> List[str]:
     """Replace the Superflip referencefile declaration with a CIF or XPLOR file.
 
-    Jana's Superflip executable can fail to infer the reference density format
-    from some path/name combinations. Always write referenceformat explicitly
-    for both XPLOR and CIF reference files.
+    Phase Studio writes only the referencefile keyword and lets Superflip infer
+    the reference format from the file extension.
     """
     suffix = reference_path.suffix.lower()
     if suffix not in {".cif", ".xplor"}:
@@ -461,9 +445,6 @@ def apply_reference_override(lines: Sequence[str], reference_path: Path) -> List
         )
     cleaned = without_keywords(lines, {"referencefile", "referenceformat"})
     cleaned = insert_before_fbegin(cleaned, f"referencefile {Path(reference_path).name}")
-    ref_format = superflip_reference_format_for_path(reference_path)
-    if ref_format:
-        cleaned = insert_before_fbegin(cleaned, f"referenceformat {ref_format}")
     return cleaned
 
 
@@ -559,7 +540,6 @@ def define_m80_inflip(header_lines: Sequence[str], base_name: str, model_name: s
     out.extend(
         [
             "repeatmode 1",
-            "modelformat xplor",
             f'modelfile "{model_name}"',
             "polish no",
             "maxcycles 0",
@@ -2030,10 +2010,9 @@ def launch_phase_studio_from_jana(inflip_path: Optional[Path], options: JanaRunO
         else:
             imported_values["hkl"] = ""
         imported_values["reference_cif"] = ""
-        imported_values["superflip_reference_xplor"] = ""
         if reference_path is not None:
             if reference_path.suffix.lower() == ".xplor":
-                imported_values["superflip_reference_xplor"] = str(reference_path)
+                imported_values["superflip_referencefile"] = str(reference_path)
                 imported_values["referencefile_mode"] = "reference_xplor"
             else:
                 imported_values["reference_cif"] = str(reference_path)

@@ -2042,22 +2042,6 @@ def inflip_declared_reference(inflip_path: Path) -> Optional[Path]:
 
 
 
-def superflip_reference_format_for_path(reference_path: Optional[Path]) -> str:
-    """Return an explicit Superflip referenceformat only when Superflip needs it.
-
-    CIF reference files are deliberately left without referenceformat.  Some
-    Jana/Superflip builds interpret ``referenceformat cif`` as a density
-    reference request and then fail while opening the CIF as a map.  With a
-    .cif suffix, Superflip can infer the structure reference correctly.
-    """
-    if reference_path is None:
-        return ""
-    suffix = reference_path.suffix.lower()
-    if suffix == ".xplor":
-        return "xplor"
-    return ""
-
-
 def parse_inflip_crystallography(inflip_path: Path) -> Tuple[gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
     cell_values: Optional[List[float]] = None
     hm = "P 1"
@@ -2207,7 +2191,6 @@ def define_m80_inflip_from_model(header_lines: Sequence[str], base_name: str, mo
         out = insert_before_fbegin(out, f'outputfile "{base_name}-ready.xplor"')
     out.extend([
         "repeatmode 1",
-        "modelformat xplor",
         f'modelfile "{model_name}"',
         "polish no",
         "maxcycles 0",
@@ -2343,6 +2326,8 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
         elif key == "referencefile":
             saw_reference_keyword = True
             ref_name = parts[1].strip().strip('"') if len(parts) > 1 else ""
+            if ref_name:
+                settings["superflip_referencefile"] = ref_name
             suffix = Path(ref_name).suffix.lower()
             if suffix == ".xplor":
                 settings["referencefile_mode"] = "reference_xplor"
@@ -2668,14 +2653,8 @@ def write_superflip_input(
         f.write("outputfile " + " ".join(output_files) + f"\noutputformat {fmt}\n")
         if reference_file is not None:
             f.write(f"referencefile {reference_file.name}\n")
-            if str(reference_format or "").strip():
-                f.write(f"referenceformat {str(reference_format).strip()}\n")
         if model_file is not None:
             f.write(f"modelfile {model_file.name}\n")
-            if model_file.suffix.lower() == ".xplor":
-                f.write("modelformat xplor\n")
-            elif model_file.suffix.lower() == ".ccp4":
-                f.write("modelformat ccp4\n")
         f.write("dimension  3\n")
         if voxel_line:
             f.write(voxel_line + "\n")
@@ -2737,8 +2716,6 @@ def write_superflip_symmetry_input(
     prefix: str,
     ref_ctx: ReferenceContext,
     model_file: Path,
-    reference_file: Optional[Path],
-    reference_format: str,
     output_xplor: str,
     output_format: str,
     voxel: str,
@@ -2780,15 +2757,6 @@ def write_superflip_symmetry_input(
         f.write("endsymmetry\n")
         f.write(f"composition {ref_ctx.composition}\n\n")
         f.write(f'modelfile "{model_file.name}"\n')
-        if model_file.suffix.lower() == ".xplor":
-            f.write("modelformat xplor\n")
-        elif model_file.suffix.lower() == ".ccp4":
-            f.write("modelformat ccp4\n")
-        if reference_file is not None:
-            f.write(f'referencefile "{reference_file.name}"\n')
-            ref_fmt = str(reference_format or superflip_reference_format_for_path(reference_file)).strip().lower()
-            if ref_fmt:
-                f.write(f"referenceformat {ref_fmt}\n")
         f.write("polish no\n")
         f.write("maxcycles 0\n")
         f.write(f"searchsymmetry {searchsymmetry_value}\n")
@@ -2956,7 +2924,6 @@ def run_superflip_symmetrize_map(
     prefix: str,
     ref_ctx: ReferenceContext,
     input_map: Path,
-    reference_file: Optional[Path],
     superflip_exe: str,
     output_format: str,
     voxel: str,
@@ -2969,15 +2936,6 @@ def run_superflip_symmetrize_map(
     sym_dir.mkdir(parents=True, exist_ok=True)
     model_for_input = sym_dir / "deblurred_modelfile_for_symmetry.xplor"
     normalize_xplor_for_superflip_modelfile(input_map, model_for_input, log)
-    reference_for_input: Optional[Path] = None
-    reference_format = ""
-    if reference_file is not None and reference_file.is_file():
-        suffix = reference_file.suffix.lower() or ".dat"
-        reference_for_input = sym_dir / f"symmetry_referencefile{suffix}"
-        if reference_file.resolve() != reference_for_input.resolve():
-            shutil.copy2(reference_file, reference_for_input)
-        reference_format = superflip_reference_format_for_path(reference_for_input)
-        log(f"  Superflip symmetry referencefile: {reference_for_input.name} ({reference_format or 'auto'})")
     output_name = f"{prefix}.xplor"
     inp = sym_dir / f"{prefix}.inflip"
     log_path = sym_dir / f"{prefix}.superflip.log"
@@ -2987,8 +2945,6 @@ def run_superflip_symmetrize_map(
         prefix=prefix,
         ref_ctx=ref_ctx,
         model_file=model_for_input,
-        reference_file=reference_for_input,
-        reference_format=reference_format,
         output_xplor=output_name,
         output_format=output_format,
         voxel=voxel,
@@ -3712,7 +3668,7 @@ Input reflection data:
 
 Output and model files:
   outputfile, outputformat, filebase, rewriteoutput, modelfile,
-  modelformat, commandfile, terminal, expandedlog, coverage.
+  commandfile, terminal, expandedlog, coverage.
 
 Density modification and convergence:
   perform, maxcycles, repeatmode, bestdensities, delta, weakratio,
@@ -3911,7 +3867,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         hkl_button_row.addWidget(analyze_hkl_btn)
         hkl_tools_form.addRow("", hkl_button_row)
         self._add_path(paths_layout, "reference_cif", "External reference CIF", "", "file", "CIF files (*.cif);;All files (*)")
-        self._add_path(paths_layout, "superflip_reference_xplor", "External reference XPLOR", "", "file", "XPLOR maps (*.xplor);;All files (*)")
         self._add_path(paths_layout, "superflip_referencefile", "Superflip referencefile", "", "file", "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)")
         self._add_path(paths_layout, "first_cycle_modelfile", "First-cycle modelfile", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
         self._add_path(paths_layout, "work_dir", "Work directory", str(cwd / "iterative_superflip_qt_run"), "dir")
@@ -4168,7 +4123,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("jana_inflip", jana_enabled),
             ("hkl", override_enabled or external_enabled),
             ("reference_cif", override_enabled or external_enabled),
-            ("superflip_reference_xplor", override_enabled),
             ("superflip_referencefile", True),
         ):
             widget = self.inputs.get(key)
@@ -4246,6 +4200,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._set_widget_value_from_string(self.inputs["plimit_superflip"], str(old_plimit))
             if self.settings.value("inputs/plimit_deblur", None) is None and "plimit_deblur" in self.inputs:
                 self._set_widget_value_from_string(self.inputs["plimit_deblur"], str(old_plimit))
+        legacy_reference_xplor = self.settings.value("inputs/superflip_reference_xplor", None)
+        referencefile_widget = self.inputs.get("superflip_referencefile")
+        if legacy_reference_xplor and referencefile_widget is not None and not self._widget_value_as_string(referencefile_widget).strip():
+            self._set_widget_value_from_string(referencefile_widget, str(legacy_reference_xplor))
         self._sync_input_source_mode_widgets()
         geom = self.settings.value("window/geometry", None)
         if geom is not None:
@@ -4260,6 +4218,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         try:
             parsed = parse_inflip_settings(Path(path))
+            if "superflip_reference_xplor" in parsed and "superflip_referencefile" not in parsed:
+                parsed["superflip_referencefile"] = parsed["superflip_reference_xplor"]
             applied = 0
             for key, value in parsed.items():
                 widget = self.inputs.get(key)
@@ -5037,12 +4997,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         plot_atoms = list(non_h_atoms)
         if len(plot_atoms) > 600:
-            plot_atoms = plot_atoms[:600]
+            idx = np.linspace(0, len(plot_atoms) - 1, 600, dtype=int)
+            plot_atoms = [plot_atoms[int(i)] for i in idx]
         coords = np.asarray([wrap_frac(a.frac) for a in plot_atoms], dtype=np.float64)
         colors = [self._element_color(a.element) for a in plot_atoms]
         sizes = [max(12.0, min(70.0, 10.0 + 1.2 * element_atomic_number(a.element))) for a in plot_atoms]
         ax.scatter(coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors, alpha=0.86, edgecolors="#ffffff", linewidths=0.35)
-        ax.text2D(0.02, 0.02, f"{len(non_h_atoms)} non-H atoms", color="#667085", fontsize=8, transform=ax.transAxes)
+        shown = len(plot_atoms)
+        suffix = "" if shown == len(non_h_atoms) else f"; {shown} shown"
+        ax.text2D(0.02, 0.02, f"{len(non_h_atoms)} non-H atoms{suffix}", color="#667085", fontsize=8, transform=ax.transAxes)
 
     def _safe_parse_structure(self, path: Optional[Path]) -> List[AtomSite]:
         if path is None or not Path(path).is_file():
@@ -5086,7 +5049,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def get_config(self) -> RunConfig:
         input_source_mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
-        reference_xplor_text = self._path_value("superflip_reference_xplor")
+        reference_xplor_text = self._path_value("superflip_reference_xplor") if "superflip_reference_xplor" in self.inputs else ""
         reference_xplor = Path(reference_xplor_text).expanduser().resolve() if reference_xplor_text else None
         superflip_referencefile_text = self._path_value("superflip_referencefile") if "superflip_referencefile" in self.inputs else ""
         superflip_referencefile = Path(superflip_referencefile_text).expanduser().resolve() if superflip_referencefile_text else None
@@ -5200,7 +5163,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             mode = normalize_input_source_mode(cfg.input_source_mode)
             hkl_text = self._path_value("hkl").strip()
             ref_text = self._path_value("reference_cif").strip()
-            xplor_text = self._path_value("superflip_reference_xplor").strip()
+            xplor_text = self._path_value("superflip_reference_xplor").strip() if "superflip_reference_xplor" in self.inputs else ""
             if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
                 if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
                     raise FileNotFoundError("Jana .inflip input mode requires a readable Jana .inflip file.")
@@ -5287,12 +5250,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 else:
                     self.log(f"Reference CIF override: {cfg.reference_cif}")
 
-                if mode == INPUT_MODE_INFLIP:
-                    cfg.superflip_reference_xplor = None
-                if cfg.superflip_reference_xplor is None and declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() == ".xplor":
-                    cfg.superflip_reference_xplor = declared_ref
+                if cfg.superflip_referencefile is None and declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() == ".xplor":
+                    cfg.superflip_referencefile = declared_ref
                     cfg.referencefile_mode = "reference_xplor"
-                    self.log(f"Reference XPLOR declared by Jana .inflip: {cfg.superflip_reference_xplor}")
+                    self.log(f"Superflip referencefile declared by Jana .inflip: {cfg.superflip_referencefile}")
             else:
                 self.log(f"External HKL source: {cfg.hkl}")
                 self.log(f"External reference CIF: {cfg.reference_cif}")
@@ -5443,10 +5404,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 reference_format_for_cycle = ""
                 if referencefile_mode == "reference_cif":
                     reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else ref_ctx.work_ref_cif
-                    reference_format_for_cycle = superflip_reference_format_for_path(reference_file_for_cycle)
                 elif referencefile_mode == "reference_xplor":
                     reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else cfg.superflip_reference_xplor
-                    reference_format_for_cycle = superflip_reference_format_for_path(reference_file_for_cycle)
                 sf_voxel = cfg.voxel
                 sf_extra_superflip_keywords = cfg.extra_superflip_keywords
                 if cfg.run_sharped and not use_superflip_xplor_modelfile:
@@ -5508,20 +5467,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
                     sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
-                    symmetry_reference_file: Optional[Path] = None
-                    if explicit_superflip_referencefile is not None:
-                        symmetry_reference_file = explicit_superflip_referencefile
-                    elif ref_ctx.atoms and ref_ctx.work_ref_cif.is_file():
-                        symmetry_reference_file = ref_ctx.work_ref_cif
-                    elif sf_edma_cif is not None and sf_edma_cif.is_file():
-                        symmetry_reference_file = sf_edma_cif
-                        self.log("  Superflip symmetry uses the current EDMA CIF as referencefile because no atom-site reference CIF is available.")
+                    self.log("  Superflip symmetry uses only the deblurred XPLOR modelfile; no referencefile is written.")
                     deblur_map = run_superflip_symmetrize_map(
                         cycle_dir=cycle_dir,
                         prefix=sym_prefix,
                         ref_ctx=ref_ctx,
                         input_map=deblur_map,
-                        reference_file=symmetry_reference_file,
                         superflip_exe=cfg.superflip_exe,
                         output_format=cfg.output_format,
                         voxel=cfg.voxel,
