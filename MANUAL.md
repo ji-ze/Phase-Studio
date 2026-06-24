@@ -35,15 +35,23 @@ When `Jana .inflip` input mode is selected, Phase Studio treats the `.inflip`
 file as the authoritative crystallographic input unless the user explicitly
 selects override files.
 
-### 2.2 External HKL And Reference CIF Inputs
+### 2.2 External HKL And Reference Inputs
 
 External input mode is used when reflection data and reference metadata are
 available as separate files. In this mode:
 
 - the HKL file supplies observed reflection records,
-- the reference CIF supplies the unit cell, space group, composition and
-  optional atomic coordinates for metrics,
-- optional XPLOR or CIF files may be used as Superflip `referencefile` inputs.
+- `External reference file` is the single reference selector,
+- CIF-compatible reference files supply the unit cell, space group, composition
+  and optional atomic coordinates for metrics,
+- Jana, XPLOR and CCP4 density maps are written as Superflip `referencefile`
+  inputs, with the format inferred from the filename.
+
+Fully external HKL mode still requires a CIF-compatible reference file because
+HKL data alone do not contain the crystallographic model metadata needed by
+EDMA, completeness analysis and structure metrics. In Jana `.inflip` modes,
+map reference files can be used because the `.inflip` supplies the missing cell,
+space group and composition.
 
 ### 2.3 HKL Data Formats
 
@@ -130,17 +138,17 @@ The Paths tab defines the crystallographic inputs and external executables.
 Important fields:
 
 - `Input data mode`: selects Jana `.inflip`, Jana `.inflip` with overrides, or
-  fully external HKL + reference CIF input.
+  fully external HKL + CIF reference input.
 - `Jana .inflip`: primary Jana/Superflip input file.
 - `External HKL`: external reflection file used in override or external mode.
 - `HKL data format`: controls interpretation of observed values and sigmas.
 - `Test HKL load`: opens a diagnostic table showing parsed reflection records.
 - `Analyze completeness`: opens the reflection completeness and intensity
   statistics window.
-- `External reference CIF`: source of unit cell, space group, composition and
-  optional reference atoms in external mode.
-- `Superflip referencefile`: explicit Superflip `referencefile` input, written
-  only when selected.
+- `External reference file`: the single reference selector. CIF-compatible
+  files provide crystallographic metadata and atom sites; Jana/XPLOR/CCP4 maps
+  are passed to Superflip as `referencefile` inputs without an explicit
+  `referenceformat` keyword.
 - `First-cycle modelfile`: optional model or map for the first Superflip cycle.
 - `Work directory`: output directory for generated inputs, maps, logs and
   metrics.
@@ -429,7 +437,7 @@ or place `superflip_original.exe` next to the wrapper.
 Check:
 
 - unit cell and space group source,
-- whether the correct Jana `.inflip` or reference CIF is selected,
+- whether the correct Jana `.inflip` or CIF-compatible reference file is selected,
 - `HKL data format`,
 - whether the data are intensities or amplitudes,
 - whether the reflection file contains merged or unmerged data.

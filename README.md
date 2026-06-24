@@ -6,14 +6,16 @@ deblurring, EDMA peak extraction, reflection-data diagnostics and Jana2020
 hand-off tools in one reproducible Python project.
 
 The application is intended for crystallographers working with electron-density
-or electrostatic-potential maps, Jana `.inflip` inputs, external HKL/CIF data
+or electrostatic-potential maps, Jana `.inflip` inputs, external HKL/reference data
 and iterative model-seeded Superflip workflows.
 
 ## Key Features
 
 - Direct use of Jana2020 `.inflip` files, including embedded `fbegin/endf`
   reflection blocks, cell parameters, space group and composition.
-- External HKL and reference CIF/XPLOR override modes.
+- External HKL and unified reference-file modes. The reference file may be a
+  CIF-compatible structure or a Jana/XPLOR/CCP4 density map; fully external HKL
+  mode requires a CIF-compatible structure for crystallographic metadata.
 - Superflip input generation with explicit control of `dataformat`,
   `dataitemwidths`, `referencefile`, `modelfile`, output formats and common
   charge-flipping parameters.
@@ -108,8 +110,8 @@ $env:SHARPED_API_TOKEN = "your-token"
 
 1. Select an input mode:
    - `Jana .inflip`,
-   - `Jana .inflip with external HKL/CIF overrides`,
-   - `External HKL + reference CIF`.
+   - `Jana .inflip with external HKL/reference overrides`,
+   - `External HKL + CIF reference`.
 2. Set or verify `HKL data format`.
    In `auto` mode Phase Studio first reads Superflip `dataformat` /
    `dataitemwidths` from a Jana `.inflip` file when available.

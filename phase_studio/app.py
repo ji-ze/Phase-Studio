@@ -8,7 +8,7 @@ persistent settings and standardized metric plotting.
 
 Reference CIF supplies cell, symmetry, composition and metrics. Superflip
 referencefile is optional and is written only when the user explicitly
-selects a Superflip referencefile (CIF structure or XPLOR density map). The first Superflip run has no
+selects an external reference file (CIF/Jana/XPLOR/CCP4). The first Superflip run has no
 modelfile. Later cycles can use EDMA CIF coordinates, raw Superflip XPLOR, or
 deblurred XPLOR as Superflip modelfile.
 
@@ -175,8 +175,8 @@ INPUT_MODE_EXTERNAL = "external_hkl_cif"
 
 INPUT_MODE_LABELS = {
     INPUT_MODE_INFLIP: "Jana .inflip",
-    INPUT_MODE_INFLIP_OVERRIDES: "Jana .inflip with external HKL/CIF overrides",
-    INPUT_MODE_EXTERNAL: "External HKL + reference CIF",
+    INPUT_MODE_INFLIP_OVERRIDES: "Jana .inflip with external HKL/reference overrides",
+    INPUT_MODE_EXTERNAL: "External HKL + CIF reference",
 }
 
 def normalize_input_source_mode(value: str) -> str:
@@ -298,6 +298,10 @@ class HklAnalysisRequest:
     ref_text: str
     work_text: str
     configured_mode: str
+
+REFERENCE_STRUCTURE_SUFFIXES = {".cif", ".ins", ".res"}
+REFERENCE_DENSITY_SUFFIXES = {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"}
+REFERENCE_FILE_SUFFIXES = REFERENCE_STRUCTURE_SUFFIXES | REFERENCE_DENSITY_SUFFIXES
 
 # -----------------------------------------------------------------------------
 # CIF / crystallographic helpers
@@ -1107,6 +1111,110 @@ def is_systematically_absent_hkl(hkl: Tuple[int, int, int], sg: gemmi.SpaceGroup
             continue
     return False
 
+def reciprocal_metric_tensor(cell: gemmi.UnitCell) -> np.ndarray:
+    alpha = math.radians(float(cell.alpha))
+    beta = math.radians(float(cell.beta))
+    gamma = math.radians(float(cell.gamma))
+    direct = np.asarray(
+        [
+            [cell.a * cell.a, cell.a * cell.b * math.cos(gamma), cell.a * cell.c * math.cos(beta)],
+            [cell.a * cell.b * math.cos(gamma), cell.b * cell.b, cell.b * cell.c * math.cos(alpha)],
+            [cell.a * cell.c * math.cos(beta), cell.b * cell.c * math.cos(alpha), cell.c * cell.c],
+        ],
+        dtype=np.float64,
+    )
+    return np.linalg.inv(direct)
+
+def hkl_q2_from_metric(gstar: np.ndarray, h: int, k: int, l: int) -> float:
+    return (
+        float(gstar[0, 0]) * h * h
+        + 2.0 * float(gstar[0, 1]) * h * k
+        + 2.0 * float(gstar[0, 2]) * h * l
+        + float(gstar[1, 1]) * k * k
+        + 2.0 * float(gstar[1, 2]) * k * l
+        + float(gstar[2, 2]) * l * l
+    )
+
+def sintheta_over_lambda_from_metric(gstar: np.ndarray, h: int, k: int, l: int) -> float:
+    q2 = hkl_q2_from_metric(gstar, h, k, l)
+    return 0.5 * math.sqrt(q2) if q2 > 0.0 and math.isfinite(q2) else math.nan
+
+def hkl_symmetry_cache(sg: Optional[gemmi.SpaceGroup]) -> Tuple[List[Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]]], List[Tuple[Tuple[int, int, int], Tuple[float, float, float]]]]:
+    matrices: List[Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]]] = [
+        ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+    ]
+    absence_ops: List[Tuple[Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]], Tuple[float, float, float]]] = []
+    if sg is None:
+        return matrices, absence_ops
+    seen = {matrices[0]}
+    try:
+        ops = full_spacegroup_ops(sg)
+    except Exception:
+        ops = []
+    for op in ops:
+        parsed = direct_rotation_translation_from_triplet(op.triplet())
+        if parsed is None:
+            continue
+        direct_rotation, translation = parsed
+        try:
+            reciprocal = np.linalg.inv(np.asarray(direct_rotation, dtype=np.float64)).T
+        except Exception:
+            continue
+        rounded = np.rint(reciprocal).astype(int)
+        if not np.allclose(reciprocal, rounded, atol=1e-8):
+            continue
+        matrix = tuple(tuple(int(v) for v in row) for row in rounded.tolist())  # type: ignore[assignment]
+        if matrix not in seen:
+            matrices.append(matrix)
+            seen.add(matrix)
+        absence_ops.append((matrix, (float(translation[0]), float(translation[1]), float(translation[2]))))
+    return matrices, absence_ops
+
+def apply_hkl_matrix(
+    matrix: Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]],
+    h: int,
+    k: int,
+    l: int,
+) -> Tuple[int, int, int]:
+    return (
+        matrix[0][0] * h + matrix[0][1] * k + matrix[0][2] * l,
+        matrix[1][0] * h + matrix[1][1] * k + matrix[1][2] * l,
+        matrix[2][0] * h + matrix[2][1] * k + matrix[2][2] * l,
+    )
+
+def is_systematically_absent_hkl_cached(
+    h: int,
+    k: int,
+    l: int,
+    absence_ops: Sequence[Tuple[Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]], Tuple[float, float, float]]],
+) -> bool:
+    for matrix, translation in absence_ops:
+        if apply_hkl_matrix(matrix, h, k, l) != (h, k, l):
+            continue
+        phase = h * translation[0] + k * translation[1] + l * translation[2]
+        if abs(phase - round(phase)) > 1e-6:
+            return True
+    return False
+
+def canonical_hkl_cached(
+    h: int,
+    k: int,
+    l: int,
+    matrices: Sequence[Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]]],
+) -> Tuple[int, int, int]:
+    best = (int(h), int(k), int(l))
+    inverted = (-best[0], -best[1], -best[2])
+    if inverted < best:
+        best = inverted
+    for matrix in matrices:
+        transformed = apply_hkl_matrix(matrix, h, k, l)
+        if transformed < best:
+            best = transformed
+        inverted = (-transformed[0], -transformed[1], -transformed[2])
+        if inverted < best:
+            best = inverted
+    return best
+
 def canonical_hkl(hkl: Tuple[int, int, int], sg: Optional[gemmi.SpaceGroup] = None) -> Tuple[int, int, int]:
     equivalents = [tuple(int(x) for x in hkl), tuple(-int(x) for x in hkl)]
     if sg is not None:
@@ -1168,31 +1276,65 @@ def format_resolution_d(value: Optional[float], digits: int = 5) -> str:
         return "n/a"
     return f"{float(value):.{digits}g} A"
 
+def referencefile_mode_for_path(reference_path: Optional[Path]) -> str:
+    if reference_path is None:
+        return "omit"
+    suffix = reference_path.suffix.lower()
+    if suffix in REFERENCE_STRUCTURE_SUFFIXES:
+        return "reference_cif"
+    if suffix in REFERENCE_DENSITY_SUFFIXES:
+        return "reference_density"
+    return "reference_density"
+
+def theoretical_unique_hkl_stl_from_observed(
+    reflections: Sequence[Reflection],
+    cell: gemmi.UnitCell,
+    sg: gemmi.SpaceGroup,
+    d_min: float,
+) -> Dict[Tuple[int, int, int], float]:
+    if not reflections or not math.isfinite(d_min) or d_min <= 0:
+        return {}
+    gstar = reciprocal_metric_tensor(cell)
+    qmax = 1.0 / (float(d_min) * float(d_min))
+    hmax = int(math.ceil(float(cell.a) / float(d_min))) + 1
+    kmax = int(math.ceil(float(cell.b) / float(d_min))) + 1
+    matrices, absence_ops = hkl_symmetry_cache(sg)
+    unique_stl: Dict[Tuple[int, int, int], float] = {}
+    g00, g01, g02 = float(gstar[0, 0]), float(gstar[0, 1]), float(gstar[0, 2])
+    g11, g12, g22 = float(gstar[1, 1]), float(gstar[1, 2]), float(gstar[2, 2])
+    for h in range(-hmax, hmax + 1):
+        h2 = h * h
+        for k in range(-kmax, kmax + 1):
+            base = g00 * h2 + 2.0 * g01 * h * k + g11 * k * k - qmax
+            linear_l = 2.0 * (g02 * h + g12 * k)
+            disc = linear_l * linear_l - 4.0 * g22 * base
+            if disc < -1e-12:
+                continue
+            root = math.sqrt(max(0.0, disc))
+            lo_l = int(math.ceil((-linear_l - root) / (2.0 * g22) - 1e-10))
+            hi_l = int(math.floor((-linear_l + root) / (2.0 * g22) + 1e-10))
+            for l in range(lo_l, hi_l + 1):
+                if (h, k, l) == (0, 0, 0):
+                    continue
+                q2 = g00 * h2 + 2.0 * g01 * h * k + 2.0 * g02 * h * l + g11 * k * k + 2.0 * g12 * k * l + g22 * l * l
+                if q2 <= 0.0 or q2 > qmax + 1e-9:
+                    continue
+                if is_systematically_absent_hkl_cached(h, k, l, absence_ops):
+                    continue
+                key = canonical_hkl_cached(h, k, l, matrices)
+                stl = 0.5 * math.sqrt(q2)
+                previous = unique_stl.get(key)
+                if previous is None or stl < previous:
+                    unique_stl[key] = stl
+    return unique_stl
+
 def theoretical_unique_hkls_from_observed(
     reflections: Sequence[Reflection],
     cell: gemmi.UnitCell,
     sg: gemmi.SpaceGroup,
     d_min: float,
 ) -> List[Tuple[int, int, int]]:
-    if not reflections or not math.isfinite(d_min) or d_min <= 0:
-        return []
-    hmax = max(abs(int(r.h)) for r in reflections)
-    kmax = max(abs(int(r.k)) for r in reflections)
-    lmax = max(abs(int(r.l)) for r in reflections)
-    unique: Dict[Tuple[int, int, int], Tuple[int, int, int]] = {}
-    for h in range(-hmax, hmax + 1):
-        for k in range(-kmax, kmax + 1):
-            for l in range(-lmax, lmax + 1):
-                if (h, k, l) == (0, 0, 0):
-                    continue
-                d = reflection_d_spacing(cell, h, k, l)
-                if not math.isfinite(d) or d < d_min - 1e-9:
-                    continue
-                if is_systematically_absent_hkl((h, k, l), sg):
-                    continue
-                key = canonical_hkl((h, k, l), sg)
-                unique.setdefault(key, (h, k, l))
-    return list(unique.values())
+    return list(theoretical_unique_hkl_stl_from_observed(reflections, cell, sg, d_min).keys())
 
 def analyze_hkl_data(
     hkl_path: Path,
@@ -1207,25 +1349,25 @@ def analyze_hkl_data(
     value_col, sigma_col, include_000 = reflection_columns_for_mode(mode)
     raw = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
     unique = merge_duplicate_reflections(raw)
+    gstar = reciprocal_metric_tensor(cell)
     ds = [
-        reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l))
+        1.0 / math.sqrt(q2)
         for r in unique
+        for q2 in [hkl_q2_from_metric(gstar, int(r.h), int(r.k), int(r.l))]
         if not (int(r.h) == 0 and int(r.k) == 0 and int(r.l) == 0)
+        and q2 > 0.0
+        and math.isfinite(q2)
     ]
     ds = [d for d in ds if math.isfinite(d) and d > 0]
     if not ds:
         raise ValueError("No non-zero HKL reflections with finite d-spacing were found.")
     d_min = min(ds)
-    theory = theoretical_unique_hkls_from_observed(unique, cell, sg, d_min)
-    theory_records = [
-        (canonical_hkl((int(h), int(k), int(l)), sg), reflection_sintheta_over_lambda(cell, int(h), int(k), int(l)))
-        for h, k, l in theory
-    ]
-    theory_records = [(key, stl) for key, stl in theory_records if math.isfinite(stl) and stl > 0]
+    matrices, _absence_ops = hkl_symmetry_cache(sg)
+    theory_stl_by_key = theoretical_unique_hkl_stl_from_observed(unique, cell, sg, d_min)
     observed_records = [
         (
-            canonical_hkl((int(r.h), int(r.k), int(r.l)), sg),
-            reflection_sintheta_over_lambda(cell, int(r.h), int(r.k), int(r.l)),
+            canonical_hkl_cached(int(r.h), int(r.k), int(r.l), matrices),
+            sintheta_over_lambda_from_metric(gstar, int(r.h), int(r.k), int(r.l)),
             reflection_primary_signal_to_noise(r, mode),
         )
         for r in unique
@@ -1236,39 +1378,49 @@ def analyze_hkl_data(
         raise ValueError("Could not calculate sin(theta)/lambda values for the HKL data.")
     bins: List[Dict[str, float]] = []
     edges = np.linspace(0.0, max_stl, max(2, int(bin_count)) + 1)
-    for idx in range(len(edges) - 1):
+    bin_total = len(edges) - 1
+    theory_counts = np.zeros(bin_total, dtype=np.int64)
+    observed_counts = np.zeros(bin_total, dtype=np.int64)
+    signal_sums = np.zeros(bin_total, dtype=np.float64)
+    signal_counts = np.zeros(bin_total, dtype=np.int64)
+    theory_stls = np.asarray([stl for stl in theory_stl_by_key.values() if math.isfinite(float(stl)) and float(stl) > 0], dtype=np.float64)
+    if theory_stls.size:
+        theory_bin_indices = np.searchsorted(edges, theory_stls, side="left") - 1
+        theory_bin_indices = np.clip(theory_bin_indices, 0, bin_total - 1)
+        theory_counts += np.bincount(theory_bin_indices, minlength=bin_total)[:bin_total]
+    observed_stl_by_key: Dict[Tuple[int, int, int], float] = {}
+    for key, stl, _ios in observed_records:
+        if key in theory_stl_by_key:
+            observed_stl_by_key[key] = min(stl, observed_stl_by_key.get(key, stl))
+    observed_theory_stls = np.asarray([stl for stl in observed_stl_by_key.values() if math.isfinite(float(stl)) and float(stl) > 0], dtype=np.float64)
+    if observed_theory_stls.size:
+        observed_bin_indices = np.searchsorted(edges, observed_theory_stls, side="left") - 1
+        observed_bin_indices = np.clip(observed_bin_indices, 0, bin_total - 1)
+        observed_counts += np.bincount(observed_bin_indices, minlength=bin_total)[:bin_total]
+    for _key, stl, ios in observed_records:
+        if ios is None or not math.isfinite(float(ios)):
+            continue
+        bin_idx = int(np.searchsorted(edges, float(stl), side="left") - 1)
+        if 0 <= bin_idx < bin_total:
+            signal_sums[bin_idx] += float(ios)
+            signal_counts[bin_idx] += 1
+    for idx in range(bin_total):
         lo = float(edges[idx])
         hi = float(edges[idx + 1])
-        if idx == 0:
-            theory_bin = {key for key, stl in theory_records if lo <= stl <= hi}
-            observed_bin = {key for key, stl, _ in observed_records if lo <= stl <= hi}
-            ios_values = [ios for _, stl, ios in observed_records if lo <= stl <= hi and ios is not None]
-        else:
-            theory_bin = {key for key, stl in theory_records if lo < stl <= hi}
-            observed_bin = {key for key, stl, _ in observed_records if lo < stl <= hi}
-            ios_values = [ios for _, stl, ios in observed_records if lo < stl <= hi and ios is not None]
-        observed_in_theory = observed_bin & theory_bin if theory_bin else observed_bin
-        completeness = 100.0 * len(observed_in_theory) / len(theory_bin) if theory_bin else 0.0
-        mean_signal = float(np.mean(np.asarray(ios_values, dtype=np.float64))) if ios_values else math.nan
+        completeness = 100.0 * float(observed_counts[idx]) / float(theory_counts[idx]) if theory_counts[idx] else 0.0
+        mean_signal = float(signal_sums[idx] / signal_counts[idx]) if signal_counts[idx] else math.nan
         bins.append(
             {
                 "lo": lo,
                 "hi": hi,
                 "center": 0.5 * (lo + hi),
-                "theory": float(len(theory_bin)),
-                "observed": float(len(observed_in_theory)),
+                "theory": float(theory_counts[idx]),
+                "observed": float(observed_counts[idx]),
                 "completeness": completeness,
                 "mean_i_over_sigma": mean_signal,
                 "mean_signal_to_noise": mean_signal,
             }
         )
-    theory_stl_by_key: Dict[Tuple[int, int, int], float] = {}
-    for key, stl in theory_records:
-        theory_stl_by_key[key] = min(stl, theory_stl_by_key.get(key, stl))
-    observed_stl_by_key: Dict[Tuple[int, int, int], float] = {}
-    for key, stl, _ios in observed_records:
-        if key in theory_stl_by_key:
-            observed_stl_by_key[key] = min(stl, observed_stl_by_key.get(key, stl))
     theory_sorted = sorted((stl, key) for key, stl in theory_stl_by_key.items())
     observed_sorted = sorted((stl, key) for key, stl in observed_stl_by_key.items())
     d_full_98: Optional[float] = None
@@ -2337,20 +2489,21 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
             ref_name = parts[1].strip().strip('"') if len(parts) > 1 else ""
             if ref_name:
                 settings["superflip_referencefile"] = ref_name
+                settings["reference_cif"] = ref_name
             suffix = Path(ref_name).suffix.lower()
-            if suffix == ".xplor":
-                settings["referencefile_mode"] = "reference_xplor"
-            elif suffix in {".cif", ".ins", ".res"}:
+            if suffix in REFERENCE_DENSITY_SUFFIXES:
+                settings["referencefile_mode"] = "reference_density"
+            elif suffix in REFERENCE_STRUCTURE_SUFFIXES:
                 settings["referencefile_mode"] = "reference_cif"
             elif ref_name:
-                settings["referencefile_mode"] = "reference_cif"
+                settings["referencefile_mode"] = "reference_density"
         elif key == "referenceformat":
             saw_reference_keyword = True
             fmt = parts[1].strip().lower() if len(parts) > 1 else ""
-            if fmt == "xplor":
-                settings["referencefile_mode"] = "reference_xplor"
-            elif fmt == "jana":
-                settings["referencefile_mode"] = "omit"
+            if fmt in {"jana", "xplor", "ccp4"}:
+                settings["referencefile_mode"] = "reference_density"
+            elif fmt == "cif":
+                settings["referencefile_mode"] = "reference_cif"
         elif key == "dataformat":
             items = [p.strip().lower() for p in parts[1:]]
             if "intensity" in items:
@@ -3587,12 +3740,10 @@ class PathRow(QWidget):
         self.button.setToolTip("Browse for " + self.label.text())
 
 INPUT_TOOLTIPS = {
-    "input_source_mode": "Choose how crystallographic input is supplied: use the Jana .inflip as the primary source, use it with selected external HKL/CIF replacements, or use an external HKL plus reference CIF without a Jana input file.",
+    "input_source_mode": "Choose how crystallographic input is supplied: use the Jana .inflip as the primary source, use it with selected external HKL/reference replacements, or use an external HKL plus CIF reference without a Jana input file.",
     "jana_inflip": "Jana2020 Superflip input file. In Jana modes its fbegin/endf reflection block is the default HKL source, and its cell/space-group/composition keywords can provide the reference metadata.",
     "hkl": "External reflection file. In Jana override mode it replaces only the fbegin/endf reflection block; in external mode it is the required reflection source.",
-    "reference_cif": "External reference CIF. In Jana override mode it replaces only the reference structure; in external mode it is the required crystallographic reference model for cell, symmetry, composition and RMSD metrics.",
-    "superflip_reference_xplor": "Optional XPLOR density map used only when Superflip referencefile mode is reference_xplor.",
-    "superflip_referencefile": "Optional Superflip referencefile used without replacing the Jana .inflip HKL or metadata. Accepts CIF structures or XPLOR density maps; useful in Jana .inflip mode for bestdensities/reference scoring.",
+    "reference_cif": "External reference file. CIF/INS/RES files provide the crystallographic reference model; Jana/XPLOR/CCP4 density maps are written as Superflip referencefile inputs. External HKL-only mode requires a CIF-compatible reference.",
     "first_cycle_modelfile": "Optional external density or structure model for cycle 1. Supported Superflip modelfile inputs are XPLOR, CCP4 and CIF.",
     "work_dir": "Output directory for generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics.",
     "superflip_exe": "Absolute path to the original Jana2020 Superflip executable. Default: C:\\Jana2020\\SUPERFLIP\\superflip_original.exe. Do not select the Phase Studio wrapper named superflip.exe.",
@@ -3625,7 +3776,7 @@ INPUT_TOOLTIPS = {
     "export_superflip_jana": "Request Jana density and reflection outputs from Superflip: m81 density map and m80 phased-reflection list.",
     "export_standard_hkl": "Write a standardized observed-reflection export with h k l I sigma(I) phase(deg). Phase is 0 unless supplied by the selected input mode.",
     "export_jana_project": "Create a Jana2020 export folder for each cycle with Superflip m80/m81, EDMA m40, maps, CIF and logs.",
-    "referencefile_mode": "Internal automatic setting. Superflip referencefile is written only when a Superflip referencefile path is selected; otherwise it is omitted.",
+    "referencefile_mode": "Internal automatic setting derived from External reference file. Phase Studio writes only referencefile and lets Superflip infer jana/xplor/ccp4/cif from the filename.",
     "voxel": "Superflip voxel grid. The default omit/blank skips the keyword. Use three integers, for example 180 80 160, or AUTO to compute a 0.2 A grid from the unit cell.",
     "bestdensities_count": "First argument of bestdensities: how many best density maps Superflip keeps.",
     "bestdensities_metric": "Second argument of bestdensities: rvalue, peakiness, symmetry or reference.",
@@ -3876,8 +4027,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         hkl_button_row.addWidget(self.test_hkl_btn)
         hkl_button_row.addWidget(self.analyze_hkl_btn)
         hkl_tools_form.addRow("", hkl_button_row)
-        self._add_path(paths_layout, "reference_cif", "External reference CIF", "", "file", "CIF files (*.cif);;All files (*)")
-        self._add_path(paths_layout, "superflip_referencefile", "Superflip referencefile", "", "file", "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)")
+        self._add_path(paths_layout, "reference_cif", "External reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
         self._add_path(paths_layout, "first_cycle_modelfile", "First-cycle modelfile", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
         self._add_path(paths_layout, "work_dir", "Work directory", str(cwd / "iterative_superflip_qt_run"), "dir")
         self._add_path(paths_layout, "superflip_exe", "Superflip exe/path", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
@@ -3934,7 +4084,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(superflip_form, "export_standard_hkl", "Save standardized HKL I/sigma/phase", False)
         self._add_checkbox(superflip_form, "export_jana_project", "Export complete Jana2020 project folder", False)
         referencefile_note = QLabel(
-            "referencefile is automatic: omitted by default; written only when a Superflip referencefile is selected on the Paths tab."
+            "referencefile is automatic: omitted by default; written only when an External reference file is selected on the Paths tab."
         )
         referencefile_note.setWordWrap(True)
         superflip_form.addRow("referencefile", referencefile_note)
@@ -4132,8 +4282,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         for key, enabled in (
             ("jana_inflip", jana_enabled),
             ("hkl", override_enabled or external_enabled),
-            ("reference_cif", override_enabled or external_enabled),
-            ("superflip_referencefile", True),
+            ("reference_cif", True),
         ):
             widget = self.inputs.get(key)
             if hasattr(widget, "setEnabled"):
@@ -4211,9 +4360,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if self.settings.value("inputs/plimit_deblur", None) is None and "plimit_deblur" in self.inputs:
                 self._set_widget_value_from_string(self.inputs["plimit_deblur"], str(old_plimit))
         legacy_reference_xplor = self.settings.value("inputs/superflip_reference_xplor", None)
-        referencefile_widget = self.inputs.get("superflip_referencefile")
-        if legacy_reference_xplor and referencefile_widget is not None and not self._widget_value_as_string(referencefile_widget).strip():
-            self._set_widget_value_from_string(referencefile_widget, str(legacy_reference_xplor))
+        legacy_superflip_referencefile = self.settings.value("inputs/superflip_referencefile", None)
+        referencefile_widget = self.inputs.get("reference_cif")
+        if referencefile_widget is not None and not self._widget_value_as_string(referencefile_widget).strip():
+            legacy_reference = legacy_superflip_referencefile or legacy_reference_xplor
+            if legacy_reference:
+                self._set_widget_value_from_string(referencefile_widget, str(legacy_reference))
         self._sync_input_source_mode_widgets()
         geom = self.settings.value("window/geometry", None)
         if geom is not None:
@@ -4230,6 +4382,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             parsed = parse_inflip_settings(Path(path))
             if "superflip_reference_xplor" in parsed and "superflip_referencefile" not in parsed:
                 parsed["superflip_referencefile"] = parsed["superflip_reference_xplor"]
+            if "superflip_referencefile" in parsed and "reference_cif" not in parsed:
+                parsed["reference_cif"] = parsed["superflip_referencefile"]
             applied = 0
             for key, value in parsed.items():
                 widget = self.inputs.get(key)
@@ -4266,7 +4420,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             hkl_path = Path(request.hkl_text).expanduser().resolve()
             if not hkl_path.is_file():
                 raise FileNotFoundError(f"HKL file not found: {hkl_path}")
-            if request.ref_text and Path(request.ref_text).expanduser().is_file():
+            if request.ref_text and Path(request.ref_text).expanduser().is_file() and Path(request.ref_text).suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
                 ref_path = Path(request.ref_text).expanduser().resolve()
                 cell, sg, hm = parse_cif_cell_and_sg(ref_path)
                 source_note = f"HKL source: {hkl_path}; cell/symmetry source: {ref_path}"
@@ -4274,7 +4428,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 cell, sg, hm, _composition = parse_inflip_crystallography(jana_path)
                 source_note = f"HKL source: {hkl_path}; cell/symmetry source: {jana_path}"
             else:
-                raise FileNotFoundError("Select a reference CIF or Jana .inflip so Phase Studio can calculate d-spacings and completeness.")
+                raise FileNotFoundError("Select a CIF-compatible reference file or Jana .inflip so Phase Studio can calculate d-spacings and completeness.")
         if use_inflip_hkl:
             data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
         else:
@@ -5065,21 +5219,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if not atoms:
             ax.text2D(0.5, 0.5, "No structure", ha="center", va="center", color="#667085", transform=ax.transAxes)
             return
-        non_h_atoms = [a for a in atoms if clean_element_symbol(a.element) not in {"H", "D"}]
+        non_h_atoms = [a for a in atoms if clean_element_symbol(a.element) not in {"H", "D", "He"}]
         if not non_h_atoms:
-            ax.text2D(0.5, 0.5, "No non-H atoms", ha="center", va="center", color="#667085", transform=ax.transAxes)
+            ax.text2D(0.5, 0.5, "No non-H/He atoms", ha="center", va="center", color="#667085", transform=ax.transAxes)
             return
-        plot_atoms = list(non_h_atoms)
-        if len(plot_atoms) > 600:
-            idx = np.linspace(0, len(plot_atoms) - 1, 600, dtype=int)
-            plot_atoms = [plot_atoms[int(i)] for i in idx]
+        ranked_atoms = sorted(non_h_atoms, key=lambda atom: element_atomic_number(atom.element), reverse=True)
+        plot_atoms = ranked_atoms[:800]
         coords = np.asarray([wrap_frac(a.frac) for a in plot_atoms], dtype=np.float64)
         colors = [self._element_color(a.element) for a in plot_atoms]
         sizes = [max(12.0, min(70.0, 10.0 + 1.2 * element_atomic_number(a.element))) for a in plot_atoms]
         ax.scatter(coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors, alpha=0.86, edgecolors="#ffffff", linewidths=0.35)
         shown = len(plot_atoms)
-        suffix = "" if shown == len(non_h_atoms) else f"; {shown} shown"
-        ax.text2D(0.02, 0.02, f"{len(non_h_atoms)} non-H atoms{suffix}", color="#667085", fontsize=8, transform=ax.transAxes)
+        suffix = "" if shown == len(non_h_atoms) else f"; first {shown} heaviest shown"
+        ax.text2D(0.02, 0.02, f"{len(non_h_atoms)} non-H/He atoms{suffix}", color="#667085", fontsize=8, transform=ax.transAxes)
 
     def _safe_parse_structure(self, path: Optional[Path]) -> List[AtomSite]:
         if path is None or not Path(path).is_file():
@@ -5123,28 +5275,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def get_config(self) -> RunConfig:
         input_source_mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
-        reference_xplor_text = self._path_value("superflip_reference_xplor") if "superflip_reference_xplor" in self.inputs else ""
-        reference_xplor = Path(reference_xplor_text).expanduser().resolve() if reference_xplor_text else None
-        superflip_referencefile_text = self._path_value("superflip_referencefile") if "superflip_referencefile" in self.inputs else ""
-        superflip_referencefile = Path(superflip_referencefile_text).expanduser().resolve() if superflip_referencefile_text else None
+        reference_xplor: Optional[Path] = None
         first_model_text = self._path_value("first_cycle_modelfile")
         first_model = Path(first_model_text).expanduser().resolve() if first_model_text else None
         jana_inflip_text = self._path_value("jana_inflip") if "jana_inflip" in self.inputs else ""
         jana_inflip = Path(jana_inflip_text).expanduser().resolve() if jana_inflip_text else None
         hkl_text = self._path_value("hkl")
         reference_cif_text = self._path_value("reference_cif")
+        external_reference_file = Path(reference_cif_text).expanduser().resolve() if reference_cif_text else None
+        superflip_referencefile = external_reference_file
         hkl_path = Path(hkl_text).expanduser().resolve() if hkl_text else Path("__phase_studio_no_external_hkl_selected__").resolve()
-        reference_cif_path = Path(reference_cif_text).expanduser().resolve() if reference_cif_text else Path("__phase_studio_no_external_reference_cif_selected__").resolve()
-        if input_source_mode == INPUT_MODE_INFLIP:
+        if external_reference_file is not None and external_reference_file.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
+            reference_cif_path = external_reference_file
+        else:
+            reference_cif_path = Path("__phase_studio_no_external_reference_cif_selected__").resolve()
+        if input_source_mode == INPUT_MODE_INFLIP and external_reference_file is None:
             hkl_path = Path("__phase_studio_use_hkl_from_inflip__").resolve()
             reference_cif_path = Path("__phase_studio_use_reference_from_inflip__").resolve()
-            reference_xplor = None
-        if superflip_referencefile is not None:
-            referencefile_mode = "reference_xplor" if superflip_referencefile.suffix.lower() == ".xplor" else "reference_cif"
-        elif reference_xplor is not None:
-            referencefile_mode = "reference_xplor"
-        else:
-            referencefile_mode = "omit"
+            superflip_referencefile = None
+        referencefile_mode = referencefile_mode_for_path(superflip_referencefile)
         modelfile_source_value = normalize_modelfile_source(self._combo_value("modelfile_source"))
         cycles_value = max(1, self._spin_value("cycles"))
         if modelfile_source_value == "none":
@@ -5237,7 +5386,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             mode = normalize_input_source_mode(cfg.input_source_mode)
             hkl_text = self._path_value("hkl").strip()
             ref_text = self._path_value("reference_cif").strip()
-            xplor_text = self._path_value("superflip_reference_xplor").strip() if "superflip_reference_xplor" in self.inputs else ""
+            ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
             if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
                 if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
                     raise FileNotFoundError("Jana .inflip input mode requires a readable Jana .inflip file.")
@@ -5246,30 +5395,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 else:
                     if hkl_text and not cfg.hkl.is_file():
                         raise FileNotFoundError(f"HKL override not found: {cfg.hkl}")
-                    if ref_text and not cfg.reference_cif.is_file():
-                        raise FileNotFoundError(f"Reference CIF override not found: {cfg.reference_cif}")
-                    if xplor_text and (cfg.superflip_reference_xplor is None or not cfg.superflip_reference_xplor.is_file()):
-                        raise FileNotFoundError(f"Reference XPLOR override not found: {cfg.superflip_reference_xplor}")
+                    if ref_text and (cfg.superflip_referencefile is None or not cfg.superflip_referencefile.is_file()):
+                        raise FileNotFoundError(f"External reference file not found: {cfg.superflip_referencefile}")
                     if not hkl_text:
                         self.log_text.append("HKL override is empty; the Jana .inflip fbegin/endf block will be used.")
                     if not ref_text:
-                        self.log_text.append("Reference CIF override is empty; the Jana .inflip cell/space group/composition will be used.")
+                        self.log_text.append("External reference file is empty; the Jana .inflip cell/space group/composition will be used.")
             else:
-                for p, label in [(cfg.hkl, "External HKL"), (cfg.reference_cif, "External reference CIF")]:
-                    if not p.is_file():
-                        raise FileNotFoundError(f"{label} not found: {p}")
+                if not cfg.hkl.is_file():
+                    raise FileNotFoundError(f"External HKL not found: {cfg.hkl}")
+                if cfg.superflip_referencefile is None or not cfg.superflip_referencefile.is_file():
+                    raise FileNotFoundError(f"External reference file not found: {cfg.superflip_referencefile}")
+                if ref_suffix not in REFERENCE_STRUCTURE_SUFFIXES:
+                    raise ValueError(
+                        "External HKL mode requires External reference file to be a CIF/INS/RES structure, "
+                        "because Phase Studio needs cell, symmetry, composition and reference atoms. "
+                        "Jana/XPLOR/CCP4 density reference files are supported in Jana .inflip modes."
+                    )
             if cfg.first_cycle_modelfile is not None and not cfg.first_cycle_modelfile.is_file():
                 raise FileNotFoundError(f"First-cycle modelfile not found: {cfg.first_cycle_modelfile}")
             if cfg.superflip_referencefile is not None:
                 if not cfg.superflip_referencefile.is_file():
-                    raise FileNotFoundError(f"Superflip referencefile not found: {cfg.superflip_referencefile}")
-                if cfg.superflip_referencefile.suffix.lower() not in {".cif", ".xplor"}:
-                    raise ValueError("Superflip referencefile must be a CIF structure or an XPLOR density map.")
-            if cfg.referencefile_mode == "reference_xplor" and cfg.superflip_referencefile is None and (mode == INPUT_MODE_EXTERNAL or bool(xplor_text)):
-                if cfg.superflip_reference_xplor is None:
-                    raise FileNotFoundError("Superflip referencefile mode is reference_xplor, but Reference XPLOR path is empty.")
-                if not cfg.superflip_reference_xplor.is_file():
-                    raise FileNotFoundError(f"Reference XPLOR file not found: {cfg.superflip_reference_xplor}")
+                    raise FileNotFoundError(f"External reference file not found: {cfg.superflip_referencefile}")
+                if ref_suffix not in REFERENCE_FILE_SUFFIXES:
+                    raise ValueError("External reference file must be a Jana, XPLOR, CCP4 or CIF-compatible file.")
             if not any([cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana, cfg.export_standard_hkl, cfg.export_jana_project]):
                 raise ValueError("Select at least one Superflip export: XPLOR, CCP4, Jana m80/m81, standardized HKL, or Jana2020 project.")
             if cfg.run_sharped and not cfg.sharped_api_token.strip():
@@ -5322,16 +5471,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         cfg.reference_cif = write_reference_cif_from_inflip(cfg.jana_inflip, cfg.work_dir / f"{cfg.jana_inflip.stem}_embedded_reference.cif")
                         self.log(f"Reference CIF synthesized from Jana .inflip cell/space group/composition: {cfg.reference_cif}")
                 else:
-                    self.log(f"Reference CIF override: {cfg.reference_cif}")
+                    self.log(f"External reference structure: {cfg.reference_cif}")
 
-                if cfg.superflip_referencefile is None and declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() == ".xplor":
+                if cfg.superflip_referencefile is None and declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() in REFERENCE_DENSITY_SUFFIXES:
                     cfg.superflip_referencefile = declared_ref
-                    cfg.referencefile_mode = "reference_xplor"
-                    self.log(f"Superflip referencefile declared by Jana .inflip: {cfg.superflip_referencefile}")
+                    cfg.referencefile_mode = referencefile_mode_for_path(cfg.superflip_referencefile)
+                    self.log(f"External reference density declared by Jana .inflip: {cfg.superflip_referencefile}")
             else:
                 self.log(f"External HKL source: {cfg.hkl}")
-                self.log(f"External reference CIF: {cfg.reference_cif}")
-            if str(cfg.referencefile_mode).strip().lower() == "reference_xplor" and cfg.superflip_reference_xplor is None and cfg.superflip_referencefile is None:
+                self.log(f"External reference file: {cfg.superflip_referencefile or cfg.reference_cif}")
+            if str(cfg.referencefile_mode).strip().lower() in {"reference_xplor", "reference_density"} and cfg.superflip_reference_xplor is None and cfg.superflip_referencefile is None:
                 cfg.referencefile_mode = "omit"
             ref_ctx = load_reference_context(cfg.reference_cif, cfg.work_dir, cfg.composition_override)
             # If the user selected a real CIF as Superflip referencefile in Jana .inflip mode,
@@ -5342,7 +5491,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     ref_ctx, cfg.superflip_referencefile, cfg.work_dir, cfg.composition_override, self.log
                 )
             self.msg_queue.put(("reference_atoms", expand_atoms_by_symmetry(ref_ctx.atoms, ref_ctx.spacegroup)))
-            self.log(f"Reference CIF: {cfg.reference_cif}")
+            self.log(f"Crystallographic reference CIF: {cfg.reference_cif}")
             self.log(f"Working reference CIF for EDMA/metrics: {ref_ctx.work_ref_cif}")
             self.log(f"Cell: {ref_ctx.cell.a:.5f} {ref_ctx.cell.b:.5f} {ref_ctx.cell.c:.5f} {ref_ctx.cell.alpha:.3f} {ref_ctx.cell.beta:.3f} {ref_ctx.cell.gamma:.3f}")
             self.log(f"Space group: {ref_ctx.spacegroup_hm}")
@@ -5387,25 +5536,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log(f"First-cycle external modelfile: {cfg.first_cycle_modelfile}")
             explicit_superflip_referencefile = cfg.superflip_referencefile
             if explicit_superflip_referencefile is not None:
-                self.log(f"Explicit Superflip referencefile: {explicit_superflip_referencefile}")
+                self.log(f"External reference file: {explicit_superflip_referencefile}")
                 if explicit_superflip_referencefile.suffix.lower() == ".cif" and not parse_cif_atoms(explicit_superflip_referencefile):
-                    raise ValueError(
-                        "The selected Superflip referencefile CIF contains no readable atom sites. "
-                        "Use a real structure CIF with atom coordinates, or omit the Superflip referencefile keyword."
+                    self.log(
+                        "Selected reference CIF contains no readable atom sites; it is used for "
+                        "crystallographic metadata only and the Superflip referencefile keyword is omitted."
                     )
+                    explicit_superflip_referencefile = None
             referencefile_mode = str(cfg.referencefile_mode or "none").strip().lower()
             if explicit_superflip_referencefile is not None:
-                referencefile_mode = "reference_xplor" if explicit_superflip_referencefile.suffix.lower() == ".xplor" else "reference_cif"
+                referencefile_mode = referencefile_mode_for_path(explicit_superflip_referencefile)
             elif referencefile_mode == "reference_cif" and explicit_superflip_referencefile is None:
                 referencefile_mode = "omit"
-                self.log("Superflip referencefile keyword omitted: no explicit Superflip referencefile was selected.")
+                self.log("Superflip referencefile keyword omitted: no external reference file was selected.")
             if referencefile_mode == "reference_cif":
                 if explicit_superflip_referencefile is not None:
-                    self.log(f"Superflip referencefile CIF: {explicit_superflip_referencefile} (CIF inferred from .cif suffix)")
+                    self.log(f"Superflip referencefile: {explicit_superflip_referencefile} (format inferred from CIF suffix)")
                 else:
-                    self.log(f"Superflip referencefile CIF: {ref_ctx.work_ref_cif} (CIF inferred from .cif suffix)")
-            elif referencefile_mode == "reference_xplor" and (explicit_superflip_referencefile is not None or cfg.superflip_reference_xplor is not None):
-                self.log(f"Superflip referencefile XPLOR: {explicit_superflip_referencefile or cfg.superflip_reference_xplor}")
+                    self.log(f"Superflip referencefile: {ref_ctx.work_ref_cif} (format inferred from CIF suffix)")
+            elif referencefile_mode in {"reference_xplor", "reference_density"} and (explicit_superflip_referencefile is not None or cfg.superflip_reference_xplor is not None):
+                self.log(f"Superflip referencefile: {explicit_superflip_referencefile or cfg.superflip_reference_xplor} (format inferred from filename)")
             else:
                 self.log("Superflip referencefile keyword: no")
             self.log(f"Superflip bestdensities: {cfg.bestdensities_count} {'symmetry' if cfg.bestdensities_symmetry else cfg.bestdensities_metric}")
@@ -5478,7 +5628,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 reference_format_for_cycle = ""
                 if referencefile_mode == "reference_cif":
                     reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else ref_ctx.work_ref_cif
-                elif referencefile_mode == "reference_xplor":
+                elif referencefile_mode in {"reference_xplor", "reference_density"}:
                     reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else cfg.superflip_reference_xplor
                 sf_voxel = cfg.voxel
                 sf_extra_superflip_keywords = cfg.extra_superflip_keywords
