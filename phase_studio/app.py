@@ -290,6 +290,15 @@ class HklAnalysis:
     bins: List[Dict[str, float]]
     source_note: str
 
+@dataclass
+class HklAnalysisRequest:
+    mode: str
+    hkl_text: str
+    jana_text: str
+    ref_text: str
+    work_text: str
+    configured_mode: str
+
 # -----------------------------------------------------------------------------
 # CIF / crystallographic helpers
 # -----------------------------------------------------------------------------
@@ -3703,6 +3712,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.resize(1420, 880)
         self.msg_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
         self.worker: Optional[threading.Thread] = None
+        self.hkl_task_worker: Optional[threading.Thread] = None
         self.stop_after_cycle = threading.Event()
         self.stop_now = threading.Event()
         self.results: List[CycleResult] = []
@@ -3857,14 +3867,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         paths_layout.addLayout(hkl_tools_form)
         self._add_combo(hkl_tools_form, "reflection_data_mode", "HKL data format", [REFLECTION_DATA_MODE_AUTO, REFLECTION_DATA_MODE_INTENSITY, REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA], REFLECTION_DATA_MODE_AUTO)
         hkl_button_row = QHBoxLayout()
-        test_hkl_btn = QPushButton("Test HKL load")
-        analyze_hkl_btn = QPushButton("Analyze completeness")
-        test_hkl_btn.setToolTip("Parse the selected HKL or Jana .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
-        analyze_hkl_btn.setToolTip("Open completeness and data-statistics plots for the selected HKL data.")
-        test_hkl_btn.clicked.connect(self.test_hkl_load_dialog)
-        analyze_hkl_btn.clicked.connect(self.open_hkl_completeness_dialog)
-        hkl_button_row.addWidget(test_hkl_btn)
-        hkl_button_row.addWidget(analyze_hkl_btn)
+        self.test_hkl_btn = QPushButton("Test HKL load")
+        self.analyze_hkl_btn = QPushButton("Analyze completeness")
+        self.test_hkl_btn.setToolTip("Parse the selected HKL or Jana .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
+        self.analyze_hkl_btn.setToolTip("Open completeness and data-statistics plots for the selected HKL data.")
+        self.test_hkl_btn.clicked.connect(self.test_hkl_load_dialog)
+        self.analyze_hkl_btn.clicked.connect(self.open_hkl_completeness_dialog)
+        hkl_button_row.addWidget(self.test_hkl_btn)
+        hkl_button_row.addWidget(self.analyze_hkl_btn)
         hkl_tools_form.addRow("", hkl_button_row)
         self._add_path(paths_layout, "reference_cif", "External reference CIF", "", "file", "CIF files (*.cif);;All files (*)")
         self._add_path(paths_layout, "superflip_referencefile", "Superflip referencefile", "", "file", "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)")
@@ -4231,15 +4241,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Load .inflip failed", str(exc))
 
-    def _hkl_analysis_inputs(self) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
+    def _collect_hkl_analysis_request(self) -> HklAnalysisRequest:
         mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
         hkl_text = self._path_value("hkl").strip() if "hkl" in self.inputs else ""
         jana_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
         ref_text = self._path_value("reference_cif").strip() if "reference_cif" in self.inputs else ""
         work_text = self._path_value("work_dir").strip() if "work_dir" in self.inputs else ""
-        work_dir = Path(work_text).expanduser().resolve() if work_text else Path.cwd()
-        jana_path = Path(jana_text).expanduser().resolve() if jana_text else None
-        use_inflip_hkl = mode == INPUT_MODE_INFLIP or (mode == INPUT_MODE_INFLIP_OVERRIDES and not hkl_text)
+        configured_mode = self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO
+        return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode)
+
+    def _resolve_hkl_analysis_inputs(self, request: HklAnalysisRequest) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
+        work_dir = Path(request.work_text).expanduser().resolve() if request.work_text else Path.cwd()
+        jana_path = Path(request.jana_text).expanduser().resolve() if request.jana_text else None
+        use_inflip_hkl = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
         if use_inflip_hkl:
             if jana_path is None or not jana_path.is_file():
                 raise FileNotFoundError("Jana .inflip is required to test or analyze embedded HKL data.")
@@ -4247,35 +4261,76 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             cell, sg, hm, _composition = parse_inflip_crystallography(jana_path)
             source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
         else:
-            if not hkl_text:
+            if not request.hkl_text:
                 raise FileNotFoundError("Select an external HKL file or a Jana .inflip with embedded reflections.")
-            hkl_path = Path(hkl_text).expanduser().resolve()
+            hkl_path = Path(request.hkl_text).expanduser().resolve()
             if not hkl_path.is_file():
                 raise FileNotFoundError(f"HKL file not found: {hkl_path}")
-            if ref_text and Path(ref_text).expanduser().is_file():
-                cell, sg, hm = parse_cif_cell_and_sg(Path(ref_text).expanduser().resolve())
-                source_note = f"HKL source: {hkl_path}; cell/symmetry source: {Path(ref_text).expanduser().resolve()}"
+            if request.ref_text and Path(request.ref_text).expanduser().is_file():
+                ref_path = Path(request.ref_text).expanduser().resolve()
+                cell, sg, hm = parse_cif_cell_and_sg(ref_path)
+                source_note = f"HKL source: {hkl_path}; cell/symmetry source: {ref_path}"
             elif jana_path is not None and jana_path.is_file():
                 cell, sg, hm, _composition = parse_inflip_crystallography(jana_path)
                 source_note = f"HKL source: {hkl_path}; cell/symmetry source: {jana_path}"
             else:
                 raise FileNotFoundError("Select a reference CIF or Jana .inflip so Phase Studio can calculate d-spacings and completeness.")
-        configured_mode = self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO
         if use_inflip_hkl:
-            data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, configured_mode, jana_path)
+            data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
         else:
-            data_mode = resolve_reflection_data_mode_from_sources(hkl_path, configured_mode, jana_path)
+            data_mode = resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
         return hkl_path, data_mode, cell, sg, hm, source_note
 
+    def _hkl_analysis_inputs(self) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
+        return self._resolve_hkl_analysis_inputs(self._collect_hkl_analysis_request())
+
+    def _set_hkl_task_running(self, running: bool) -> None:
+        for button_name in ("test_hkl_btn", "analyze_hkl_btn"):
+            button = getattr(self, button_name, None)
+            if isinstance(button, QPushButton):
+                button.setEnabled(not running)
+        pipeline_active = self.worker is not None and self.worker.is_alive()
+        if running and not pipeline_active:
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setFormat("HKL analysis...")
+        elif not running and not pipeline_active:
+            self.progress_bar.setRange(0, 1)
+            self.progress_bar.setValue(0)
+            self.progress_bar.setFormat("Idle")
+
+    def _start_hkl_background_task(self, label: str, worker_fn: Callable[[], object], done_kind: str) -> None:
+        if self.hkl_task_worker is not None and self.hkl_task_worker.is_alive():
+            QMessageBox.information(self, "HKL analysis already running", "Wait for the current HKL load/completeness job to finish before starting another one.")
+            return
+        self._set_hkl_task_running(True)
+        self.log_text.append(f"{label} started in background.")
+
+        def worker() -> None:
+            try:
+                result = worker_fn()
+                self.msg_queue.put((done_kind, result))
+            except Exception as exc:
+                self.msg_queue.put(("hkl_task_error", (label, str(exc))))
+            finally:
+                self.msg_queue.put(("hkl_task_finished", None))
+
+        self.hkl_task_worker = threading.Thread(target=worker, daemon=True)
+        self.hkl_task_worker.start()
+
     def test_hkl_load_dialog(self) -> None:
-        try:
-            hkl_path, data_mode, cell, sg, hm, source_note = self._hkl_analysis_inputs()
+        request = self._collect_hkl_analysis_request()
+
+        def worker() -> object:
+            hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
             value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
             reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
             unique = merge_duplicate_reflections(reflections)
-        except Exception as exc:
-            QMessageBox.critical(self, "HKL load test failed", str(exc))
-            return
+            return hkl_path, data_mode, cell, sg, hm, source_note, reflections, unique
+
+        self._start_hkl_background_task("HKL load test", worker, "hkl_load_result")
+
+    def _show_hkl_load_result_dialog(self, payload: object) -> None:
+        hkl_path, data_mode, cell, sg, hm, source_note, reflections, unique = payload  # type: ignore[misc]
         dialog = QDialog(self)
         dialog.setWindowTitle("HKL Load Test")
         dialog.resize(860, 560)
@@ -4330,12 +4385,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog.exec()
 
     def open_hkl_completeness_dialog(self) -> None:
-        try:
-            hkl_path, data_mode, cell, sg, hm, source_note = self._hkl_analysis_inputs()
+        request = self._collect_hkl_analysis_request()
+
+        def worker() -> object:
+            hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
             analysis = analyze_hkl_data(hkl_path, data_mode, cell, sg, hm, source_note)
-        except Exception as exc:
-            QMessageBox.critical(self, "HKL completeness analysis failed", str(exc))
-            return
+            return analysis
+
+        self._start_hkl_background_task("HKL completeness analysis", worker, "hkl_completeness_result")
+
+    def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("HKL Completeness and Intensity Statistics")
         dialog.resize(1120, 820)
@@ -4654,6 +4713,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         widget.setCurrentIndex(idx if idx >= 0 else 0)
                         widget.blockSignals(False)
                     self.log_text.append("SharpED models refreshed.")
+                elif kind == "hkl_load_result":
+                    self.log_text.append("HKL load test finished.")
+                    self._set_hkl_task_running(False)
+                    self._show_hkl_load_result_dialog(payload)
+                elif kind == "hkl_completeness_result":
+                    self.log_text.append("HKL completeness analysis finished.")
+                    self._set_hkl_task_running(False)
+                    self._show_hkl_completeness_dialog(payload)  # type: ignore[arg-type]
+                elif kind == "hkl_task_error":
+                    label, message = payload  # type: ignore[misc]
+                    self._set_hkl_task_running(False)
+                    QMessageBox.critical(self, f"{label} failed", str(message))
+                    self.log_text.append(f"\n{label} ERROR: {message}")
+                elif kind == "hkl_task_finished":
+                    self._set_hkl_task_running(False)
                 elif kind == "handoff_done":
                     self.log_text.append("\nJana2020 hand-off completed. Phase Studio will close automatically.")
                     self.handoff_btn.setEnabled(False)
