@@ -299,6 +299,20 @@ class HklAnalysisRequest:
     work_text: str
     configured_mode: str
 
+@dataclass
+class HklLoadResult:
+    hkl_path: Path
+    data_mode: str
+    cell: gemmi.UnitCell
+    spacegroup: gemmi.SpaceGroup
+    spacegroup_hm: str
+    source_note: str
+    value_col: int
+    sigma_col: Optional[int]
+    include_000: bool
+    reflections: List[Reflection]
+    unique_reflections: List[Reflection]
+
 REFERENCE_STRUCTURE_SUFFIXES = {".cif", ".ins", ".res"}
 REFERENCE_DENSITY_SUFFIXES = {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"}
 REFERENCE_FILE_SUFFIXES = REFERENCE_STRUCTURE_SUFFIXES | REFERENCE_DENSITY_SUFFIXES
@@ -1139,6 +1153,26 @@ def sintheta_over_lambda_from_metric(gstar: np.ndarray, h: int, k: int, l: int) 
     q2 = hkl_q2_from_metric(gstar, h, k, l)
     return 0.5 * math.sqrt(q2) if q2 > 0.0 and math.isfinite(q2) else math.nan
 
+def hkl_stl_array_from_metric(gstar: np.ndarray, hkls: np.ndarray) -> np.ndarray:
+    arr = np.asarray(hkls, dtype=np.float64)
+    if arr.size == 0:
+        return np.asarray([], dtype=np.float64)
+    h = arr[:, 0]
+    k = arr[:, 1]
+    l = arr[:, 2]
+    q2 = (
+        float(gstar[0, 0]) * h * h
+        + 2.0 * float(gstar[0, 1]) * h * k
+        + 2.0 * float(gstar[0, 2]) * h * l
+        + float(gstar[1, 1]) * k * k
+        + 2.0 * float(gstar[1, 2]) * k * l
+        + float(gstar[2, 2]) * l * l
+    )
+    stl = np.full(q2.shape, np.nan, dtype=np.float64)
+    valid = np.isfinite(q2) & (q2 > 0.0)
+    stl[valid] = 0.5 * np.sqrt(q2[valid])
+    return stl
+
 def hkl_symmetry_cache(sg: Optional[gemmi.SpaceGroup]) -> Tuple[List[Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]]], List[Tuple[Tuple[int, int, int], Tuple[float, float, float]]]]:
     matrices: List[Tuple[Tuple[int, int, int], Tuple[int, int, int], Tuple[int, int, int]]] = [
         ((1, 0, 0), (0, 1, 0), (0, 0, 1))
@@ -1295,6 +1329,17 @@ def theoretical_unique_hkl_stl_from_observed(
     if not reflections or not math.isfinite(d_min) or d_min <= 0:
         return {}
     gstar = reciprocal_metric_tensor(cell)
+    try:
+        miller = gemmi.make_miller_array(cell, sg, float(d_min), 0.0, True)
+        miller = np.asarray(miller, dtype=np.int32)
+        stls = hkl_stl_array_from_metric(gstar, miller)
+        return {
+            (int(row[0]), int(row[1]), int(row[2])): float(stl)
+            for row, stl in zip(miller, stls)
+            if math.isfinite(float(stl)) and float(stl) > 0.0
+        }
+    except Exception:
+        pass
     qmax = 1.0 / (float(d_min) * float(d_min))
     hmax = int(math.ceil(float(cell.a) / float(d_min))) + 1
     kmax = int(math.ceil(float(cell.b) / float(d_min))) + 1
@@ -1350,27 +1395,25 @@ def analyze_hkl_data(
     raw = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
     unique = merge_duplicate_reflections(raw)
     gstar = reciprocal_metric_tensor(cell)
-    ds = [
-        1.0 / math.sqrt(q2)
-        for r in unique
-        for q2 in [hkl_q2_from_metric(gstar, int(r.h), int(r.k), int(r.l))]
-        if not (int(r.h) == 0 and int(r.k) == 0 and int(r.l) == 0)
-        and q2 > 0.0
-        and math.isfinite(q2)
-    ]
-    ds = [d for d in ds if math.isfinite(d) and d > 0]
-    if not ds:
+    unique_hkls = np.asarray([[int(r.h), int(r.k), int(r.l)] for r in unique], dtype=np.int32)
+    unique_stls = hkl_stl_array_from_metric(gstar, unique_hkls)
+    nonzero = np.any(unique_hkls != 0, axis=1) if unique_hkls.size else np.asarray([], dtype=bool)
+    valid_stl = np.isfinite(unique_stls) & (unique_stls > 0.0) & nonzero
+    ds = (1.0 / (2.0 * unique_stls[valid_stl])).astype(np.float64) if np.any(valid_stl) else np.asarray([], dtype=np.float64)
+    if ds.size == 0:
         raise ValueError("No non-zero HKL reflections with finite d-spacing were found.")
-    d_min = min(ds)
-    matrices, _absence_ops = hkl_symmetry_cache(sg)
+    d_min = float(np.min(ds))
     theory_stl_by_key = theoretical_unique_hkl_stl_from_observed(unique, cell, sg, d_min)
+    observed_asu = np.array(unique_hkls, copy=True)
+    try:
+        sg.switch_to_asu(observed_asu)
+        observed_keys = [(int(row[0]), int(row[1]), int(row[2])) for row in observed_asu]
+    except Exception:
+        matrices, _absence_ops = hkl_symmetry_cache(sg)
+        observed_keys = [canonical_hkl_cached(int(r.h), int(r.k), int(r.l), matrices) for r in unique]
     observed_records = [
-        (
-            canonical_hkl_cached(int(r.h), int(r.k), int(r.l), matrices),
-            sintheta_over_lambda_from_metric(gstar, int(r.h), int(r.k), int(r.l)),
-            reflection_primary_signal_to_noise(r, mode),
-        )
-        for r in unique
+        (key, float(stl), reflection_primary_signal_to_noise(r, mode))
+        for key, stl, r in zip(observed_keys, unique_stls, unique)
     ]
     observed_records = [(key, stl, ios) for key, stl, ios in observed_records if math.isfinite(stl) and stl > 0]
     max_stl = max([stl for _, stl, _ in observed_records] or [0.0])
@@ -1422,21 +1465,20 @@ def analyze_hkl_data(
             }
         )
     theory_sorted = sorted((stl, key) for key, stl in theory_stl_by_key.items())
-    observed_sorted = sorted((stl, key) for key, stl in observed_stl_by_key.items())
     d_full_98: Optional[float] = None
-    theory_cum = set()
-    observed_cum = set()
-    obs_idx = 0
     theory_idx = 0
+    theory_cum_count = 0
+    observed_cum_count = 0
     while theory_idx < len(theory_sorted):
         edge = float(theory_sorted[theory_idx][0])
         while theory_idx < len(theory_sorted) and theory_sorted[theory_idx][0] <= edge + 1e-12:
-            theory_cum.add(theory_sorted[theory_idx][1])
+            key = theory_sorted[theory_idx][1]
+            theory_cum_count += 1
+            observed_stl = observed_stl_by_key.get(key)
+            if observed_stl is not None and observed_stl <= edge + 1e-12:
+                observed_cum_count += 1
             theory_idx += 1
-        while obs_idx < len(observed_sorted) and observed_sorted[obs_idx][0] <= edge + 1e-12:
-            observed_cum.add(observed_sorted[obs_idx][1])
-            obs_idx += 1
-        if theory_cum and 100.0 * len(observed_cum & theory_cum) / len(theory_cum) >= 98.0:
+        if theory_cum_count and 100.0 * observed_cum_count / theory_cum_count >= 98.0:
             d_full_98 = 1.0 / (2.0 * edge) if edge > 0 else None
     return HklAnalysis(
         hkl_path=Path(hkl_path),
@@ -4438,6 +4480,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _hkl_analysis_inputs(self) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
         return self._resolve_hkl_analysis_inputs(self._collect_hkl_analysis_request())
 
+    def _build_hkl_load_result(self, request: HklAnalysisRequest) -> HklLoadResult:
+        hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
+        value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
+        reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
+        unique = merge_duplicate_reflections(reflections)
+        return HklLoadResult(
+            hkl_path=hkl_path,
+            data_mode=data_mode,
+            cell=cell,
+            spacegroup=sg,
+            spacegroup_hm=hm,
+            source_note=source_note,
+            value_col=value_col,
+            sigma_col=sigma_col,
+            include_000=include_000,
+            reflections=reflections,
+            unique_reflections=unique,
+        )
+
     def _set_hkl_task_running(self, running: bool) -> None:
         for button_name in ("test_hkl_btn", "analyze_hkl_btn"):
             button = getattr(self, button_name, None)
@@ -4475,16 +4536,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         request = self._collect_hkl_analysis_request()
 
         def worker() -> object:
-            hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
-            value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
-            reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
-            unique = merge_duplicate_reflections(reflections)
-            return hkl_path, data_mode, cell, sg, hm, source_note, reflections, unique
+            return self._build_hkl_load_result(request)
 
         self._start_hkl_background_task("HKL load test", worker, "hkl_load_result")
 
     def _show_hkl_load_result_dialog(self, payload: object) -> None:
-        hkl_path, data_mode, cell, sg, hm, source_note, reflections, unique = payload  # type: ignore[misc]
+        result = payload  # type: ignore[assignment]
+        hkl_path = result.hkl_path  # type: ignore[attr-defined]
+        data_mode = result.data_mode  # type: ignore[attr-defined]
+        cell = result.cell  # type: ignore[attr-defined]
+        hm = result.spacegroup_hm  # type: ignore[attr-defined]
+        source_note = result.source_note  # type: ignore[attr-defined]
+        value_col = result.value_col  # type: ignore[attr-defined]
+        sigma_col = result.sigma_col  # type: ignore[attr-defined]
+        include_000 = result.include_000  # type: ignore[attr-defined]
+        reflections = result.reflections  # type: ignore[attr-defined]
+        unique = result.unique_reflections  # type: ignore[attr-defined]
         dialog = QDialog(self)
         dialog.setWindowTitle("HKL Load Test")
         dialog.resize(860, 560)
