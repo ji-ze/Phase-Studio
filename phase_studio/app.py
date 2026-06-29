@@ -2947,6 +2947,7 @@ def write_superflip_symmetry_input(
         f.write("perform symmetry\n")
         f.write(f'outputfile "{output_xplor}"\n')
         f.write(f"outputformat {fmt}\n")
+        f.write(f"referencefile {model_file.name}\n")
         f.write("dimension  3\n")
         c = ref_ctx.cell
         f.write(f"cell {c.a:.6f} {c.b:.6f} {c.c:.6f} {c.alpha:.4f} {c.beta:.4f} {c.gamma:.4f}\n")
@@ -5758,7 +5759,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
                     sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
-                    self.log("  Superflip symmetry uses only the deblurred XPLOR modelfile; no referencefile is written.")
+                    self.log("  Superflip symmetry uses the deblurred XPLOR map as both modelfile and referencefile.")
                     deblur_map = run_superflip_symmetrize_map(
                         cycle_dir=cycle_dir,
                         prefix=sym_prefix,
