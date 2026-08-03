@@ -41,6 +41,7 @@ Server-side SharpED processing requires an API token.
 The same website also provides the online version of SharpED, which can be used independently of Phase Studio.
 
 The token can be entered directly in the Phase Studio graphical interface.
+The default SharpED API server configured in the application is `https://jana.fzu.cz`.
 
 ---
 
@@ -49,7 +50,7 @@ The token can be entered directly in the Phase Studio graphical interface.
 1. Download and extract the latest Windows release.
 2. Install Superflip and EDMA from [superflip.fzu.cz](https://superflip.fzu.cz/).
 3. Start `Phase Studio.exe`.
-4. Set the paths to the Superflip and EDMA executables if they are not detected automatically.
+4. Set the paths to the Superflip and EDMA executables if the default paths do not match your installation.
 5. Optionally enter a SharpED API token.
 6. Select an input workflow:
 
@@ -91,7 +92,7 @@ Use the Jana `.inflip` file as a workflow template while replacing the HKL data,
 
 ### External HKL and CIF
 
-Create a structure-solution workflow from external reflection data, unit-cell parameters, space-group symmetry, and an optional CIF reference structure.
+Create a structure-solution workflow from external reflection data and a required CIF-compatible reference structure supplying unit-cell parameters, space-group symmetry, composition, and optional atom sites.
 
 ### Iterative model seeding
 
@@ -104,6 +105,10 @@ Use atomic positions obtained from Superflip, EDMA, SharpED-processed maps, Jana
 Detailed installation, configuration, workflow, and development instructions are available in:
 
 ### [MANUAL.md](MANUAL.md)
+
+Three practical sample workflows are available in:
+
+### [EXAMPLES.md](EXAMPLES.md)
 
 The manual includes:
 
