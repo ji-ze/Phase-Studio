@@ -459,3 +459,594 @@ Suggested commit body:
 - Add complete English user manual for crystallographic workflows
 - Document HKL diagnostics, completeness statistics and XPLOR damping semantics
 ```
+
+# Phase Studio User Manual
+
+## 1. Overview
+
+Phase Studio is a crystallographic workflow application that integrates:
+
+* Superflip charge flipping,
+* SharpED density-map deblurring,
+* EDMA peak searching,
+* reflection-data diagnostics,
+* density-map conversion and symmetrization,
+* iterative model-seeded reconstruction,
+* and Jana2020 hand-off tools.
+
+The application can be used in two principal ways:
+
+1. as a companion application for Jana2020 projects;
+2. as a standalone workflow using external HKL and CIF data.
+
+Phase Studio does not replace crystallographic refinement in Jana2020. Its primary purpose is to integrate structure solution, density-map processing, peak searching, diagnostic analysis, and model preparation.
+
+---
+
+# 2. Installation
+
+## 2.1 Windows Executable
+
+A prebuilt Windows version is available from:
+
+https://github.com/ji-ze/Phase-Studio/releases
+
+The prebuilt application can be launched directly and does not require a separate Python installation.
+
+### Required external programs
+
+The Windows package does not include Superflip or EDMA.
+
+Install both programs separately from:
+
+https://superflip.fzu.cz/
+
+Superflip and EDMA are required even when the prebuilt Phase Studio executable is used.
+
+After installation, configure their executable paths in Phase Studio if they are not detected automatically.
+
+Jana2020 is required for:
+
+* direct use of Jana `.inflip` files,
+* Jana-specific project integration,
+* and transfer of generated results back to Jana2020.
+
+Jana2020 is not strictly required for workflows based entirely on external HKL and CIF data.
+
+---
+
+## 2.2 SharpED API Token
+
+SharpED integration is optional.
+
+A SharpED API token is required only when server-side SharpED density-map deblurring is enabled.
+
+Jana2020 users can obtain a token from:
+
+https://sharped.fzu.cz/
+
+The same website provides an online SharpED application that can be used independently of Phase Studio.
+
+The API token can be entered directly in the Phase Studio graphical interface.
+
+It can also be supplied through the `SHARPED_API_TOKEN` environment variable.
+
+### Linux and macOS
+
+```bash
+export SHARPED_API_TOKEN="your-token"
+```
+
+### Windows PowerShell
+
+```powershell
+$env:SHARPED_API_TOKEN = "your-token"
+```
+
+Do not commit API tokens to public repositories or store them in publicly accessible configuration files.
+
+---
+
+## 2.3 Installation from Python Source
+
+Running Phase Studio from source requires Python 3.10 or newer.
+
+### Required Python packages
+
+* `numpy`
+* `matplotlib`
+* `gemmi`
+* `PySide6`
+
+### Optional packages
+
+* `qtvscodestyle` for consistent graphical-interface styling;
+* `pyinstaller` for building the Windows executable and Jana2020 wrapper.
+
+### Linux and macOS
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -e ".[app]"
+
+python -m phase_studio
+```
+
+### Windows PowerShell
+
+```powershell
+py -3.10 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+
+python -m pip install --upgrade pip
+python -m pip install -e ".[app]"
+
+python -m phase_studio
+```
+
+After installation, the application can also be started using:
+
+```bash
+phase-studio
+```
+
+---
+
+# 3. Input Modes
+
+Phase Studio supports three principal input modes.
+
+## 3.1 Jana `.inflip`
+
+This mode loads an existing Jana2020 `.inflip` file and uses the Superflip settings defined in that file.
+
+Selected settings can be overridden from the Phase Studio interface without manually editing the original input file.
+
+This mode is suitable for:
+
+* reproducing an existing Jana2020 Superflip calculation;
+* testing alternative charge-flipping settings;
+* applying EDMA to generated maps;
+* optionally processing maps with SharpED;
+* and transferring the selected result back to Jana2020.
+
+---
+
+## 3.2 Jana `.inflip` with External Overrides
+
+This mode uses a Jana `.inflip` file as the workflow template while replacing selected inputs.
+
+Possible overrides include:
+
+* an external HKL file;
+* an external reference CIF;
+* alternative cell parameters;
+* alternative symmetry information;
+* reflection-data-format settings;
+* and selected Superflip options.
+
+Use this mode when the Jana project contains the required structure-solution configuration but the reflection data or reference model must be replaced.
+
+---
+
+## 3.3 External HKL and CIF Reference
+
+This mode creates a structure-solution workflow without requiring an existing Jana `.inflip` file.
+
+Typical inputs include:
+
+* an HKL reflection file;
+* unit-cell parameters;
+* space-group symmetry;
+* reflection-data-format information;
+* and an optional CIF reference structure.
+
+This mode is suitable for datasets prepared outside Jana2020 or for exploratory calculations before a complete Jana project has been created.
+
+---
+
+# 4. Reflection-Data Configuration
+
+## 4.1 HKL Data Format
+
+The reflection-data format determines how Phase Studio and Superflip interpret individual columns in the HKL file.
+
+When `auto` mode is selected, Phase Studio first attempts to read the following settings from the Jana `.inflip` file:
+
+* `dataformat`;
+* `dataitemwidths`.
+
+If these values are unavailable or incompatible with the supplied HKL file, configure the format manually.
+
+---
+
+## 4.2 Test HKL Load
+
+Always use **Test HKL load** before starting a complete reconstruction.
+
+The test verifies:
+
+* whether the HKL file can be read;
+* which columns are interpreted as indices and reflection values;
+* whether amplitudes, intensities, and uncertainty values are parsed correctly;
+* and whether the selected format is consistent with the input file.
+
+An incorrect HKL format may produce a calculation that runs without an obvious error but uses incorrect reflection values.
+
+---
+
+## 4.3 Completeness Analysis
+
+Use **Analyze completeness** to inspect the reflection dataset.
+
+The analysis can include:
+
+* total reflection count;
+* resolution range;
+* minimum spacing, `d_min`;
+* fully complete resolution, `d_full`;
+* shell completeness;
+* intensity-to-uncertainty statistics;
+* and resolution-dependent reflection distributions.
+
+These diagnostics can reveal:
+
+* incomplete high-resolution shells;
+* incorrect indexing;
+* mismatched unit-cell parameters;
+* inconsistent symmetry;
+* unexpected resolution cutoffs;
+* duplicated reflections;
+* or incorrect interpretation of intensity and uncertainty columns.
+
+---
+
+# 5. Superflip Workflow
+
+Superflip is used for charge-flipping structure solution and phase retrieval.
+
+Phase Studio prepares the required input files, launches the Superflip executable, and records the generated outputs.
+
+Typical Superflip outputs include:
+
+* density or electrostatic-potential maps;
+* phase information;
+* model files;
+* convergence information;
+* and intermediate cycle results.
+
+The generated files are stored within the Phase Studio workflow directory so that individual reconstruction cycles remain traceable.
+
+---
+
+# 6. Density-Map Processing
+
+Phase Studio can work with several types of maps:
+
+* raw Superflip maps;
+* symmetrized Superflip maps;
+* SharpED-deblurred maps;
+* maps reconstructed from modified amplitudes or phases;
+* and maps generated from intermediate structural models.
+
+Original and processed maps should remain stored separately.
+
+This allows direct comparison of:
+
+* the original Superflip reconstruction;
+* the symmetrized map;
+* the SharpED result;
+* different peak-search settings;
+* and maps generated during later iterative cycles.
+
+---
+
+# 7. SharpED Processing
+
+SharpED can optionally be applied to a reconstructed density or electrostatic-potential map.
+
+The purpose of SharpED is to improve:
+
+* localization of atomic-density maxima;
+* separation of overlapping maxima;
+* visual interpretability of the map;
+* and the quality of input supplied to peak searching.
+
+A SharpED-processed map can be used for:
+
+* visual inspection;
+* comparison with the original reconstruction;
+* EDMA peak searching;
+* generation of an updated structural model;
+* export to external crystallographic software;
+* and model-seeded Superflip calculations.
+
+SharpED is not required for standard Superflip and EDMA workflows.
+
+---
+
+# 8. EDMA Peak Searching
+
+EDMA identifies candidate atomic positions in density or electrostatic-potential maps.
+
+EDMA can be applied to:
+
+* raw Superflip maps;
+* symmetrized maps;
+* SharpED-deblurred maps;
+* and maps generated during later reconstruction cycles.
+
+Peak-search results can be:
+
+* inspected;
+* filtered;
+* exported as structural models;
+* used as starting positions for Jana2020 refinement;
+* or reused as seeds for a subsequent Superflip cycle.
+
+EDMA provides the connection between reconstructed density maxima and candidate atomic coordinates.
+
+---
+
+# 9. Iterative Model-Seeded Reconstruction
+
+Phase Studio supports iterative Superflip calculations seeded by previously generated structural models.
+
+Possible model sources include:
+
+* Superflip model files;
+* EDMA peak-search results;
+* models generated from SharpED-deblurred maps;
+* partially completed Jana2020 structures;
+* external CIF files;
+* and manually edited intermediate models.
+
+A typical iterative workflow is:
+
+1. run an initial Superflip calculation;
+2. generate and inspect the density map;
+3. optionally symmetrize the map;
+4. optionally apply SharpED deblurring;
+5. run EDMA peak searching;
+6. inspect or edit the generated model;
+7. select the next-cycle model;
+8. configure model damping;
+9. run a new Superflip cycle;
+10. compare the resulting maps and models.
+
+Model damping can be used to control the influence of the supplied starting model on the subsequent reconstruction.
+
+This workflow is useful when the initial charge-flipping solution contains recognizable structural fragments but is incomplete or difficult to interpret.
+
+---
+
+# 10. Jana2020 Hand-Off
+
+For workflows originating from Jana2020, selected maps and models can be transferred back to Jana2020.
+
+Transferable results may include:
+
+* EDMA-derived atomic positions;
+* SharpED-assisted models;
+* Superflip model files;
+* CIF structures;
+* processed density maps;
+* and selected reconstruction-cycle outputs.
+
+The hand-off procedure reduces the need for manual file conversion and editing.
+
+After transfer, detailed model completion and crystallographic refinement should be performed in Jana2020.
+
+---
+
+# 11. Recommended User Workflow
+
+1. Start Phase Studio.
+2. Select the appropriate input mode.
+3. Load the `.inflip`, HKL, and optional CIF files.
+4. Verify the reflection-data format.
+5. Run **Test HKL load**.
+6. Run **Analyze completeness**.
+7. Check `d_min`, `d_full`, completeness, and intensity statistics.
+8. Configure Superflip settings.
+9. Configure the next-cycle model policy and damping if required.
+10. Configure EDMA options.
+11. Enter the SharpED token if deblurring is required.
+12. Run the pipeline.
+13. Inspect the generated maps and models.
+14. Compare raw, symmetrized, and SharpED-processed results.
+15. Select the preferred cycle or model.
+16. Export the result or transfer it back to Jana2020.
+
+---
+
+# 12. Building the Jana2020 Superflip Wrapper
+
+Install the graphical-interface and build dependencies:
+
+```bash
+python -m pip install -e ".[app,build]"
+```
+
+Build the wrapper using PyInstaller:
+
+```bash
+python -m PyInstaller --clean --noconfirm superflip.spec
+```
+
+The expected output is:
+
+```text
+dist/superflip/superflip.exe
+```
+
+Keep the complete `dist/superflip/` directory together. Required Python packages and DLL files are stored next to the executable.
+
+---
+
+## 12.1 Recommended Jana2020 Deployment
+
+Recommended installation directory:
+
+```text
+C:\Jana2020\SUPERFLIP
+```
+
+Recommended file layout:
+
+```text
+C:\Jana2020\SUPERFLIP\superflip_original.exe
+C:\Jana2020\SUPERFLIP\superflip.exe
+C:\Jana2020\SUPERFLIP\EDMA.exe
+```
+
+Deployment procedure:
+
+1. Close Jana2020.
+
+2. Open:
+
+   ```text
+   C:\Jana2020\SUPERFLIP
+   ```
+
+3. Rename the original Jana2020 executable:
+
+   ```text
+   superflip.exe
+   ```
+
+   to:
+
+   ```text
+   superflip_original.exe
+   ```
+
+4. Copy the complete contents of:
+
+   ```text
+   dist\superflip\
+   ```
+
+   into:
+
+   ```text
+   C:\Jana2020\SUPERFLIP
+   ```
+
+5. Confirm that `EDMA.exe` is installed.
+
+6. Start Jana2020.
+
+7. Run a Superflip calculation normally.
+
+The wrapper searches for the original Superflip executable in the following order:
+
+```text
+C:\Jana2020\SUPERFLIP\superflip_original.exe
+<wrapper directory>\superflip_original.exe
+<wrapper directory>\SuperFlip-orig.exe
+<wrapper directory>\superflip-original.exe
+PATH: superflip_original.exe
+PATH: SuperFlip-orig.exe
+```
+
+---
+
+# 13. Repository Layout
+
+```text
+phase_studio/                  Python package and GUI source code
+phase_studio/app.py            Main Phase Studio GUI and reconstruction pipeline
+phase_studio/jana_superflip.py Jana2020-compatible Superflip wrapper launcher
+phase_studio/ui_style.py       Qt styling utilities
+superflip.spec                 PyInstaller specification for the Jana wrapper
+pyproject.toml                 Package metadata and optional dependencies
+README.md                      Quick-start and project overview
+MANUAL.md                      Detailed user and developer documentation
+documentation/                 Optional local reference material
+examples/                      Optional local example datasets
+```
+
+The `documentation/` and `examples/` directories may contain local files that are not included in version control.
+
+---
+
+# 14. Package Validation
+
+Compile-check the Python package:
+
+```bash
+python -m compileall -q phase_studio
+```
+
+Validate package metadata and installation without installing runtime dependencies:
+
+```bash
+python -m pip install --no-deps --prefix /tmp/phase_studio_install_test .
+```
+
+Remove generated build artifacts on Linux or macOS:
+
+```bash
+rm -rf build dist phase_studio.egg-info phase_studio/__pycache__
+```
+
+Windows PowerShell:
+
+```powershell
+Remove-Item -Recurse -Force build, dist, phase_studio.egg-info
+Remove-Item -Recurse -Force phase_studio\__pycache__
+```
+
+---
+
+# 15. Reproducibility
+
+Phase Studio is designed to preserve:
+
+* original input files;
+* explicit workflow parameters;
+* generated Superflip input files;
+* intermediate maps;
+* EDMA outputs;
+* SharpED outputs;
+* model-seeding decisions;
+* and final exported results.
+
+This is important when comparing:
+
+* alternative charge-flipping parameters;
+* different reflection-data formats;
+* raw and SharpED-processed maps;
+* EDMA peak-search thresholds;
+* model-damping values;
+* and different iterative reconstruction strategies.
+
+---
+
+# 16. External Resources
+
+* Phase Studio releases:
+  https://github.com/ji-ze/Phase-Studio/releases
+
+* Superflip and EDMA:
+  https://superflip.fzu.cz/
+
+* SharpED, online application, and API-token access:
+  https://sharped.fzu.cz/
+
+---
+
+# 17. Notes
+
+* Superflip and EDMA are not included in the Phase Studio Windows package.
+* SharpED processing requires network access and a valid API token.
+* Phase Studio can run without SharpED.
+* Jana2020 is required only for Jana-specific integration and hand-off workflows.
+* Generated Superflip, EDMA, SharpED, and PyInstaller outputs should be excluded through `.gitignore`.
+* Reference copies of older Phase Studio versions are not required for normal operation.
+
