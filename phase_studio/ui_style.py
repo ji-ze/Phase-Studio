@@ -194,6 +194,36 @@ QProgressBar::chunk {
     background-color: #2264b8;
     border-radius: 0;
 }
+QLabel#progressSectionLabel {
+    color: #2264b8;
+    font-size: 8pt;
+    font-weight: 800;
+    letter-spacing: 1px;
+    padding-top: 2px;
+}
+QLabel#progressStageCounter {
+    color: #44b7ff;
+    font-size: 8pt;
+    font-weight: 700;
+}
+QLabel#currentCycleDetail {
+    color: #001170;
+    background-color: #f2f4f9;
+    border: none;
+    border-left: 2px solid #44b7ff;
+    padding: 4px 7px;
+    font-size: 8.5pt;
+    font-weight: 600;
+}
+QProgressBar#currentCycleProgress {
+    min-height: 7px;
+    max-height: 7px;
+    border: none;
+    background-color: #f2f4f9;
+}
+QProgressBar#currentCycleProgress::chunk {
+    background-color: #44b7ff;
+}
 QWidget#brandHeader {
     background-color: #f2f4f9;
     border: none;

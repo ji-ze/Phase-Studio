@@ -288,6 +288,46 @@ class RunConfig:
     sharped_poll_seconds: int
     sharped_max_polls: int
 
+
+@dataclass(frozen=True)
+class CycleProgressState:
+    cycle_index: int
+    cycle_total: int
+    stage_name: str
+    stage_index: int
+    stage_total: int
+    sub_index: Optional[int] = None
+    sub_total: Optional[int] = None
+    detail: str = ""
+    busy: bool = False
+    complete: bool = False
+
+    def display_text(self) -> str:
+        parts = [f"Cycle {self.cycle_index} / {self.cycle_total}", self.stage_name]
+        if self.sub_index is not None and self.sub_total is not None:
+            parts.append(f"repeat {self.sub_index} / {self.sub_total}")
+        if self.detail:
+            parts.append(self.detail)
+        return " · ".join(part for part in parts if part)
+
+
+def cycle_progress_stages(cfg: object) -> List[str]:
+    """Return only workflow stages that can actually execute for this run."""
+    modelfile_mode = normalize_modelfile_source(str(getattr(cfg, "modelfile_source", "")))
+    raw_superflip_cycling = modelfile_mode == "superflip_xplor"
+    stages = ["Preparing cycle", "Superflip"]
+    if bool(getattr(cfg, "run_edma_superflip", False)):
+        stages.append("EDMA · Superflip map")
+    if bool(getattr(cfg, "run_sharped", False)) and not raw_superflip_cycling:
+        stages.append("SharpED")
+    if bool(getattr(cfg, "symmetrize_deblurred_map", False)) and not raw_superflip_cycling:
+        stages.append("Superflip symmetry averaging")
+    if bool(getattr(cfg, "run_edma_deblurred", False)) and not raw_superflip_cycling:
+        stages.append("EDMA · deblurred map")
+    stages.append("Finalizing cycle")
+    return stages
+
+
 @dataclass
 class XplorMap:
     title: str
@@ -3293,13 +3333,37 @@ def sharped_elements_from_composition(composition: str) -> str:
         elements.append(elem)
     return " ".join(elements) or "C N O"
 
-def run_sharped_deblur(input_map: Path, output_map: Path, base_url: str, api_token: str, model: str, elements: str, outres: float, max_upload_mb: float, timeout_seconds: int, poll_seconds: int, max_polls: int, log: Callable[[str], None], stop_event: Optional[threading.Event] = None) -> Path:
+def run_sharped_deblur(
+    input_map: Path,
+    output_map: Path,
+    base_url: str,
+    api_token: str,
+    model: str,
+    elements: str,
+    outres: float,
+    max_upload_mb: float,
+    timeout_seconds: int,
+    poll_seconds: int,
+    max_polls: int,
+    log: Callable[[str], None],
+    stop_event: Optional[threading.Event] = None,
+    progress: Optional[Callable[[str], None]] = None,
+) -> Path:
     output_map.parent.mkdir(parents=True, exist_ok=True)
     log_path = output_map.parent / f"{output_map.stem}.sharped.log"
     log_lines: List[str] = []
 
     def log_both(line: str) -> None:
         log_lines.append(line)
+        if progress is not None:
+            lowered = str(line).lower()
+            if "uploading" in lowered:
+                progress("uploading")
+            elif "downloading" in lowered:
+                progress("downloading")
+            elif "server status:" in lowered:
+                status = lowered.split("server status:", 1)[1].strip()
+                progress("completed" if status in {"completed", "complete", "done", "ready", "finished", "success", "succeeded"} else "processing")
         try:
             log(line)
         finally:
@@ -4173,6 +4237,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._metrics_expanded = False
         self._configuration_locked = False
         self._run_status = "READY"
+        self._cycle_progress_state: Optional[CycleProgressState] = None
         self.inputs: Dict[str, object] = {}
         self.input_labels: Dict[str, QWidget] = {}
         self.settings = QSettings("PhaseStudio", "PhaseStudio")
@@ -4975,6 +5040,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         left_layout.addLayout(primary_buttons)
         left_layout.addLayout(secondary_buttons)
 
+        overall_progress_label = QLabel("OVERALL PROGRESS")
+        overall_progress_label.setObjectName("progressSectionLabel")
+        left_layout.addWidget(overall_progress_label)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
@@ -4982,6 +5050,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.progress_bar.setFormat("Idle")
         self.progress_bar.setToolTip("Cycle-level progress indicator for the iterative pipeline.")
         left_layout.addWidget(self.progress_bar)
+        current_cycle_header = QHBoxLayout()
+        current_cycle_label = QLabel("CURRENT CYCLE")
+        current_cycle_label.setObjectName("progressSectionLabel")
+        self.current_cycle_stage_counter = QLabel("")
+        self.current_cycle_stage_counter.setObjectName("progressStageCounter")
+        self.current_cycle_stage_counter.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        current_cycle_header.addWidget(current_cycle_label)
+        current_cycle_header.addStretch(1)
+        current_cycle_header.addWidget(self.current_cycle_stage_counter)
+        left_layout.addLayout(current_cycle_header)
+        self.current_cycle_detail = QLabel("Idle")
+        self.current_cycle_detail.setObjectName("currentCycleDetail")
+        self.current_cycle_detail.setWordWrap(True)
+        left_layout.addWidget(self.current_cycle_detail)
+        self.current_cycle_progress = QProgressBar()
+        self.current_cycle_progress.setObjectName("currentCycleProgress")
+        self.current_cycle_progress.setRange(0, 1)
+        self.current_cycle_progress.setValue(0)
+        self.current_cycle_progress.setTextVisible(False)
+        self.current_cycle_progress.setToolTip("Stage-based progress for the active cycle; this is not an elapsed-time estimate.")
+        left_layout.addWidget(self.current_cycle_progress)
         self.configuration_lock_hint = QLabel("Configuration locked while the pipeline is running.")
         self.configuration_lock_hint.setObjectName("configurationLockHint")
         self.configuration_lock_hint.setVisible(False)
@@ -5884,6 +5973,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Idle")
+        self._cycle_progress_state = None
+        self.current_cycle_detail.setText("Idle")
+        self.current_cycle_stage_counter.setText("")
+        self.current_cycle_progress.setRange(0, 1)
+        self.current_cycle_progress.setValue(0)
         self._set_run_status("Ready")
         if hasattr(self, "handoff_btn"):
             self.handoff_btn.setEnabled(False)
@@ -5893,6 +5987,59 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def log(self, message: str) -> None:
         self.msg_queue.put(("log", message))
+
+    def _emit_cycle_progress(
+        self,
+        cycle_index: int,
+        cycle_total: int,
+        stages: Sequence[str],
+        stage_name: str,
+        *,
+        sub_index: Optional[int] = None,
+        sub_total: Optional[int] = None,
+        detail: str = "",
+        busy: bool = False,
+        complete: bool = False,
+    ) -> None:
+        try:
+            stage_index = list(stages).index(stage_name) + 1
+        except ValueError:
+            stage_index = max(1, len(stages))
+        self.msg_queue.put(("cycle_progress", CycleProgressState(
+            cycle_index=max(1, int(cycle_index)),
+            cycle_total=max(1, int(cycle_total)),
+            stage_name=str(stage_name),
+            stage_index=stage_index,
+            stage_total=max(1, len(stages)),
+            sub_index=sub_index,
+            sub_total=sub_total,
+            detail=str(detail),
+            busy=bool(busy),
+            complete=bool(complete),
+        )))
+
+    def _apply_cycle_progress_state(self, state: CycleProgressState) -> None:
+        self._cycle_progress_state = state
+        stage_total = max(1, int(state.stage_total))
+        self.current_cycle_progress.setRange(0, stage_total)
+        completed_stages = stage_total if state.complete else max(0, min(stage_total, int(state.stage_index) - 1))
+        self.current_cycle_progress.setValue(completed_stages)
+        display_text = state.display_text()
+        if str(getattr(self, "_run_status", "")).upper() == "STOPPING":
+            stop_detail = "Stopping immediately..." if self.stop_now.is_set() else "Stopping after current cycle..."
+            display_text = f"{display_text} · {stop_detail}"
+        self.current_cycle_detail.setText(display_text)
+        self.current_cycle_stage_counter.setText(
+            "Completed" if state.complete else f"Stage {state.stage_index} / {stage_total}"
+        )
+
+    def _annotate_cycle_progress(self, detail: str) -> None:
+        state = self._cycle_progress_state
+        if state is None:
+            self.current_cycle_detail.setText(str(detail))
+            return
+        text = state.display_text()
+        self.current_cycle_detail.setText(f"{text} · {detail}" if detail else text)
 
     def _set_run_status(self, status: str) -> None:
         normalized = str(status).strip().upper() or "READY"
@@ -5935,12 +6082,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def request_stop_after_cycle(self) -> None:
         self.stop_after_cycle.set()
         self._set_run_status("Stopping")
+        self._annotate_cycle_progress("Stopping after current cycle...")
         self.log("Stop after current cycle requested.")
 
     def request_immediate_stop(self) -> None:
         self.stop_after_cycle.set()
         self.stop_now.set()
         self._set_run_status("Stopping")
+        self._annotate_cycle_progress("Stopping immediately...")
         self.log("Immediate stop requested.")
 
     def refresh_sharped_models(self) -> None:
@@ -6082,6 +6231,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.progress_bar.setRange(0, total)
                     self.progress_bar.setValue(0)
                     self.progress_bar.setFormat("0/%m cycles")
+                    self.current_cycle_progress.setRange(0, 0)
+                    self.current_cycle_detail.setText(f"Cycle 1 / {total} · Preparing cycle")
+                    self.current_cycle_stage_counter.setText("")
+                elif kind == "cycle_progress":
+                    self._apply_cycle_progress_state(payload)  # type: ignore[arg-type]
                 elif kind == "progress":
                     value = int(payload)
                     self.progress_bar.setValue(value)
@@ -6091,6 +6245,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     QMessageBox.critical(self, "Pipeline error", str(payload))
                     self.log_text.append("\nERROR: " + str(payload))
                     self.progress_bar.setFormat("Error")
+                    self._annotate_cycle_progress("Error")
                     self.run_btn.setEnabled(True)
                     self.handoff_btn.setEnabled(False)
                     self.run_btn.setText("Run pipeline")
@@ -6100,6 +6255,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     if payload is not None:
                         self.progress_bar.setValue(int(payload))
                     self.progress_bar.setFormat("Done")
+                    if self._cycle_progress_state is None:
+                        self.current_cycle_detail.setText("Pipeline complete")
+                        self.current_cycle_stage_counter.setText("Completed")
                     self.run_btn.setEnabled(True)
                     self.run_btn.setText("Run pipeline")
                     can_handoff = bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None)
@@ -6843,6 +7001,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Starting...")
+        self._cycle_progress_state = None
+        self.current_cycle_progress.setRange(0, 0)
+        self.current_cycle_detail.setText("Preparing pipeline...")
+        self.current_cycle_stage_counter.setText("")
         self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
@@ -7005,9 +7167,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             exclude_labels = parse_atom_label_list(cfg.exclude_atoms)
             all_results: List[CycleResult] = []
             completed_cycles = 0
+            progress_stages = cycle_progress_stages(cfg)
             for cyc in range(1, cfg.cycles + 1):
                 if self.stop_after_cycle.is_set():
                     self.log("Stop requested before next cycle."); break
+                self._emit_cycle_progress(
+                    cyc,
+                    cfg.cycles,
+                    progress_stages,
+                    "Preparing cycle",
+                    detail="preparing model and reflections",
+                )
                 cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
                 self.log(f"\n=== Cycle {cyc} ===")
                 model_for_sf: Optional[Path] = None
@@ -7049,11 +7219,39 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                             sf_extra_superflip_keywords,
                             f"finevoxel {sf_voxel}",
                         )
+                effective_repeat = 1 if model_for_sf is not None else max(1, int(cfg.repeatmode))
+                if effective_repeat == 1:
+                    self._emit_cycle_progress(
+                        cyc,
+                        cfg.cycles,
+                        progress_stages,
+                        "Superflip",
+                        sub_index=1,
+                        sub_total=1,
+                        detail="running",
+                        busy=True,
+                    )
+                else:
+                    self._emit_cycle_progress(
+                        cyc,
+                        cfg.cycles,
+                        progress_stages,
+                        "Superflip",
+                        detail=f"repeat mode {effective_repeat} · running",
+                        busy=True,
+                    )
                 sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, cfg.output_format, cfg.write_auxiliary_outputs or cfg.export_jana_project, cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana or cfg.export_jana_project, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
                 self.log(f"Superflip map: {sf_map}")
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
                 sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
+                self._emit_cycle_progress(
+                    cyc,
+                    cfg.cycles,
+                    progress_stages,
+                    "Superflip",
+                    detail="reading metrics",
+                )
                 if sf_log_metrics.rvalue is not None:
                     self.log(
                         "Superflip metrics: "
@@ -7067,6 +7265,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     )
                 sf_edma_dir = cycle_dir / "edma_superflip"
                 if cfg.run_edma_superflip:
+                    self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · Superflip map", busy=True)
                     sf_edma_cif = run_edma_on_xplor(
                         sf_map, sf_edma_dir, sf_prefix, ref_ctx, cfg.plimit_superflip,
                         cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
@@ -7089,7 +7288,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.run_sharped and not use_superflip_xplor_modelfile:
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
-                    run_sharped_deblur(sf_map, deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model, sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log, self.stop_now)
+                    self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="preparing upload", busy=True)
+                    run_sharped_deblur(
+                        sf_map,
+                        deblur_map,
+                        cfg.sharped_base_url,
+                        cfg.sharped_api_token,
+                        cfg.sharped_model,
+                        sharped_elements,
+                        cfg.sharped_outres,
+                        cfg.sharped_max_upload_mb,
+                        cfg.sharped_timeout_seconds,
+                        cfg.sharped_poll_seconds,
+                        cfg.sharped_max_polls,
+                        self.log,
+                        self.stop_now,
+                        progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
+                            cycle,
+                            cfg.cycles,
+                            progress_stages,
+                            "SharpED",
+                            detail=detail,
+                            busy=detail != "completed",
+                        ),
+                    )
                 else:
                     shutil.copy2(sf_map, deblur_map)
                     if use_superflip_xplor_modelfile:
@@ -7100,6 +7322,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
+                    self._emit_cycle_progress(
+                        cyc,
+                        cfg.cycles,
+                        progress_stages,
+                        "Superflip symmetry averaging",
+                        detail="running",
+                        busy=True,
+                    )
                     sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
                     self.log("  Superflip symmetry uses the deblurred XPLOR map as both modelfile and referencefile.")
                     deblur_map = run_superflip_symmetrize_map(
@@ -7119,6 +7349,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_prefix = f"cycle_{cyc:03d}_deblurred"
                 deblur_edma_dir = cycle_dir / "edma_deblurred"
                 if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
+                    self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · deblurred map", busy=True)
                     deblur_edma_cif = run_edma_on_xplor(
                         deblur_map, deblur_edma_dir, deblur_prefix, ref_ctx, cfg.plimit_deblur,
                         cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
@@ -7137,6 +7368,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.export_jana_project and cfg.run_edma_deblurred:
                     export_jana2020_project(cycle_dir / "jana2020_deblurred", deblur_prefix, cycle_dir, deblur_edma_dir, deblur_map, deblur_edma_cif, ref_ctx, self.log)
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
                 self.log(f"EDMA after deblur CIF: {deblur_edma_cif}")
                 self.msg_queue.put(("structure_update", ("deblur", deblur_edma_cif)))
                 self.log(f"EDMA after deblur RMSD: {deblur_metric if deblur_metric is not None else 'n/a'} Å")
@@ -7164,8 +7396,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 all_results.append(result)
                 write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
                 self.msg_queue.put(("result", result))
-                completed_cycles = cyc
-                self.msg_queue.put(("progress", completed_cycles))
                 if cyc < cfg.cycles:
                     add_missing = cfg.map_feedback_missing_from_cycle > 0 and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
                     correct_intensities = cfg.map_feedback_intensity_from_cycle > 0 and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
@@ -7216,6 +7446,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 else:
                     current_model = None
                     current_model_metric = None
+                completed_cycles = cyc
+                self.msg_queue.put(("progress", completed_cycles))
+                self._emit_cycle_progress(
+                    cyc,
+                    cfg.cycles,
+                    progress_stages,
+                    "Finalizing cycle",
+                    detail="completed",
+                    complete=True,
+                )
             self.msg_queue.put(("done", completed_cycles))
         except Exception as exc:
             self.msg_queue.put(("error", exc))
