@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import ssl
 import time
 import uuid
 from dataclasses import dataclass
@@ -65,8 +66,60 @@ class SharpEDServerClient:
         self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent
         self.timeout = timeout
+        self.ssl_context, self.tls_fallback_message = self._create_ssl_context()
+        self._tls_fallback_logged = False
+
+    @staticmethod
+    def _create_ssl_context() -> tuple[ssl.SSLContext, str]:
+        """Create a verified TLS context even if one Windows certificate is malformed."""
+        try:
+            return ssl.create_default_context(), ""
+        except ssl.SSLError as default_error:
+            if not hasattr(ssl, "enum_certificates"):
+                raise SharpEDServerError(
+                    f"Cannot load the operating-system TLS certificates: {default_error}"
+                ) from default_error
+
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = True
+            context.verify_mode = ssl.CERT_REQUIRED
+            server_auth_oid = "1.3.6.1.5.5.7.3.1"
+            loaded = 0
+            skipped = 0
+            for store_name in ("ROOT", "CA"):
+                try:
+                    certificates = ssl.enum_certificates(store_name)
+                except Exception:
+                    continue
+                for certificate, encoding, trust in certificates:
+                    if encoding != "x509_asn":
+                        continue
+                    if trust is not True and server_auth_oid not in trust:
+                        continue
+                    try:
+                        pem = ssl.DER_cert_to_PEM_cert(certificate)
+                        context.load_verify_locations(cadata=pem)
+                        loaded += 1
+                    except (ssl.SSLError, ValueError):
+                        skipped += 1
+            if loaded == 0:
+                raise SharpEDServerError(
+                    "Cannot create a verified TLS context: the Windows ROOT/CA stores "
+                    f"did not contain a readable server-authentication certificate. Original error: {default_error}"
+                ) from default_error
+            message = (
+                "TLS certificate fallback active: the default Windows certificate bundle could not be parsed "
+                f"({default_error}); loaded {loaded} valid certificate(s) individually and skipped {skipped} malformed certificate(s)."
+            )
+            return context, message
+
+    def _log_tls_fallback(self, log: ProgressLog) -> None:
+        if log and self.tls_fallback_message and not self._tls_fallback_logged:
+            log(self.tls_fallback_message)
+            self._tls_fallback_logged = True
 
     def get_models(self, log: ProgressLog = None) -> ModelsResult:
+        self._log_tls_fallback(log)
         if log:
             log("SharpED server: fetching available models")
         body = self._request_text("GET", self._url("/sharp-ed/models"))
@@ -121,6 +174,7 @@ class SharpEDServerClient:
         outres: float,
         log: ProgressLog = None,
     ) -> UploadResult:
+        self._log_tls_fallback(log)
         if not bearer_token:
             raise SharpEDServerError("Missing SharpED API token.")
         if not file_path.is_file():
@@ -301,13 +355,15 @@ class SharpEDServerClient:
         req_headers.update(headers or {})
         req = Request(url, data=data, headers=req_headers, method=method)
         try:
-            with urlopen(req, timeout=self.timeout) as resp:
+            with urlopen(req, timeout=self.timeout, context=self.ssl_context) as resp:
                 return resp.read()
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
             raise SharpEDServerError(f"SharpED HTTP error {exc.code} for {url}. Body: {body}") from exc
         except URLError as exc:
             raise SharpEDServerError(f"SharpED request failed for {url}: {exc}") from exc
+        except ssl.SSLError as exc:
+            raise SharpEDServerError(f"SharpED TLS error for {url}: {exc}") from exc
 
     def _request_text_with_auth_candidates(self, url: str, tokens: list[str]) -> str:
         return self._request_bytes_with_auth_candidates(url, tokens).decode("utf-8", errors="replace")

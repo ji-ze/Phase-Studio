@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import collections
 import csv
+import html
 import locale
 import math
 import os
@@ -61,12 +62,12 @@ except Exception as exc:
 # Import the selected Qt binding before Matplotlib's Qt backend.
 # The application and the frozen executable use PySide6 exclusively.
 try:
-    from PySide6.QtCore import Qt, QTimer, QSettings
-    from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
+    from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QRectF
+    from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
         QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
-        QDialog, QDialogButtonBox, QProgressBar, QPushButton, QScrollArea, QSpinBox, QSplitter, QSplashScreen,
+        QDialog, QDialogButtonBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QSplashScreen, QToolButton,
         QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QTextEdit, QVBoxLayout, QWidget
     )
 except Exception as exc:
@@ -85,8 +86,24 @@ try:
     import matplotlib
 
     matplotlib.use("QtAgg", force=True)
+    matplotlib.rcParams.update(
+        {
+            "text.color": "#001170",
+            "axes.labelcolor": "#001170",
+            "axes.edgecolor": "#001170",
+            "axes.titlecolor": "#001170",
+            "xtick.color": "#001170",
+            "ytick.color": "#001170",
+            "grid.color": "#44b7ff",
+            "figure.facecolor": "#ffffff",
+            "axes.facecolor": "#ffffff",
+            "savefig.facecolor": "#ffffff",
+            "legend.labelcolor": "#001170",
+        }
+    )
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
     from matplotlib.figure import Figure
+    from matplotlib.lines import Line2D
     from matplotlib.ticker import MaxNLocator
 except Exception as exc:
     raise RuntimeError(
@@ -95,10 +112,13 @@ except Exception as exc:
     ) from exc
 
 COMMENT_PREFIXES = ("#", "!", ";")
-REFLECTION_DATA_MODE_AUTO = "auto"
-REFLECTION_DATA_MODE_INTENSITY = "intensity"
-REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA = "amplitude_dummy_sigma"
-REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA = "fobs_zero_phase_sigma"
+REFLECTION_DATA_MODE_SET_FROM_INFLIP = "set from inflip"
+REFLECTION_DATA_MODE_INTENSITY = "hkl I sigma"
+REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA = "hkl F sigma"
+REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA = "hkl I phase sigma"
+REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA = "hkl F phase sigma"
+# Compatibility name used by older settings and internal call sites.
+REFLECTION_DATA_MODE_AUTO = REFLECTION_DATA_MODE_SET_FROM_INFLIP
 ATOMIC_NUMBER_HINTS = {
     "H": 1, "B": 5, "C": 6, "N": 7, "O": 8, "F": 9,
     "Na": 11, "Mg": 12, "Al": 13, "Si": 14, "P": 15, "S": 16, "Cl": 17,
@@ -862,8 +882,14 @@ def nearest_metric_to_reference(model_cif: Optional[Path], ref_ctx: ReferenceCon
 def normalize_reflection_data_mode(value: str) -> str:
     mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
+        "auto": REFLECTION_DATA_MODE_SET_FROM_INFLIP,
         "auto_detect": REFLECTION_DATA_MODE_AUTO,
         "detect": REFLECTION_DATA_MODE_AUTO,
+        "set_from_inflip": REFLECTION_DATA_MODE_SET_FROM_INFLIP,
+        "hkl_i_sigma": REFLECTION_DATA_MODE_INTENSITY,
+        "hkl_f_sigma": REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        "hkl_i_phase_sigma": REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+        "hkl_f_phase_sigma": REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
         "i": REFLECTION_DATA_MODE_INTENSITY,
         "int": REFLECTION_DATA_MODE_INTENSITY,
         "intensities": REFLECTION_DATA_MODE_INTENSITY,
@@ -874,21 +900,46 @@ def normalize_reflection_data_mode(value: str) -> str:
         "amplitude": REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
         "amplitudes": REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
         "amplitude_sigma": REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        "amplitude_dummy_sigma": REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
         "fobs_phase_sigma": REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
         "fobs_zero_phase": REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
         "fobs_zero_phase_sigma": REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+        "intensity_phase_sigma": REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+        "i_phase_sigma": REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
     }
     mode = aliases.get(mode, mode)
     if mode == REFLECTION_DATA_MODE_AUTO:
         return REFLECTION_DATA_MODE_AUTO
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+    if mode in {
+        REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+        REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+    }:
         return mode
     return REFLECTION_DATA_MODE_INTENSITY
 
+
+def reflection_mode_is_amplitude(data_mode: str) -> bool:
+    return normalize_reflection_data_mode(data_mode) in {
+        REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+    }
+
+
+def reflection_mode_has_phase(data_mode: str) -> bool:
+    return normalize_reflection_data_mode(data_mode) in {
+        REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+        REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+    }
+
+
+def superflip_dataformat_for_mode(data_mode: str) -> str:
+    quantity = "amplitude" if reflection_mode_is_amplitude(data_mode) else "intensity"
+    return f"{quantity} phase dummy" if reflection_mode_has_phase(data_mode) else f"{quantity} dummy"
+
 def detect_reflection_data_mode_from_hkl(hkl_path: Path) -> str:
     name = hkl_path.name.lower()
-    if "fobs" in name or "f_obs" in name:
-        return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
+    name_hint = REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA if "fobs" in name or "f_obs" in name else None
     try:
         with hkl_path.open("r", encoding="utf-8", errors="ignore") as f:
             for _ in range(80):
@@ -898,13 +949,17 @@ def detect_reflection_data_mode_from_hkl(hkl_path: Path) -> str:
                 low = line.lower()
                 if "fobs_zero_phase_sigma" in low:
                     return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+                if "intensity" in low and "phase" in low:
+                    return REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA
+                if "fobs" in low and "phase" in low:
+                    return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
                 if "fobs" in low and "sigma" in low:
                     return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
                 if "intensity" in low:
                     return REFLECTION_DATA_MODE_INTENSITY
     except Exception:
         pass
-    return REFLECTION_DATA_MODE_INTENSITY
+    return name_hint or REFLECTION_DATA_MODE_INTENSITY
 
 def resolve_reflection_data_mode(hkl_path: Path, configured_mode: str) -> str:
     mode = normalize_reflection_data_mode(configured_mode)
@@ -927,7 +982,9 @@ def parse_reflection_line(line: str, value_col: int, sigma_col: Optional[int]) -
             sigma = float(parts[sigma_col - 1])
         phase = None
         if value_col == 4 and sigma_col == 6 and len(parts) >= 5:
-            phase = float(parts[4])
+            phase_token = parts[4].strip()
+            if phase_token not in {"?", ".", "nan", "NaN"}:
+                phase = float(phase_token)
         return Reflection(h, k, l, value, sigma, phase)
     except Exception:
         return None
@@ -948,7 +1005,7 @@ def read_hkl(hkl_path: Path, value_col: int = 4, sigma_col: Optional[int] = 5, i
 
 def reflection_columns_for_mode(data_mode: str) -> Tuple[int, Optional[int], bool]:
     mode = normalize_reflection_data_mode(data_mode)
-    if mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA:
+    if reflection_mode_has_phase(mode):
         return 4, 6, True
     if mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
         return 4, 5, False
@@ -992,8 +1049,10 @@ def observed_hkl_name_for_mode(data_mode: str) -> str:
     mode = normalize_reflection_data_mode(data_mode)
     if mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
         return "observed_unique_amplitude_sigma_for_superflip.hkl"
+    if mode == REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA:
+        return "observed_unique_intensity_phase_sigma_for_superflip.hkl"
     if mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA:
-        return "observed_unique_fobs_zero_phase_for_superflip.hkl"
+        return "observed_unique_amplitude_phase_sigma_for_superflip.hkl"
     return "observed_unique_for_superflip.hkl"
 
 def reflection_d_spacing(cell: gemmi.UnitCell, h: int, k: int, l: int) -> float:
@@ -1270,8 +1329,7 @@ def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]
     value = float(r.value)
     if sigma <= 0 or not math.isfinite(sigma) or not math.isfinite(value):
         return None
-    mode = normalize_reflection_data_mode(data_mode)
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+    if reflection_mode_is_amplitude(data_mode):
         amplitude = abs(value)
         if amplitude <= 0:
             return 0.0
@@ -1288,14 +1346,12 @@ def reflection_amplitude_signal_to_noise(r: Reflection) -> Optional[float]:
     return value / sigma
 
 def reflection_value_label(data_mode: str) -> str:
-    mode = normalize_reflection_data_mode(data_mode)
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+    if reflection_mode_is_amplitude(data_mode):
         return "Fobs"
     return "Iobs"
 
 def reflection_sigma_label(data_mode: str) -> str:
-    mode = normalize_reflection_data_mode(data_mode)
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+    if reflection_mode_is_amplitude(data_mode):
         return "sigma(Fobs)"
     return "sigma(Iobs)"
 
@@ -1614,38 +1670,23 @@ def write_observed_reflections(out_hkl: Path, reflections: Sequence[Reflection],
         if _passes_reflection_filters(r, i_over_sigma_min, cell, resolution_d_min)
     ]
     with out_hkl.open("w", encoding="utf-8") as f:
-        if mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
-            f.write("# h k l Fobs sigma(Fobs)\n")
-            f.write("# Superflip dataformat: amplitude dummy; sigma is ignored by Superflip\n")
-        elif mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA:
-            records = [
-                (
-                    int(r.h),
-                    int(r.k),
-                    int(r.l),
-                    max(0.0, float(r.value)),
-                    0.0 if r.phase is None else float(r.phase),
-                    0.0 if r.sigma is None else max(0.0, float(r.sigma)),
-                )
-                for r in filtered
-            ]
-            widths = calculate_superflip_dataitemwidths(records)
-            f.write("# h k l Fobs phase sigma(Fobs)\n")
-            f.write("# legacy mode: phase fixed to 0, sigma ignored by Superflip\n")
-            f.write(f"# Phase Studio auto dataitemwidths: {widths[0]} {widths[1]} {widths[2]}\n")
-            for h, k, l, value, phase, sigma in records:
-                f.write(format_superflip_fixed_reflection(h, k, l, value, phase, sigma, widths) + "\n")
-            return len(records)
+        quantity = "Fobs" if reflection_mode_is_amplitude(mode) else "Iobs"
+        sigma_name = "sigma(Fobs)" if reflection_mode_is_amplitude(mode) else "sigma(Iobs)"
+        if reflection_mode_has_phase(mode):
+            f.write(f"# h k l {quantity} phase(deg) {sigma_name}\n")
+            f.write("# Phase is converted from degrees to turns for Superflip; sigma is ignored by Superflip.\n")
         else:
-            f.write("# h k l I\n")
+            f.write(f"# h k l {quantity} {sigma_name}\n")
+            f.write("# Sigma is retained by Phase Studio and ignored by Superflip.\n")
         n = 0
         for r in filtered:
             value = max(0.0, float(r.value))
-            if mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
-                sigma = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
-                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {sigma:14.7f}\n")
+            sigma = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
+            if reflection_mode_has_phase(mode):
+                phase_turns = (0.0 if r.phase is None else float(r.phase)) / 360.0
+                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {phase_turns:14.9f} {sigma:14.7f}\n")
             else:
-                f.write(f"{r.h:d} {r.k:d} {r.l:d} {value:.6f}\n")
+                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {sigma:14.7f}\n")
             n += 1
     return n
 
@@ -1656,7 +1697,7 @@ def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Refle
     n = 0
     with out_hkl.open("w", encoding="utf-8") as f:
         f.write("# h k l I sigma(I) phase(deg)\n")
-        f.write("# Phase Studio v3 standardized HKL export; phase is 0.0 unless supplied by the selected HKL mode.\n")
+        f.write("# Phase Studio 1.0.1 standardized HKL export; phase is 0.0 unless supplied by the selected HKL mode.\n")
         for r in reflections:
             if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
                 if float(r.value) / float(r.sigma) < i_over_sigma_min:
@@ -1664,7 +1705,7 @@ def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Refle
             if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
                 continue
             value = max(0.0, float(r.value))
-            if mode == REFLECTION_DATA_MODE_INTENSITY:
+            if not reflection_mode_is_amplitude(mode):
                 intensity = value
                 sigma_i = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
             else:
@@ -1678,15 +1719,13 @@ def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Refle
 
 def reflection_value_as_intensity(reflection: Reflection, data_mode: str) -> float:
     value = max(0.0, float(reflection.value))
-    mode = normalize_reflection_data_mode(data_mode)
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+    if reflection_mode_is_amplitude(data_mode):
         return value * value
     return value
 
 def value_from_intensity(intensity: float, data_mode: str) -> float:
     intensity = max(0.0, float(intensity))
-    mode = normalize_reflection_data_mode(data_mode)
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+    if reflection_mode_is_amplitude(data_mode):
         return math.sqrt(intensity)
     return intensity
 
@@ -1795,7 +1834,7 @@ def apply_map_feedback_to_reflections(
                 map_i = raw_i * scale
                 new_i = (1.0 - damping) * obs_i + damping * map_i
                 value = value_from_intensity(new_i, mode)
-                phase = r.phase if r.phase is not None else (map_phase if mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA else None)
+                phase = r.phase if r.phase is not None else (map_phase if reflection_mode_has_phase(mode) else None)
                 corrected_reflections.append(Reflection(r.h, r.k, r.l, value, r.sigma, phase))
                 corrected += 1
             else:
@@ -1818,7 +1857,7 @@ def apply_map_feedback_to_reflections(
                 intensity = raw_i * scale
                 value = value_from_intensity(intensity, mode)
                 sigma = estimate_sigma_for_reflection_value(current, value)
-                new_reflections.append(Reflection(key[0], key[1], key[2], value, sigma, phase if mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA else None))
+                new_reflections.append(Reflection(key[0], key[1], key[2], value, sigma, phase if reflection_mode_has_phase(mode) else None))
                 existing.add(key)
                 added += 1
             current = new_reflections
@@ -2209,6 +2248,11 @@ def without_inflip_keywords(lines: Sequence[str], keywords: Iterable[str]) -> Li
 def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Path:
     lines = Path(inflip_path).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     reflections: List[str] = []
+    phase_is_superflip_turns = any(
+        inflip_first_token(line) == "dataformat"
+        and "phase" in {part.lower() for part in split_inflip_line(line)[1:]}
+        for line in lines
+    )
     in_block = False
     for line in lines:
         key = inflip_first_token(line)
@@ -2218,13 +2262,23 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Pat
         if in_block and key == "endf":
             break
         if in_block and line.strip() and not line.lstrip().startswith(COMMENT_PREFIXES):
-            reflections.append(line.rstrip())
+            record = line.rstrip()
+            if phase_is_superflip_turns:
+                fields = record.split()
+                if len(fields) >= 6:
+                    try:
+                        fields[4] = f"{float(fields[4]) * 360.0:.9f}"
+                        record = " ".join(fields)
+                    except ValueError:
+                        pass
+            reflections.append(record)
     if not reflections:
         raise ValueError(f"No fbegin/endf reflection block was found in Jana .inflip: {inflip_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
     out = output_dir / f"{Path(inflip_path).stem}_embedded_reflections.hkl"
     out.write_text(
         "# Reflections exported from the Jana2020 .inflip fbegin/endf block.\n"
+        + ("# Input Superflip phase turns were converted to degrees by Phase Studio.\n" if phase_is_superflip_turns else "")
         + "\n".join(reflections)
         + "\n",
         encoding="utf-8",
@@ -2293,6 +2347,7 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
     saw_dataitemwidths = False
     saw_dataformat_amplitude = False
     saw_dataformat_intensity = False
+    saw_dataformat_phase = False
     sample_widths: List[int] = []
     in_block = False
     try:
@@ -2305,6 +2360,7 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
                 items = {p.strip().lower() for p in parts[1:]}
                 saw_dataformat_intensity = "intensity" in items
                 saw_dataformat_amplitude = "amplitude" in items
+                saw_dataformat_phase = "phase" in items
             if key == "fbegin":
                 in_block = True
                 continue
@@ -2318,6 +2374,8 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
                         break
     except Exception:
         return None
+    if saw_dataformat_phase:
+        return REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA if saw_dataformat_intensity else REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
     if saw_dataitemwidths and sample_widths and max(sample_widths) >= 6:
         return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
     if saw_dataformat_intensity:
@@ -2548,7 +2606,11 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
                 settings["referencefile_mode"] = "reference_cif"
         elif key == "dataformat":
             items = [p.strip().lower() for p in parts[1:]]
-            if "intensity" in items:
+            if "intensity" in items and "phase" in items:
+                settings["reflection_data_mode"] = REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA
+            elif "amplitude" in items and "phase" in items:
+                settings["reflection_data_mode"] = REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+            elif "intensity" in items:
                 settings["reflection_data_mode"] = REFLECTION_DATA_MODE_INTENSITY
             elif "amplitude" in items and "dummy" in items:
                 settings["reflection_data_mode"] = REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
@@ -2583,7 +2645,7 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
         settings["referencefile_mode"] = "omit"
     if not saw_voxel_keyword:
         settings["voxel"] = "omit"
-    if "dataitemwidths" in settings:
+    if "dataitemwidths" in settings and "reflection_data_mode" not in settings:
         settings["reflection_data_mode"] = REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
     if extra:
         settings["extra_superflip_keywords"] = "\n".join(extra)
@@ -2890,19 +2952,7 @@ def write_superflip_input(
             f.write(line + "\n")
         if str(electrons or "").strip():
             f.write(f"electrons {str(electrons).strip()}\n")
-        if data_mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
-            f.write("dataformat amplitude dummy\n")
-        elif data_mode == REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA:
-            requested_widths = str(dataitemwidths or "").strip()
-            if requested_widths.lower() in {"", "auto", "automatic", "generated", "4 14 14"}:
-                effective_widths = infer_dataitemwidths_from_hkl(observed_hkl)
-                if log is not None:
-                    log(f"  Superflip dataitemwidths automatically set to {effective_widths} from the fbegin reflection records.")
-            else:
-                effective_widths = requested_widths
-            f.write(f"dataitemwidths {effective_widths}\n")
-        else:
-            f.write("dataformat intensity\n")
+        f.write(f"dataformat {superflip_dataformat_for_mode(data_mode)}\n")
         f.write("fbegin\n")
         with observed_hkl.open("r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
@@ -3746,16 +3796,18 @@ class PathRow(QWidget):
         self.on_change: Optional[Callable[[], None]] = None
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        self.label = QLabel(label)
-        self.label.setMinimumWidth(170)
+        layout.setSpacing(6)
+        self.label_text = str(label)
+        self.form_label: Optional[QWidget] = None
+        self._base_tooltip = ""
         self.edit = QLineEdit(default)
         self.button = QPushButton("…")
-        self.button.setMaximumWidth(34)
-        layout.addWidget(self.label)
+        self.button.setFixedWidth(34)
         layout.addWidget(self.edit, 1)
         layout.addWidget(self.button)
         self.button.clicked.connect(self.browse)
         self.edit.editingFinished.connect(self._notify_changed)
+        self._refresh_path_tooltip()
 
     def browse(self) -> None:
         if self.mode == "dir":
@@ -3763,10 +3815,12 @@ class PathRow(QWidget):
         else:
             path, _ = QFileDialog.getOpenFileName(self, "Select file", self.edit.text() or str(Path.cwd()), self.file_filter)
         if path:
-            self.edit.setText(path)
+            self.set_value(path)
             self._notify_changed()
 
     def _notify_changed(self) -> None:
+        self.edit.setCursorPosition(0)
+        self._refresh_path_tooltip()
         if self.on_change is not None:
             self.on_change()
 
@@ -3775,12 +3829,30 @@ class PathRow(QWidget):
 
     def set_value(self, value: str) -> None:
         self.edit.setText(str(value))
+        self.edit.setCursorPosition(0)
+        self._refresh_path_tooltip()
 
     def set_tooltip(self, tooltip: str) -> None:
+        self._base_tooltip = str(tooltip).strip()
+        self._refresh_path_tooltip()
+        self.button.setToolTip("Browse for " + self.label_text)
+
+    def set_form_label(self, label: Optional[QWidget]) -> None:
+        self.form_label = label
+        if label is not None:
+            label.setEnabled(self.isEnabled())
+
+    def setEnabled(self, enabled: bool) -> None:  # type: ignore[override]
+        super().setEnabled(enabled)
+        if self.form_label is not None:
+            self.form_label.setEnabled(enabled)
+
+    def _refresh_path_tooltip(self) -> None:
+        path = self.edit.text().strip()
+        parts = [part for part in (self._base_tooltip, f"Path: {path}" if path else "") if part]
+        tooltip = "\n\n".join(parts)
         self.setToolTip(tooltip)
-        self.label.setToolTip(tooltip)
         self.edit.setToolTip(tooltip)
-        self.button.setToolTip("Browse for " + self.label.text())
 
 INPUT_TOOLTIPS = {
     "input_source_mode": "Choose how crystallographic input is supplied: use the Jana .inflip as the primary source, use it with selected external HKL/reference replacements, or use an external HKL plus CIF reference without a Jana input file.",
@@ -3831,8 +3903,8 @@ INPUT_TOOLTIPS = {
     "delta": "Superflip delta keyword. AUTO lets Superflip estimate the flip threshold.",
     "weakratio": "Superflip weakratio keyword.",
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
-    "reflection_data_mode": "HKL data format for Superflip fbegin/endf. Auto first reads dataformat/dataitemwidths from a Jana .inflip when available, then detects from HKL headers. intensity uses h k l I sigma(I); amplitude dummy uses h k l Fobs sigma(Fobs); Fobs/phase/sigma uses fixed-width h k l Fobs phase sigma records.",
-    "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic v3 -> Next-cycle modelfile instead.",
+    "reflection_data_mode": "Exact HKL column order. 'set from inflip' imports dataformat from Jana; the four HKL modes accept I or F followed by sigma, optionally with phase in degrees before sigma. Phase Studio converts phase to Superflip turns and retains sigma for diagnostics.",
+    "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle modelfile instead.",
     "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
     "normalize": "Optional Superflip reflection normalization keyword. For this Windows executable, none is the safest default and local is omitted.",
@@ -3841,7 +3913,7 @@ INPUT_TOOLTIPS = {
     "searchsymmetry": "Superflip searchsymmetry keyword: no, shift or average.",
     "derivesymmetry": "Superflip derivesymmetry keyword. Common values are yes, no or use, depending on Superflip version.",
     "electrons": "Superflip electrons keyword. Leave blank to omit.",
-    "dataitemwidths": "Always automatic. Phase Studio generates dataitemwidths from the exact fbegin records written to the Superflip input.",
+    "dataitemwidths": "Not required for generated inputs because Phase Studio writes whitespace-separated fbegin records.",
     "extra_superflip_keywords": "Additional raw Superflip keyword lines inserted before fbegin. Use this for advanced/manual keywords not represented by a widget.",
     "map_feedback_missing_from_cycle": "First completed cycle whose final map is used to add missing reflections for the next cycle. Use 0 to disable missing-reflection completion.",
     "map_feedback_missing_percent_limit": "Maximum number of added missing reflections, expressed as a percent of the current HKL count. This prevents map feedback from overwhelming measured data.",
@@ -3899,10 +3971,140 @@ for example:
   usephases firstcycle
 """
 
+
+def create_phase_studio_logo_pixmap(width: int = 96) -> QPixmap:
+    """Render the supplied Phase Studio monitor mark without an external asset dependency."""
+    width = max(40, int(width))
+    height = max(30, int(round(width * 255.0 / 339.0)))
+    pixmap = QPixmap(width, height)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        sx = width / 339.0
+        sy = height / 255.0
+
+        def rect(x: float, y: float, w: float, h: float, color: str, radius: float = 0.0) -> None:
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(color))
+            painter.drawRoundedRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy), radius * sx, radius * sy)
+
+        frame_pen = QPen(QColor("#001170"), max(2.0, 7.0 * sx))
+        frame_pen.setJoinStyle(Qt.RoundJoin)
+        painter.setPen(frame_pen)
+        painter.setBrush(QColor("#F2F4F9"))
+        painter.drawRoundedRect(int(19 * sx), int(11 * sy), int(286 * sx), int(177 * sy), 2.5 * sx, 2.5 * sy)
+        painter.drawLine(int(159 * sx), int(188 * sy), int(159 * sx), int(238 * sy))
+        painter.drawLine(int(82 * sx), int(239 * sy), int(237 * sx), int(239 * sy))
+
+        rect(104, 49, 30, 17, "#001170", 5)
+        rect(132, 69, 19, 16, "#001170", 5)
+        rect(72, 87, 61, 13, "#001170", 6)
+        rect(80, 106, 25, 21, "#001170", 5)
+        rect(118, 109, 17, 42, "#001170", 5)
+        rect(149, 107, 21, 22, "#001170", 5)
+        rect(151, 47, 44, 20, "#1FA5FF", 5)
+        rect(194, 69, 33, 16, "#1FA5FF", 7)
+        rect(172, 87, 90, 13, "#44B7FF", 6)
+        rect(190, 106, 42, 21, "#1FA5FF", 6)
+        rect(146, 134, 64, 15, "#1FA5FF", 7)
+    finally:
+        painter.end()
+    return pixmap
+
+
+def create_phase_studio_app_icon(size: int = 64) -> QIcon:
+    """Create a square, optically centered application/taskbar icon."""
+    size = max(32, int(size))
+    source = create_phase_studio_logo_pixmap(size)
+    cropped = source.copy(
+        int(source.width() * 0.04),
+        int(source.height() * 0.025),
+        int(source.width() * 0.88),
+        int(source.height() * 0.95),
+    )
+    target = QPixmap(size, size)
+    target.fill(Qt.transparent)
+    scaled = cropped.scaled(
+        int(size * 0.90), int(size * 0.90), Qt.KeepAspectRatio, Qt.SmoothTransformation
+    )
+    painter = QPainter(target)
+    try:
+        painter.drawPixmap((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
+    finally:
+        painter.end()
+    return QIcon(target)
+
+
+class WorkflowDiagram(QWidget):
+    """Compact native-Qt overview of the optional reconstruction branches."""
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self.setMinimumHeight(190)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.setToolTip("Optional branches depend on the Workflow settings.")
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        super().paintEvent(event)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            width = max(520.0, float(self.width()))
+            scale = min(1.0, width / 760.0)
+            box_w = 116.0 * scale
+            box_h = 34.0
+            gap = max(18.0, (width - 5.0 * box_w - 32.0) / 4.0)
+            y = 30.0
+            labels = ("Reflections", "Superflip", "XPLOR map", "SharpED", "Next-cycle model")
+            boxes: List[QRectF] = []
+            x = 8.0
+            for label in labels:
+                box = QRectF(x, y, box_w, box_h)
+                boxes.append(box)
+                painter.setPen(QPen(QColor("#44b7ff"), 1.0))
+                painter.setBrush(QColor("#f2f4f9"))
+                painter.drawRect(box)
+                painter.setPen(QColor("#001170"))
+                painter.drawText(box, Qt.AlignCenter, label)
+                x += box_w + gap
+
+            def arrow(start_x: float, start_y: float, end_x: float, end_y: float) -> None:
+                painter.setPen(QPen(QColor("#2264b8"), 1.5))
+                painter.drawLine(int(start_x), int(start_y), int(end_x), int(end_y))
+                painter.drawLine(int(end_x), int(end_y), int(end_x - 6), int(end_y - 4))
+                painter.drawLine(int(end_x), int(end_y), int(end_x - 6), int(end_y + 4))
+
+            for first, second in zip(boxes, boxes[1:]):
+                arrow(first.right() + 3, first.center().y(), second.left() - 3, second.center().y())
+
+            edma_box = QRectF(boxes[2].center().x() - box_w / 2.0, 100.0, box_w, box_h)
+            painter.setPen(QPen(QColor("#44b7ff"), 1.0))
+            painter.setBrush(QColor("#f2f4f9"))
+            painter.drawRect(edma_box)
+            painter.setPen(QColor("#001170"))
+            painter.drawText(edma_box, Qt.AlignCenter, "EDMA")
+            painter.setPen(QPen(QColor("#2264b8"), 1.5))
+            painter.drawLine(int(boxes[2].center().x()), int(boxes[2].bottom() + 3), int(edma_box.center().x()), int(edma_box.top() - 3))
+
+            jana_box = QRectF(boxes[4].center().x() - box_w / 2.0, 100.0, box_w, box_h)
+            painter.setPen(QPen(QColor("#44b7ff"), 1.0))
+            painter.setBrush(QColor("#f2f4f9"))
+            painter.drawRect(jana_box)
+            painter.setPen(QColor("#001170"))
+            painter.drawText(jana_box, Qt.AlignCenter, "Jana2020")
+            painter.setPen(QPen(QColor("#2264b8"), 1.5))
+            painter.drawLine(int(boxes[4].center().x()), int(boxes[4].bottom() + 3), int(jana_box.center().x()), int(jana_box.top() - 3))
+            painter.setPen(QColor("#2264b8"))
+            painter.drawText(QRectF(8.0, 152.0, width - 16.0, 24.0), Qt.AlignCenter, "Branches are optional · selected result → Jana2020")
+        finally:
+            painter.end()
+
 class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Phase Studio for Jana2020")
+        self.setWindowTitle("Phase Studio 1.0.1 for Jana2020")
+        self.setWindowIcon(create_phase_studio_app_icon(64))
         self.resize(1420, 880)
         self.msg_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
         self.worker: Optional[threading.Thread] = None
@@ -3914,24 +4116,58 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.reference_atoms_for_plot: List[AtomSite] = []
         self.superflip_atoms_for_plot: List[AtomSite] = []
         self.deblur_atoms_for_plot: List[AtomSite] = []
+        self.structure_cell: Optional[gemmi.UnitCell] = None
         self.structure_axes: List[object] = []
         self.structure_elev = 20.0
         self.structure_azim = 35.0
+        self._structure_rotation_source: Optional[object] = None
+        self._metrics_compact_sizes: Optional[List[int]] = None
+        self._metrics_expanded = False
+        self._configuration_locked = False
+        self._run_status = "READY"
         self.inputs: Dict[str, object] = {}
+        self.input_labels: Dict[str, QWidget] = {}
         self.settings = QSettings("PhaseStudio", "PhaseStudio")
         self._build_ui()
+        self.help_shortcut = QShortcut(QKeySequence(Qt.Key_F1), self)
+        self.help_shortcut.setContext(Qt.WindowShortcut)
+        self.help_shortcut.activated.connect(self._open_context_help)
         self.load_settings()
         QTimer.singleShot(250, self.refresh_sharped_models)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll_queue)
         self.timer.start(200)
 
-    def _add_path(self, parent: QVBoxLayout, key: str, label: str, default: str, mode: str = "file", file_filter: str = "All files (*)") -> None:
+    def _configure_form(self, form: QFormLayout) -> QFormLayout:
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        form.setFormAlignment(Qt.AlignTop)
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(8)
+        form.setContentsMargins(0, 0, 0, 0)
+        return form
+
+    @staticmethod
+    def _brief_tooltip(text: str) -> str:
+        text = " ".join(str(text or "").split())
+        match = re.match(r"^(.+?[.!?])(?:\s|$)", text)
+        return match.group(1) if match else text
+
+    def _secondary_help(self, text: str) -> QLabel:
+        label = QLabel(text)
+        label.setObjectName("secondaryHelp")
+        label.setWordWrap(True)
+        return label
+
+    def _add_path(self, form: QFormLayout, key: str, label: str, default: str, mode: str = "file", file_filter: str = "All files (*)") -> None:
         row = PathRow(label, default, mode, file_filter)
         row.on_change = self.save_settings
-        parent.addWidget(row)
+        form.addRow(label, row)
+        row.set_form_label(form.labelForField(row))
         self.inputs[key] = row
         self._apply_input_tooltip(key, row)
+        self._apply_form_label_tooltip(form, row, key)
 
     def _add_text(self, form: QFormLayout, key: str, label: str, default: str = "") -> None:
         w = QLineEdit(default)
@@ -3953,6 +4189,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _add_combo(self, form: QFormLayout, key: str, label: str, values: Sequence[str], default: str) -> None:
         w = QComboBox()
         w.addItems(list(values))
+        w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        w.setMinimumContentsLength(18)
+        w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         idx = w.findText(default)
         if idx >= 0:
             w.setCurrentIndex(idx)
@@ -3962,12 +4201,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._apply_form_label_tooltip(form, w, key)
 
     def _add_checkbox(self, form: QFormLayout, key: str, label: str, default: bool = False) -> None:
-        w = QCheckBox()
+        w = QCheckBox(label)
         w.setChecked(bool(default))
-        form.addRow(label, w)
+        form.addRow(w)
         self.inputs[key] = w
         self._apply_input_tooltip(key, w)
-        self._apply_form_label_tooltip(form, w, key)
 
     def _add_spin(self, form: QFormLayout, key: str, label: str, default: int, minimum: int = 0, maximum: int = 1000000, step: int = 1) -> None:
         w = QSpinBox()
@@ -3991,7 +4229,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._apply_form_label_tooltip(form, w, key)
 
     def _apply_input_tooltip(self, key: str, widget: object) -> None:
-        tooltip = INPUT_TOOLTIPS.get(key, "")
+        tooltip = self._brief_tooltip(INPUT_TOOLTIPS.get(key, ""))
         if not tooltip:
             return
         if isinstance(widget, PathRow):
@@ -4000,50 +4238,296 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             widget.setToolTip(tooltip)  # type: ignore[attr-defined]
 
     def _apply_form_label_tooltip(self, form: QFormLayout, widget: QWidget, key: str) -> None:
-        tooltip = INPUT_TOOLTIPS.get(key, "")
+        tooltip = self._brief_tooltip(INPUT_TOOLTIPS.get(key, ""))
         label = form.labelForField(widget)
-        if tooltip and label is not None:
-            label.setToolTip(tooltip)
+        if label is not None:
+            self.input_labels[key] = label
+            label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
+            if tooltip:
+                label.setToolTip(tooltip)
+
+    def _open_help_section(self, anchor: str) -> None:
+        if not all(hasattr(self, name) for name in ("category_tabs", "basic_tabs", "help_scroll")):
+            return
+        self.category_tabs.setCurrentIndex(0)
+        help_index = next(
+            (index for index in range(self.basic_tabs.count()) if self.basic_tabs.tabText(index) == "Help"),
+            -1,
+        )
+        if help_index < 0:
+            return
+        self.basic_tabs.setCurrentIndex(help_index)
+        target = self.help_sections.get(str(anchor))
+        if target is None:
+            self.help_scroll.verticalScrollBar().setValue(0)
+            return
+        QTimer.singleShot(0, lambda section=target: self.help_scroll.ensureWidgetVisible(section, 0, 8))
+
+    def _context_help_anchor(self) -> Optional[str]:
+        if not hasattr(self, "category_tabs"):
+            return "setup"
+        if self.category_tabs.currentIndex() == 0:
+            name = self.basic_tabs.tabText(self.basic_tabs.currentIndex())
+            return {
+                "Paths": "setup",
+                "Workflow": "setup",
+                "SharpED": "sharped",
+                "Help": None,
+            }.get(name, "setup")
+        name = self.advanced_tabs.tabText(self.advanced_tabs.currentIndex())
+        return {
+            "Superflip": "superflip",
+            "EDMA": "edma",
+            "Map feedback": "map_feedback",
+        }.get(name, "setup")
+
+    def _open_context_help(self) -> None:
+        anchor = self._context_help_anchor()
+        if anchor is not None:
+            self._open_help_section(anchor)
+
+    def _external_link_icon(self, url: str, tooltip: str) -> QToolButton:
+        def chain_pixmap(color: str) -> QPixmap:
+            pixmap = QPixmap(20, 20)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            try:
+                painter.setRenderHint(QPainter.Antialiasing, True)
+                pen = QPen(QColor(color), 1.7)
+                pen.setJoinStyle(Qt.RoundJoin)
+                painter.setPen(pen)
+                painter.setBrush(Qt.NoBrush)
+                painter.save()
+                painter.translate(7.2, 11.7)
+                painter.rotate(-38.0)
+                painter.drawRoundedRect(QRectF(-5.5, -3.0, 10.0, 6.0), 3.0, 3.0)
+                painter.restore()
+                painter.save()
+                painter.translate(12.8, 8.3)
+                painter.rotate(-38.0)
+                painter.drawRoundedRect(QRectF(-4.5, -3.0, 10.0, 6.0), 3.0, 3.0)
+                painter.restore()
+            finally:
+                painter.end()
+            return pixmap
+
+        normal_pixmap = chain_pixmap("#2264b8")
+        active_pixmap = chain_pixmap("#001170")
+        icon = QIcon()
+        icon.addPixmap(normal_pixmap, QIcon.Normal, QIcon.Off)
+        icon.addPixmap(active_pixmap, QIcon.Active, QIcon.Off)
+        link = QToolButton()
+        link.setObjectName("externalLink")
+        link.setIcon(icon)
+        link.setIconSize(normal_pixmap.size())
+        link.setAutoRaise(True)
+        link.setCursor(Qt.PointingHandCursor)
+        link.setToolTip(tooltip)
+        link.setAccessibleName(tooltip)
+        link.setFixedSize(24, 24)
+        link.clicked.connect(lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target)))
+        return link
 
     def _build_ui(self) -> None:
         central = QWidget()
         self.setCentralWidget(central)
         main_layout = QHBoxLayout(central)
-        splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(splitter)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setHandleWidth(3)
+        main_layout.addWidget(self.main_splitter)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        splitter.addWidget(left)
-        settings_tabs = QTabWidget()
-        left_layout.addWidget(settings_tabs, 1)
+        left_layout.setContentsMargins(6, 4, 8, 4)
+        left_layout.setSpacing(8)
+        self.main_splitter.addWidget(left)
 
-        def add_settings_tab(name: str) -> QVBoxLayout:
+        brand_header = QWidget()
+        brand_header.setObjectName("brandHeader")
+        brand_layout = QHBoxLayout(brand_header)
+        brand_layout.setContentsMargins(12, 6, 12, 7)
+        brand_layout.setSpacing(10)
+        brand_logo = QLabel()
+        brand_logo.setObjectName("brandLogo")
+        brand_logo_pixmap = create_phase_studio_logo_pixmap(58)
+        brand_logo.setPixmap(brand_logo_pixmap)
+        brand_logo.setFixedSize(brand_logo_pixmap.size())
+        brand_logo.setToolTip("Phase Studio")
+        brand_text_layout = QVBoxLayout()
+        brand_text_layout.setContentsMargins(0, 0, 0, 0)
+        brand_text_layout.setSpacing(1)
+        brand_title_row = QHBoxLayout()
+        brand_title_row.setSpacing(8)
+        brand_title = QLabel("PHASE STUDIO")
+        brand_title.setObjectName("brandTitle")
+        version_badge = QLabel("1.0.1")
+        version_badge.setObjectName("versionBadge")
+        version_badge.setAlignment(Qt.AlignCenter)
+        brand_title_row.addWidget(brand_title, 1)
+        brand_title_row.addWidget(version_badge)
+        brand_subtitle = QLabel("Superflip · SharpED · EDMA workflow")
+        brand_subtitle.setObjectName("brandSubtitle")
+        brand_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        brand_text_layout.addLayout(brand_title_row)
+        brand_text_layout.addWidget(brand_subtitle)
+        brand_layout.addWidget(brand_logo, 0, Qt.AlignVCenter)
+        brand_layout.addLayout(brand_text_layout, 1)
+        left_layout.addWidget(brand_header)
+
+        category_tabs = QTabWidget()
+        category_tabs.setObjectName("categoryTabs")
+        basic_tabs = QTabWidget()
+        basic_tabs.setObjectName("sectionTabs")
+        advanced_tabs = QTabWidget()
+        advanced_tabs.setObjectName("sectionTabs")
+        category_tabs.addTab(basic_tabs, "Basic")
+        category_tabs.addTab(advanced_tabs, "Advanced")
+        self.category_tabs = category_tabs
+        self.basic_tabs = basic_tabs
+        self.advanced_tabs = advanced_tabs
+        self.help_sections: Dict[str, QWidget] = {}
+        left_layout.addWidget(category_tabs, 1)
+
+        def add_settings_tab(name: str, advanced: bool = False) -> QVBoxLayout:
             scroll = QScrollArea()
             scroll.setWidgetResizable(True)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             page = QWidget()
+            page.setObjectName("settingsPage")
+            page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             layout = QVBoxLayout(page)
-            layout.setContentsMargins(8, 8, 8, 8)
-            layout.setSpacing(10)
+            layout.setContentsMargins(10, 10, 10, 10)
+            layout.setSpacing(12)
             scroll.setWidget(page)
-            settings_tabs.addTab(scroll, name)
+            (advanced_tabs if advanced else basic_tabs).addTab(scroll, name)
+            if name == "Help" and not advanced:
+                self.help_scroll = scroll
+                self.help_page = page
             return layout
+
+        def add_form_group(page_layout: QVBoxLayout, title: str, guide_anchor: Optional[str] = None) -> QFormLayout:
+            if guide_anchor:
+                box = QGroupBox()
+                box_layout = QVBoxLayout(box)
+                box_layout.setContentsMargins(8, 7, 8, 8)
+                box_layout.setSpacing(7)
+                heading_row = QHBoxLayout()
+                heading = QLabel(title)
+                heading.setObjectName("inlineGroupTitle")
+                guide = QToolButton()
+                guide.setObjectName("guideLink")
+                guide.setText("Open guide")
+                guide.setCursor(Qt.PointingHandCursor)
+                guide.setToolTip("Open the relevant section in Help (F1).")
+                guide.clicked.connect(lambda _checked=False, target=guide_anchor: self._open_help_section(target))
+                heading_row.addWidget(heading, 1)
+                heading_row.addWidget(guide)
+                form_widget = QWidget()
+                form = self._configure_form(QFormLayout(form_widget))
+                box_layout.addLayout(heading_row)
+                box_layout.addWidget(form_widget)
+                page_layout.addWidget(box)
+                return form
+            box = QGroupBox(title)
+            form = self._configure_form(QFormLayout(box))
+            page_layout.addWidget(box)
+            return form
+
+        def settings_callout(title: str, text: str) -> QLabel:
+            label = QLabel(f"<b>{title}</b><br>{text}")
+            label.setObjectName("settingsCallout")
+            label.setTextFormat(Qt.RichText)
+            label.setWordWrap(True)
+            return label
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
-        splitter.addWidget(right)
-        splitter.setSizes([520, 900])
+        right_layout.setContentsMargins(8, 4, 6, 4)
+        right_layout.setSpacing(6)
+        self.main_splitter.addWidget(right)
+        left.setMinimumWidth(400)
+        right.setMinimumWidth(600)
+        self.main_splitter.setChildrenCollapsible(False)
+        self.main_splitter.setStretchFactor(0, 4)
+        self.main_splitter.setStretchFactor(1, 7)
+        self.main_splitter.setSizes([520, 900])
+
+        dashboard_header = QWidget()
+        dashboard_header.setObjectName("dashboardHeader")
+        dashboard_layout = QHBoxLayout(dashboard_header)
+        dashboard_layout.setContentsMargins(12, 5, 12, 5)
+        dashboard_text = QVBoxLayout()
+        dashboard_text.setSpacing(0)
+        dashboard_title = QLabel("RUN OVERVIEW")
+        dashboard_title.setObjectName("dashboardTitle")
+        dashboard_subtitle = QLabel("Reconstruction progress and results")
+        dashboard_subtitle.setObjectName("dashboardSubtitle")
+        dashboard_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        dashboard_text.addWidget(dashboard_title)
+        dashboard_text.addWidget(dashboard_subtitle)
+        self.status_badge = QLabel("READY")
+        self.status_badge.setObjectName("statusBadge")
+        self.status_badge.setAlignment(Qt.AlignCenter)
+        dashboard_layout.addLayout(dashboard_text, 1)
+        dashboard_layout.addWidget(self.status_badge)
+        right_layout.addWidget(dashboard_header)
+
+        def make_result_section(title: str) -> Tuple[QWidget, QVBoxLayout]:
+            section = QWidget()
+            section.setObjectName("resultSection")
+            section_layout = QVBoxLayout(section)
+            section_layout.setContentsMargins(4, 4, 4, 4)
+            section_layout.setSpacing(3)
+            label = QLabel(title)
+            label.setObjectName("sectionLabel")
+            section_layout.addWidget(label)
+            return section, section_layout
+
+        def add_help_section(page_layout: QVBoxLayout, anchor: str, title: str, body_html: str) -> QVBoxLayout:
+            box = QGroupBox(title)
+            box.setObjectName("helpSection")
+            box_layout = QVBoxLayout(box)
+            box_layout.setContentsMargins(10, 12, 10, 8)
+            body = QLabel(body_html)
+            body.setObjectName("helpSectionBody")
+            body.setTextFormat(Qt.RichText)
+            body.setWordWrap(True)
+            body.setOpenExternalLinks(True)
+            body.setTextInteractionFlags(Qt.TextBrowserInteraction)
+            body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            box_layout.addWidget(body)
+            page_layout.addWidget(box)
+            self.help_sections[anchor] = box
+            return box_layout
+
+        def add_help_callout(section_layout: QVBoxLayout, label: str, text: str) -> None:
+            callout = QLabel(f"<b>{label}</b><br>{text}")
+            callout.setObjectName("helpCallout")
+            callout.setTextFormat(Qt.RichText)
+            callout.setWordWrap(True)
+            section_layout.addWidget(callout)
+
+        def add_back_to_contents(section_layout: QVBoxLayout) -> None:
+            row = QHBoxLayout()
+            row.addStretch(1)
+            link = QToolButton()
+            link.setObjectName("helpNavLink")
+            link.setText("↑ Contents")
+            link.setCursor(Qt.PointingHandCursor)
+            link.clicked.connect(lambda: self.help_scroll.verticalScrollBar().setValue(0))
+            row.addWidget(link)
+            section_layout.addLayout(row)
 
         cwd = Path.cwd()
+
+        # Basic / Paths
         paths_tab = add_settings_tab("Paths")
-        paths_box = QGroupBox("Input/output paths")
-        paths_layout = QVBoxLayout(paths_box)
-        input_mode_form = QFormLayout()
-        paths_layout.addLayout(input_mode_form)
+        data_input_form = add_form_group(paths_tab, "Data input")
         self._add_combo(
-            input_mode_form,
+            data_input_form,
             "input_source_mode",
-            "Input data mode",
+            "Input mode",
             [
                 INPUT_MODE_LABELS[INPUT_MODE_INFLIP],
                 INPUT_MODE_LABELS[INPUT_MODE_INFLIP_OVERRIDES],
@@ -4055,13 +4539,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.inputs["input_source_mode"].currentTextChanged.connect(self._sync_input_source_mode_widgets)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self._add_path(paths_layout, "jana_inflip", "Jana .inflip", "", "file", "Superflip input (*.inflip *.inp);;All files (*)")
-        self._add_path(paths_layout, "hkl", "External HKL", "", "file", "HKL files (*.hkl);;All files (*)")
-        hkl_tools_form = QFormLayout()
-        paths_layout.addLayout(hkl_tools_form)
-        self._add_combo(hkl_tools_form, "reflection_data_mode", "HKL data format", [REFLECTION_DATA_MODE_AUTO, REFLECTION_DATA_MODE_INTENSITY, REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA], REFLECTION_DATA_MODE_AUTO)
+        self._add_path(data_input_form, "jana_inflip", "Jana2020 .inflip file", "", "file", "Superflip input (*.inflip *.inp);;All files (*)")
+        self._add_path(data_input_form, "hkl", "External HKL file", "", "file", "HKL files (*.hkl);;All files (*)")
+        self._add_combo(
+            data_input_form,
+            "reflection_data_mode",
+            "HKL format",
+            [
+                REFLECTION_DATA_MODE_SET_FROM_INFLIP,
+                REFLECTION_DATA_MODE_INTENSITY,
+                REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+                REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+                REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+            ],
+            REFLECTION_DATA_MODE_SET_FROM_INFLIP,
+        )
         hkl_button_row = QHBoxLayout()
-        self.test_hkl_btn = QPushButton("Test HKL load")
+        self.test_hkl_btn = QPushButton("Validate HKL")
         self.analyze_hkl_btn = QPushButton("Analyze completeness")
         self.test_hkl_btn.setToolTip("Parse the selected HKL or Jana .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
         self.analyze_hkl_btn.setToolTip("Open completeness and data-statistics plots for the selected HKL data.")
@@ -4069,173 +4563,351 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.analyze_hkl_btn.clicked.connect(self.open_hkl_completeness_dialog)
         hkl_button_row.addWidget(self.test_hkl_btn)
         hkl_button_row.addWidget(self.analyze_hkl_btn)
-        hkl_tools_form.addRow("", hkl_button_row)
-        self._add_path(paths_layout, "reference_cif", "External reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
-        self._add_path(paths_layout, "first_cycle_modelfile", "First-cycle modelfile", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
-        self._add_path(paths_layout, "work_dir", "Work directory", str(cwd / "iterative_superflip_qt_run"), "dir")
-        self._add_path(paths_layout, "superflip_exe", "Superflip exe/path", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
-        self._add_path(paths_layout, "edma_exe", "EDMA exe/path", r"C:\Jana2020\SUPERFLIP\EDMA.exe", "file", "Executables (*.exe);;All files (*)")
-        paths_tab.addWidget(paths_box)
+        data_input_form.addRow("", hkl_button_row)
+
+        reference_form = add_form_group(paths_tab, "Reference and initial model")
+        self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
+        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
+
+        output_form = add_form_group(paths_tab, "Output")
+        self._add_path(output_form, "work_dir", "Working directory", str(cwd / "iterative_superflip_qt_run"), "dir")
+
+        programs_form = add_form_group(paths_tab, "External programs")
+        self._add_path(programs_form, "superflip_exe", "Superflip executable", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
+        self._add_path(programs_form, "edma_exe", "EDMA executable", r"C:\Jana2020\SUPERFLIP\EDMA.exe", "file", "Executables (*.exe);;All files (*)")
+        program_links = QVBoxLayout()
+        program_links.setSpacing(3)
+        for program_name, tooltip in (
+            ("Superflip website", "Open the official Superflip website"),
+            ("EDMA website", "Open the official EDMA website"),
+        ):
+            program_row = QHBoxLayout()
+            program_row.addWidget(QLabel(program_name))
+            program_row.addWidget(self._external_link_icon("https://superflip.fzu.cz/", tooltip))
+            program_row.addStretch(1)
+            program_links.addLayout(program_row)
+        programs_form.addRow("Downloads", program_links)
         paths_tab.addStretch(1)
 
-        workflow_tab = add_settings_tab("Basic v3")
-        workflow_box = QGroupBox("Workflow and sample preset")
-        workflow_form = QFormLayout(workflow_box)
-        self._add_combo(workflow_form, "workflow_preset", "Sample/data preset", ["custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "custom")
+        # Basic / Workflow
+        workflow_tab = add_settings_tab("Workflow")
+        workflow_form = add_form_group(workflow_tab, "Reconstruction", "setup")
+        self._add_combo(workflow_form, "workflow_preset", "Workflow preset", ["custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "custom")
         try:
             self.inputs["workflow_preset"].currentTextChanged.connect(self._apply_workflow_preset)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self._add_spin(workflow_form, "cycles", "Cycles to run", 1, 1, 999, 1)
+        self._add_spin(workflow_form, "cycles", "Cycles", 1, 1, 999, 1)
         self.inputs["cycles"].valueChanged.connect(self._update_plot)  # type: ignore[attr-defined]
-        self._add_text(workflow_form, "composition_override", "Composition override (blank = from reference)", "")
-        self._add_combo(workflow_form, "modelfile_source", "Next-cycle modelfile", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "superflip_xplor")
+        self._add_text(workflow_form, "composition_override", "Composition override", "")
+        workflow_form.addRow("", self._secondary_help("Leave blank to use the reference composition."))
+        self._add_combo(workflow_form, "modelfile_source", "Next-cycle model", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "superflip_xplor")
         try:
             self.inputs["modelfile_source"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self._add_dspin(workflow_form, "damping_factor", "XPLOR damping 1/x", 1.0, 0.001, 1.0, 0.05, 3)
-        self._add_text(workflow_form, "exclude_atoms", "Exclude atoms from model CIF", "none")
-        workflow_note = QLabel(
+        self._add_dspin(workflow_form, "damping_factor", "XPLOR damping (1/x)", 1.0, 0.001, 1.0, 0.05, 3)
+        self._add_text(workflow_form, "exclude_atoms", "Excluded atoms", "none")
+        workflow_note = settings_callout(
+            "Note",
             "Next-cycle modelfile is authoritative: 'none' forces a one-cycle run. "
             "superflip_xplor cycles without SharpED deblurring; XPLOR damping is active for XPLOR modes only."
         )
-        workflow_note.setWordWrap(True)
         workflow_form.addRow("", workflow_note)
-        workflow_tab.addWidget(workflow_box)
-        optional_box = QGroupBox("Optional functions")
-        optional_form = QFormLayout(optional_box)
-        self._add_checkbox(optional_form, "run_edma_superflip", "Run EDMA after Superflip map", True)
+
+        optional_form = add_form_group(workflow_tab, "Optional processing")
+        self._add_checkbox(optional_form, "run_edma_superflip", "Run EDMA on Superflip map", True)
         self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True)
-        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize deblurred map with Superflip", False)
-        self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA after deblurred map", True)
-        workflow_tab.addWidget(optional_box)
+        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize processed map with Superflip", False)
+        self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on processed map", True)
         workflow_tab.addStretch(1)
 
-        superflip_tab = add_settings_tab("Advanced: Superflip")
-        superflip_box = QGroupBox("Superflip")
-        superflip_form = QFormLayout(superflip_box)
-        self._add_combo(superflip_form, "perform_algorithm", "perform", ["CF", "AAR", "lde", "general", "fourier", "symmetry"], "CF")
-        self.inputs["perform_algorithm"].setToolTip(
-            INPUT_TOOLTIPS["perform_algorithm"]
-        )  # type: ignore[attr-defined]
-        self._add_combo(superflip_form, "output_format", "outputformat", ["xplor", "jana", "ccp4", "m80"], "xplor")
-        self._add_checkbox(superflip_form, "write_auxiliary_outputs", "Legacy outputfile m81/m80/xplor", False)
-        self._add_checkbox(superflip_form, "export_superflip_xplor", "Save Superflip XPLOR map", True)
-        self._add_checkbox(superflip_form, "export_superflip_ccp4", "Save Superflip CCP4 map", False)
-        self._add_checkbox(superflip_form, "export_superflip_jana", "Save Superflip m80/m81", False)
-        self._add_checkbox(superflip_form, "export_standard_hkl", "Save standardized HKL I/sigma/phase", False)
-        self._add_checkbox(superflip_form, "export_jana_project", "Export complete Jana2020 project folder", False)
-        referencefile_note = QLabel(
-            "referencefile is automatic: omitted by default; written only when an External reference file is selected on the Paths tab."
-        )
-        referencefile_note.setWordWrap(True)
-        superflip_form.addRow("referencefile", referencefile_note)
-        self._add_text(superflip_form, "voxel", "voxel", "omit")
-        self._add_spin(superflip_form, "bestdensities_count", "bestdensities count", 1, 1, 100, 1)
-        self._add_combo(superflip_form, "bestdensities_metric", "bestdensities metric", ["rvalue", "peakiness", "symmetry", "reference"], "rvalue")
-        self._add_checkbox(superflip_form, "bestdensities_symmetry", "bestdensities symmetry", False)
-        self.inputs["bestdensities_symmetry"].setToolTip(
-            INPUT_TOOLTIPS["bestdensities_symmetry"]
-        )  # type: ignore[attr-defined]
-        self._add_checkbox(superflip_form, "polish", "polish yes", False)
-        self._add_spin(superflip_form, "maxcycles", "maxcycles", 1000, 1, 100000, 100)
-        self._add_spin(superflip_form, "repeatmode", "repeatmode", 12, 1, 10000, 1)
-        self._add_text(superflip_form, "randomseed", "Random seed", "12345")
-        self._add_text(superflip_form, "delta", "delta", "AUTO")
-        self._add_text(superflip_form, "weakratio", "weakratio", "0.000")
-        self._add_text(superflip_form, "biso", "Biso", "0.000")
-        self._add_dspin(superflip_form, "i_over_sigma_min", "Value/sigma min filter", 0.0, 0.0, 100.0, 0.5, 3)
-        self._add_dspin(superflip_form, "resolution_d_min", "Resolution d min cutoff A", 0.0, 0.0, 20.0, 0.1, 3)
-        self._add_combo(superflip_form, "normalize", "normalize", ["none", "local", "atoms", "wilson"], "none")
-        self._add_spin(superflip_form, "nresshells", "nresshells", 100, 0, 100000, 10)
-        self._add_text(superflip_form, "missing", "missing keyword", "bound 0.5 2.5")
-        self._add_combo(superflip_form, "searchsymmetry", "searchsymmetry", ["average", "shift", "no"], "average")
-        self._add_text(superflip_form, "derivesymmetry", "derivesymmetry", "yes")
-        self._add_text(superflip_form, "electrons", "electrons", "")
-        dataitemwidths_note = QLabel("dataitemwidths is generated automatically from the exact fbegin/endf records.")
-        dataitemwidths_note.setWordWrap(True)
-        superflip_form.addRow("dataitemwidths", dataitemwidths_note)
-        self._add_multiline(superflip_form, "extra_superflip_keywords", "Extra Superflip keywords", "", 110)
-        load_inflip_btn = QPushButton("Load settings from .inflip")
-        load_inflip_btn.setToolTip("Read Superflip keyword settings from an existing .inflip file. Reflection data blocks are ignored.")
-        load_inflip_btn.clicked.connect(self.load_inflip_settings_dialog)
-        superflip_form.addRow("", load_inflip_btn)
-        superflip_tab.addWidget(superflip_box)
-        superflip_tab.addStretch(1)
-
-        edma_tab = add_settings_tab("Advanced: EDMA")
-        edma_box = QGroupBox("EDMA")
-        edma_form = QFormLayout(edma_box)
-        self._add_dspin(edma_form, "plimit_superflip", "plimit after Superflip sigma", 0.5, 0.0, 100.0, 0.1, 3)
-        self._add_dspin(edma_form, "plimit_deblur", "plimit after deblurring sigma", 0.5, 0.0, 100.0, 0.1, 3)
-        self._add_dspin(edma_form, "merge_distance", "Symmetry merge distance Å", 0.75, 0.0, 10.0, 0.05, 3)
-        self._add_text(edma_form, "edma_maxima", "maxima", "all")
-        self._add_combo(edma_form, "edma_fullcell", "fullcell", ["no", "yes"], "no")
-        self._add_text(edma_form, "edma_numberofatoms", "numberofatoms", "composition")
-        self._add_checkbox(edma_form, "edma_centerofcharge", "centerofcharge yes", True)
-        self._add_text(edma_form, "edma_chlimit", "chlimit", "0.2500")
-        self._add_text(edma_form, "edma_chlimlist", "chlimlist", "0.0057 relative")
-        self._add_multiline(edma_form, "extra_edma_keywords", "Extra EDMA keywords", "", 110)
-        edma_tab.addWidget(edma_box)
-        edma_tab.addStretch(1)
-
-        feedback_tab = add_settings_tab("Advanced: Map feedback")
-        feedback_box = QGroupBox("Map-derived reflection feedback")
-        feedback_form = QFormLayout(feedback_box)
-        self._add_spin(feedback_form, "map_feedback_missing_from_cycle", "Add missing reflections from completed cycle", 0, 0, 999, 1)
-        self._add_dspin(feedback_form, "map_feedback_missing_percent_limit", "Missing-reflection limit (%)", 0.0, 0.0, 100.0, 1.0, 3)
-        self._add_spin(feedback_form, "map_feedback_intensity_from_cycle", "Correct intensities from completed cycle", 0, 0, 999, 1)
-        self._add_dspin(feedback_form, "map_feedback_intensity_damping", "Intensity correction damping", 0.0, 0.0, 1.0, 0.05, 3)
-        self._add_dspin(feedback_form, "map_feedback_intensity_max_i_over_sigma", "Correct only below value/sigma", 0.0, 0.0, 1000.0, 0.5, 3)
-        feedback_tab.addWidget(feedback_box)
-        feedback_tab.addStretch(1)
-
-        reference_tab = add_settings_tab("Help")
-        sf_reference_box = QGroupBox("Superflip keyword reference")
-        sf_reference_layout = QVBoxLayout(sf_reference_box)
-        sf_reference = QTextEdit()
-        sf_reference.setReadOnly(True)
-        sf_reference.setLineWrapMode(QTextEdit.NoWrap)
-        sf_reference.setPlainText(SUPERFLIP_KEYWORD_REFERENCE)
-        sf_reference.setMinimumHeight(230)
-        sf_reference_layout.addWidget(sf_reference)
-        reference_tab.addWidget(sf_reference_box)
-        reference_tab.addStretch(1)
-
+        # Basic / SharpED
         sharped_tab = add_settings_tab("SharpED")
-        sharped_box = QGroupBox("SharpED server inference")
-        sharped_form = QFormLayout(sharped_box)
-        self._add_text(sharped_form, "sharped_base_url", "Server URL", "https://jana.fzu.cz")
-        self._add_text(sharped_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
+        server_form = add_form_group(sharped_tab, "Server connection", "sharped")
+        self._add_text(server_form, "sharped_base_url", "Server URL", "https://jana.fzu.cz")
+        self._add_text(server_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
         try:
             self.inputs["sharped_api_token"].setEchoMode(QLineEdit.Password)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self._add_combo(sharped_form, "sharped_model", "Model", ["default"], "default")
+        token_link_row = QHBoxLayout()
+        token_link_row.addWidget(QLabel("Get SharpED token"))
+        token_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
+        token_link_row.addStretch(1)
+        server_form.addRow("", token_link_row)
+
+        model_form = add_form_group(sharped_tab, "SharpED model")
+        self._add_combo(model_form, "sharped_model", "Model", ["default"], "default")
         try:
             self.inputs["sharped_model"].setEditable(True)  # type: ignore[attr-defined]
         except Exception:
             pass
-        refresh_models_btn = QPushButton("Refresh available models")
-        refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
-        refresh_models_btn.clicked.connect(self.refresh_sharped_models)
-        sharped_form.addRow("", refresh_models_btn)
-        self._add_text(sharped_form, "sharped_elements", "Elements", "")
-        self._add_dspin(sharped_form, "sharped_outres", "outres", 0.2, 0.001, 10.0, 0.05, 4)
-        self._add_dspin(sharped_form, "sharped_max_upload_mb", "Max upload size MB", 100.0, 0.0, 100000.0, 10.0, 1)
-        self._add_spin(sharped_form, "sharped_timeout_seconds", "HTTP timeout seconds", 600, 600, 7200, 60)
-        self._add_spin(sharped_form, "sharped_poll_seconds", "Poll seconds", 2, 1, 3600, 1)
-        self._add_spin(sharped_form, "sharped_max_polls", "Max polls (-1 = no limit)", -1, -1, 1000000, 1)
-        sharped_tab.addWidget(sharped_box)
+        self.refresh_models_btn = QPushButton("Refresh models")
+        self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
+        self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
+        model_form.addRow("", self.refresh_models_btn)
+
+        inference_form = add_form_group(sharped_tab, "Inference")
+        self._add_text(inference_form, "sharped_elements", "Elements", "")
+        self._add_dspin(inference_form, "sharped_outres", "Output resolution", 0.2, 0.001, 10.0, 0.05, 4)
+
+        network_form = add_form_group(sharped_tab, "Transfer and network")
+        self._add_dspin(network_form, "sharped_max_upload_mb", "Upload limit (MB)", 100.0, 0.0, 100000.0, 10.0, 1)
+        self._add_spin(network_form, "sharped_timeout_seconds", "HTTP timeout (s)", 600, 600, 7200, 60)
+        self._add_spin(network_form, "sharped_poll_seconds", "Polling interval (s)", 2, 1, 3600, 1)
+        self._add_spin(network_form, "sharped_max_polls", "Maximum polls", -1, -1, 1000000, 1)
+        network_form.addRow("", self._secondary_help("Use -1 for no fixed polling limit."))
         sharped_tab.addStretch(1)
 
-        buttons = QHBoxLayout()
-        self.run_btn = QPushButton("Run")
+        # Basic / Help
+        reference_tab = add_settings_tab("Help")
+        contents_row = QHBoxLayout()
+        contents_row.setSpacing(4)
+        contents_label = QLabel("CONTENTS")
+        contents_label.setObjectName("helpContentsLabel")
+        contents_row.addWidget(contents_label)
+        for link_text, anchor in (
+            ("Setup", "setup"), ("Superflip", "superflip"), ("EDMA", "edma"),
+            ("SharpED", "sharped"), ("Feedback", "map_feedback"), ("About", "about"),
+        ):
+            link = QToolButton()
+            link.setObjectName("helpNavLink")
+            link.setText(link_text)
+            link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            link.setCursor(Qt.PointingHandCursor)
+            link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
+            contents_row.addWidget(link)
+        contents_row.addStretch(1)
+        reference_tab.addLayout(contents_row)
+        setup_help_layout = add_help_section(reference_tab, "setup", "Systematic setup guide", """
+            <h3>1. Select the input</h3>
+            <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file with a crystallographic reference.</p>
+            <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
+            <h3>2. Choose a workflow preset</h3>
+            <p>Use a preset as a starting point, then adjust advanced parameters only when necessary.</p>
+            <ul><li><b>Small molecule, atomic resolution:</b> small-molecule preset, charge flipping, typically 1&ndash;2 cycles.</li>
+            <li><b>Inorganic:</b> symmetry-assisted density selection and an EDMA threshold around 1 sigma.</li>
+            <li><b>MOF, atomic resolution:</b> SharpED/deblurred XPLOR feedback and typically 2&ndash;4 cycles.</li>
+            <li><b>MOF/framework, medium resolution:</b> SharpED + EDMA CIF feedback and approximately 0.5&ndash;1 sigma peak threshold.</li></ul>
+            <h3>3. Configure the iterative workflow</h3>
+            <p><b>observed reflections &rarr; Superflip &rarr; XPLOR map &rarr; EDMA and/or SharpED &rarr; deblurred XPLOR &rarr; EDMA &rarr; next-cycle model</b></p>
+            <p>The exact branches depend on <b>Basic &rarr; Workflow &rarr; Optional processing</b>. The next-cycle source can be Superflip XPLOR, SharpED/deblurred XPLOR, deblurred EDMA CIF, or <b>none</b>. Selecting none forces a one-cycle run.</p>
+            <h3>4. Inspect each cycle</h3>
+            <p>Review convergence metrics, structure previews, detected atom/peak counts, reference agreement when available, raw Superflip versus SharpED results, and the execution log. Phase Studio does not replace final crystallographic refinement.</p>
+            <h3>5. Return the selected result to Jana2020</h3>
+            <p>After a successful run, <b>Send to Jana2020</b> lets you select a completed cycle and map source. Final interpretation and refinement remain in Jana2020.</p>
+        """)
+        setup_help_layout.insertWidget(1, WorkflowDiagram())
+        add_help_callout(setup_help_layout, "Tip", "Use the first cycle to establish a stable solution before enabling aggressive feedback.")
+        add_back_to_contents(setup_help_layout)
+        superflip_help_layout = add_help_section(reference_tab, "superflip", "Superflip guide", """
+            <h3>What Superflip does</h3>
+            <p>Superflip is the density-reconstruction and phase-retrieval stage. Phase Studio prepares reflections, crystallographic metadata and input, executes Superflip, then uses its density map for direct inspection, EDMA peak extraction, SharpED processing and iterative feedback.</p>
+            <h3>1. Verify reflection input</h3>
+            <p>Select the correct HKL format, run <b>Validate HKL</b> and <b>Analyze completeness</b>, and apply an optional d<sub>min</sub> cutoff only when appropriate. Do not compensate for incorrectly parsed input by tuning reconstruction parameters.</p>
+            <h3>2. Choose the algorithm</h3>
+            <p><b>Algorithm</b> maps to Superflip's <code>perform</code> keyword. <b>CF</b> is the normal charge-flipping workflow used by the presets. AAR, lde, general, fourier and symmetry are advanced modes.</p>
+            <h3>3. Control iteration and repeated solutions</h3>
+            <p><b>Maximum iterations</b> limits one Superflip run. <b>Repeat mode</b> controls repeated solution attempts, and <b>Random seed</b> initializes random numbers. Delta, Weak ratio and Biso are advanced parameters normally left at preset/default values. <b>Enable final polish</b> activates the final polishing option when supported.</p>
+            <h3>4. Select the best density</h3>
+            <p><b>Best densities: count</b> controls retained solutions. <b>Best-density metric</b> selects by rvalue, peakiness, symmetry or reference. <b>Use symmetry for best densities</b> adds the symmetry modifier.</p>
+            <h3>5. Reflection handling</h3>
+            <p><b>Minimum value/&sigma;</b> removes weak observations before writing the reflection block. <b>d<sub>min</sub> cutoff</b> is optional; 0 keeps all reflections. Normalization and Resolution shells control optional normalization. Missing-reflection keyword and Electrons expose the corresponding advanced Superflip options.</p>
+            <h3>6. Symmetry</h3>
+            <p><b>Search symmetry</b> maps to <code>searchsymmetry</code>; <b>Derive symmetry</b> maps to <code>derivesymmetry</code>.</p>
+            <h3>7. Output</h3>
+            <p>XPLOR is important internally because EDMA and SharpED consume XPLOR density maps. Other outputs support external inspection, Jana2020 interoperability and export.</p>
+            <h3>8. Advanced keywords</h3>
+            <p><b>Extra Superflip keywords</b> lets expert users append documented keywords without dedicated GUI controls.</p>
+        """)
+        add_help_callout(superflip_help_layout, "Recommended", "Start with CF and the supplied preset values unless you intentionally tune the calculation.")
+        add_back_to_contents(superflip_help_layout)
+        edma_help_layout = add_help_section(reference_tab, "edma", "EDMA guide", """
+            <h3>What EDMA does in Phase Studio</h3>
+            <p>EDMA extracts density maxima from an XPLOR map. Phase Studio uses these maxima to create structural models and exports, independently for the raw Superflip map and the SharpED/deblurred map when enabled.</p>
+            <h3>1. Peak thresholds</h3>
+            <p><b>Superflip threshold</b> and <b>SharpED threshold (&sigma;)</b> are multipliers of the corresponding map sigma. Phase Studio converts each multiplier to EDMA's absolute <code>plimit</code> for that map. A higher threshold is stricter; a lower threshold includes more maxima. There is no universal correct threshold.</p>
+            <h3>2. Maxima selection and atom count</h3>
+            <p><b>Maxima selection = all</b> requests all maxima above plimit. Advanced users may enter more restrictive documented EDMA syntax. <b>Atom-count mode = composition</b> requests counts consistent with chemical composition.</p>
+            <h3>3. Symmetry and peak positions</h3>
+            <p><b>Merge distance</b> is the tolerance used when reducing maxima to one representative per full space-group orbit for the CIF asymmetric unit. <b>Full-cell = no</b> requests symmetry-independent maxima; yes lists the full unit cell. <b>Use center of charge</b> refines positions to the charge center of each density basin.</p>
+            <h3>4. Chemical filtering</h3>
+            <p><b>Charge limit</b> is the minimum integrated charge for exported maxima. <b>Charge-list threshold</b> supplies EDMA's <code>chlimlist</code> setting for atom-count/composition-based export.</p>
+            <h3>5. Additional keywords</h3>
+            <p><b>Extra EDMA keywords</b> appends documented EDMA options not represented by dedicated controls.</p>
+        """)
+        add_help_callout(edma_help_layout, "Recommended", "An EDMA threshold around 1σ is a common starting point in the supplied guidance; adjust it according to peak quality.")
+        add_back_to_contents(edma_help_layout)
+        sharped_help_layout = add_help_section(reference_tab, "sharped", "SharpED guide", """
+            <h3>What SharpED does</h3>
+            <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
+            <h3>1. Server connection</h3>
+            <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
+            <h3>2. Model and elements</h3>
+            <p><b>Model</b> is sent to the server; <b>Refresh models</b> updates the selector. <code>default</code> uses the server default. <b>Elements</b> are sent to SharpED; when blank, Phase Studio derives unique non-hydrogen elements from the reference composition.</p>
+            <h3>3. Output resolution</h3>
+            <p><b>Output resolution</b> is sent to the server as the <code>outres</code> field.</p>
+            <h3>4. Upload and network</h3>
+            <p><b>Upload limit</b> checks XPLOR size; the public-server default is 100 MB. HTTP timeout covers model queries, upload, status and download. Polling interval sets the delay between status checks. Maximum polls limits those checks; <b>-1</b> means no fixed polling limit.</p>
+            <h3>5. SharpED in iterative workflows</h3>
+            <p><b>Run SharpED deblurring</b> enables server processing. <b>Symmetrize processed map with Superflip</b> performs symmetry averaging, not another charge-flipping reconstruction. <code>deblurred_xplor</code> feeds the processed map into the next cycle; <code>deblurred_edma_cif</code> feeds its EDMA structure.</p>
+        """)
+        sharped_link_row = QHBoxLayout()
+        sharped_link_row.addWidget(QLabel("SharpED project and API token"))
+        sharped_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
+        sharped_link_row.addStretch(1)
+        sharped_help_layout.addLayout(sharped_link_row)
+        add_help_callout(sharped_help_layout, "Important", "SharpED processing requires a valid API token and network access.")
+        add_back_to_contents(sharped_help_layout)
+        map_feedback_layout = add_help_section(reference_tab, "map_feedback", "Map feedback", """
+            <h3>Missing-reflection completion</h3>
+            <p>Completion starts from the selected completed cycle. <b>Added limit (%)</b> caps generated missing reflections relative to the current reflection count.</p>
+            <h3>Intensity correction</h3>
+            <p>Correction starts from the selected completed cycle. Damping 0 keeps observed values; 1 replaces them with scaled map-derived values. <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections; 0 applies it to all non-zero reflections.</p>
+        """)
+        add_help_callout(map_feedback_layout, "Note", "Cycle 0 disables the corresponding feedback mechanism.")
+        add_back_to_contents(map_feedback_layout)
+        keyword_html = html.escape(SUPERFLIP_KEYWORD_REFERENCE).replace("\n", "<br>")
+        add_help_section(
+            reference_tab,
+            "keyword_reference",
+            "Advanced Superflip keyword reference",
+            f'<p style="font-family: Cascadia Mono, Consolas, monospace; color: #2264b8;">{keyword_html}</p>',
+        )
+        about_layout = add_help_section(reference_tab, "about", "About Phase Studio", """
+            <h2>Phase Studio</h2>
+            <p>Phase Studio is a crystallographic reconstruction workflow integrating Superflip, SharpED and EDMA with Jana2020-oriented workflows.</p>
+            <h3>Developed at</h3>
+            <p>Department of Structure Analysis<br>Institute of Physics of the Czech Academy of Sciences</p>
+            <h3>Authors and contacts</h3>
+            <p><b>Jiří Zelenka</b><br><a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>
+            <p><b>Jan Rohlíček</b><br><a href="mailto:rohlicek@fzu.cz">rohlicek@fzu.cz</a></p>
+            <p><b>Monika Kučeráková</b></p><p><b>Zdeněk Buk</b></p>
+            <p><b>General contact</b><br><a href="mailto:sharped@fzu.cz">sharped@fzu.cz</a></p>
+            <h3>Project resources</h3>
+        """)
+        for resource_name, resource_url, resource_tip in (
+            ("Department of Structure Analysis", "https://www.fzu.cz/en/research/divisions-and-departments/division-3/department-19", "Open the department website"),
+            ("SharpED project and API token", "https://sharped.fzu.cz/", "Open the SharpED project and API-token page"),
+            ("Phase Studio source code", "https://github.com/ji-ze/Phase-Studio", "Open the Phase Studio source repository"),
+        ):
+            resource_row = QHBoxLayout()
+            resource_row.addWidget(QLabel(resource_name))
+            resource_row.addWidget(self._external_link_icon(resource_url, resource_tip))
+            resource_row.addStretch(1)
+            about_layout.addLayout(resource_row)
+        add_back_to_contents(about_layout)
+        reference_tab.addStretch(1)
+
+        # Advanced / Superflip
+        superflip_tab = add_settings_tab("Superflip", advanced=True)
+        calculation_form = add_form_group(superflip_tab, "Calculation", "superflip")
+        self._add_combo(calculation_form, "perform_algorithm", "Algorithm", ["CF", "AAR", "lde", "general", "fourier", "symmetry"], "CF")
+        self.inputs["perform_algorithm"].setToolTip(
+            INPUT_TOOLTIPS["perform_algorithm"]
+        )  # type: ignore[attr-defined]
+        self._add_spin(calculation_form, "maxcycles", "Maximum iterations", 1000, 1, 100000, 100)
+        self._add_spin(calculation_form, "repeatmode", "Repeat mode", 12, 1, 10000, 1)
+        self._add_text(calculation_form, "randomseed", "Random seed", "12345")
+        self._add_text(calculation_form, "delta", "Delta", "AUTO")
+        self._add_text(calculation_form, "weakratio", "Weak ratio", "0.000")
+        self._add_text(calculation_form, "biso", "Biso", "0.000")
+        self._add_checkbox(calculation_form, "polish", "Enable final polish", False)
+
+        density_form = add_form_group(superflip_tab, "Density / solution selection")
+        self._add_text(density_form, "voxel", "Voxel grid", "omit")
+        self._add_spin(density_form, "bestdensities_count", "Best densities: count", 1, 1, 100, 1)
+        self._add_combo(density_form, "bestdensities_metric", "Best-density metric", ["rvalue", "peakiness", "symmetry", "reference"], "rvalue")
+        self._add_checkbox(density_form, "bestdensities_symmetry", "Use symmetry for best densities", False)
+        self.inputs["bestdensities_symmetry"].setToolTip(
+            INPUT_TOOLTIPS["bestdensities_symmetry"]
+        )  # type: ignore[attr-defined]
+        self._add_combo(density_form, "searchsymmetry", "Search symmetry", ["average", "shift", "no"], "average")
+        self._add_text(density_form, "derivesymmetry", "Derive symmetry", "yes")
+
+        reflection_form = add_form_group(superflip_tab, "Reflection handling")
+        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum value/σ", 0.0, 0.0, 100.0, 0.5, 3)
+        self._add_dspin(reflection_form, "resolution_d_min", "d_min cutoff (Å)", 0.0, 0.0, 20.0, 0.1, 3)
+        self._add_combo(reflection_form, "normalize", "Normalization", ["none", "local", "atoms", "wilson"], "none")
+        self._add_spin(reflection_form, "nresshells", "Resolution shells", 100, 0, 100000, 10)
+        self._add_text(reflection_form, "missing", "Missing-reflection keyword", "bound 0.5 2.5")
+        self._add_text(reflection_form, "electrons", "Electrons", "")
+
+        output_options_form = add_form_group(superflip_tab, "Output")
+        self._add_combo(output_options_form, "output_format", "Format", ["xplor", "jana", "ccp4", "m80"], "xplor")
+        self._add_checkbox(output_options_form, "write_auxiliary_outputs", "Write legacy auxiliary outputs", False)
+        self._add_checkbox(output_options_form, "export_superflip_xplor", "Save XPLOR map", True)
+        self._add_checkbox(output_options_form, "export_superflip_ccp4", "Save CCP4 map", False)
+        self._add_checkbox(output_options_form, "export_superflip_jana", "Save Jana m80/m81", False)
+        self._add_checkbox(output_options_form, "export_standard_hkl", "Save standardized HKL (I/σ/phase)", False)
+        self._add_checkbox(output_options_form, "export_jana_project", "Export Jana2020 project", False)
+
+        reference_density_form = add_form_group(superflip_tab, "Reference density")
+        reference_density_form.addRow(self._secondary_help(
+            "The referencefile keyword is automatic: it is omitted by default and written only when a reference file is selected on Paths."
+        ))
+        reference_density_form.addRow(self._secondary_help(
+            "dataitemwidths is unnecessary because Phase Studio writes whitespace-separated fbegin/endf records."
+        ))
+
+        additional_sf_form = add_form_group(superflip_tab, "Additional keywords")
+        self._add_multiline(additional_sf_form, "extra_superflip_keywords", "Extra Superflip keywords", "", 110)
+        self.load_inflip_btn = QPushButton("Load settings from .inflip")
+        self.load_inflip_btn.setToolTip("Read Superflip keyword settings from an existing .inflip file. Reflection data blocks are ignored.")
+        self.load_inflip_btn.clicked.connect(self.load_inflip_settings_dialog)
+        additional_sf_form.addRow("", self.load_inflip_btn)
+        superflip_tab.addStretch(1)
+
+        # Advanced / EDMA
+        edma_tab = add_settings_tab("EDMA", advanced=True)
+        peak_form = add_form_group(edma_tab, "Peak extraction", "edma")
+        self._add_dspin(peak_form, "plimit_superflip", "Superflip threshold", 0.5, 0.0, 100.0, 0.1, 3)
+        self._add_dspin(peak_form, "plimit_deblur", "SharpED threshold (σ)", 0.5, 0.0, 100.0, 0.1, 3)
+        self._add_text(peak_form, "edma_maxima", "Maxima selection", "all")
+        self._add_text(peak_form, "edma_numberofatoms", "Atom-count mode", "composition")
+
+        symmetry_form = add_form_group(edma_tab, "Symmetry and peak positions")
+        self._add_dspin(symmetry_form, "merge_distance", "Merge distance (Å)", 0.75, 0.0, 10.0, 0.05, 3)
+        self._add_combo(symmetry_form, "edma_fullcell", "Full-cell", ["no", "yes"], "no")
+        self._add_checkbox(symmetry_form, "edma_centerofcharge", "Use center of charge", True)
+
+        chemical_form = add_form_group(edma_tab, "Chemical filtering")
+        self._add_text(chemical_form, "edma_chlimit", "Charge limit", "0.2500")
+        self._add_text(chemical_form, "edma_chlimlist", "Charge-list threshold", "0.0057 relative")
+
+        edma_extra_form = add_form_group(edma_tab, "Additional keywords")
+        self._add_multiline(edma_extra_form, "extra_edma_keywords", "Extra EDMA keywords", "", 110)
+        edma_tab.addStretch(1)
+
+        # Advanced / Map feedback
+        feedback_tab = add_settings_tab("Map feedback", advanced=True)
+        missing_feedback_form = add_form_group(feedback_tab, "Missing-reflection completion", "map_feedback")
+        self._add_spin(missing_feedback_form, "map_feedback_missing_from_cycle", "Start after cycle", 0, 0, 999, 1)
+        self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Added limit (%)", 0.0, 0.0, 100.0, 1.0, 3)
+        missing_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables missing-reflection completion."))
+
+        intensity_feedback_form = add_form_group(feedback_tab, "Intensity correction")
+        self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 0, 0, 999, 1)
+        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
+        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply below value/σ", 0.0, 0.0, 1000.0, 0.5, 3)
+        intensity_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables correction; value/σ = 0 applies to all non-zero reflections."))
+        feedback_tab.addStretch(1)
+
+        # Persistent actions
+        primary_buttons = QHBoxLayout()
+        primary_buttons.setSpacing(8)
+        secondary_buttons = QHBoxLayout()
+        secondary_buttons.setSpacing(8)
+        self.run_btn = QPushButton("Run pipeline")
         self.stop_btn = QPushButton("Stop after current cycle")
-        self.stop_now_btn = QPushButton("Stop now")
-        self.clear_btn = QPushButton("Clear")
-        self.handoff_btn = QPushButton("Pass data to Jana2020")
+        self.stop_now_btn = QPushButton("Stop immediately")
+        self.clear_btn = QPushButton("Clear results")
+        self.handoff_btn = QPushButton("Send to Jana2020")
+        self.run_btn.setObjectName("primaryButton")
+        self.handoff_btn.setObjectName("handoffButton")
+        for action_button in (self.run_btn, self.stop_btn, self.stop_now_btn, self.clear_btn, self.handoff_btn):
+            action_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.handoff_btn.setEnabled(False)
         self.run_btn.setToolTip("Start the complete iterative crystallographic reconstruction workflow.")
         self.stop_btn.setToolTip("Request a graceful stop after the currently running cycle has completed.")
@@ -4243,16 +4915,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.clear_btn.setToolTip("Clear the log panel and reset the plotted metrics for the current GUI session.")
         self.handoff_btn.setToolTip("After a completed run started from a Jana .inflip, select a cycle and pass either its Superflip map or deblurred map back to Jana2020.")
         self.run_btn.clicked.connect(self.start_run)
-        self.stop_btn.clicked.connect(self.stop_after_cycle.set)
+        self.stop_btn.clicked.connect(self.request_stop_after_cycle)
         self.stop_now_btn.clicked.connect(self.request_immediate_stop)
         self.clear_btn.clicked.connect(self.clear_log_plot)
         self.handoff_btn.clicked.connect(self.open_jana_handoff_dialog)
-        buttons.addWidget(self.run_btn)
-        buttons.addWidget(self.stop_btn)
-        buttons.addWidget(self.stop_now_btn)
-        buttons.addWidget(self.handoff_btn)
-        buttons.addWidget(self.clear_btn)
-        left_layout.addLayout(buttons)
+        primary_buttons.addWidget(self.run_btn, 1)
+        primary_buttons.addWidget(self.handoff_btn, 1)
+        secondary_buttons.addWidget(self.stop_btn, 2)
+        secondary_buttons.addWidget(self.stop_now_btn, 1)
+        secondary_buttons.addWidget(self.clear_btn, 1)
+        left_layout.addLayout(primary_buttons)
+        left_layout.addLayout(secondary_buttons)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
@@ -4261,35 +4934,69 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.progress_bar.setFormat("Idle")
         self.progress_bar.setToolTip("Cycle-level progress indicator for the iterative pipeline.")
         left_layout.addWidget(self.progress_bar)
+        self.configuration_lock_hint = QLabel("Configuration locked while the pipeline is running.")
+        self.configuration_lock_hint.setObjectName("configurationLockHint")
+        self.configuration_lock_hint.setVisible(False)
+        left_layout.addWidget(self.configuration_lock_hint)
+        self._set_run_status("Ready")
 
+        # Right-side resizable scientific dashboard
+        self.result_splitter = QSplitter(Qt.Vertical)
+        self.result_splitter.setObjectName("resultSplitter")
+        self.result_splitter.setHandleWidth(3)
+        self.result_splitter.setChildrenCollapsible(False)
+        right_layout.addWidget(self.result_splitter, 1)
+
+        metrics_section, metrics_layout = make_result_section("SUPERFLIP CONVERGENCE")
         self.figure = Figure(figsize=(7.5, 3.5), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvas(self.figure)
-        self.canvas.setMinimumHeight(330)
-        self.canvas.setToolTip("Normalized Superflip metrics plot. Each curve is scaled so 1 is best and 0 is worst within the current run.")
-        right_layout.addWidget(self.canvas, 0)
+        self.canvas.setObjectName("metricsCanvas")
+        self.canvas.setMinimumHeight(150)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.canvas.mpl_connect("resize_event", lambda _event: self._layout_metrics_figure())
+        self.canvas.setToolTip("")
+        metrics_layout.addWidget(self.canvas, 1)
+        self.result_splitter.addWidget(metrics_section)
 
+        structure_section, structure_layout = make_result_section("STRUCTURE COMPARISON")
         self.structure_figure = Figure(figsize=(7.5, 3.0), dpi=100)
         self.structure_canvas = FigureCanvas(self.structure_figure)
-        self.structure_canvas.setMinimumHeight(290)
+        self.structure_canvas.setObjectName("structureCanvas")
+        self.structure_canvas.setMinimumHeight(260)
+        self.structure_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.structure_canvas.setToolTip("Drag any structure preview to rotate all three views together. Hydrogens are hidden.")
+        self.structure_canvas.mpl_connect("button_press_event", self._begin_structure_rotation)
         self.structure_canvas.mpl_connect("motion_notify_event", self._sync_structure_view_from_event)
-        self.structure_canvas.mpl_connect("button_release_event", self._sync_structure_view_from_event)
-        right_layout.addWidget(self.structure_canvas, 0)
+        self.structure_canvas.mpl_connect("button_release_event", self._finish_structure_rotation)
+        self.structure_canvas.mpl_connect("resize_event", lambda _event: self._layout_structure_figure())
+        structure_layout.addWidget(self.structure_canvas, 1)
+        self.result_splitter.addWidget(structure_section)
 
+        log_section, log_layout = make_result_section("EXECUTION LOG")
         self.log_text = QTextEdit()
+        self.log_text.setObjectName("executionLog")
         self.log_text.setReadOnly(True)
         self.log_text.setLineWrapMode(QTextEdit.NoWrap)
-        self.log_text.setToolTip("Execution log with generated file paths, crystallographic metadata and external-command status messages.")
-        right_layout.addWidget(self.log_text, 1)
+        self.log_text.setMinimumHeight(100)
+        self.log_text.setToolTip("")
+        log_layout.addWidget(self.log_text, 1)
+        self.result_splitter.addWidget(log_section)
+        self.result_splitter.setStretchFactor(0, 2)
+        self.result_splitter.setStretchFactor(1, 5)
+        self.result_splitter.setStretchFactor(2, 2)
+        self.result_splitter.setSizes([170, 390, 140])
         self.log_text.append("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL + CIF input mode.")
         self.log_text.append("Defaults: later-cycle Superflip modelfiles can use raw Superflip XPLOR, deblurred XPLOR, or EDMA CIF.")
+        self._update_action_states()
         self._update_plot()
         self._update_structure_views()
         self._sync_input_source_mode_widgets()
         self._sync_workflow_widgets()
 
     def _sync_workflow_widgets(self) -> None:
+        if self._configuration_locked:
+            return
         mode = normalize_modelfile_source(self._combo_value("modelfile_source") if "modelfile_source" in self.inputs else "")
         cycles_widget = self.inputs.get("cycles")
         damping_widget = self.inputs.get("damping_factor")
@@ -4303,14 +5010,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             else:
                 cycles_widget.setEnabled(True)
                 cycles_widget.setToolTip(INPUT_TOOLTIPS.get("cycles", ""))
+            cycles_label = self.input_labels.get("cycles")
+            if cycles_label is not None:
+                cycles_label.setEnabled(mode != "none")
         if isinstance(damping_widget, QDoubleSpinBox):
             damping_widget.setEnabled(mode in {"superflip_xplor", "deblurred_xplor"})
+            damping_label = self.input_labels.get("damping_factor")
+            if damping_label is not None:
+                damping_label.setEnabled(mode in {"superflip_xplor", "deblurred_xplor"})
             if mode in {"superflip_xplor", "deblurred_xplor"}:
                 damping_widget.setToolTip(INPUT_TOOLTIPS.get("damping_factor", ""))
             else:
                 damping_widget.setToolTip("XPLOR damping is used only when Next-cycle modelfile is superflip_xplor or deblurred_xplor.")
         if isinstance(symmetrize_widget, QCheckBox):
             symmetrize_widget.setEnabled(mode != "superflip_xplor")
+            symmetrize_label = self.input_labels.get("symmetrize_deblurred_map")
+            if symmetrize_label is not None:
+                symmetrize_label.setEnabled(mode != "superflip_xplor")
             if mode == "superflip_xplor":
                 symmetrize_widget.setToolTip("Raw Superflip XPLOR cycling skips the deblurred-map branch, so post-deblur symmetry averaging is not used.")
             else:
@@ -4318,6 +5034,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._update_plot()
 
     def _sync_input_source_mode_widgets(self) -> None:
+        if self._configuration_locked:
+            return
         mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
         jana_enabled = mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}
         override_enabled = mode == INPUT_MODE_INFLIP_OVERRIDES
@@ -4330,6 +5048,29 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             widget = self.inputs.get(key)
             if hasattr(widget, "setEnabled"):
                 widget.setEnabled(bool(enabled))  # type: ignore[attr-defined]
+            label = self.input_labels.get(key)
+            if label is not None:
+                label.setEnabled(bool(enabled))
+
+    def _set_configuration_locked(self, locked: bool) -> None:
+        locked = bool(locked)
+        was_locked = self._configuration_locked
+        self._configuration_locked = locked
+        for key, widget in self.inputs.items():
+            if hasattr(widget, "setEnabled"):
+                widget.setEnabled(not locked)  # type: ignore[attr-defined]
+            label = self.input_labels.get(key)
+            if label is not None:
+                label.setEnabled(not locked)
+        for name in ("test_hkl_btn", "analyze_hkl_btn", "refresh_models_btn", "load_inflip_btn"):
+            action = getattr(self, name, None)
+            if action is not None:
+                action.setEnabled(not locked)
+        if hasattr(self, "configuration_lock_hint"):
+            self.configuration_lock_hint.setVisible(locked)
+        if was_locked and not locked:
+            self._sync_input_source_mode_widgets()
+            self._sync_workflow_widgets()
 
     def _widget_value_as_string(self, widget: object) -> str:
         if isinstance(widget, PathRow):
@@ -4375,6 +5116,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         for key, widget in self.inputs.items():
             value = self.settings.value(f"inputs/{key}", None)
             if value is not None:
+                if key == "reflection_data_mode":
+                    value = normalize_reflection_data_mode(str(value))
                 self._set_widget_value_from_string(widget, str(value))
 
         # Migrate legacy generic executable names to the Jana2020 installation
@@ -4416,6 +5159,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.restoreGeometry(geom)
             except Exception:
                 pass
+        for setting_key, splitter in (
+            ("window/main_splitter", getattr(self, "main_splitter", None)),
+            ("window/result_splitter", getattr(self, "result_splitter", None)),
+        ):
+            state = self.settings.value(setting_key, None)
+            if state is not None and isinstance(splitter, QSplitter):
+                try:
+                    splitter.restoreState(state)
+                except Exception:
+                    pass
 
     def load_inflip_settings_dialog(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Load Superflip settings", self._path_value("work_dir") or str(Path.cwd()), "Superflip input (*.inflip *.inp);;All files (*)")
@@ -4504,7 +5257,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         for button_name in ("test_hkl_btn", "analyze_hkl_btn"):
             button = getattr(self, button_name, None)
             if isinstance(button, QPushButton):
-                button.setEnabled(not running)
+                button.setEnabled(not running and not self._configuration_locked)
         pipeline_active = self.worker is not None and self.worker.is_alive()
         if running and not pipeline_active:
             self.progress_bar.setRange(0, 0)
@@ -4699,26 +5452,29 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         signal_values = [float(v) for v in signal_values if v is not None and math.isfinite(float(v))]
         d_min_stl = 1.0 / (2.0 * analysis.d_min) if analysis.d_min > 0 else None
         d_full_stl = 1.0 / (2.0 * analysis.d_full_98) if analysis.d_full_98 is not None and analysis.d_full_98 > 0 else None
-        ax1.bar(centers, completeness, width=widths, align="center", color="#2563eb", alpha=0.72, label="Completeness")
-        ax1.axhline(98.0, color="#be123c", linewidth=1.0, linestyle="--")
+        figure.patch.set_facecolor("#ffffff")
+        ax1.set_facecolor("#ffffff")
+        ax2.set_facecolor("#ffffff")
+        ax1.bar(centers, completeness, width=widths, align="center", color="#2264b8", alpha=0.72, label="Completeness")
+        ax1.axhline(98.0, color="#001170", linewidth=1.0, linestyle="--")
         if d_min_stl is not None:
-            ax1.axvline(d_min_stl, color="#111827", linewidth=1.1, linestyle="-", label="d_min")
-            ax1.text(d_min_stl, 103.0, f"d_min\n{d_min_text}", rotation=90, va="top", ha="right", color="#111827", fontsize=8)
+            ax1.axvline(d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label="d_min")
+            ax1.text(d_min_stl, 103.0, f"d_min\n{d_min_text}", rotation=90, va="top", ha="right", color="#001170", fontsize=8)
         if d_full_stl is not None:
-            ax1.axvline(d_full_stl, color="#7c3aed", linewidth=1.1, linestyle=":", label="d_full 98%")
-            ax1.text(d_full_stl, 103.0, f"d_full\n{d_full}", rotation=90, va="top", ha="left", color="#7c3aed", fontsize=8)
+            ax1.axvline(d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label="d_full 98%")
+            ax1.text(d_full_stl, 103.0, f"d_full\n{d_full}", rotation=90, va="top", ha="left", color="#44b7ff", fontsize=8)
         ax1.set_ylabel("Completeness (%)", labelpad=6, fontsize=9)
         ax1.set_xlabel("sin(theta)/lambda")
         ax1.set_ylim(0, 105)
-        ax1.grid(True, axis="y", alpha=0.25)
+        ax1.grid(True, axis="y", color="#44b7ff", alpha=0.25)
         ax1b = ax1.twinx()
-        ax1b.plot(centers, mean_signal, marker="o", color="#047857", linewidth=1.8, label=f"Mean {signal_label}")
-        ax1b.axhline(signal_threshold, color="#f97316", linewidth=1.0, linestyle="--", label=f"{signal_label} = {signal_threshold:.1f}")
+        ax1b.plot(centers, mean_signal, marker="o", color="#001170", linewidth=1.8, label=f"Mean {signal_label}")
+        ax1b.axhline(signal_threshold, color="#2264b8", linewidth=1.0, linestyle="--", label=f"{signal_label} = {signal_threshold:.1f}")
         ax1b.set_ylabel(f"Mean {signal_label}", labelpad=6, fontsize=9)
         if threshold_stl is not None:
-            ax1.axvline(threshold_stl, color="#f97316", linewidth=1.1, linestyle="-.", label=f"{signal_label} < {signal_threshold:.1f}")
+            ax1.axvline(threshold_stl, color="#2264b8", linewidth=1.1, linestyle="-.", label=f"{signal_label} < {signal_threshold:.1f}")
             threshold_label = f"I/sigma<3\n{threshold_d_text}" if threshold_d is not None else "I/sigma<3"
-            ax1.text(threshold_stl, 103.0, threshold_label, rotation=90, va="top", ha="left", color="#c2410c", fontsize=8)
+            ax1.text(threshold_stl, 103.0, threshold_label, rotation=90, va="top", ha="left", color="#001170", fontsize=8)
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax1b.get_legend_handles_labels()
         ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=8)
@@ -4726,14 +5482,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if signal_values:
             histogram_bins = np.arange(0.0, 16.0, 1.0)
             histogram_weights = np.full(len(signal_values), 100.0 / float(histogram_denominator), dtype=np.float64)
-            ax2.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#0f766e", alpha=0.82)
+            ax2.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#44b7ff", alpha=0.82)
         else:
             ax2.text(0.5, 0.5, "No sigma values available", transform=ax2.transAxes, ha="center", va="center")
         ax2.set_xlabel(signal_label)
         ax2.set_ylabel("Reflections (%)", labelpad=6, fontsize=9)
         ax2.set_xlim(0.0, 15.0)
         ax2.set_xticks(np.arange(0.0, 16.0, 1.0))
-        ax2.grid(True, axis="y", alpha=0.25)
+        ax2.grid(True, axis="y", color="#44b7ff", alpha=0.25)
+        for axis in (ax1, ax1b, ax2):
+            axis.tick_params(colors="#001170")
+            axis.xaxis.label.set_color("#001170")
+            axis.yaxis.label.set_color("#001170")
         figure.tight_layout(pad=1.1)
         figure.subplots_adjust(left=0.08, right=0.91)
         layout.addWidget(canvas, 1)
@@ -4765,6 +5525,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         for key, widget in self.inputs.items():
             self.settings.setValue(f"inputs/{key}", self._widget_value_as_string(widget))
         self.settings.setValue("window/geometry", self.saveGeometry())
+        if hasattr(self, "main_splitter"):
+            self.settings.setValue("window/main_splitter", self.main_splitter.saveState())
+        if hasattr(self, "result_splitter"):
+            self.settings.setValue("window/result_splitter", self.result_splitter.saveState())
         self.settings.sync()
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
@@ -4816,9 +5580,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.reference_atoms_for_plot.clear()
         self.superflip_atoms_for_plot.clear()
         self.deblur_atoms_for_plot.clear()
+        self.structure_cell = None
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Idle")
+        self._set_run_status("Ready")
         if hasattr(self, "handoff_btn"):
             self.handoff_btn.setEnabled(False)
         self.last_run_config = None
@@ -4828,9 +5594,53 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def log(self, message: str) -> None:
         self.msg_queue.put(("log", message))
 
+    def _set_run_status(self, status: str) -> None:
+        normalized = str(status).strip().upper() or "READY"
+        normalized = {
+            "IDLE": "READY",
+            "DONE": "COMPLETE",
+            "COMPLETED": "COMPLETE",
+            "FAILED": "ERROR",
+            "CANCELED": "CANCELLED",
+        }.get(normalized, normalized)
+        self._run_status = normalized
+        if hasattr(self, "status_badge"):
+            self.status_badge.setText(normalized)
+            self.status_badge.setProperty("runState", normalized.lower())
+            self.status_badge.style().unpolish(self.status_badge)
+            self.status_badge.style().polish(self.status_badge)
+        self._update_action_states()
+        if hasattr(self, "canvas") and not getattr(self, "results", []):
+            self._update_plot()
+        if hasattr(self, "structure_canvas"):
+            self._update_structure_views()
+
+    def _update_action_states(self) -> None:
+        status = str(getattr(self, "_run_status", "READY")).upper()
+        active = status in {"RUNNING", "STOPPING"}
+        self._set_configuration_locked(active)
+        if hasattr(self, "run_btn"):
+            self.run_btn.setEnabled(not active)
+        if hasattr(self, "stop_btn"):
+            self.stop_btn.setEnabled(status == "RUNNING")
+        if hasattr(self, "stop_now_btn"):
+            self.stop_now_btn.setEnabled(status in {"RUNNING", "STOPPING"})
+        if hasattr(self, "clear_btn"):
+            has_results = bool(getattr(self, "results", []))
+            has_log = bool(hasattr(self, "log_text") and self.log_text.toPlainText().strip())
+            self.clear_btn.setEnabled(not active and (has_results or has_log))
+        if active and hasattr(self, "handoff_btn"):
+            self.handoff_btn.setEnabled(False)
+
+    def request_stop_after_cycle(self) -> None:
+        self.stop_after_cycle.set()
+        self._set_run_status("Stopping")
+        self.log("Stop after current cycle requested.")
+
     def request_immediate_stop(self) -> None:
         self.stop_after_cycle.set()
         self.stop_now.set()
+        self._set_run_status("Stopping")
         self.log("Immediate stop requested.")
 
     def refresh_sharped_models(self) -> None:
@@ -4899,6 +5709,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if kind == "log":
                     self.log_text.append(str(payload))
                     self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+                    self._update_action_states()
                 elif kind == "result":
                     result = payload  # type: ignore[assignment]
                     self.results.append(result)  # type: ignore[arg-type]
@@ -4917,6 +5728,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 elif kind == "reference_atoms":
                     self.reference_atoms_for_plot = list(payload)  # type: ignore[arg-type]
                     self._update_structure_views()
+                elif kind == "structure_cell":
+                    values = tuple(float(value) for value in payload)  # type: ignore[arg-type]
+                    if len(values) == 6 and min(values[:3]) > 0:
+                        self.structure_cell = gemmi.UnitCell(*values)
+                        self._update_structure_views()
                 elif kind == "sharped_models":
                     default_model, models = payload  # type: ignore[misc]
                     widget = self.inputs.get("sharped_model")
@@ -4951,14 +5767,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 elif kind == "hkl_task_finished":
                     self._set_hkl_task_running(False)
                 elif kind == "handoff_done":
+                    self._set_run_status("Transferred")
                     self.log_text.append("\nJana2020 hand-off completed. Phase Studio will close automatically.")
                     self.handoff_btn.setEnabled(False)
                     QTimer.singleShot(400, QApplication.instance().quit)
                 elif kind == "handoff_error":
+                    self._set_run_status("Error")
                     QMessageBox.critical(self, "Jana2020 hand-off failed", str(payload))
                     self.log_text.append("\nJana2020 hand-off ERROR: " + str(payload))
                     self.handoff_btn.setEnabled(bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None))
                 elif kind == "progress_setup":
+                    self._set_run_status("Running")
                     total = max(1, int(payload))
                     self.progress_bar.setRange(0, total)
                     self.progress_bar.setValue(0)
@@ -4968,23 +5787,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.progress_bar.setValue(value)
                     self.progress_bar.setFormat(f"{value}/{self.progress_bar.maximum()} cycles")
                 elif kind == "error":
+                    self._set_run_status("Error")
                     QMessageBox.critical(self, "Pipeline error", str(payload))
                     self.log_text.append("\nERROR: " + str(payload))
                     self.progress_bar.setFormat("Error")
                     self.run_btn.setEnabled(True)
                     self.handoff_btn.setEnabled(False)
-                    self.run_btn.setText("Run")
+                    self.run_btn.setText("Run pipeline")
                 elif kind == "done":
+                    self._set_run_status("Complete")
                     self.log_text.append("\nDone.")
                     if payload is not None:
                         self.progress_bar.setValue(int(payload))
                     self.progress_bar.setFormat("Done")
                     self.run_btn.setEnabled(True)
-                    self.run_btn.setText("Run")
+                    self.run_btn.setText("Run pipeline")
                     can_handoff = bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None)
                     self.handoff_btn.setEnabled(can_handoff)
                     if can_handoff:
-                        self.log_text.append("Jana2020 hand-off is ready. Use 'Pass data to Jana2020' to select the cycle and map source.")
+                        self.log_text.append("Jana2020 hand-off is ready. Use 'Send to Jana2020' to select the cycle and map source.")
         except queue.Empty:
             pass
 
@@ -5162,16 +5983,83 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _layout_metrics_figure(self) -> None:
+        width = max(1.0, float(self.canvas.width()))
+        height = max(1.0, float(self.canvas.height()))
+        has_data = bool(self.results)
+        left_pixels = 86.0 if has_data else 70.0
+        left = min(0.18, max(0.07, left_pixels / width))
+        right = 1.0 - min(0.04, max(0.02, 18.0 / width))
+        bottom = min(0.22, max(0.12, 34.0 / height))
+        if has_data:
+            # Keep the figure-level legend in a stable band above the axes.
+            top = 1.0 - min(0.30, max(0.20, 50.0 / height))
+        else:
+            top = 1.0 - min(0.16, max(0.07, 22.0 / height))
+        self.figure.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
+
+    def _set_metrics_data_layout(self, has_data: bool) -> None:
+        if not hasattr(self, "result_splitter"):
+            return
+        if has_data == self._metrics_expanded:
+            return
+        sizes = self.result_splitter.sizes()
+        if len(sizes) != 3 or sum(sizes) <= 0:
+            return
+        if has_data:
+            self._metrics_compact_sizes = list(sizes)
+            available = sum(sizes)
+            desired_metrics = min(max(sizes[0] + 45, 215), int(available * 0.34))
+            increase = max(0, desired_metrics - sizes[0])
+            structure_room = max(0, sizes[1] - 330)
+            from_structure = min(increase, structure_room)
+            from_log = min(increase - from_structure, max(0, sizes[2] - 110))
+            self.result_splitter.setSizes([
+                sizes[0] + from_structure + from_log,
+                sizes[1] - from_structure,
+                sizes[2] - from_log,
+            ])
+        elif self._metrics_compact_sizes:
+            self.result_splitter.setSizes(self._metrics_compact_sizes)
+            self._metrics_compact_sizes = None
+        self._metrics_expanded = has_data
+
     def _update_plot(self) -> None:
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
-        self.figure.patch.set_facecolor("#f7f8fa")
+        self.figure.patch.set_facecolor("#ffffff")
         self.ax.set_facecolor("#ffffff")
-        self.ax.set_title("Superflip metrics, normalized best to worst", fontsize=12, fontweight="bold", pad=12)
-        self.ax.set_xlabel("Cycle")
-        self.ax.set_ylabel("Score (1 best, 0 worst)")
-        self.ax.set_ylim(-0.04, 1.04)
         cycles = [r.cycle for r in self.results]
+        if not cycles:
+            self._set_metrics_data_layout(False)
+            status = str(getattr(self, "_run_status", "READY")).upper()
+            if status in {"RUNNING", "STOPPING"}:
+                empty_message = "Waiting for the first convergence metrics…"
+            elif status in {"ERROR", "CANCELLED"}:
+                empty_message = "No convergence metrics available."
+            else:
+                empty_message = "Run the pipeline to display convergence metrics."
+            self.ax.set_axis_off()
+            self.ax.text(
+                0.5,
+                0.50,
+                empty_message,
+                ha="center",
+                va="center",
+                color="#2264b8",
+                transform=self.ax.transAxes,
+            )
+            self._layout_metrics_figure()
+            self.canvas.draw_idle()
+            return
+
+        self._set_metrics_data_layout(True)
+        self.ax.set_title("")
+        self.ax.set_xlabel("")
+        self.figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#2264b8", fontsize=8.5)
+        self.ax.set_ylim(-0.04, 1.04)
+        self.ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+        self.ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
         try:
             cycles_to_run = max(1, self._spin_value("cycles"))
         except Exception:
@@ -5182,13 +6070,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.ax.set_xticks(list(range(1, x_max + 1)))
         else:
             self.ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12, min_n_ticks=2))
-        self.ax.grid(True, axis="y", color="#d0d5dd", linewidth=0.8, alpha=0.7)
-        self.ax.grid(True, axis="x", color="#e4e7ec", linewidth=0.6, alpha=0.55)
+        self.ax.grid(True, axis="y", color="#44b7ff", linewidth=0.7, alpha=0.24)
+        self.ax.grid(True, axis="x", color="#44b7ff", linewidth=0.55, alpha=0.14)
         for spine in ("top", "right"):
             self.ax.spines[spine].set_visible(False)
-        self.ax.spines["left"].set_color("#98a2b3")
-        self.ax.spines["bottom"].set_color("#98a2b3")
-        self.ax.tick_params(colors="#344054")
+        self.ax.spines["left"].set_color("#001170")
+        self.ax.spines["bottom"].set_color("#001170")
+        self.ax.tick_params(colors="#001170")
+        self.ax.title.set_color("#001170")
+        self.ax.xaxis.label.set_color("#001170")
+        self.ax.yaxis.label.set_color("#001170")
 
         def best_score(values: Sequence[Optional[float]], higher_is_better: bool) -> List[float]:
             arr = np.asarray([np.nan if v is None else float(v) for v in values], dtype=float)
@@ -5205,101 +6096,168 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 out[finite] = scaled if higher_is_better else 1.0 - scaled
             return out.tolist()
 
-        if cycles:
-            series = [
-                ("R", [r.superflip_rvalue for r in self.results], False, "#ef4444", "o", "-"),
-                ("Peaks", [r.superflip_peaks for r in self.results], True, "#f97316", "s", "-"),
-                ("Symmetry", [r.superflip_symm for r in self.results], False, "#2563eb", "^", "-"),
-                ("Reference match", [r.superflip_ref_match for r in self.results], False, "#16a34a", "D", "-"),
-                ("FOM", [r.superflip_fom for r in self.results], True, "#7c3aed", "P", "--"),
-                ("SF RMSD", [r.superflip_metric for r in self.results], False, "#0f766e", "v", "-"),
-                ("Deblur RMSD", [r.deblur_metric for r in self.results], False, "#be123c", "X", "-"),
-            ]
-            plotted = 0
-            for label, values, higher_is_better, color, marker, linestyle in series:
-                y = best_score(values, higher_is_better)
-                if not np.any(np.isfinite(np.asarray(y, dtype=float))):
-                    continue
-                plotted += 1
-                self.ax.plot(
-                    cycles,
-                    y,
-                    color=color,
-                    marker=marker,
-                    linestyle=linestyle,
-                    linewidth=2.1,
-                    markersize=5.5,
-                    markeredgecolor="#ffffff",
-                    markeredgewidth=0.8,
-                    label=label,
-                )
-            if plotted:
-                self.ax.legend(
-                    loc="upper center",
-                    bbox_to_anchor=(0.5, 1.02),
-                    ncol=5,
-                    frameon=False,
-                    fontsize=8,
-                    handlelength=2.4,
-                )
-            else:
-                self.ax.text(
-                    0.5,
-                    0.5,
-                    "No finite metrics yet",
-                    ha="center",
-                    va="center",
-                    color="#667085",
-                    transform=self.ax.transAxes,
-                )
+        series = [
+            ("R", [r.superflip_rvalue for r in self.results], False, "#001170", "o", "-"),
+            ("Peaks", [r.superflip_peaks for r in self.results], True, "#2264b8", "s", "-"),
+            ("Symmetry", [r.superflip_symm for r in self.results], False, "#44b7ff", "^", "-"),
+            ("Reference match", [r.superflip_ref_match for r in self.results], False, "#001170", "D", ":"),
+            ("FOM", [r.superflip_fom for r in self.results], True, "#2264b8", "P", "--"),
+            ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
+            ("Deblur RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
+        ]
+        plotted = 0
+        for label, values, higher_is_better, color, marker, linestyle in series:
+            y = best_score(values, higher_is_better)
+            if not np.any(np.isfinite(np.asarray(y, dtype=float))):
+                continue
+            plotted += 1
+            self.ax.plot(
+                cycles,
+                y,
+                color=color,
+                marker=marker,
+                linestyle=linestyle,
+                linewidth=2.1,
+                markersize=5.5,
+                markeredgecolor="#ffffff",
+                markeredgewidth=0.8,
+                label=label,
+            )
+        if plotted:
+            handles, labels = self.ax.get_legend_handles_labels()
+            if len(handles) == 7:
+                # Matplotlib fills multi-column legends down each column.
+                # Reorder only the legend handles to retain natural row order.
+                legend_order = (0, 4, 1, 5, 2, 6, 3)
+                handles = [handles[index] for index in legend_order]
+                labels = [labels[index] for index in legend_order]
+            self.figure.legend(
+                handles,
+                labels,
+                loc="upper center",
+                bbox_to_anchor=(0.5, 0.985),
+                ncol=min(4, plotted),
+                frameon=False,
+                fontsize=7.4,
+                handlelength=1.7,
+                columnspacing=1.0,
+                handletextpad=0.4,
+                borderaxespad=0.0,
+            )
         else:
             self.ax.text(
                 0.5,
                 0.5,
-                "Run the pipeline to plot normalized Superflip metrics",
+                "No finite metrics yet",
                 ha="center",
                 va="center",
-                color="#667085",
+                color="#2264b8",
                 transform=self.ax.transAxes,
             )
-        self.figure.tight_layout(pad=1.5)
+        self._layout_metrics_figure()
         self.canvas.draw_idle()
 
     def _element_color(self, element: str) -> str:
+        # This extended blue scale is intentionally exclusive to structure atoms.
         palette = {
-            "H": "#d0d5dd", "C": "#344054", "N": "#2563eb", "O": "#dc2626",
-            "B": "#16a34a", "Zn": "#7c3aed", "I": "#a16207", "Ag": "#64748b",
-            "S": "#ca8a04", "P": "#f97316", "Cl": "#22c55e", "Br": "#92400e",
+            "H": "#74C9FF", "C": "#001170", "N": "#0E50AF", "O": "#1FA5FF",
+            "B": "#2264B8", "F": "#44B7FF", "Na": "#082A8A", "Mg": "#126AC7",
+            "Al": "#1684DE", "Si": "#2DAEFF", "P": "#0B3798", "S": "#44B7FF",
+            "Cl": "#1FA5FF", "K": "#071F82", "Ca": "#0E50AF", "Mn": "#126AC7",
+            "Fe": "#082A8A", "Co": "#0B3798", "Ni": "#126AC7", "Cu": "#1684DE",
+            "Zn": "#2264B8", "Br": "#2DAEFF", "Ag": "#44B7FF", "I": "#0E50AF",
+            "Au": "#1FA5FF", "Hg": "#1684DE", "Pb": "#071F82",
         }
-        return palette.get(clean_element_symbol(element), "#475467")
+        symbol = clean_element_symbol(element)
+        if symbol in palette:
+            return palette[symbol]
+        fallback_scale = ("#001170", "#082A8A", "#0B3798", "#0E50AF", "#126AC7", "#1684DE", "#1FA5FF", "#2DAEFF", "#44B7FF")
+        return fallback_scale[element_atomic_number(symbol) % len(fallback_scale)]
 
-    def _plot_structure_atoms(self, ax, title: str, atoms: Sequence[AtomSite]) -> None:
-        ax.set_title(title, fontsize=10, fontweight="bold", pad=4)
-        ax.set_xlim(0, 1); ax.set_ylim(0, 1); ax.set_zlim(0, 1)
-        ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
-        ax.view_init(elev=self.structure_elev, azim=self.structure_azim)
-        ax.set_box_aspect((1, 1, 1))
-        try:
-            for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
-                axis.pane.set_alpha(0.04)
-        except Exception:
-            pass
+    def _structure_cartesian_geometry(self, atoms: Sequence[AtomSite]) -> Tuple[np.ndarray, np.ndarray]:
+        fractional_corners = np.asarray(
+            [
+                [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0], [1.0, 1.0, 1.0],
+            ],
+            dtype=np.float64,
+        )
+        fractional_atoms = np.asarray([wrap_frac(atom.frac) for atom in atoms], dtype=np.float64)
+        cell = self.structure_cell
+        if cell is None or min(float(cell.a), float(cell.b), float(cell.c)) <= 0:
+            return fractional_atoms, fractional_corners
+
+        def orthogonalize(points: np.ndarray) -> np.ndarray:
+            cartesian: List[List[float]] = []
+            for point in points:
+                position = cell.orthogonalize(gemmi.Fractional(float(point[0]), float(point[1]), float(point[2])))
+                cartesian.append([float(position.x), float(position.y), float(position.z)])
+            return np.asarray(cartesian, dtype=np.float64)
+
+        return orthogonalize(fractional_atoms), orthogonalize(fractional_corners)
+
+    def _plot_structure_atoms(self, ax, atoms: Sequence[AtomSite], empty_text: str = "No structure available") -> str:
         if not atoms:
-            ax.text2D(0.5, 0.5, "No structure", ha="center", va="center", color="#667085", transform=ax.transAxes)
-            return
+            ax.set_axis_off()
+            ax.text2D(0.5, 0.50, empty_text, ha="center", va="center", fontsize=9, color="#2264b8", transform=ax.transAxes)
+            return ""
+
         non_h_atoms = [a for a in atoms if clean_element_symbol(a.element) not in {"H", "D", "He"}]
         if not non_h_atoms:
-            ax.text2D(0.5, 0.5, "No non-H/He atoms", ha="center", va="center", color="#667085", transform=ax.transAxes)
-            return
+            ax.set_axis_off()
+            ax.text2D(0.5, 0.50, "No non-H/He atoms", ha="center", va="center", fontsize=9, color="#2264b8", transform=ax.transAxes)
+            return ""
+
+        ax.set_axis_on()
+        ax.axison = True
+        ax.set_xticks([]); ax.set_yticks([]); ax.set_zticks([])
+        ax.view_init(elev=self.structure_elev, azim=self.structure_azim)
+        ax.set_proj_type("ortho")
+        try:
+            for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
+                axis.pane.set_facecolor("#ffffff")
+                axis.pane.set_edgecolor("#ffffff")
+                axis.pane.set_alpha(0.0)
+                axis.line.set_color("#ffffff")
+                axis._axinfo["grid"]["color"] = "#ffffff"
+        except Exception:
+            pass
         ranked_atoms = sorted(non_h_atoms, key=lambda atom: element_atomic_number(atom.element), reverse=True)
         plot_atoms = ranked_atoms[:800]
-        coords = np.asarray([wrap_frac(a.frac) for a in plot_atoms], dtype=np.float64)
+        coords, cell_corners = self._structure_cartesian_geometry(plot_atoms)
+        bounds_min = np.min(cell_corners, axis=0)
+        bounds_max = np.max(cell_corners, axis=0)
+        spans = np.maximum(bounds_max - bounds_min, 1.0e-6)
+        padding = spans * 0.025
+        ax.set_xlim(bounds_min[0] - padding[0], bounds_max[0] + padding[0])
+        ax.set_ylim(bounds_min[1] - padding[1], bounds_max[1] + padding[1])
+        ax.set_zlim(bounds_min[2] - padding[2], bounds_max[2] + padding[2])
+        display_aspect = spans / max(float(np.max(spans)), 1.0e-6)
+        ax.set_box_aspect(display_aspect, zoom=1.18)
+
+        cell_edges = (
+            (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
+            (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
+        )
+        for start, end in cell_edges:
+            edge = cell_corners[[start, end]]
+            ax.plot(edge[:, 0], edge[:, 1], edge[:, 2], color="#44b7ff", linewidth=0.55, alpha=0.46)
+
         colors = [self._element_color(a.element) for a in plot_atoms]
-        sizes = [max(12.0, min(70.0, 10.0 + 1.2 * element_atomic_number(a.element))) for a in plot_atoms]
-        ax.scatter(coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors, alpha=0.86, edgecolors="#ffffff", linewidths=0.35)
+        atom_count = len(non_h_atoms)
+        count_scale = float(np.interp(
+            atom_count,
+            [10, 50, 200, 500, 1000, 2000],
+            [1.30, 1.0, 0.72, 0.48, 0.34, 0.22],
+        ))
+        sizes = [max(4.0, min(76.0, (10.0 + 1.2 * element_atomic_number(a.element)) * count_scale)) for a in plot_atoms]
+        ax.scatter(
+            coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors,
+            alpha=0.84, edgecolors="#ffffff", linewidths=0.18, depthshade=True,
+        )
         shown = len(plot_atoms)
         suffix = "" if shown == len(non_h_atoms) else f"; first {shown} heaviest shown"
-        ax.text2D(0.02, 0.02, f"{len(non_h_atoms)} non-H/He atoms{suffix}", color="#667085", fontsize=8, transform=ax.transAxes)
+        return f"{len(non_h_atoms)} non-H/He atoms{suffix}"
 
     def _safe_parse_structure(self, path: Optional[Path]) -> List[AtomSite]:
         if path is None or not Path(path).is_file():
@@ -5310,35 +6268,114 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         except Exception:
             return []
 
-    def _sync_structure_view_from_event(self, event) -> None:
+    def _begin_structure_rotation(self, event) -> None:
         ax = getattr(event, "inaxes", None)
-        if ax is None or ax not in self.structure_axes:
+        self._structure_rotation_source = ax if ax in self.structure_axes else None
+
+    def _apply_structure_rotation(self, source_ax, *, redraw: bool = True) -> None:
+        if source_ax is None or source_ax not in self.structure_axes:
             return
-        elev = float(getattr(ax, "elev", self.structure_elev))
-        azim = float(getattr(ax, "azim", self.structure_azim))
-        if abs(elev - self.structure_elev) < 0.01 and abs(azim - self.structure_azim) < 0.01:
-            return
+        elev = float(getattr(source_ax, "elev", self.structure_elev))
+        azim = float(getattr(source_ax, "azim", self.structure_azim))
         self.structure_elev = elev
         self.structure_azim = azim
-        for other_ax in self.structure_axes:
-            if other_ax is not ax:
-                other_ax.view_init(elev=self.structure_elev, azim=self.structure_azim)
-        self.structure_canvas.draw_idle()
+        for axis in self.structure_axes:
+            axis.view_init(elev=elev, azim=azim)
+        if redraw:
+            self.structure_canvas.draw_idle()
+
+    def _sync_structure_view_from_event(self, event) -> None:
+        source_ax = self._structure_rotation_source
+        if source_ax is None:
+            source_ax = getattr(event, "inaxes", None)
+        if source_ax is None or source_ax not in self.structure_axes:
+            return
+        self._apply_structure_rotation(source_ax)
+
+    def _finish_structure_rotation(self, event) -> None:
+        source_ax = self._structure_rotation_source
+        if source_ax is None:
+            source_ax = getattr(event, "inaxes", None)
+        self._apply_structure_rotation(source_ax, redraw=False)
+        self._structure_rotation_source = None
+        self.structure_canvas.draw()
+
+    def _layout_structure_figure(self) -> None:
+        if not hasattr(self, "structure_figure"):
+            return
+        height = max(1.0, float(self.structure_canvas.height())) if hasattr(self, "structure_canvas") else 390.0
+        title_band = min(0.15, max(0.075, 30.0 / height))
+        metadata_band = min(0.11, max(0.055, 24.0 / height))
+        axes_top = 1.0 - title_band
+        self.structure_figure.subplots_adjust(left=0.002, right=0.998, bottom=metadata_band, top=axes_top, wspace=0.035)
+        title_y = axes_top + title_band * 0.52
+        for title_text in getattr(self, "structure_title_texts", []):
+            title_text.set_y(title_y)
+        for metadata_text in getattr(self, "structure_metadata_texts", []):
+            metadata_text.set_y(metadata_band * 0.44)
+        for separator in getattr(self, "structure_separators", []):
+            separator.set_ydata([max(0.08, metadata_band + 0.01), axes_top - 0.01])
 
     def _update_structure_views(self) -> None:
         self.structure_figure.clear()
-        self.structure_figure.patch.set_facecolor("#f7f8fa")
+        self.structure_figure.patch.set_facecolor("#ffffff")
         self.structure_axes = []
+        status = str(getattr(self, "_run_status", "READY")).upper()
+        waiting = status in {"RUNNING", "STOPPING"}
+        failed = status in {"ERROR", "CANCELLED"}
         panels = [
-            ("Reference", self.reference_atoms_for_plot),
-            ("Current Superflip", self.superflip_atoms_for_plot),
-            ("Current Deblurred", self.deblur_atoms_for_plot),
+            ("Reference", self.reference_atoms_for_plot, "No structure available"),
+            (
+                "Superflip",
+                self.superflip_atoms_for_plot,
+                "Waiting for Superflip result…" if waiting else ("Superflip result unavailable" if failed else "No structure available"),
+            ),
+            (
+                "SharpED",
+                self.deblur_atoms_for_plot,
+                "Waiting for SharpED result…" if waiting else ("SharpED result unavailable" if failed else "No structure available"),
+            ),
         ]
-        for idx, (title, atoms) in enumerate(panels, start=1):
+        panel_metadata = []
+        for idx, (_title, atoms, empty_text) in enumerate(panels, start=1):
             ax = self.structure_figure.add_subplot(1, 3, idx, projection="3d")
             self.structure_axes.append(ax)
-            self._plot_structure_atoms(ax, title, atoms)
-        self.structure_figure.tight_layout(pad=1.1)
+            panel_metadata.append(self._plot_structure_atoms(ax, atoms, empty_text))
+        self.structure_title_texts = [
+            self.structure_figure.text(
+                x_position,
+                0.96,
+                title,
+                ha="center",
+                va="center",
+                fontsize=10,
+                fontweight="bold",
+                color="#001170",
+            )
+            for x_position, (title, _atoms, _empty_text) in zip((1.0 / 6.0, 0.5, 5.0 / 6.0), panels)
+        ]
+        self.structure_metadata_texts = [
+            self.structure_figure.text(
+                x_position,
+                0.03,
+                metadata,
+                ha="center",
+                va="center",
+                fontsize=7.5,
+                color="#2264b8",
+            )
+            for x_position, metadata in zip((1.0 / 6.0, 0.5, 5.0 / 6.0), panel_metadata)
+        ]
+        self.structure_separators = []
+        for x_position in (1.0 / 3.0, 2.0 / 3.0):
+            separator = Line2D(
+                [x_position, x_position], [0.08, 0.90],
+                transform=self.structure_figure.transFigure,
+                color="#44b7ff", linewidth=0.55, alpha=0.45,
+            )
+            self.structure_figure.add_artist(separator)
+            self.structure_separators.append(separator)
+        self._layout_structure_figure()
         self.structure_canvas.draw_idle()
 
     def get_config(self) -> RunConfig:
@@ -5506,6 +6543,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Starting...")
+        self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
         self.run_btn.setText("Running...")
@@ -5558,6 +6596,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ref_ctx = reference_context_with_external_atom_sites(
                     ref_ctx, cfg.superflip_referencefile, cfg.work_dir, cfg.composition_override, self.log
                 )
+            self.msg_queue.put(("structure_cell", (
+                ref_ctx.cell.a, ref_ctx.cell.b, ref_ctx.cell.c,
+                ref_ctx.cell.alpha, ref_ctx.cell.beta, ref_ctx.cell.gamma,
+            )))
             self.msg_queue.put(("reference_atoms", expand_atoms_by_symmetry(ref_ctx.atoms, ref_ctx.spacegroup)))
             self.log(f"Crystallographic reference CIF: {cfg.reference_cif}")
             self.log(f"Working reference CIF for EDMA/metrics: {ref_ctx.work_ref_cif}")
@@ -5881,32 +6923,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
 def create_startup_splash() -> QSplashScreen:
     pixmap = QPixmap(520, 250)
-    pixmap.fill(QColor("#f6f8fb"))
+    pixmap.fill(QColor("#ffffff"))
 
     painter = QPainter(pixmap)
     try:
         painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(QColor("#d0d5dd"), 1))
+        painter.setPen(QPen(QColor("#44b7ff"), 1))
         painter.setBrush(QColor("#ffffff"))
         painter.drawRoundedRect(10, 10, 500, 230, 8, 8)
 
-        painter.setPen(QColor("#101828"))
+        painter.setPen(QColor("#001170"))
         title_font = QFont()
         title_font.setPointSize(20)
         title_font.setBold(True)
         painter.setFont(title_font)
-        painter.drawText(34, 70, "Phase Studio v3")
+        painter.drawText(34, 70, "Phase Studio 1.0.1")
+        painter.drawPixmap(386, 26, create_phase_studio_logo_pixmap(96))
 
-        painter.setPen(QColor("#475467"))
+        painter.setPen(QColor("#001170"))
         body_font = QFont()
         body_font.setPointSize(10)
         painter.setFont(body_font)
         painter.drawText(34, 108, "Starting crystallographic pipeline workspace")
         painter.drawText(34, 134, "Loading settings, plots and structure views...")
 
-        painter.setPen(QPen(QColor("#2563eb"), 3))
+        painter.setPen(QPen(QColor("#2264b8"), 3))
         painter.drawLine(34, 180, 486, 180)
-        painter.setPen(QColor("#667085"))
+        painter.setPen(QColor("#001170"))
         small_font = QFont()
         small_font.setPointSize(8)
         painter.setFont(small_font)
@@ -5916,7 +6959,7 @@ def create_startup_splash() -> QSplashScreen:
 
     splash = QSplashScreen(pixmap)
     splash.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-    splash.showMessage("Starting...", Qt.AlignBottom | Qt.AlignRight, QColor("#344054"))
+    splash.showMessage("Starting...", Qt.AlignBottom | Qt.AlignRight, QColor("#001170"))
     return splash
 
 
