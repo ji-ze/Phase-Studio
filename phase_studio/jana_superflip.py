@@ -574,6 +574,19 @@ def resolve_original_superflip(exe_dir: Path) -> Path:
     return candidates[0]
 
 
+def allow_external_process_foreground(process_id: int) -> bool:
+    """Grant the native Superflip process one-shot foreground permission on Windows."""
+    if sys.platform != "win32" or int(process_id) <= 0:
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        return bool(user32.AllowSetForegroundWindow(int(process_id)))
+    except Exception:
+        return False
+
+
 def run_process(cmd: Sequence[str], cwd: Path, log: Callable[[str], None]) -> int:
     log("Running: " + " ".join(str(part) for part in cmd))
     proc = subprocess.Popen(
@@ -585,6 +598,7 @@ def run_process(cmd: Sequence[str], cwd: Path, log: Callable[[str], None]) -> in
         encoding=text_encoding(),
         errors="replace",
     )
+    allow_external_process_foreground(proc.pid)
     assert proc.stdout is not None
     for line in proc.stdout:
         log(line.rstrip("\r\n"))
@@ -1464,7 +1478,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
     settings = QSettings("PhaseStudio", "JanaSuperflipWrapper")
     dialog = QDialog()
-    dialog.setWindowTitle("Phase Studio for Jana2020")
+    dialog.setWindowTitle("Phase Studio 1.0.1 for Jana2020")
     dialog.setMinimumWidth(760)
     dialog.resize(820, 680)
 
@@ -1472,7 +1486,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     root.setContentsMargins(14, 14, 14, 14)
     root.setSpacing(10)
 
-    title = QLabel("Phase Studio for Jana2020")
+    title = QLabel("Phase Studio 1.0.1 for Jana2020")
     title_font = title.font()
     title_font.setPointSize(title_font.pointSize() + 5)
     title_font.setBold(True)
@@ -2037,7 +2051,7 @@ def launch_phase_studio_from_jana(inflip_path: Optional[Path], options: JanaRunO
         if options.superflip_referencefile.strip():
             win.log_text.append(f"Superflip referencefile: {options.superflip_referencefile}")
         win.log_text.append("After the full pipeline finishes, use the 'Pass data to Jana2020' button to choose the cycle and map source for the final Jana2020 hand-off.")
-    win.setWindowTitle("Phase Studio for Jana2020")
+    win.setWindowTitle("Phase Studio 1.0.1 for Jana2020")
     win.show()
     splash.finish(win)
     return int(app.exec())
@@ -2079,7 +2093,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             QApplication = qt["QApplication"]
             QMessageBox = qt["QMessageBox"]
             QApplication.instance() or QApplication([sys.argv[0]])
-            QMessageBox.critical(None, "Phase Studio for Jana2020 — calculation error", str(exc))
+            QMessageBox.critical(None, "Phase Studio 1.0.1 for Jana2020 — calculation error", str(exc))
         except Exception:
             pass
         return 1

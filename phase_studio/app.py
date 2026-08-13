@@ -2504,7 +2504,14 @@ def return_phase_studio_result_to_jana(
     final_lines = define_m80_inflip_from_model(inflip_header_for_m80(original_lines), base_name, target_map.name)
     write_text_lines_platform(calc_inflip, final_lines)
     log(f"Jana2020 final Superflip input: {calc_inflip}")
-    run_command([str(original), str(calc_inflip)], cwd=jana_cwd, log_path=Path(cfg.work_dir) / "jana2020_return_superflip.log", log=log, stop_event=stop_event)
+    run_command(
+        [str(original), str(calc_inflip)],
+        cwd=jana_cwd,
+        log_path=Path(cfg.work_dir) / "jana2020_return_superflip.log",
+        log=log,
+        stop_event=stop_event,
+        allow_foreground=True,
+    )
     log("Jana2020 final Superflip hand-off completed.")
 
 
@@ -3019,12 +3026,39 @@ def write_superflip_symmetry_input(
         if voxel_line:
             f.write(voxel_line + "\n")
 
-def run_command(cmd: Sequence[str], cwd: Path, log_path: Path, log: Callable[[str], None], timeout: Optional[int] = None, stop_event: Optional[threading.Event] = None) -> int:
+def _allow_external_process_foreground(process_id: int) -> bool:
+    """Let a newly launched Windows process use normal native foreground rules.
+
+    This grants permission once; it neither activates a window nor polls for one.
+    Other platforms deliberately keep their default window-manager behaviour.
+    """
+    if sys.platform != "win32" or int(process_id) <= 0:
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+        return bool(user32.AllowSetForegroundWindow(int(process_id)))
+    except Exception:
+        return False
+
+
+def run_command(
+    cmd: Sequence[str],
+    cwd: Path,
+    log_path: Path,
+    log: Callable[[str], None],
+    timeout: Optional[int] = None,
+    stop_event: Optional[threading.Event] = None,
+    allow_foreground: bool = False,
+) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log("  $ " + " ".join(str(x) for x in cmd))
     with log_path.open("w", encoding="utf-8", errors="replace") as lf:
         try:
             proc = subprocess.Popen(list(cmd), cwd=str(cwd), stdout=lf, stderr=subprocess.STDOUT, text=True)
+            if allow_foreground:
+                _allow_external_process_foreground(proc.pid)
         except OSError as exc:
             exe = str(cmd[0]) if cmd else "<empty command>"
             if getattr(exc, "winerror", None) == 4551:
@@ -3158,7 +3192,14 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
         except Exception as exc:
             log(f"  Could not remove stale Superflip output {stale}: {exc}")
     run_started_at = time.time()
-    run_command([superflip_exe, inp.name], cwd=cycle_dir, log_path=log_path, log=log, stop_event=stop_event)
+    run_command(
+        [superflip_exe, inp.name],
+        cwd=cycle_dir,
+        log_path=log_path,
+        log=log,
+        stop_event=stop_event,
+        allow_foreground=True,
+    )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
         raise RuntimeError(f"Superflip did not create expected XPLOR map: {out}\n" + "\n".join(tail))
@@ -3216,7 +3257,14 @@ def run_superflip_symmetrize_map(
         except Exception as exc:
             log(f"  Could not remove stale Superflip symmetry output {stale}: {exc}")
     run_started_at = time.time()
-    run_command([superflip_exe, inp.name], cwd=sym_dir, log_path=log_path, log=log, stop_event=stop_event)
+    run_command(
+        [superflip_exe, inp.name],
+        cwd=sym_dir,
+        log_path=log_path,
+        log=log,
+        stop_event=stop_event,
+        allow_foreground=True,
+    )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
         raise RuntimeError(f"Superflip did not create expected symmetrized XPLOR map: {out}\n" + "\n".join(tail))
@@ -7210,7 +7258,6 @@ def create_startup_splash() -> QSplashScreen:
         painter.end()
 
     splash = QSplashScreen(pixmap)
-    splash.setWindowFlag(Qt.WindowStaysOnTopHint, True)
     splash.showMessage("Starting...", Qt.AlignBottom | Qt.AlignRight, QColor("#001170"))
     return splash
 
