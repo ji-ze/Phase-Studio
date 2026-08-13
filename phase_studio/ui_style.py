@@ -472,6 +472,111 @@ QToolButton#helpNavLink:hover, QToolButton#guideLink:hover {
     background-color: #f2f4f9;
     border-bottom: 1px solid #44b7ff;
 }
+QWidget#diagnosticHeader {
+    background-color: #001170;
+    border: none;
+    border-bottom: 2px solid #44b7ff;
+}
+QLabel#diagnosticTitle {
+    color: #ffffff;
+    background-color: #001170;
+    font-size: 13pt;
+    font-weight: 800;
+    letter-spacing: 1px;
+}
+QLabel#diagnosticSubtitle {
+    color: #44b7ff;
+    background-color: #001170;
+    font-size: 9pt;
+    font-weight: 600;
+}
+QLabel#diagnosticStatus {
+    color: #001170;
+    background-color: #f2f4f9;
+    border: 1px solid #44b7ff;
+    padding: 4px 10px;
+    min-width: 58px;
+    font-size: 9pt;
+    font-weight: 800;
+}
+QGroupBox#diagnosticSection {
+    border-top: 1px solid #44b7ff;
+    margin-top: 1.25em;
+    padding: 10px 6px 5px 6px;
+}
+QGroupBox#diagnosticSection::title,
+QLabel#diagnosticSectionTitle {
+    color: #2264b8;
+    background-color: #ffffff;
+    font-size: 9pt;
+    font-weight: 800;
+    letter-spacing: 1px;
+}
+QLabel#diagnosticSummaryValue {
+    color: #001170;
+    background-color: #ffffff;
+}
+QToolButton#diagnosticTextAction {
+    color: #2264b8;
+    background-color: transparent;
+    border: none;
+    border-bottom: 1px solid #f2f4f9;
+    padding: 2px 4px;
+    font-size: 9pt;
+}
+QToolButton#diagnosticTextAction:hover {
+    color: #001170;
+    background-color: #f2f4f9;
+    border-bottom: 1px solid #44b7ff;
+}
+QWidget#diagnosticMetric {
+    background-color: #f2f4f9;
+    border: none;
+    border-top: 2px solid #44b7ff;
+}
+QLabel#diagnosticMetricValue {
+    color: #001170;
+    background-color: #f2f4f9;
+    font-size: 12pt;
+    font-weight: 800;
+}
+QLabel#diagnosticMetricLabel {
+    color: #2264b8;
+    background-color: #f2f4f9;
+    font-size: 8.5pt;
+    font-weight: 600;
+}
+QLabel#diagnosticMeta {
+    color: #2264b8;
+    font-size: 8.5pt;
+}
+QTableWidget#diagnosticTable {
+    border: 1px solid #f2f4f9;
+    gridline-color: #f2f4f9;
+    alternate-background-color: #f7f9fc;
+    selection-background-color: #44b7ff;
+    selection-color: #001170;
+}
+QTableWidget#diagnosticTable QHeaderView::section {
+    background-color: #f2f4f9;
+    color: #001170;
+    border: none;
+    border-bottom: 1px solid #44b7ff;
+    padding: 6px;
+}
+QPushButton#diagnosticSecondaryButton {
+    background-color: #ffffff;
+    color: #2264b8;
+    border-color: #44b7ff;
+    font-weight: 600;
+}
+QPushButton#diagnosticSecondaryButton:hover {
+    background-color: #f2f4f9;
+    color: #001170;
+}
+QSplitter#diagnosticSplitter::handle {
+    background-color: #44b7ff;
+}
 a { color: #2264b8; }
 """
 

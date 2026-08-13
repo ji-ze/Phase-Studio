@@ -66,7 +66,7 @@ try:
     from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-        QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+        QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
         QDialog, QDialogButtonBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QSplashScreen, QToolButton,
         QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QTextEdit, QVBoxLayout, QWidget
     )
@@ -5292,71 +5292,222 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         def worker() -> object:
             return self._build_hkl_load_result(request)
 
-        self._start_hkl_background_task("HKL load test", worker, "hkl_load_result")
+        self._start_hkl_background_task("HKL validation", worker, "hkl_load_result")
 
-    def _show_hkl_load_result_dialog(self, payload: object) -> None:
-        result = payload  # type: ignore[assignment]
-        hkl_path = result.hkl_path  # type: ignore[attr-defined]
-        data_mode = result.data_mode  # type: ignore[attr-defined]
-        cell = result.cell  # type: ignore[attr-defined]
-        hm = result.spacegroup_hm  # type: ignore[attr-defined]
-        source_note = result.source_note  # type: ignore[attr-defined]
-        value_col = result.value_col  # type: ignore[attr-defined]
-        sigma_col = result.sigma_col  # type: ignore[attr-defined]
-        include_000 = result.include_000  # type: ignore[attr-defined]
-        reflections = result.reflections  # type: ignore[attr-defined]
-        unique = result.unique_reflections  # type: ignore[attr-defined]
-        dialog = QDialog(self)
-        dialog.setWindowTitle("HKL Load Test")
-        dialog.resize(860, 560)
-        layout = QVBoxLayout(dialog)
-        sigma_count = sum(1 for r in reflections if r.sigma is not None)
-        phase_count = sum(1 for r in reflections if r.phase is not None)
+    def _diagnostic_header(self, title: str, subtitle: str, status: Optional[str] = None) -> QWidget:
+        header = QWidget()
+        header.setObjectName("diagnosticHeader")
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 10, 14, 10)
+        text_layout = QVBoxLayout()
+        text_layout.setSpacing(1)
+        title_label = QLabel(title)
+        title_label.setObjectName("diagnosticTitle")
+        subtitle_label = QLabel(subtitle)
+        subtitle_label.setObjectName("diagnosticSubtitle")
+        text_layout.addWidget(title_label)
+        text_layout.addWidget(subtitle_label)
+        header_layout.addLayout(text_layout, 1)
+        if status:
+            badge = QLabel(status)
+            badge.setObjectName("diagnosticStatus")
+            badge.setAlignment(Qt.AlignCenter)
+            badge.setToolTip("Technical reflection input parsed successfully.")
+            header_layout.addWidget(badge)
+        return header
+
+    def _diagnostic_input_summary(
+        self,
+        hkl_path: Path,
+        data_mode: str,
+        cell: gemmi.UnitCell,
+        spacegroup_hm: str,
+        source_note: str,
+        extra_rows: Sequence[Tuple[str, str]] = (),
+    ) -> QGroupBox:
+        box = QGroupBox("INPUT SUMMARY")
+        box.setObjectName("diagnosticSection")
+        form = QFormLayout(box)
+        form.setContentsMargins(10, 12, 10, 8)
+        form.setHorizontalSpacing(18)
+        form.setVerticalSpacing(5)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+        source_row = QWidget()
+        source_layout = QHBoxLayout(source_row)
+        source_layout.setContentsMargins(0, 0, 0, 0)
+        source_layout.setSpacing(7)
+        source_value = QLabel(hkl_path.name)
+        source_value.setObjectName("diagnosticSummaryValue")
+        source_value.setToolTip(str(hkl_path))
+        source_layout.addWidget(source_value)
+        copy_path = QToolButton()
+        copy_path.setObjectName("diagnosticTextAction")
+        copy_path.setText("Copy path")
+        copy_path.setToolTip(str(hkl_path))
+        copy_path.clicked.connect(lambda: QApplication.clipboard().setText(str(hkl_path)))
+        source_layout.addWidget(copy_path)
+        source_layout.addStretch(1)
+        form.addRow("Source", source_row)
+
+        rows = [
+            ("Format", data_mode),
+            ("Unit cell", f"{cell.a:.5g}  {cell.b:.5g}  {cell.c:.5g}  {cell.alpha:.4g}  {cell.beta:.4g}  {cell.gamma:.4g}"),
+            ("Space group", spacegroup_hm),
+        ]
+        rows.extend(extra_rows)
+        for label_text, value_text in rows:
+            value = QLabel(value_text)
+            value.setObjectName("diagnosticSummaryValue")
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            form.addRow(label_text, value)
+        box.setToolTip(source_note)
+        return box
+
+    def _diagnostic_metric_grid(self, metrics: Sequence[Tuple[str, str]]) -> QWidget:
+        panel = QWidget()
+        panel.setObjectName("diagnosticMetrics")
+        grid = QGridLayout(panel)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+        columns = min(4, max(1, len(metrics)))
+        for index, (value_text, label_text) in enumerate(metrics):
+            card = QWidget()
+            card.setObjectName("diagnosticMetric")
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(8, 7, 8, 7)
+            card_layout.setSpacing(0)
+            value = QLabel(value_text)
+            value.setObjectName("diagnosticMetricValue")
+            value.setAlignment(Qt.AlignCenter)
+            label = QLabel(label_text)
+            label.setObjectName("diagnosticMetricLabel")
+            label.setAlignment(Qt.AlignCenter)
+            label.setWordWrap(True)
+            card_layout.addWidget(value)
+            card_layout.addWidget(label)
+            grid.addWidget(card, index // columns, index % columns)
+        for column in range(columns):
+            grid.setColumnStretch(column, 1)
+        return panel
+
+    @staticmethod
+    def _configure_diagnostic_table(table: QTableWidget) -> None:
+        table.setObjectName("diagnosticTable")
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setHighlightSections(False)
+        table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+
+    def _build_hkl_validation_dialog(self, result: HklLoadResult) -> QDialog:
+        hkl_path = result.hkl_path
+        data_mode = result.data_mode
+        cell = result.cell
+        hm = result.spacegroup_hm
+        source_note = result.source_note
+        value_col = result.value_col
+        sigma_col = result.sigma_col
+        include_000 = result.include_000
+        reflections = result.reflections
+        unique = result.unique_reflections
+        sigma_count = sum(1 for reflection in reflections if reflection.sigma is not None)
+        phase_count = sum(1 for reflection in reflections if reflection.phase is not None)
         value_label = reflection_value_label(data_mode)
         sigma_label = reflection_sigma_label(data_mode)
         snr_label = reflection_primary_snr_label(data_mode)
-        summary = QLabel(
-            f"{source_note}\n"
-            f"HKL data format: {data_mode}; value column: {value_col}; "
-            f"sigma column: {sigma_col if sigma_col is not None else 'none'}; include 000: {'yes' if include_000 else 'no'}\n"
-            f"Cell: {cell.a:.5g} {cell.b:.5g} {cell.c:.5g} {cell.alpha:.4g} {cell.beta:.4g} {cell.gamma:.4g}; space group: {hm}\n"
-            f"Parsed reflections: {len(reflections)}; unique HKL after duplicate merge: {len(unique)}; "
-            f"{sigma_label} loaded: {sigma_count}/{len(reflections)}; phase values loaded: {phase_count}/{len(reflections)}"
-        )
-        summary.setWordWrap(True)
-        layout.addWidget(summary)
-        headers = ["h", "k", "l", value_label, sigma_label, "phase", snr_label, "derived I/sigma", "d", "sin(theta)/lambda"]
+
+        dialog = QDialog(self)
+        dialog.setObjectName("hklValidationDialog")
+        dialog.setWindowTitle("HKL Validation")
+        dialog.resize(1060, 680)
+        dialog.setMinimumSize(820, 520)
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(9)
+        layout.addWidget(self._diagnostic_header("HKL VALIDATION", "Reflection parsing and input diagnostics", "VALID"))
+        layout.addWidget(self._diagnostic_input_summary(
+            hkl_path,
+            data_mode,
+            cell,
+            hm,
+            source_note,
+            (("Columns", f"value {value_col}  ·  sigma {sigma_col if sigma_col is not None else 'none'}  ·  include 000 {'yes' if include_000 else 'no'}"),),
+        ))
+        layout.addWidget(self._diagnostic_metric_grid((
+            (f"{len(reflections):,}", "Parsed"),
+            (f"{len(unique):,}", "Unique"),
+            (f"{sigma_count:,} / {len(reflections):,}", sigma_label),
+            (f"{phase_count:,} / {len(reflections):,}", "Phase values"),
+        )))
+
+        sample_header = QHBoxLayout()
+        sample_title = QLabel("REFLECTION SAMPLE")
+        sample_title.setObjectName("diagnosticSectionTitle")
+        sample_header.addWidget(sample_title)
+        sample_header.addStretch(1)
         rows = min(50, len(reflections))
+        sample_count = QLabel(f"First {rows:,} of {len(reflections):,} parsed reflections")
+        sample_count.setObjectName("diagnosticMeta")
+        sample_header.addWidget(sample_count)
+        layout.addLayout(sample_header)
+
+        headers = ["h", "k", "l", value_label, sigma_label, "Phase (°)", snr_label, "Derived I/σ", "d (Å)", "sinθ/λ"]
         table = QTableWidget(rows, len(headers))
+        self._configure_diagnostic_table(table)
         table.setHorizontalHeaderLabels(headers)
-        table.setAlternatingRowColors(True)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        for row, r in enumerate(reflections[:rows]):
-            d = reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l))
-            stl = reflection_sintheta_over_lambda(cell, int(r.h), int(r.k), int(r.l))
-            primary_snr = reflection_primary_signal_to_noise(r, data_mode)
-            derived_ios = reflection_signal_to_noise(r, data_mode)
+        for column in range(3):
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
+        for column in range(3, len(headers)):
+            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
+        for row, reflection in enumerate(reflections[:rows]):
+            d_spacing = reflection_d_spacing(cell, int(reflection.h), int(reflection.k), int(reflection.l))
+            stl = reflection_sintheta_over_lambda(cell, int(reflection.h), int(reflection.k), int(reflection.l))
+            primary_snr = reflection_primary_signal_to_noise(reflection, data_mode)
+            derived_ios = reflection_signal_to_noise(reflection, data_mode)
             values = [
-                str(int(r.h)),
-                str(int(r.k)),
-                str(int(r.l)),
-                f"{float(r.value):.7g}",
-                "n/a" if r.sigma is None else f"{float(r.sigma):.7g}",
-                "n/a" if r.phase is None else f"{float(r.phase):.7g}",
+                str(int(reflection.h)), str(int(reflection.k)), str(int(reflection.l)),
+                f"{float(reflection.value):.7g}",
+                "n/a" if reflection.sigma is None else f"{float(reflection.sigma):.7g}",
+                "n/a" if reflection.phase is None else f"{float(reflection.phase):.7g}",
                 "n/a" if primary_snr is None else f"{float(primary_snr):.7g}",
                 "n/a" if derived_ios is None else f"{float(derived_ios):.7g}",
-                "n/a" if not math.isfinite(d) else f"{d:.5g}",
+                "n/a" if not math.isfinite(d_spacing) else f"{d_spacing:.5g}",
                 f"{stl:.5g}",
             ]
-            for col, text in enumerate(values):
-                table.setItem(row, col, QTableWidgetItem(text))
+            for column, text_value in enumerate(values):
+                item = QTableWidgetItem(text_value)
+                item.setTextAlignment(Qt.AlignCenter if column < 3 else Qt.AlignRight | Qt.AlignVCenter)
+                table.setItem(row, column, item)
         layout.addWidget(table, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(dialog.reject)
-        buttons.button(QDialogButtonBox.Close).clicked.connect(dialog.accept)
-        layout.addWidget(buttons)
+
+        summary_text = (
+            "HKL VALIDATION\n"
+            f"Source: {hkl_path}\nFormat: {data_mode}\n"
+            f"Unit cell: {cell.a:.5g} {cell.b:.5g} {cell.c:.5g} {cell.alpha:.4g} {cell.beta:.4g} {cell.gamma:.4g}\n"
+            f"Space group: {hm}\nParsed: {len(reflections):,}\nUnique: {len(unique):,}\n"
+            f"{sigma_label}: {sigma_count:,}/{len(reflections):,}\nPhase values: {phase_count:,}/{len(reflections):,}"
+        )
+        footer = QHBoxLayout()
+        copy_summary = QPushButton("Copy summary")
+        copy_summary.setObjectName("diagnosticSecondaryButton")
+        copy_summary.clicked.connect(lambda: QApplication.clipboard().setText(summary_text))
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        footer.addWidget(copy_summary)
+        footer.addStretch(1)
+        footer.addWidget(close_button)
+        layout.addLayout(footer)
+        dialog.hkl_table = table  # type: ignore[attr-defined]
+        dialog.summary_text = summary_text  # type: ignore[attr-defined]
+        dialog.full_source_path = str(hkl_path)  # type: ignore[attr-defined]
+        return dialog
+
+    def _show_hkl_load_result_dialog(self, payload: object) -> None:
+        dialog = self._build_hkl_validation_dialog(payload)  # type: ignore[arg-type]
         dialog.exec()
 
     def open_hkl_completeness_dialog(self) -> None:
@@ -5369,11 +5520,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         self._start_hkl_background_task("HKL completeness analysis", worker, "hkl_completeness_result")
 
-    def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
+    def _build_hkl_completeness_dialog(self, analysis: HklAnalysis) -> QDialog:
         dialog = QDialog(self)
-        dialog.setWindowTitle("HKL Completeness and Intensity Statistics")
-        dialog.resize(1120, 820)
+        dialog.setObjectName("hklCompletenessDialog")
+        dialog.setWindowTitle("HKL Completeness")
+        dialog.resize(1180, 860)
+        dialog.setMinimumSize(900, 680)
         layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(9)
+        layout.addWidget(self._diagnostic_header(
+            "HKL COMPLETENESS",
+            "Resolution-dependent completeness and intensity statistics",
+        ))
         d_min_text = format_resolution_d(analysis.d_min)
         d_full = format_resolution_d(analysis.d_full_98)
         sigma_label = reflection_sigma_label(analysis.data_mode)
@@ -5408,40 +5567,37 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if threshold_stl is not None and threshold_stl > 0:
             threshold_d = 1.0 / (2.0 * threshold_stl)
         threshold_d_text = format_resolution_d(threshold_d)
-        stats_box = QGroupBox("Reflection Data Summary")
-        stats_layout = QVBoxLayout(stats_box)
-        source_label = QLabel(analysis.source_note)
-        source_label.setWordWrap(True)
-        stats_layout.addWidget(source_label)
-        stats = [
-            ("HKL data format", analysis.data_mode),
-            ("Unit cell", f"{analysis.cell.a:.5g} {analysis.cell.b:.5g} {analysis.cell.c:.5g} {analysis.cell.alpha:.4g} {analysis.cell.beta:.4g} {analysis.cell.gamma:.4g}"),
-            ("Space group", analysis.spacegroup_hm),
-            ("Parsed / unique reflections", f"{len(analysis.reflections_raw)} / {len(analysis.reflections_unique)}"),
-            (f"{sigma_label} coverage", f"{raw_sigma_count}/{len(analysis.reflections_raw)} raw; {unique_sigma_count}/{len(analysis.reflections_unique)} unique"),
-            ("Phase values", f"{phase_count}/{len(analysis.reflections_raw)} raw"),
-            ("d_min", d_min_text),
-            ("d_full at 98% cumulative completeness", d_full),
-            (f"Median {signal_label}", median_signal),
-            (f"d where mean {signal_label} falls below {signal_threshold:.1f}", threshold_d_text),
-        ]
-        stats_rows = int(math.ceil(len(stats) / 2.0))
-        stats_table = QTableWidget(stats_rows, 4)
-        stats_table.setHorizontalHeaderLabels(["Statistic", "Value", "Statistic", "Value"])
-        stats_table.setAlternatingRowColors(True)
-        stats_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        stats_table.verticalHeader().setVisible(False)
-        stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        for idx, (name, value) in enumerate(stats):
-            row = idx % stats_rows
-            col = 0 if idx < stats_rows else 2
-            stats_table.setItem(row, col, QTableWidgetItem(name))
-            stats_table.setItem(row, col + 1, QTableWidgetItem(value))
-        stats_table.setMaximumHeight(190)
-        stats_layout.addWidget(stats_table)
-        layout.addWidget(stats_box)
-        figure = Figure(figsize=(8.4, 6.2), dpi=100)
+        layout.addWidget(self._diagnostic_input_summary(
+            analysis.hkl_path,
+            analysis.data_mode,
+            analysis.cell,
+            analysis.spacegroup_hm,
+            analysis.source_note,
+        ))
+        layout.addWidget(self._diagnostic_metric_grid((
+            (f"{len(analysis.reflections_unique):,}", "Unique reflections"),
+            (d_min_text, "d_min"),
+            (d_full, "d at 98% cumulative completeness"),
+            (median_signal, f"Median {signal_label}"),
+            (threshold_d_text, f"d where mean {signal_label} < {signal_threshold:.1f}"),
+            (f"{phase_count:,} / {len(analysis.reflections_raw):,}", "Phase-value coverage"),
+            (f"{raw_sigma_count:,} / {len(analysis.reflections_raw):,}", f"{sigma_label} coverage"),
+        )))
+
+        content_splitter = QSplitter(Qt.Vertical)
+        content_splitter.setObjectName("diagnosticSplitter")
+        content_splitter.setChildrenCollapsible(False)
+        plot_panel = QWidget()
+        plot_layout = QVBoxLayout(plot_panel)
+        plot_layout.setContentsMargins(0, 0, 0, 0)
+        plot_layout.setSpacing(3)
+        plot_title = QLabel("COMPLETENESS AND SIGNAL VS RESOLUTION")
+        plot_title.setObjectName("diagnosticSectionTitle")
+        plot_layout.addWidget(plot_title)
+        figure = Figure(figsize=(8.4, 5.6), dpi=100)
         canvas = FigureCanvas(figure)
+        canvas.setObjectName("hklCompletenessCanvas")
+        canvas.setMinimumHeight(260)
         ax1 = figure.add_subplot(211)
         ax2 = figure.add_subplot(212)
         centers = [float(b["center"]) for b in analysis.bins]
@@ -5457,27 +5613,53 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ax2.set_facecolor("#ffffff")
         ax1.bar(centers, completeness, width=widths, align="center", color="#2264b8", alpha=0.72, label="Completeness")
         ax1.axhline(98.0, color="#001170", linewidth=1.0, linestyle="--")
+        reference_labels: List[Tuple[float, str, str]] = []
         if d_min_stl is not None:
             ax1.axvline(d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label="d_min")
-            ax1.text(d_min_stl, 103.0, f"d_min\n{d_min_text}", rotation=90, va="top", ha="right", color="#001170", fontsize=8)
+            reference_labels.append((d_min_stl, f"d_min\n{d_min_text}", "#001170"))
         if d_full_stl is not None:
             ax1.axvline(d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label="d_full 98%")
-            ax1.text(d_full_stl, 103.0, f"d_full\n{d_full}", rotation=90, va="top", ha="left", color="#44b7ff", fontsize=8)
+            reference_labels.append((d_full_stl, f"98%\n{d_full}", "#2264b8"))
         ax1.set_ylabel("Completeness (%)", labelpad=6, fontsize=9)
-        ax1.set_xlabel("sin(theta)/lambda")
+        ax1.set_xlabel("sinθ/λ")
         ax1.set_ylim(0, 105)
-        ax1.grid(True, axis="y", color="#44b7ff", alpha=0.25)
+        ax1.grid(True, axis="y", color="#44b7ff", linewidth=0.6, alpha=0.20)
         ax1b = ax1.twinx()
         ax1b.plot(centers, mean_signal, marker="o", color="#001170", linewidth=1.8, label=f"Mean {signal_label}")
         ax1b.axhline(signal_threshold, color="#2264b8", linewidth=1.0, linestyle="--", label=f"{signal_label} = {signal_threshold:.1f}")
         ax1b.set_ylabel(f"Mean {signal_label}", labelpad=6, fontsize=9)
         if threshold_stl is not None:
             ax1.axvline(threshold_stl, color="#2264b8", linewidth=1.1, linestyle="-.", label=f"{signal_label} < {signal_threshold:.1f}")
-            threshold_label = f"I/sigma<3\n{threshold_d_text}" if threshold_d is not None else "I/sigma<3"
-            ax1.text(threshold_stl, 103.0, threshold_label, rotation=90, va="top", ha="left", color="#001170", fontsize=8)
+            threshold_label = f"{signal_label} = 3\n{threshold_d_text}" if threshold_d is not None else f"{signal_label} = 3"
+            reference_labels.append((threshold_stl, threshold_label, "#001170"))
+        ordered_labels = sorted(reference_labels, key=lambda item: item[0])
+        horizontal_offsets = (-24, 0, 24) if len(ordered_labels) == 3 else tuple(0 for _ in ordered_labels)
+        for index, (x_position, label_text, color) in enumerate(ordered_labels):
+            ax1.annotate(
+                label_text,
+                xy=(x_position, 1.0),
+                xycoords=ax1.get_xaxis_transform(),
+                xytext=(horizontal_offsets[index], 6 + 13 * (index % 2)),
+                textcoords="offset points",
+                ha="center",
+                va="bottom",
+                color=color,
+                fontsize=7.5,
+                annotation_clip=False,
+            )
         lines1, labels1 = ax1.get_legend_handles_labels()
         lines2, labels2 = ax1b.get_legend_handles_labels()
-        ax1.legend(lines1 + lines2, labels1 + labels2, loc="lower left", fontsize=8)
+        figure.legend(
+            lines1 + lines2,
+            labels1 + labels2,
+            loc="upper center",
+            bbox_to_anchor=(0.5, 0.985),
+            ncol=3,
+            frameon=False,
+            fontsize=7.8,
+            handlelength=1.7,
+            columnspacing=1.2,
+        )
         histogram_denominator = max(1, len(analysis.reflections_unique))
         if signal_values:
             histogram_bins = np.arange(0.0, 16.0, 1.0)
@@ -5485,25 +5667,32 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ax2.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#44b7ff", alpha=0.82)
         else:
             ax2.text(0.5, 0.5, "No sigma values available", transform=ax2.transAxes, ha="center", va="center")
+        ax2.set_title("REFLECTION DISTRIBUTION", loc="left", color="#2264b8", fontsize=9, fontweight="bold", pad=7)
         ax2.set_xlabel(signal_label)
         ax2.set_ylabel("Reflections (%)", labelpad=6, fontsize=9)
         ax2.set_xlim(0.0, 15.0)
         ax2.set_xticks(np.arange(0.0, 16.0, 1.0))
-        ax2.grid(True, axis="y", color="#44b7ff", alpha=0.25)
+        ax2.grid(True, axis="y", color="#44b7ff", linewidth=0.6, alpha=0.20)
         for axis in (ax1, ax1b, ax2):
             axis.tick_params(colors="#001170")
             axis.xaxis.label.set_color("#001170")
             axis.yaxis.label.set_color("#001170")
-        figure.tight_layout(pad=1.1)
-        figure.subplots_adjust(left=0.08, right=0.91)
-        layout.addWidget(canvas, 1)
-        headers = ["sin(theta)/lambda bin", "Observed", "Theoretical", "Completeness %", f"Mean {signal_label}"]
+        figure.subplots_adjust(left=0.08, right=0.91, bottom=0.16, top=0.77, hspace=0.68)
+        plot_layout.addWidget(canvas, 1)
+        content_splitter.addWidget(plot_panel)
+
+        bins_panel = QWidget()
+        bins_layout = QVBoxLayout(bins_panel)
+        bins_layout.setContentsMargins(0, 0, 0, 0)
+        bins_layout.setSpacing(3)
+        bins_title = QLabel("RESOLUTION BINS")
+        bins_title.setObjectName("diagnosticSectionTitle")
+        bins_layout.addWidget(bins_title)
+        headers = ["sinθ/λ range", "Observed", "Theoretical", "Completeness (%)", f"Mean {signal_label}"]
         table = QTableWidget(len(analysis.bins), len(headers))
+        self._configure_diagnostic_table(table)
         table.setHorizontalHeaderLabels(headers)
-        table.setAlternatingRowColors(True)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for row, item in enumerate(analysis.bins):
             values = [
                 f"{float(item['lo']):.4g} - {float(item['hi']):.4g}",
@@ -5512,13 +5701,76 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"{float(item['completeness']):.2f}",
                 "n/a" if not math.isfinite(float(item["mean_signal_to_noise"])) else f"{float(item['mean_signal_to_noise']):.3g}",
             ]
-            for col, text in enumerate(values):
-                table.setItem(row, col, QTableWidgetItem(text))
-        layout.addWidget(table)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(dialog.reject)
-        buttons.button(QDialogButtonBox.Close).clicked.connect(dialog.accept)
-        layout.addWidget(buttons)
+            for column, text_value in enumerate(values):
+                cell_item = QTableWidgetItem(text_value)
+                cell_item.setTextAlignment(Qt.AlignCenter if column == 0 else Qt.AlignRight | Qt.AlignVCenter)
+                table.setItem(row, column, cell_item)
+        bins_layout.addWidget(table, 1)
+        content_splitter.addWidget(bins_panel)
+        content_splitter.setSizes([390, 175])
+        content_splitter.setStretchFactor(0, 3)
+        content_splitter.setStretchFactor(1, 1)
+        layout.addWidget(content_splitter, 1)
+
+        summary_text = (
+            "HKL COMPLETENESS\n"
+            f"Source: {analysis.hkl_path}\nFormat: {analysis.data_mode}\n"
+            f"Unit cell: {analysis.cell.a:.5g} {analysis.cell.b:.5g} {analysis.cell.c:.5g} {analysis.cell.alpha:.4g} {analysis.cell.beta:.4g} {analysis.cell.gamma:.4g}\n"
+            f"Space group: {analysis.spacegroup_hm}\nParsed / unique: {len(analysis.reflections_raw):,} / {len(analysis.reflections_unique):,}\n"
+            f"{sigma_label} coverage: {raw_sigma_count:,}/{len(analysis.reflections_raw):,} raw; {unique_sigma_count:,}/{len(analysis.reflections_unique):,} unique\n"
+            f"Phase values: {phase_count:,}/{len(analysis.reflections_raw):,}\n"
+            f"d_min: {d_min_text}\nd at 98% cumulative completeness: {d_full}\n"
+            f"Median {signal_label}: {median_signal}\nd where mean {signal_label} falls below {signal_threshold:.1f}: {threshold_d_text}"
+        )
+
+        def export_csv() -> None:
+            file_name, _ = QFileDialog.getSaveFileName(dialog, "Export resolution bins", "hkl_completeness.csv", "CSV files (*.csv)")
+            if not file_name:
+                return
+            with Path(file_name).open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.writer(stream)
+                writer.writerow(headers)
+                for bin_item in analysis.bins:
+                    writer.writerow([
+                        f"{float(bin_item['lo']):.8g} - {float(bin_item['hi']):.8g}",
+                        int(bin_item["observed"]),
+                        int(bin_item["theory"]),
+                        float(bin_item["completeness"]),
+                        "" if not math.isfinite(float(bin_item["mean_signal_to_noise"])) else float(bin_item["mean_signal_to_noise"]),
+                    ])
+
+        def export_plot() -> None:
+            file_name, _ = QFileDialog.getSaveFileName(dialog, "Export completeness plot", "hkl_completeness.png", "PNG image (*.png);;PDF document (*.pdf);;SVG image (*.svg)")
+            if file_name:
+                figure.savefig(file_name, dpi=200, bbox_inches="tight")
+
+        footer = QHBoxLayout()
+        copy_summary = QPushButton("Copy summary")
+        copy_summary.setObjectName("diagnosticSecondaryButton")
+        copy_summary.clicked.connect(lambda: QApplication.clipboard().setText(summary_text))
+        export_csv_button = QPushButton("Export CSV")
+        export_csv_button.setObjectName("diagnosticSecondaryButton")
+        export_csv_button.clicked.connect(export_csv)
+        export_plot_button = QPushButton("Export plot")
+        export_plot_button.setObjectName("diagnosticSecondaryButton")
+        export_plot_button.clicked.connect(export_plot)
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        footer.addWidget(copy_summary)
+        footer.addWidget(export_csv_button)
+        footer.addWidget(export_plot_button)
+        footer.addStretch(1)
+        footer.addWidget(close_button)
+        layout.addLayout(footer)
+        dialog.hkl_bins_table = table  # type: ignore[attr-defined]
+        dialog.hkl_figure = figure  # type: ignore[attr-defined]
+        dialog.hkl_canvas = canvas  # type: ignore[attr-defined]
+        dialog.summary_text = summary_text  # type: ignore[attr-defined]
+        dialog.full_source_path = str(analysis.hkl_path)  # type: ignore[attr-defined]
+        return dialog
+
+    def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
+        dialog = self._build_hkl_completeness_dialog(analysis)
         dialog.exec()
 
     def save_settings(self) -> None:
@@ -5752,7 +6004,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         widget.blockSignals(False)
                     self.log_text.append("SharpED models refreshed.")
                 elif kind == "hkl_load_result":
-                    self.log_text.append("HKL load test finished.")
+                    self.log_text.append("HKL validation finished.")
                     self._set_hkl_task_running(False)
                     self._show_hkl_load_result_dialog(payload)
                 elif kind == "hkl_completeness_result":
