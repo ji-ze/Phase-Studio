@@ -6752,14 +6752,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         has_data = bool(self.results)
         left_pixels = 86.0 if has_data else 70.0
         left = min(0.18, max(0.07, left_pixels / width))
-        right = 1.0 - min(0.04, max(0.02, 18.0 / width))
         bottom = min(0.22, max(0.12, 34.0 / height))
         if has_data:
-            # Keep the figure-level legend in a stable band above the axes.
-            top = 1.0 - min(0.30, max(0.20, 50.0 / height))
+            # Reserve a compact, fixed-width band for the vertical legend.  Keeping
+            # this budget pixel based avoids wasting plot width on large canvases
+            # while still fitting the longest label at moderately narrow widths.
+            legend_width_pixels = 112.0
+            legend_gap_pixels = 8.0
+            outer_right_pixels = 8.0
+            right = 1.0 - min(
+                0.32,
+                (legend_width_pixels + legend_gap_pixels + outer_right_pixels) / width,
+            )
+            top = 1.0 - min(0.08, max(0.035, 10.0 / height))
         else:
+            right = 1.0 - min(0.04, max(0.02, 18.0 / width))
             top = 1.0 - min(0.16, max(0.07, 22.0 / height))
         self.figure.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
+        if has_data and self.figure.legends:
+            legend_left = right + (legend_gap_pixels / width)
+            legend_center_y = (bottom + top) / 2.0
+            self.figure.legends[0].set_bbox_to_anchor(
+                (legend_left, legend_center_y),
+                transform=self.figure.transFigure,
+            )
 
     def _set_metrics_data_layout(self, has_data: bool) -> None:
         if not hasattr(self, "result_splitter"):
@@ -6888,22 +6904,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
         if plotted:
             handles, labels = self.ax.get_legend_handles_labels()
-            if len(handles) == 7:
-                # Matplotlib fills multi-column legends down each column.
-                # Reorder only the legend handles to retain natural row order.
-                legend_order = (0, 4, 1, 5, 2, 6, 3)
-                handles = [handles[index] for index in legend_order]
-                labels = [labels[index] for index in legend_order]
             self.figure.legend(
                 handles,
                 labels,
-                loc="upper center",
-                bbox_to_anchor=(0.5, 0.985),
-                ncol=min(4, plotted),
+                loc="center left",
+                bbox_to_anchor=(0.82, 0.5),
+                ncol=1,
                 frameon=False,
-                fontsize=7.4,
-                handlelength=1.7,
-                columnspacing=1.0,
+                fontsize=7.2,
+                handlelength=1.4,
+                labelspacing=0.28,
                 handletextpad=0.4,
                 borderaxespad=0.0,
             )
