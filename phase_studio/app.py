@@ -102,9 +102,11 @@ try:
         }
     )
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.colors import to_rgb
     from matplotlib.figure import Figure
     from matplotlib.lines import Line2D
     from matplotlib.ticker import MaxNLocator
+    from mpl_toolkits.mplot3d.art3d import Line3DCollection
 except Exception as exc:
     raise RuntimeError(
         "Matplotlib QtAgg backend could not be loaded. "
@@ -142,6 +144,71 @@ class AtomSite:
     element: str
     frac: np.ndarray
     density: float = 1.0
+
+
+@dataclass
+class StructureDepthArtists:
+    scatter: object
+    atom_coordinates: np.ndarray
+    atom_base_colors: np.ndarray
+    cell_collection: object
+    cell_midpoints: np.ndarray
+    cell_corners: np.ndarray
+
+
+def structure_camera_direction(elev: float, azim: float) -> np.ndarray:
+    """Return the unit vector from the view centre toward the camera."""
+    elevation = math.radians(float(elev))
+    azimuth = math.radians(float(azim))
+    return np.asarray(
+        [
+            math.cos(elevation) * math.cos(azimuth),
+            math.cos(elevation) * math.sin(azimuth),
+            math.sin(elevation),
+        ],
+        dtype=np.float64,
+    )
+
+
+def structure_depth_fade(
+    points: np.ndarray,
+    bounds: np.ndarray,
+    elev: float,
+    azim: float,
+    *,
+    front_hold: float = 0.08,
+    gamma: float = 1.45,
+    maximum: float = 0.76,
+) -> np.ndarray:
+    """Map current camera depth to a monotonic blend amount toward white.
+
+    The shared unit-cell bounds make the mapping identical in Reference,
+    Superflip and SharpED.  A small unmodified front band prevents foreground
+    atoms from looking washed out, while the nonlinear tail strongly separates
+    rear geometry.
+    """
+    point_array = np.asarray(points, dtype=np.float64).reshape((-1, 3))
+    bound_array = np.asarray(bounds, dtype=np.float64).reshape((-1, 3))
+    if point_array.size == 0:
+        return np.asarray([], dtype=np.float64)
+    direction = structure_camera_direction(elev, azim)
+    projected_bounds = bound_array @ direction
+    front = float(np.max(projected_bounds))
+    back = float(np.min(projected_bounds))
+    span = max(front - back, 1.0e-12)
+    rear_depth = np.clip((front - point_array @ direction) / span, 0.0, 1.0)
+    hold = max(0.0, min(0.45, float(front_hold)))
+    normalized = np.clip((rear_depth - hold) / max(1.0e-12, 1.0 - hold), 0.0, 1.0)
+    return np.clip(float(maximum), 0.0, 0.95) * np.power(normalized, max(0.2, float(gamma)))
+
+
+def blend_structure_colors(base_colors: np.ndarray, fade: np.ndarray) -> np.ndarray:
+    """Blend RGB colors toward the white Phase Studio structure background."""
+    colors = np.asarray(base_colors, dtype=np.float64)
+    if colors.ndim == 1:
+        colors = np.repeat(colors.reshape((1, 3)), len(fade), axis=0)
+    amounts = np.asarray(fade, dtype=np.float64).reshape((-1, 1))
+    return np.clip(colors * (1.0 - amounts) + amounts, 0.0, 1.0)
 
 @dataclass
 class ReferenceContext:
@@ -4369,6 +4436,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.deblur_atoms_for_plot: List[AtomSite] = []
         self.structure_cell: Optional[gemmi.UnitCell] = None
         self.structure_axes: List[object] = []
+        self._structure_depth_artists: List[StructureDepthArtists] = []
         self.structure_elev = 20.0
         self.structure_azim = 35.0
         self._structure_rotation_source: Optional[object] = None
@@ -6907,11 +6975,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
             (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
         )
+        cell_segments: List[np.ndarray] = []
+        cell_midpoints: List[np.ndarray] = []
+        edge_steps = np.linspace(0.0, 1.0, 9)
         for start, end in cell_edges:
-            edge = cell_corners[[start, end]]
-            ax.plot(edge[:, 0], edge[:, 1], edge[:, 2], color="#44b7ff", linewidth=0.55, alpha=0.46)
+            start_point = cell_corners[start]
+            end_point = cell_corners[end]
+            for t0, t1 in zip(edge_steps[:-1], edge_steps[1:]):
+                segment = np.asarray(
+                    [start_point * (1.0 - t0) + end_point * t0, start_point * (1.0 - t1) + end_point * t1],
+                    dtype=np.float64,
+                )
+                cell_segments.append(segment)
+                cell_midpoints.append(np.mean(segment, axis=0))
+        cell_collection = Line3DCollection(cell_segments, linewidths=0.62)
+        ax.add_collection3d(cell_collection)
 
-        colors = [self._element_color(a.element) for a in plot_atoms]
+        atom_base_colors = np.asarray([to_rgb(self._element_color(a.element)) for a in plot_atoms], dtype=np.float64)
         atom_count = len(non_h_atoms)
         count_scale = float(np.interp(
             atom_count,
@@ -6919,13 +6999,49 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             [1.30, 1.0, 0.72, 0.48, 0.34, 0.22],
         ))
         sizes = [max(4.0, min(76.0, (10.0 + 1.2 * element_atomic_number(a.element)) * count_scale)) for a in plot_atoms]
-        ax.scatter(
-            coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors,
-            alpha=0.84, edgecolors="#ffffff", linewidths=0.18, depthshade=True,
+        scatter = ax.scatter(
+            coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=atom_base_colors,
+            alpha=1.0, edgecolors="#ffffff", linewidths=0.18, depthshade=False,
         )
+        depth_artists = StructureDepthArtists(
+            scatter=scatter,
+            atom_coordinates=coords,
+            atom_base_colors=atom_base_colors,
+            cell_collection=cell_collection,
+            cell_midpoints=np.asarray(cell_midpoints, dtype=np.float64),
+            cell_corners=cell_corners,
+        )
+        self._structure_depth_artists.append(depth_artists)
+        self._update_structure_depth_artist(depth_artists, self.structure_elev, self.structure_azim)
         shown = len(plot_atoms)
         suffix = "" if shown == len(non_h_atoms) else f"; first {shown} heaviest shown"
         return f"{len(non_h_atoms)} non-H/He atoms{suffix}"
+
+    def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
+        atom_fade = structure_depth_fade(
+            artists.atom_coordinates,
+            artists.cell_corners,
+            elev,
+            azim,
+        )
+        atom_colors = blend_structure_colors(artists.atom_base_colors, atom_fade)
+        artists.scatter.set_facecolors(np.column_stack((atom_colors, np.ones(len(atom_colors), dtype=np.float64))))
+
+        edge_fade = structure_depth_fade(
+            artists.cell_midpoints,
+            artists.cell_corners,
+            elev,
+            azim,
+            front_hold=0.04,
+            gamma=1.35,
+            maximum=0.78,
+        )
+        edge_colors = blend_structure_colors(np.asarray(to_rgb("#44b7ff"), dtype=np.float64), edge_fade)
+        artists.cell_collection.set_color(np.column_stack((edge_colors, np.ones(len(edge_colors), dtype=np.float64))))
+
+    def _update_structure_depth_cue(self, elev: float, azim: float) -> None:
+        for artists in self._structure_depth_artists:
+            self._update_structure_depth_artist(artists, elev, azim)
 
     def _safe_parse_structure(self, path: Optional[Path]) -> List[AtomSite]:
         if path is None or not Path(path).is_file():
@@ -6949,6 +7065,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_azim = azim
         for axis in self.structure_axes:
             axis.view_init(elev=elev, azim=azim)
+        self._update_structure_depth_cue(elev, azim)
         if redraw:
             self.structure_canvas.draw_idle()
 
@@ -6988,6 +7105,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_figure.clear()
         self.structure_figure.patch.set_facecolor("#ffffff")
         self.structure_axes = []
+        self._structure_depth_artists = []
         status = str(getattr(self, "_run_status", "READY")).upper()
         waiting = status in {"RUNNING", "STOPPING"}
         failed = status in {"ERROR", "CANCELLED"}
