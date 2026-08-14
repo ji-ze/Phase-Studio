@@ -46,6 +46,11 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 try:
+    from phase_studio import __version__
+except Exception:
+    __version__ = "1.0.3"
+
+try:
     from phase_studio.sharped_server_client import SharpEDServerClient
 except Exception:
     from sharped_server_client import SharpEDServerClient
@@ -1923,7 +1928,7 @@ def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Refle
     n = 0
     with out_hkl.open("w", encoding="utf-8") as f:
         f.write("# h k l I sigma(I) phase(deg)\n")
-        f.write("# Phase Studio 1.0.1 standardized HKL export; phase is 0.0 unless supplied by the selected HKL mode.\n")
+        f.write(f"# Phase Studio {__version__} standardized HKL export; phase is 0.0 unless supplied by the selected HKL mode.\n")
         for r in reflections:
             if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
                 if float(r.value) / float(r.sigma) < i_over_sigma_min:
@@ -4106,6 +4111,16 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
 # Qt GUI
 # -----------------------------------------------------------------------------
 
+CONFIG_FORM_VERTICAL_SPACING = 5
+CONFIG_FORM_HORIZONTAL_SPACING = 14
+CONFIG_PAGE_MARGIN_HORIZONTAL = 10
+CONFIG_PAGE_MARGIN_VERTICAL = 8
+CONFIG_MAJOR_SECTION_SPACING = 10
+CONFIG_GUIDED_GROUP_MARGINS = (8, 5, 8, 6)
+CONFIG_GUIDED_GROUP_SPACING = 5
+CONFIG_BROWSE_BUTTON_WIDTH = 34
+CONFIG_CONTROL_VISIBLE_HEIGHT = 28
+
 class PathRow(QWidget):
     def __init__(self, label: str, default: str = "", mode: str = "file", file_filter: str = "All files (*)") -> None:
         super().__init__()
@@ -4120,7 +4135,8 @@ class PathRow(QWidget):
         self._base_tooltip = ""
         self.edit = QLineEdit(default)
         self.button = QPushButton("…")
-        self.button.setFixedWidth(34)
+        self.button.setObjectName("pathBrowseButton")
+        self.button.setFixedWidth(CONFIG_BROWSE_BUTTON_WIDTH)
         layout.addWidget(self.edit, 1)
         layout.addWidget(self.button)
         self.button.clicked.connect(self.browse)
@@ -4421,7 +4437,7 @@ class WorkflowDiagram(QWidget):
 class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Phase Studio 1.0.1 for Jana2020")
+        self.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
         self.setWindowIcon(create_phase_studio_app_icon(64))
         self.resize(1420, 880)
         self.msg_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
@@ -4463,8 +4479,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         form.setRowWrapPolicy(QFormLayout.DontWrapRows)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         form.setFormAlignment(Qt.AlignTop)
-        form.setHorizontalSpacing(14)
-        form.setVerticalSpacing(8)
+        form.setHorizontalSpacing(CONFIG_FORM_HORIZONTAL_SPACING)
+        form.setVerticalSpacing(CONFIG_FORM_VERTICAL_SPACING)
         form.setContentsMargins(0, 0, 0, 0)
         return form
 
@@ -4529,6 +4545,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _add_spin(self, form: QFormLayout, key: str, label: str, default: int, minimum: int = 0, maximum: int = 1000000, step: int = 1) -> None:
         w = QSpinBox()
+        w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        w.setMinimumHeight(CONFIG_CONTROL_VISIBLE_HEIGHT)
         w.setRange(minimum, maximum)
         w.setSingleStep(step)
         w.setValue(default)
@@ -4539,6 +4557,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _add_dspin(self, form: QFormLayout, key: str, label: str, default: float, minimum: float = -1e9, maximum: float = 1e9, step: float = 0.1, decimals: int = 3) -> None:
         w = QDoubleSpinBox()
+        w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        w.setMinimumHeight(CONFIG_CONTROL_VISIBLE_HEIGHT)
         w.setRange(minimum, maximum)
         w.setSingleStep(step)
         w.setDecimals(decimals)
@@ -4681,7 +4701,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         brand_title_row.setSpacing(8)
         brand_title = QLabel("PHASE STUDIO")
         brand_title.setObjectName("brandTitle")
-        version_badge = QLabel("1.0.1")
+        version_badge = QLabel(__version__)
         version_badge.setObjectName("versionBadge")
         version_badge.setAlignment(Qt.AlignCenter)
         brand_title_row.addWidget(brand_title, 1)
@@ -4717,8 +4737,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             page.setObjectName("settingsPage")
             page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             layout = QVBoxLayout(page)
-            layout.setContentsMargins(10, 10, 10, 10)
-            layout.setSpacing(12)
+            layout.setContentsMargins(
+                CONFIG_PAGE_MARGIN_HORIZONTAL,
+                CONFIG_PAGE_MARGIN_VERTICAL,
+                CONFIG_PAGE_MARGIN_HORIZONTAL,
+                CONFIG_PAGE_MARGIN_VERTICAL,
+            )
+            layout.setSpacing(CONFIG_MAJOR_SECTION_SPACING)
             scroll.setWidget(page)
             (advanced_tabs if advanced else basic_tabs).addTab(scroll, name)
             if name == "Help" and not advanced:
@@ -4729,9 +4754,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         def add_form_group(page_layout: QVBoxLayout, title: str, guide_anchor: Optional[str] = None) -> QFormLayout:
             if guide_anchor:
                 box = QGroupBox()
+                box.setObjectName("guidedSettingsGroup")
                 box_layout = QVBoxLayout(box)
-                box_layout.setContentsMargins(8, 7, 8, 8)
-                box_layout.setSpacing(7)
+                box_layout.setContentsMargins(*CONFIG_GUIDED_GROUP_MARGINS)
+                box_layout.setSpacing(CONFIG_GUIDED_GROUP_SPACING)
                 heading_row = QHBoxLayout()
                 heading = QLabel(title)
                 heading.setObjectName("inlineGroupTitle")
@@ -4750,6 +4776,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 page_layout.addWidget(box)
                 return form
             box = QGroupBox(title)
+            box.setObjectName("settingsGroup")
             form = self._configure_form(QFormLayout(box))
             page_layout.addWidget(box)
             return form
@@ -7830,7 +7857,7 @@ def create_startup_splash() -> QSplashScreen:
         title_font.setPointSize(20)
         title_font.setBold(True)
         painter.setFont(title_font)
-        painter.drawText(34, 70, "Phase Studio 1.0.1")
+        painter.drawText(34, 70, f"Phase Studio {__version__}")
         painter.drawPixmap(386, 26, create_phase_studio_logo_pixmap(96))
 
         painter.setPen(QColor("#001170"))

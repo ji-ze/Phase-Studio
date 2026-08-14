@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phase-studio"
-version = "0.1.13"
+version = "1.0.3"
 description = "Qt application for iterative Superflip, SharpED server deblurring and EDMA crystallographic reconstruction."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,3 +37,6 @@ phase-studio = "phase_studio.app:main"
 
 [tool.setuptools]
 packages = ["phase_studio"]
+
+[tool.setuptools.package-data]
+phase_studio = ["assets/*.svg", "assets/*.xpm", "assets/*.ico"]

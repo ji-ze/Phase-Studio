@@ -27,6 +27,11 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 try:
+    from phase_studio import __version__
+except Exception:
+    __version__ = "1.0.3"
+
+try:
     from phase_studio.sharped_server_client import SharpEDServerClient
 except Exception:
     from sharped_server_client import SharpEDServerClient
@@ -1605,7 +1610,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
     settings = QSettings("PhaseStudio", "JanaSuperflipWrapper")
     dialog = QDialog()
-    dialog.setWindowTitle("Phase Studio 1.0.1 for Jana2020")
+    dialog.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
     dialog.setMinimumWidth(760)
     dialog.resize(820, 680)
 
@@ -1613,7 +1618,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     root.setContentsMargins(14, 14, 14, 14)
     root.setSpacing(10)
 
-    title = QLabel("Phase Studio 1.0.1 for Jana2020")
+    title = QLabel(f"Phase Studio {__version__} for Jana2020")
     title_font = title.font()
     title_font.setPointSize(title_font.pointSize() + 5)
     title_font.setBold(True)
@@ -2127,7 +2132,7 @@ def launch_phase_studio_from_jana(inflip_path: Optional[Path], options: JanaRunO
             level="DETAIL",
             subsystem="Jana2020",
         )
-    win.setWindowTitle("Phase Studio 1.0.1 for Jana2020")
+    win.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
     win.show()
     splash.finish(win)
     return int(app.exec())
@@ -2169,7 +2174,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             QApplication = qt["QApplication"]
             QMessageBox = qt["QMessageBox"]
             QApplication.instance() or QApplication([sys.argv[0]])
-            QMessageBox.critical(None, "Phase Studio 1.0.1 for Jana2020 — calculation error", str(exc))
+            QMessageBox.critical(None, f"Phase Studio {__version__} for Jana2020 — calculation error", str(exc))
         except Exception:
             pass
         return 1

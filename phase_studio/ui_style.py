@@ -97,6 +97,33 @@ QComboBox::down-arrow {
     width: 10px;
     height: 7px;
 }
+QWidget#settingsPage QLineEdit,
+QWidget#settingsPage QSpinBox,
+QWidget#settingsPage QDoubleSpinBox,
+QWidget#settingsPage QComboBox {
+    min-height: 21px;
+    padding-top: 3px;
+    padding-bottom: 3px;
+}
+QWidget#settingsPage QSpinBox,
+QWidget#settingsPage QDoubleSpinBox {
+    min-height: 22px;
+    max-height: 22px;
+    padding-top: 2px;
+    padding-bottom: 3px;
+    padding-right: 23px;
+}
+QWidget#settingsPage QComboBox {
+    padding-right: 25px;
+}
+QWidget#settingsPage QPushButton {
+    min-height: 21px;
+    padding: 3px 10px;
+}
+QWidget#settingsPage QPushButton#pathBrowseButton {
+    min-height: 20px;
+    padding: 3px 0;
+}
 QPushButton {
     background-color: #ffffff;
     color: #001170;
@@ -149,6 +176,9 @@ QTabBar::tab:selected {
     border-bottom: 3px solid #2264b8;
     font-weight: 700;
 }
+#sectionTabs > QTabBar::tab {
+    padding: 3px 12px;
+}
 #categoryTabs > QTabBar::tab {
     background-color: #f2f4f9;
     color: #001170;
@@ -160,6 +190,14 @@ QTabBar::tab:selected {
     background-color: #001170;
     color: #ffffff;
     border: 1px solid #001170;
+}
+QGroupBox#settingsGroup {
+    margin-top: 1.0em;
+    padding: 8px 8px 6px 8px;
+}
+QGroupBox#guidedSettingsGroup {
+    margin-top: 0;
+    padding: 0;
 }
 QHeaderView::section {
     background-color: #f2f4f9;
@@ -426,10 +464,13 @@ QCheckBox {
     spacing: 7px;
     padding: 2px 0;
 }
+QWidget#settingsPage QCheckBox {
+    padding: 1px 0;
+}
 QLabel#secondaryHelp {
     color: #2264b8;
     font-size: 9pt;
-    padding: 2px 0 4px 0;
+    padding: 1px 0 2px 0;
 }
 QTextEdit#helpBody {
     border: none;
@@ -461,6 +502,9 @@ QLabel#helpCallout, QLabel#settingsCallout, QLabel#configurationLockHint {
     border-left: 3px solid #44b7ff;
     padding: 8px 10px;
 }
+QLabel#settingsCallout {
+    padding: 6px 8px;
+}
 QLabel#configurationLockHint {
     font-size: 9pt;
     padding: 5px 8px;
@@ -474,14 +518,14 @@ QLabel#helpContentsLabel {
     color: #001170;
     font-size: 9pt;
     font-weight: 800;
-    padding: 4px 8px 4px 0;
+    padding: 2px 8px 2px 0;
 }
 QToolButton#helpNavLink, QToolButton#guideLink {
     color: #2264b8;
     background-color: #ffffff;
     border: none;
     border-bottom: 1px solid #f2f4f9;
-    padding: 3px 6px;
+    padding: 2px 6px;
     font-weight: 600;
 }
 QToolButton#externalLink {
