@@ -2595,7 +2595,7 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
     }
     ignored = {
         "title", "cell", "spacegroup", "centro", "dimension", "referencefile",
-        "referenceformat", "modelfile", "modelformat", "dataformat",
+        "referenceformat", "modelformat", "dataformat",
         "inputfile", "outputbase", "m40forjana", "writem40", "maxima", "fullcell",
         "scale", "numberofatoms", "centerofcharge", "chlimit", "chlimlist",
     }
@@ -2651,6 +2651,10 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
                 settings["referencefile_mode"] = "reference_density"
             elif fmt == "cif":
                 settings["referencefile_mode"] = "reference_cif"
+        elif key == "modelfile":
+            model_name = parts[1].strip().strip('"') if len(parts) > 1 else ""
+            if model_name:
+                settings["first_cycle_modelfile"] = model_name
         elif key == "dataformat":
             items = [p.strip().lower() for p in parts[1:]]
             if "intensity" in items and "phase" in items:

@@ -55,10 +55,10 @@ INPUT_MODE_LABELS = [
 
 def normalize_dialog_input_mode(value: str) -> str:
     text = str(value or "").strip().lower()
-    if "external" in text and "hkl" in text and "cif" in text:
-        return INPUT_MODE_EXTERNAL
     if "override" in text or "nahra" in text or "replace" in text:
         return INPUT_MODE_INFLIP_OVERRIDES
+    if "external" in text and "hkl" in text and "cif" in text:
+        return INPUT_MODE_EXTERNAL
     return INPUT_MODE_INFLIP
 
 
@@ -78,6 +78,133 @@ class JanaRunOptions:
     reference_override: str = ""
     superflip_referencefile: str = ""
     first_cycle_modelfile: str = ""
+
+
+@dataclass
+class JanaHandoffImport:
+    values: dict[str, str]
+    inflip_keys: list[str]
+    handoff_keys: list[str]
+    limitations: list[str]
+    input_mode: str
+    reflection_source: str
+    reference_source: str
+
+
+def _resolved_handoff_path(value: str, base_dir: Path) -> str:
+    text = str(value or "").strip().strip('"')
+    if not text:
+        return ""
+    path = Path(text).expanduser()
+    return str((path if path.is_absolute() else base_dir / path).resolve())
+
+
+def build_jana_handoff_import(
+    inflip_path: Path,
+    options: JanaRunOptions,
+    parsed_settings: dict[str, str],
+) -> JanaHandoffImport:
+    """Compose one-shot GUI values with explicit hand-off precedence.
+
+    Values explicitly returned by the Jana launcher override mapped .inflip
+    keywords. Saved Phase Studio values already exist in the constructed window
+    and therefore remain the fallback for keys absent from both sources.
+    """
+    inflip_path = Path(inflip_path).expanduser().resolve()
+    base_dir = inflip_path.parent
+    path_keys = {"reference_cif", "superflip_referencefile", "first_cycle_modelfile"}
+    inflip_values: dict[str, str] = {}
+    for key, value in parsed_settings.items():
+        mapped_value = _resolved_handoff_path(value, base_dir) if key in path_keys else str(value)
+        inflip_values[key] = mapped_value
+
+    input_mode = normalize_dialog_input_mode(options.input_mode)
+    app_input_label = {
+        INPUT_MODE_INFLIP: "Jana .inflip",
+        INPUT_MODE_INFLIP_OVERRIDES: "Jana .inflip with external HKL/reference overrides",
+        INPUT_MODE_EXTERNAL: "External HKL + CIF reference",
+    }[input_mode]
+    allow_external_sources = input_mode in {INPUT_MODE_INFLIP_OVERRIDES, INPUT_MODE_EXTERNAL}
+    explicit_hkl = _resolved_handoff_path(options.hkl_override, base_dir) if allow_external_sources else ""
+    explicit_reference = _resolved_handoff_path(options.reference_override, base_dir) if allow_external_sources else ""
+    explicit_superflip_reference = _resolved_handoff_path(options.superflip_referencefile, base_dir)
+    explicit_first_model = _resolved_handoff_path(options.first_cycle_modelfile, base_dir)
+
+    handoff_values = {
+        "input_source_mode": app_input_label,
+        "jana_inflip": str(inflip_path),
+        "work_dir": str(base_dir / f"phase_studio_full_run_{inflip_path.stem}"),
+        "superflip_exe": str(DEFAULT_JANA_SUPERFLIP),
+        "edma_exe": str(DEFAULT_JANA_EDMA),
+        "cycles": str(options.cycles),
+        "run_sharped": "true" if options.next_cycle_modelfile == "deblurred_xplor" else "false",
+        "sharped_base_url": options.server_url,
+        "sharped_api_token": options.api_token,
+        "sharped_model": options.model,
+        "sharped_elements": options.elements,
+        "sharped_outres": str(options.outres),
+        "modelfile_source": options.next_cycle_modelfile,
+        "export_superflip_xplor": "true",
+        "export_superflip_jana": "true",
+        "hkl": explicit_hkl,
+    }
+    if explicit_first_model:
+        handoff_values["first_cycle_modelfile"] = explicit_first_model
+
+    limitations: list[str] = []
+    if explicit_reference:
+        handoff_values["reference_cif"] = explicit_reference
+        handoff_values["referencefile_mode"] = "reference_density" if Path(explicit_reference).suffix.lower() in {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"} else "reference_cif"
+        reference_source = explicit_reference
+        if explicit_superflip_reference and Path(explicit_superflip_reference) != Path(explicit_reference):
+            limitations.append(
+                "A separate Superflip referencefile was also supplied; the GUI has one External reference field, so the explicit crystallographic reference override is shown there."
+            )
+    elif explicit_superflip_reference:
+        handoff_values["reference_cif"] = explicit_superflip_reference
+        handoff_values["referencefile_mode"] = "reference_density" if Path(explicit_superflip_reference).suffix.lower() in {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"} else "reference_cif"
+        reference_source = explicit_superflip_reference
+    elif inflip_values.get("reference_cif"):
+        reference_source = inflip_values["reference_cif"]
+    else:
+        handoff_values["reference_cif"] = ""
+        reference_source = "cell, space group and composition embedded in the .inflip"
+
+    values = dict(inflip_values)
+    values.update(handoff_values)
+    # superflip_referencefile is an internal compatibility key, not a visible
+    # main-window control. The visible reference_cif field above carries only a
+    # verified semantically compatible source.
+    values.pop("superflip_referencefile", None)
+    reflection_source = explicit_hkl or "embedded fbegin/endf block from the .inflip"
+    return JanaHandoffImport(
+        values=values,
+        inflip_keys=sorted(key for key in inflip_values if key not in {"superflip_referencefile"}),
+        handoff_keys=sorted(handoff_values),
+        limitations=limitations,
+        input_mode=app_input_label,
+        reflection_source=reflection_source,
+        reference_source=reference_source,
+    )
+
+
+def jana_handoff_log_lines(handoff: JanaHandoffImport, inflip_path: Path, applied_keys: Sequence[str]) -> list[str]:
+    """Return concise provenance only; sensitive hand-off values are excluded."""
+    applied = set(applied_keys)
+    imported_inflip_keys = [key for key in handoff.inflip_keys if key in applied]
+    lines = [
+        "Jana2020 hand-off detected.",
+        f"Primary input: {Path(inflip_path).name}",
+        f"Working directory: {handoff.values.get('work_dir', '')}",
+        f"Input data mode: {handoff.input_mode}",
+        f"Reflection source: {handoff.reflection_source}",
+        f"Reference source shown in GUI: {handoff.reference_source}",
+        f"Imported {len(imported_inflip_keys)} mapped .inflip parameter(s).",
+    ]
+    if "reflection_data_mode" in imported_inflip_keys:
+        lines.append(f"Imported HKL format: {handoff.values['reflection_data_mode']}")
+    lines.extend(f"Import note: {limitation}" for limitation in handoff.limitations)
+    return lines
 
 
 @dataclass
@@ -1984,72 +2111,17 @@ def launch_phase_studio_from_jana(inflip_path: Optional[Path], options: JanaRunO
     win = IterativeSuperflipPipelineQtGUI()
     if inflip_path is not None and inflip_path.is_file():
         parsed = parse_inflip_settings(inflip_path)
-        for key, value in parsed.items():
+        handoff_import = build_jana_handoff_import(inflip_path, options, parsed)
+        applied_keys: list[str] = []
+        for key, value in handoff_import.values.items():
             widget = win.inputs.get(key)
             if widget is not None:
                 win._set_widget_value_from_string(widget, value)
-        input_mode = normalize_dialog_input_mode(options.input_mode)
-        allow_external_sources = input_mode in {INPUT_MODE_INFLIP_OVERRIDES, INPUT_MODE_EXTERNAL}
-        embedded_hkl = None
-        if allow_external_sources and options.hkl_override.strip():
-            embedded_hkl = Path(options.hkl_override).expanduser().resolve()
-
-        reference_path: Optional[Path] = None
-        if allow_external_sources and options.reference_override.strip():
-            reference_path = Path(options.reference_override).expanduser().resolve()
-
-        imported_values = {
-            "input_source_mode": input_mode,
-            "jana_inflip": str(inflip_path),
-            "work_dir": str(inflip_path.parent / f"phase_studio_full_run_{inflip_path.stem}"),
-            "superflip_exe": str(DEFAULT_JANA_SUPERFLIP),
-            "edma_exe": str(DEFAULT_JANA_EDMA),
-            "cycles": str(options.cycles),
-            "run_sharped": "true" if options.next_cycle_modelfile == "deblurred_xplor" else "false",
-            "sharped_base_url": options.server_url,
-            "sharped_api_token": options.api_token,
-            "sharped_model": options.model,
-            "sharped_elements": options.elements,
-            "sharped_outres": str(options.outres),
-            "modelfile_source": options.next_cycle_modelfile,
-            "first_cycle_modelfile": options.first_cycle_modelfile,
-            "superflip_referencefile": options.superflip_referencefile,
-            "export_superflip_xplor": "true",
-            "export_superflip_jana": "true",
-        }
-        if input_mode == INPUT_MODE_EXTERNAL and embedded_hkl is None:
-            imported_values["hkl"] = ""
-        elif embedded_hkl is not None:
-            imported_values["hkl"] = str(embedded_hkl)
-        else:
-            imported_values["hkl"] = ""
-        imported_values["reference_cif"] = ""
-        if reference_path is not None:
-            if reference_path.suffix.lower() == ".xplor":
-                imported_values["superflip_referencefile"] = str(reference_path)
-                imported_values["referencefile_mode"] = "reference_xplor"
-            else:
-                imported_values["reference_cif"] = str(reference_path)
-                imported_values["referencefile_mode"] = "reference_cif"
-
-        for key, value in imported_values.items():
-            widget = win.inputs.get(key)
-            if widget is not None:
-                win._set_widget_value_from_string(widget, value)
-        win.log_text.append(f"Loaded Jana2020 .inflip settings from: {inflip_path}")
-        win.log_text.append(f"Input data mode: {input_mode}")
-        if embedded_hkl is not None:
-            win.log_text.append(f"Reflection override: {embedded_hkl}")
-        else:
-            win.log_text.append("Reflection source: embedded fbegin/endf block from the Jana2020 .inflip file.")
-        if reference_path is not None:
-            win.log_text.append(f"Reference override: {reference_path}")
-        else:
-            win.log_text.append("Reference source: cell, space group and composition from the Jana2020 .inflip file.")
-        if options.first_cycle_modelfile.strip():
-            win.log_text.append(f"First-cycle modelfile: {options.first_cycle_modelfile}")
-        if options.superflip_referencefile.strip():
-            win.log_text.append(f"Superflip referencefile: {options.superflip_referencefile}")
+                applied_keys.append(key)
+        win._sync_input_source_mode_widgets()
+        win._sync_workflow_widgets()
+        for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
+            win.log_text.append(line)
         win.log_text.append("After the full pipeline finishes, use the 'Pass data to Jana2020' button to choose the cycle and map source for the final Jana2020 hand-off.")
     win.setWindowTitle("Phase Studio 1.0.1 for Jana2020")
     win.show()
