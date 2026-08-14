@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import re
 import ssl
 import time
 import uuid
@@ -14,6 +15,20 @@ from urllib.request import Request, urlopen
 
 
 ProgressLog = Optional[Callable[[str], None]]
+
+
+_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b(?:api[_ -]?token|access[_ -]?token|job[_ -]?token|download[_ -]?token|token)"
+    r"\b[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+_SECRET_BEARER_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)[^\s,;]+")
+_SECRET_URL_RE = re.compile(r"(?i)(/api/user/sharp-ed/(?:status|download)/)[^\s/?#]+")
+
+
+def redact_server_diagnostic(value: object) -> str:
+    text = _SECRET_BEARER_RE.sub(r"\1[REDACTED]", str(value))
+    text = _SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", text)
+    return _SECRET_URL_RE.sub(r"\1[REDACTED]", text)
 
 
 @dataclass
@@ -159,7 +174,7 @@ class SharpEDServerClient:
         self._raise_if_stopped(stop_event)
         if status.download_bytes is not None:
             if log:
-                log(f"SharpED server: downloading result to {out_path}")
+                log(f"[SharpED] Downloading result to {out_path}")
             self._write_download_body(status.download_bytes, out_path)
         else:
             self.download(status.download_url, out_path, primary_token=upload.token, fallback_token=bearer_token, log=log)
@@ -188,7 +203,7 @@ class SharpEDServerClient:
         }
         body, boundary = self._multipart_body(file_path, content_type, fields)
         if log:
-            log(f"SharpED server: uploading {file_path.name} ({len(body)} bytes)")
+            log(f"[SharpED] Uploading {file_path.name} · {len(body) / (1024 * 1024):.1f} MiB")
 
         headers = {
             "Authorization": f"Bearer {bearer_token}",
@@ -198,7 +213,7 @@ class SharpEDServerClient:
         text = self._request_text("POST", self._url("/api/user/sharp-ed/upload"), data=body, headers=headers)
         data = self._loads_json(text, "Upload")
         if not data.get("success", False):
-            raise SharpEDServerError(f"SharpED upload failed: {text}")
+            raise SharpEDServerError(f"SharpED upload failed: {redact_server_diagnostic(text)}")
         token = str(data.get("token") or "")
         status_url = str(data.get("status_url") or "")
         if status_url:
@@ -206,7 +221,7 @@ class SharpEDServerClient:
         if not status_url and token:
             status_url = self._url(f"/api/user/sharp-ed/status/{token}")
         if log:
-            log(f"SharpED server: uploaded job_id={data.get('job_id', -1)}, token={token or '<missing>'}")
+            log(f"[SharpED] Job submitted · ID {data.get('job_id', -1)}")
         return UploadResult(
             job_id=int(data.get("job_id", -1)),
             token=token,
@@ -225,11 +240,19 @@ class SharpEDServerClient:
         stop_event: object = None,
     ) -> StatusResult:
         polls = 0
+        last_logged_status = ""
         while max_polls < 0 or polls < max_polls:
             self._raise_if_stopped(stop_event)
             status = self.get_status(status_url, job_token, bearer_token)
-            if log:
-                log(f"SharpED server status: {status.status or '<empty>'}")
+            normalized_status = str(status.status or "<empty>").strip().lower()
+            if log and normalized_status != last_logged_status:
+                if normalized_status in {"processing", "running", "queued", "pending"}:
+                    log("[SharpED] Processing...")
+                elif normalized_status in {"completed", "complete", "done", "ready", "finished", "success", "succeeded"}:
+                    log("[SharpED] Completed")
+                else:
+                    log(f"[SharpED] Status: {status.status or '<empty>'}")
+                last_logged_status = normalized_status
             if status.completed:
                 return status
             if status.failed:
@@ -280,7 +303,7 @@ class SharpEDServerClient:
         log: ProgressLog = None,
     ) -> None:
         if log:
-            log(f"SharpED server: downloading result to {out_path}")
+            log(f"[SharpED] Downloading result to {out_path}")
         body = self._request_bytes_with_auth_candidates(download_url, [primary_token, fallback_token])
         self._write_download_body(body, out_path)
 
@@ -359,11 +382,14 @@ class SharpEDServerClient:
                 return resp.read()
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise SharpEDServerError(f"SharpED HTTP error {exc.code} for {url}. Body: {body}") from exc
+            raise SharpEDServerError(
+                f"SharpED HTTP error {exc.code} for {redact_server_diagnostic(url)}. "
+                f"Body: {redact_server_diagnostic(body)}"
+            ) from exc
         except URLError as exc:
-            raise SharpEDServerError(f"SharpED request failed for {url}: {exc}") from exc
+            raise SharpEDServerError(f"SharpED request failed for {redact_server_diagnostic(url)}: {exc}") from exc
         except ssl.SSLError as exc:
-            raise SharpEDServerError(f"SharpED TLS error for {url}: {exc}") from exc
+            raise SharpEDServerError(f"SharpED TLS error for {redact_server_diagnostic(url)}: {exc}") from exc
 
     def _request_text_with_auth_candidates(self, url: str, tokens: list[str]) -> str:
         return self._request_bytes_with_auth_candidates(url, tokens).decode("utf-8", errors="replace")
@@ -393,7 +419,7 @@ class SharpEDServerClient:
         except json.JSONDecodeError as exc:
             raise SharpEDServerError(f"{label} JSON parse failed: {exc}") from exc
         if not isinstance(data, dict):
-            raise SharpEDServerError(f"{label} response is not a JSON object: {body}")
+            raise SharpEDServerError(f"{label} response is not a JSON object: {redact_server_diagnostic(body)}")
         return data
 
     def _multipart_body(self, file_path: Path, content_type: str, fields: dict[str, str]) -> tuple[bytes, str]:

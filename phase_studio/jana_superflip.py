@@ -2121,8 +2121,12 @@ def launch_phase_studio_from_jana(inflip_path: Optional[Path], options: JanaRunO
         win._sync_input_source_mode_widgets()
         win._sync_workflow_widgets()
         for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
-            win.log_text.append(line)
-        win.log_text.append("After the full pipeline finishes, use the 'Pass data to Jana2020' button to choose the cycle and map source for the final Jana2020 hand-off.")
+            win._append_execution_log(line, subsystem="Jana2020")
+        win._append_execution_log(
+            "After the full pipeline finishes, use the 'Pass data to Jana2020' button to choose the cycle and map source for the final Jana2020 hand-off.",
+            level="DETAIL",
+            subsystem="Jana2020",
+        )
     win.setWindowTitle("Phase Studio 1.0.1 for Jana2020")
     win.show()
     splash.finish(win)

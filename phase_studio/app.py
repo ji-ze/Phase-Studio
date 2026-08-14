@@ -63,7 +63,7 @@ except Exception as exc:
 # The application and the frozen executable use PySide6 exclusively.
 try:
     from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QRectF
-    from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut
+    from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
         QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
@@ -164,6 +164,125 @@ class SuperflipLogMetrics:
     fom: Optional[float] = None
     success_rate: Optional[float] = None
     mean_cycles: Optional[float] = None
+
+
+LOG_LEVELS = {"INFO", "STEP", "SUCCESS", "WARNING", "ERROR", "COMMAND", "DETAIL"}
+LOG_DETAIL_PREFIXES = (
+    "edma plimit",
+    "edma maxima",
+    "sharped inference server",
+    "sharped model",
+    "sharped elements",
+    "sharped maximum upload",
+    "sharped server http timeout",
+    "next-cycle modelfile",
+    "xplor damping",
+    "cif modelfiles",
+    "superflip perform",
+    "superflip requested outputformat",
+    "superflip exports",
+    "superflip bestdensities",
+    "superflip polish",
+    "superflip hkl data mode",
+    "superflip resolution cutoff",
+    "optional functions",
+    "map feedback",
+    "prepared hkl",
+    "standardized hkl export",
+    "superflip map:",
+    "deblurred map:",
+)
+
+
+@dataclass(frozen=True)
+class ExecutionLogRecord:
+    text: str
+    level: str = "INFO"
+    subsystem: str = "Pipeline"
+
+
+_LOG_SECRET_ASSIGNMENT_RE = re.compile(
+    r"(?i)(\b(?:api[_ -]?token|access[_ -]?token|authorization[_ -]?token|"
+    r"job[_ -]?token|download[_ -]?token|token)\b[\"']?\s*[:=]\s*)"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
+)
+_LOG_BEARER_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)[^\s,;]+")
+_LOG_SECRET_URL_RE = re.compile(
+    r"(?i)(/api/user/sharp-ed/(?:status|download)/)[^\s/?#]+"
+)
+_LOG_SECRET_QUERY_RE = re.compile(
+    r"(?i)([?&](?:token|access_token|api_token)=)[^&#\s]+"
+)
+
+
+def redact_log_secrets(message: object) -> str:
+    """Remove credentials and job-access tokens from user-visible diagnostics."""
+    text = str(message)
+    text = _LOG_BEARER_RE.sub(r"\1[REDACTED]", text)
+    text = _LOG_SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", text)
+    text = _LOG_SECRET_URL_RE.sub(r"\1[REDACTED]", text)
+    return _LOG_SECRET_QUERY_RE.sub(r"\1[REDACTED]", text)
+
+
+def relative_log_paths(message: str, work_dir: Optional[Path]) -> str:
+    """Make paths below the already-announced work directory concise."""
+    text = str(message)
+    if work_dir is None or text.lstrip().lower().startswith("work dir:"):
+        return text
+    try:
+        root = str(Path(work_dir).expanduser().resolve())
+    except Exception:
+        return text
+    for separator in ("\\", "/"):
+        variant = root.replace("\\", separator).replace("/", separator)
+        text = text.replace(variant + separator, "")
+    return text
+
+
+def classify_log_record(
+    message: object,
+    *,
+    level: str = "",
+    subsystem: str = "",
+    work_dir: Optional[Path] = None,
+) -> ExecutionLogRecord:
+    """Create a safe semantic log record without changing scientific content."""
+    text = relative_log_paths(redact_log_secrets(message), work_dir)
+    stripped = text.strip()
+    lowered = stripped.lower()
+    resolved_subsystem = str(subsystem or "").strip()
+    if not resolved_subsystem:
+        bracketed = re.match(r"^\[([^]]+)\]", stripped)
+        if bracketed:
+            resolved_subsystem = bracketed.group(1)
+        elif "sharped" in lowered:
+            resolved_subsystem = "SharpED"
+        elif "superflip" in lowered:
+            resolved_subsystem = "Superflip"
+        elif "edma" in lowered:
+            resolved_subsystem = "EDMA"
+        elif "jana2020" in lowered or "jana .inflip" in lowered:
+            resolved_subsystem = "Jana2020"
+        else:
+            resolved_subsystem = "Pipeline"
+
+    resolved_level = str(level or "").strip().upper()
+    if resolved_level not in LOG_LEVELS:
+        if "error" in lowered or "failed" in lowered or "failure" in lowered:
+            resolved_level = "ERROR"
+        elif any(word in lowered for word in ("warning", "could not", "skipped", "omitted")):
+            resolved_level = "WARNING"
+        elif stripped.startswith("$") or stripped.startswith("$ ") or stripped.startswith("  $"):
+            resolved_level = "COMMAND"
+        elif stripped.startswith("===") or re.match(r"^cycle\s+\d+\s*/\s*\d+", lowered):
+            resolved_level = "STEP"
+        elif any(word in lowered for word in ("completed", " complete", "finished", "done.")):
+            resolved_level = "SUCCESS"
+        elif text.startswith(("  ", "\t")) or lowered.startswith(LOG_DETAIL_PREFIXES):
+            resolved_level = "DETAIL"
+        else:
+            resolved_level = "INFO"
+    return ExecutionLogRecord(text=text, level=resolved_level, subsystem=resolved_subsystem)
 
 
 @dataclass
@@ -3097,7 +3216,15 @@ def run_command(
     allow_foreground: bool = False,
 ) -> int:
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log("  $ " + " ".join(str(x) for x in cmd))
+    display_cmd = [Path(str(cmd[0])).name] if cmd else []
+    for argument in cmd[1:]:
+        text = str(argument)
+        try:
+            path = Path(text)
+            display_cmd.append(path.name if path.is_absolute() and path.parent.resolve() == Path(cwd).resolve() else text)
+        except Exception:
+            display_cmd.append(text)
+    log("  $ " + " ".join(display_cmd))
     with log_path.open("w", encoding="utf-8", errors="replace") as lf:
         try:
             proc = subprocess.Popen(list(cmd), cwd=str(cwd), stdout=lf, stderr=subprocess.STDOUT, text=True)
@@ -3226,7 +3353,7 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
     if reference_for_input is None or work_ref_dst.resolve() != reference_for_input.resolve():
         shutil.copy2(ref_ctx.work_ref_cif, work_ref_dst)
     write_superflip_input(inp, prefix, ref_ctx, observed_hkl, output_name, model_for_input, reference_for_input, reference_format, perform_algorithm, output_format, write_auxiliary_outputs, export_superflip_xplor, export_superflip_ccp4, export_superflip_jana, voxel, bestdensities_count, bestdensities_metric, bestdensities_symmetry, polish, maxcycles, repeatmode, randomseed, delta, weakratio, biso, reflection_data_mode, normalize, nresshells, missing, searchsymmetry, derivesymmetry, electrons, dataitemwidths, extra_superflip_keywords, log)
-    log(f"[Superflip] input: {inp}")
+    log(f"[Superflip] Running {inp.name}")
     out = cycle_dir / output_name
     for stale in (out, cycle_dir / f"{prefix}.sflog"):
         try:
@@ -3257,6 +3384,7 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
         raise
     except Exception:
         pass
+    log("[Superflip] Completed")
     return out
 
 def run_superflip_symmetrize_map(
@@ -3292,7 +3420,7 @@ def run_superflip_symmetrize_map(
         derivesymmetry=derivesymmetry,
         log=log,
     )
-    log(f"[Superflip symmetry] input: {inp}")
+    log(f"[Superflip symmetry] Running {inp.name}")
     for stale in (out, sym_dir / f"{prefix}.sflog"):
         try:
             if stale.is_file():
@@ -3325,7 +3453,7 @@ def run_superflip_symmetrize_map(
     final_map = cycle_dir / f"{prefix}.xplor"
     if out.resolve() != final_map.resolve():
         shutil.copy2(out, final_map)
-    log(f"Symmetrized deblurred map: {final_map}")
+    log(f"[Superflip symmetry] Completed · {final_map.name}")
     return final_map
 
 def sharped_elements_from_composition(composition: str) -> str:
@@ -3368,6 +3496,10 @@ def run_sharped_deblur(
             elif "server status:" in lowered:
                 status = lowered.split("server status:", 1)[1].strip()
                 progress("completed" if status in {"completed", "complete", "done", "ready", "finished", "success", "succeeded"} else "processing")
+            elif "[sharped] processing" in lowered:
+                progress("processing")
+            elif "[sharped] completed" in lowered:
+                progress("completed")
         try:
             log(line)
         finally:
@@ -3412,6 +3544,7 @@ def run_sharped_deblur(
     )
     if not output_map.is_file() or output_map.stat().st_size == 0:
         raise RuntimeError(f"SharpED did not create output map: {output_map}")
+    log_both(f"[SharpED] Downloaded {output_map.name}")
     return output_map
 
 def parse_edma_coo(coo_file: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -3631,11 +3764,13 @@ def run_edma_on_xplor(
     if len(frac) == 0:
         log(f"EDMA coordinate output contains no peaks above plimit for {xplor_map.name}; writing empty CIF.")
         write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
+        log(f"[EDMA] Completed · output: {cif}")
         return cif
     frac, dens = symmetry_merge_peaks(frac, dens, ref_ctx, merge_distance_a)
     elements = assign_elements_by_reference_composition(dens, ref_ctx.atoms)
     atoms = [AtomSite(label=f"{elements[i]}{i+1}", element=elements[i], frac=frac[i], density=float(dens[i])) for i in range(len(frac))]
     write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms)
+    log(f"[EDMA] Completed · output: {cif}")
     return cif
 
 def extract_jana_embedded_files(cif_path: Path, export_dir: Path, prefix: str) -> List[Path]:
@@ -5127,8 +5262,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.result_splitter.setStretchFactor(1, 5)
         self.result_splitter.setStretchFactor(2, 2)
         self.result_splitter.setSizes([170, 390, 140])
-        self.log_text.append("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL + CIF input mode.")
-        self.log_text.append("Defaults: later-cycle Superflip modelfiles can use raw Superflip XPLOR, deblurred XPLOR, or EDMA CIF.")
+        self._last_log_record: Optional[ExecutionLogRecord] = None
+        self._append_execution_log("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL + CIF input mode.")
+        self._append_execution_log(
+            "Defaults: later-cycle Superflip modelfiles can use raw Superflip XPLOR, deblurred XPLOR, or EDMA CIF.",
+            level="DETAIL",
+        )
         self._update_action_states()
         self._update_plot()
         self._update_structure_views()
@@ -5413,7 +5552,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             QMessageBox.information(self, "HKL analysis already running", "Wait for the current HKL load/completeness job to finish before starting another one.")
             return
         self._set_hkl_task_running(True)
-        self.log_text.append(f"{label} started in background.")
+        self._append_execution_log(f"{label} started in background.")
 
         def worker() -> None:
             try:
@@ -5969,6 +6108,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def clear_log_plot(self) -> None:
         self.log_text.clear()
+        self._last_log_record = None
         self.results.clear()
         self.reference_atoms_for_plot.clear()
         self.superflip_atoms_for_plot.clear()
@@ -5989,8 +6129,60 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._update_plot()
         self._update_structure_views()
 
-    def log(self, message: str) -> None:
-        self.msg_queue.put(("log", message))
+    def _append_execution_log(
+        self,
+        payload: object,
+        *,
+        level: str = "",
+        subsystem: str = "",
+    ) -> bool:
+        work_dir = self.last_run_config.work_dir if self.last_run_config is not None else None
+        record = payload if isinstance(payload, ExecutionLogRecord) else classify_log_record(
+            payload,
+            level=level,
+            subsystem=subsystem,
+            work_dir=work_dir,
+        )
+        repeatable_status = bool(
+            record.subsystem.lower() == "sharped"
+            and re.search(r"(?:server status:|\]\s*(?:processing|completed|uploading|downloading))", record.text, re.IGNORECASE)
+        )
+        if repeatable_status and self._last_log_record == record:
+            return False
+
+        scroll_bar = self.log_text.verticalScrollBar()
+        was_following = scroll_bar.maximum() - scroll_bar.value() <= max(4, scroll_bar.pageStep() // 20)
+        cursor = QTextCursor(self.log_text.document())
+        cursor.movePosition(QTextCursor.End)
+        if self.log_text.document().characterCount() > 1:
+            cursor.insertBlock()
+        text_format = QTextCharFormat()
+        colors = {
+            "INFO": "#001170",
+            "STEP": "#001170",
+            "SUCCESS": "#2264b8",
+            "WARNING": "#8a5a00",
+            "ERROR": "#b42318",
+            "COMMAND": "#2264b8",
+            "DETAIL": "#5d6b86",
+        }
+        text_format.setForeground(QColor(colors.get(record.level, "#001170")))
+        text_format.setFontWeight(QFont.Bold if record.level in {"STEP", "SUCCESS", "ERROR"} else QFont.Normal)
+        text_format.setFontFixedPitch(True)
+        cursor.insertText(record.text, text_format)
+        if was_following:
+            scroll_bar.setValue(scroll_bar.maximum())
+        self._last_log_record = record
+        return True
+
+    def log(self, message: str, *, level: str = "", subsystem: str = "") -> None:
+        work_dir = self.last_run_config.work_dir if self.last_run_config is not None else None
+        self.msg_queue.put(("log", classify_log_record(
+            message,
+            level=level,
+            subsystem=subsystem,
+            work_dir=work_dir,
+        )))
 
     def _emit_cycle_progress(
         self,
@@ -6160,8 +6352,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 kind, payload = self.msg_queue.get_nowait()
                 processed += 1
                 if kind == "log":
-                    self.log_text.append(str(payload))
-                    self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+                    self._append_execution_log(payload)
                     self._update_action_states()
                 elif kind == "result":
                     result = payload  # type: ignore[assignment]
@@ -6203,31 +6394,39 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         idx = widget.findText(current)
                         widget.setCurrentIndex(idx if idx >= 0 else 0)
                         widget.blockSignals(False)
-                    self.log_text.append("SharpED models refreshed.")
+                    self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
                 elif kind == "hkl_load_result":
-                    self.log_text.append("HKL validation finished.")
+                    self._append_execution_log("HKL validation finished.", level="SUCCESS")
                     self._set_hkl_task_running(False)
                     self._show_hkl_load_result_dialog(payload)
                 elif kind == "hkl_completeness_result":
-                    self.log_text.append("HKL completeness analysis finished.")
+                    self._append_execution_log("HKL completeness analysis finished.", level="SUCCESS")
                     self._set_hkl_task_running(False)
                     self._show_hkl_completeness_dialog(payload)  # type: ignore[arg-type]
                 elif kind == "hkl_task_error":
                     label, message = payload  # type: ignore[misc]
                     self._set_hkl_task_running(False)
                     QMessageBox.critical(self, f"{label} failed", str(message))
-                    self.log_text.append(f"\n{label} ERROR: {message}")
+                    self._append_execution_log(f"{label} ERROR: {message}", level="ERROR")
                 elif kind == "hkl_task_finished":
                     self._set_hkl_task_running(False)
                 elif kind == "handoff_done":
                     self._set_run_status("Transferred")
-                    self.log_text.append("\nJana2020 hand-off completed. Phase Studio will close automatically.")
+                    self._append_execution_log(
+                        "Jana2020 hand-off completed. Phase Studio will close automatically.",
+                        level="SUCCESS",
+                        subsystem="Jana2020",
+                    )
                     self.handoff_btn.setEnabled(False)
                     QTimer.singleShot(400, QApplication.instance().quit)
                 elif kind == "handoff_error":
                     self._set_run_status("Error")
                     QMessageBox.critical(self, "Jana2020 hand-off failed", str(payload))
-                    self.log_text.append("\nJana2020 hand-off ERROR: " + str(payload))
+                    self._append_execution_log(
+                        "Jana2020 hand-off ERROR: " + str(payload),
+                        level="ERROR",
+                        subsystem="Jana2020",
+                    )
                     self.handoff_btn.setEnabled(bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None))
                 elif kind == "progress_setup":
                     self._set_run_status("Running")
@@ -6247,7 +6446,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 elif kind == "error":
                     self._set_run_status("Error")
                     QMessageBox.critical(self, "Pipeline error", str(payload))
-                    self.log_text.append("\nERROR: " + str(payload))
+                    self._append_execution_log("ERROR: " + str(payload), level="ERROR")
                     self.progress_bar.setFormat("Error")
                     self._annotate_cycle_progress("Error")
                     self.run_btn.setEnabled(True)
@@ -6255,7 +6454,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.run_btn.setText("Run pipeline")
                 elif kind == "done":
                     self._set_run_status("Complete")
-                    self.log_text.append("\nDone.")
+                    self._append_execution_log("=== Pipeline complete ===", level="SUCCESS")
                     if payload is not None:
                         self.progress_bar.setValue(int(payload))
                     self.progress_bar.setFormat("Done")
@@ -6267,7 +6466,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     can_handoff = bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None)
                     self.handoff_btn.setEnabled(can_handoff)
                     if can_handoff:
-                        self.log_text.append("Jana2020 hand-off is ready. Use 'Send to Jana2020' to select the cycle and map source.")
+                        self._append_execution_log(
+                            "Jana2020 hand-off is ready. Use 'Send to Jana2020' to select the cycle and map source.",
+                            subsystem="Jana2020",
+                        )
         except queue.Empty:
             pass
 
@@ -6434,7 +6636,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
 
         self.handoff_btn.setEnabled(False)
-        self.log_text.append(f"\nStarting Jana2020 hand-off from cycle {selected_cycle:03d} ({selected_map}).")
+        self._append_execution_log(
+            f"Starting Jana2020 hand-off from cycle {selected_cycle:03d} ({selected_map}).",
+            level="STEP",
+            subsystem="Jana2020",
+        )
 
         def worker() -> None:
             try:
@@ -6958,16 +7164,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
                     raise FileNotFoundError("Jana .inflip input mode requires a readable Jana .inflip file.")
                 if mode == INPUT_MODE_INFLIP:
-                    self.log_text.append("Input mode: Jana .inflip. HKL and reference metadata will be taken from the .inflip file.")
+                    self._append_execution_log("Input mode: Jana .inflip. HKL and reference metadata will be taken from the .inflip file.")
                 else:
                     if hkl_text and not cfg.hkl.is_file():
                         raise FileNotFoundError(f"HKL override not found: {cfg.hkl}")
                     if ref_text and (cfg.superflip_referencefile is None or not cfg.superflip_referencefile.is_file()):
                         raise FileNotFoundError(f"External reference file not found: {cfg.superflip_referencefile}")
                     if not hkl_text:
-                        self.log_text.append("HKL override is empty; the Jana .inflip fbegin/endf block will be used.")
+                        self._append_execution_log("HKL override is empty; the Jana .inflip fbegin/endf block will be used.", level="DETAIL")
                     if not ref_text:
-                        self.log_text.append("External reference file is empty; the Jana .inflip cell/space group/composition will be used.")
+                        self._append_execution_log("External reference file is empty; the Jana .inflip cell/space group/composition will be used.", level="DETAIL")
             else:
                 if not cfg.hkl.is_file():
                     raise FileNotFoundError(f"External HKL not found: {cfg.hkl}")
@@ -7013,17 +7219,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
         self.run_btn.setText("Running...")
-        self.log_text.append("\nStarting pipeline...")
-        self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
+        self._append_execution_log("=== Starting pipeline ===", level="STEP")
         QApplication.processEvents()
         self.worker = threading.Thread(target=self.pipeline_worker, args=(cfg,), daemon=True)
         self.worker.start()
     def pipeline_worker(self, cfg: RunConfig) -> None:
         try:
-            self.log("=== Phase Studio pipeline started ===")
+            self.log("=== Pipeline started ===", level="STEP")
             self.log(f"Work dir: {cfg.work_dir}")
             mode = normalize_input_source_mode(cfg.input_source_mode)
-            self.log(f"Input data mode: {INPUT_MODE_LABELS.get(mode, mode)}")
+            input_name = cfg.jana_inflip.name if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} and cfg.jana_inflip is not None else cfg.hkl.name
+            self.log(f"Input: {INPUT_MODE_LABELS.get(mode, mode)} · {input_name}")
             if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
                 if cfg.jana_inflip is None:
                     raise RuntimeError("Jana input mode selected, but no Jana .inflip file is configured.")
@@ -7067,12 +7273,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ref_ctx.cell.alpha, ref_ctx.cell.beta, ref_ctx.cell.gamma,
             )))
             self.msg_queue.put(("reference_atoms", expand_atoms_by_symmetry(ref_ctx.atoms, ref_ctx.spacegroup)))
-            self.log(f"Crystallographic reference CIF: {cfg.reference_cif}")
-            self.log(f"Working reference CIF for EDMA/metrics: {ref_ctx.work_ref_cif}")
+            self.log("Reference:", level="STEP")
+            metadata_origin = cfg.jana_inflip.name if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} and cfg.jana_inflip is not None else cfg.reference_cif.name
+            self.log(f"  Metadata: {metadata_origin} · crystallographic CIF: {cfg.reference_cif}", level="DETAIL")
+            if cfg.superflip_referencefile is not None and cfg.superflip_referencefile.suffix.lower() == ".cif":
+                self.log(f"  Atom sites: {cfg.superflip_referencefile.name} · {len(ref_ctx.atoms)} atoms", level="DETAIL")
+            else:
+                self.log(f"  Atom sites: {cfg.reference_cif.name} · {len(ref_ctx.atoms)} atoms", level="DETAIL")
+            self.log(f"  Working EDMA/metrics reference: {ref_ctx.work_ref_cif}", level="DETAIL")
             self.log(f"Cell: {ref_ctx.cell.a:.5f} {ref_ctx.cell.b:.5f} {ref_ctx.cell.c:.5f} {ref_ctx.cell.alpha:.3f} {ref_ctx.cell.beta:.3f} {ref_ctx.cell.gamma:.3f}")
             self.log(f"Space group: {ref_ctx.spacegroup_hm}")
             self.log(f"Composition: {ref_ctx.composition}")
-            self.log(f"Reference atoms read: {len(ref_ctx.atoms)}")
+            self.log("Configuration details:", level="STEP")
+            self.log(f"  Superflip executable: {cfg.superflip_exe}", level="DETAIL")
+            self.log(f"  EDMA executable: {cfg.edma_exe}", level="DETAIL")
             self.log(f"EDMA plimit after Superflip: {cfg.plimit_superflip:g} sigma multiplier")
             self.log(f"EDMA plimit after deblurring: {cfg.plimit_deblur:g} sigma multiplier")
             self.log(f"EDMA maxima/fullcell/numberofatoms: {cfg.edma_maxima} / {cfg.edma_fullcell} / {cfg.edma_numberofatoms}")
@@ -7096,6 +7310,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log("Next-cycle XPLOR modelfile uses the raw Superflip map; SharpED deblurring is not required for cycling.")
             if use_cif_modelfile:
                 self.log("CIF modelfiles are written without an explicit CIF format keyword; Superflip infers CIF from the .cif extension.")
+            workflow = ["Superflip"]
+            if cfg.run_edma_superflip:
+                workflow.append("EDMA")
+            if cfg.run_sharped and not use_superflip_xplor_modelfile:
+                workflow.append("SharpED")
+            if cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
+                workflow.append("symmetry averaging")
+            if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
+                workflow.append("EDMA")
+            self.log("Workflow: " + " → ".join(workflow), level="STEP")
             self.log(f"Superflip perform: {cfg.perform_algorithm.upper()}")
             self.log(f"Superflip requested outputformat: {cfg.output_format}")
             self.log(
@@ -7183,29 +7407,29 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     detail="preparing model and reflections",
                 )
                 cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
-                self.log(f"\n=== Cycle {cyc} ===")
+                self.log(f"=== Cycle {cyc} / {cfg.cycles} ===", level="STEP")
                 model_for_sf: Optional[Path] = None
                 model_source = "none"
                 model_metric = current_model_metric
                 if cyc == 1 and cfg.first_cycle_modelfile is not None:
                     model_source = "external_first_cycle"
                     model_for_sf = cfg.first_cycle_modelfile
-                    self.log(f"Using external first-cycle modelfile: {model_for_sf}")
+                    self.log(f"[Cycle model] Source: external first-cycle model · {model_for_sf}")
                 elif current_model is not None and use_xplor_modelfile:
                     model_source = modelfile_mode
                     model_for_sf = current_model
-                    self.log(f"Using {modelfile_mode} as modelfile: {model_for_sf}")
-                    self.log("  CIF-only exclude settings skipped for XPLOR modelfile.")
+                    self.log(f"[Cycle model] Source: {modelfile_mode} from cycle {cyc - 1} · {model_for_sf}")
+                    self.log("  CIF-only exclude settings skipped for XPLOR modelfile.", level="DETAIL")
                 elif current_model is not None and use_cif_modelfile:
                     model_source = "deblurred_edma_cif"
                     model_for_sf = cycle_dir / f"cycle_{cyc:03d}_modelfile_prepared.cif"
                     model_for_sf, removed, kept = write_filtered_cif(current_model, model_for_sf, exclude_labels)
-                    self.log(f"Prepared CIF modelfile: {model_for_sf}")
-                    self.log(f"  removed={removed}, kept={kept}")
-                    self.log("  Superflip will infer CIF from .cif extension; no explicit CIF format keyword is written.")
+                    self.log(f"[Cycle model] Prepared CIF model · {model_for_sf}")
+                    self.log(f"  removed={removed}, kept={kept}", level="DETAIL")
+                    self.log("  Superflip infers CIF from the .cif extension; no explicit format keyword is written.", level="DETAIL")
                     model_metric = nearest_metric_to_reference(model_for_sf, ref_ctx)
                 elif cyc > 1 and modelfile_mode == "none":
-                    self.log("No Superflip modelfile for this cycle.")
+                    self.log("[Cycle model] No Superflip modelfile for this cycle.")
                 observed_hkl_for_cycle = observed_hkls[configured_data_mode]
                 sf_prefix = f"cycle_{cyc:03d}_superflip"
                 reference_file_for_cycle: Optional[Path] = None
@@ -7258,14 +7482,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 )
                 if sf_log_metrics.rvalue is not None:
                     self.log(
-                        "Superflip metrics: "
-                        f"R={sf_log_metrics.rvalue:.3f}, "
-                        f"Peaks={sf_log_metrics.peaks if sf_log_metrics.peaks is not None else 'n/a'}, "
-                        f"Symm={sf_log_metrics.symm if sf_log_metrics.symm is not None else 'n/a'}, "
-                        f"Der.SG={sf_log_metrics.derived_sg or 'n/a'}, "
-                        f"Saved run={sf_log_metrics.saved_run if sf_log_metrics.saved_run is not None else 'n/a'}, "
-                        f"Ref.match={sf_log_metrics.ref_match if sf_log_metrics.ref_match is not None else 'n/a'}, "
-                        f"SR={sf_log_metrics.success_rate if sf_log_metrics.success_rate is not None else 'n/a'}%"
+                        "[Superflip] Metrics\n"
+                        f"  R={sf_log_metrics.rvalue:.3f} · "
+                        f"Peaks={sf_log_metrics.peaks if sf_log_metrics.peaks is not None else 'n/a'} · "
+                        f"Symm={sf_log_metrics.symm if sf_log_metrics.symm is not None else 'n/a'}\n"
+                        f"  Derived SG={sf_log_metrics.derived_sg or 'n/a'} · "
+                        f"Saved run={sf_log_metrics.saved_run if sf_log_metrics.saved_run is not None else 'n/a'} · "
+                        f"Ref.match={sf_log_metrics.ref_match if sf_log_metrics.ref_match is not None else 'n/a'} · "
+                        f"SR={sf_log_metrics.success_rate if sf_log_metrics.success_rate is not None else 'n/a'}%",
+                        subsystem="Superflip",
                     )
                 sf_edma_dir = cycle_dir / "edma_superflip"
                 if cfg.run_edma_superflip:
@@ -7285,9 +7510,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.export_jana_project and cfg.run_edma_superflip:
                     export_jana2020_project(cycle_dir / "jana2020_superflip", sf_prefix, cycle_dir, sf_edma_dir, sf_map, sf_edma_cif, ref_ctx, self.log)
                 sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
-                self.log(f"EDMA after Superflip CIF: {sf_edma_cif}")
+                self.log(
+                    f"[EDMA] Superflip map · RMSD={sf_metric if sf_metric is not None else 'n/a'} Å\n"
+                    f"  output: {sf_edma_cif}",
+                    subsystem="EDMA",
+                )
                 self.msg_queue.put(("structure_update", ("superflip", sf_edma_cif)))
-                self.log(f"EDMA after Superflip RMSD: {sf_metric if sf_metric is not None else 'n/a'} Å")
                 deblur_map = cycle_dir / f"cycle_{cyc:03d}_deblurred.xplor"
                 if cfg.run_sharped and not use_superflip_xplor_modelfile:
                     if self.stop_now.is_set():
@@ -7349,7 +7577,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         log=self.log,
                         stop_event=self.stop_now,
                     )
-                    self.log(f"Deblurred map after Superflip symmetry averaging: {deblur_map}")
                 deblur_prefix = f"cycle_{cyc:03d}_deblurred"
                 deblur_edma_dir = cycle_dir / "edma_deblurred"
                 if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
@@ -7373,9 +7600,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     export_jana2020_project(cycle_dir / "jana2020_deblurred", deblur_prefix, cycle_dir, deblur_edma_dir, deblur_map, deblur_edma_cif, ref_ctx, self.log)
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
-                self.log(f"EDMA after deblur CIF: {deblur_edma_cif}")
+                self.log(
+                    f"[EDMA] Deblurred map · RMSD={deblur_metric if deblur_metric is not None else 'n/a'} Å\n"
+                    f"  output: {deblur_edma_cif}",
+                    subsystem="EDMA",
+                )
                 self.msg_queue.put(("structure_update", ("deblur", deblur_edma_cif)))
-                self.log(f"EDMA after deblur RMSD: {deblur_metric if deblur_metric is not None else 'n/a'} Å")
                 result = CycleResult(
                     cycle=cyc,
                     model_source=model_source,
@@ -7451,6 +7681,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     current_model = None
                     current_model_metric = None
                 completed_cycles = cyc
+                self.log(f"Cycle {cyc} / {cfg.cycles} complete.", level="SUCCESS")
                 self.msg_queue.put(("progress", completed_cycles))
                 self._emit_cycle_progress(
                     cyc,
