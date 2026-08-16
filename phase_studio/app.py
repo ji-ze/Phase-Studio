@@ -4596,7 +4596,7 @@ INPUT_TOOLTIPS = {
     "weakratio": "Superflip weakratio keyword.",
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
     "reflection_data_mode": "Exact HKL column order. 'set from inflip' imports dataformat from Jana; the four HKL modes accept I or F followed by sigma, optionally with phase in degrees before sigma. Phase Studio converts phase to Superflip turns and retains sigma for diagnostics.",
-    "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle modelfile instead.",
+    "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle model instead.",
     "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
     "normalize": "Optional Superflip reflection normalization keyword. For this Windows executable, none is the safest default and local is omitted.",
@@ -5488,7 +5488,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_text(workflow_form, "exclude_atoms", "Excluded atoms", "none")
         workflow_note = settings_callout(
             "Note",
-            "Next-cycle modelfile is authoritative: 'none' forces a one-cycle run. "
+            "Next-cycle model is authoritative: 'none' forces a one-cycle run. "
             "superflip_xplor cycles without SharpED deblurring; XPLOR damping is active for XPLOR modes only."
         )
         workflow_form.addRow("", workflow_note)
@@ -5566,10 +5566,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
             <h3>2. Choose a workflow preset</h3>
             <p>Use a preset as a starting point, then adjust advanced parameters only when necessary.</p>
-            <ul><li><b>Small molecule, atomic resolution:</b> small-molecule preset, charge flipping, typically 1&ndash;2 cycles.</li>
-            <li><b>Inorganic:</b> symmetry-assisted density selection and an EDMA threshold around 1 sigma.</li>
-            <li><b>MOF, atomic resolution:</b> SharpED/deblurred XPLOR feedback and typically 2&ndash;4 cycles.</li>
-            <li><b>MOF/framework, medium resolution:</b> SharpED + EDMA CIF feedback and approximately 0.5&ndash;1 sigma peak threshold.</li></ul>
+            <ul><li><b>small molecule:</b> settings intended as a starting point for small-molecule data.</li>
+            <li><b>inorganic:</b> settings intended as a starting point for inorganic materials.</li>
+            <li><b>MOF atomic resolution:</b> settings intended as a starting point for atomic-resolution framework data.</li>
+            <li><b>MOF medium resolution:</b> settings intended as a starting point for medium-resolution framework data.</li></ul>
+            <p>Applying a preset changes multiple controls. Review the resulting values and adapt them to the dataset; a preset is not a universal scientific recommendation.</p>
             <h3>3. Configure the iterative workflow</h3>
             <p><b>observed reflections &rarr; Superflip &rarr; XPLOR map &rarr; EDMA and/or SharpED &rarr; deblurred XPLOR &rarr; EDMA &rarr; next-cycle model</b></p>
             <p>The exact branches depend on <b>Basic &rarr; Workflow &rarr; Optional processing</b>. The next-cycle source can be Superflip XPLOR, SharpED/deblurred XPLOR, deblurred EDMA CIF, or <b>none</b>. Selecting none forces a one-cycle run.</p>
@@ -5579,7 +5580,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>After a successful run, <b>Send to Jana2020</b> lets you select a completed cycle and map source. Final interpretation and refinement remain in Jana2020.</p>
         """)
         setup_help_layout.insertWidget(1, WorkflowDiagram())
-        add_help_callout(setup_help_layout, "Tip", "Use the first cycle to establish a stable solution before enabling aggressive feedback.")
+        add_help_callout(setup_help_layout, "Tip", "Validate the reflection interpretation and review the selected preset values before starting a run.")
         add_back_to_contents(setup_help_layout)
         superflip_help_layout = add_help_section(reference_tab, "superflip", "Superflip guide", """
             <h3>What Superflip does</h3>
@@ -5601,7 +5602,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>8. Advanced keywords</h3>
             <p><b>Extra Superflip keywords</b> lets expert users append documented keywords without dedicated GUI controls.</p>
         """)
-        add_help_callout(superflip_help_layout, "Recommended", "Start with CF and the supplied preset values unless you intentionally tune the calculation.")
+        add_help_callout(superflip_help_layout, "Starting point", "CF and the supplied preset values are initial settings only; choose parameters appropriate for the dataset and intended method.")
         add_back_to_contents(superflip_help_layout)
         edma_help_layout = add_help_section(reference_tab, "edma", "EDMA guide", """
             <h3>What EDMA does in Phase Studio</h3>
@@ -5617,7 +5618,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>5. Additional keywords</h3>
             <p><b>Extra EDMA keywords</b> appends documented EDMA options not represented by dedicated controls.</p>
         """)
-        add_help_callout(edma_help_layout, "Recommended", "An EDMA threshold around 1σ is a common starting point in the supplied guidance; adjust it according to peak quality.")
+        add_help_callout(edma_help_layout, "Important", "Select each EDMA threshold for its map and assess the resulting peaks; there is no universal threshold.")
         add_back_to_contents(edma_help_layout)
         sharped_help_layout = add_help_section(reference_tab, "sharped", "SharpED guide", """
             <h3>What SharpED does</h3>
@@ -5629,7 +5630,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>3. Output resolution</h3>
             <p><b>Output resolution</b> is sent to the server as the <code>outres</code> field.</p>
             <h3>4. Upload and network</h3>
-            <p><b>Upload limit</b> checks XPLOR size; the public-server default is 100 MB. HTTP timeout covers model queries, upload, status and download. Polling interval sets the delay between status checks. Maximum polls limits those checks; <b>-1</b> means no fixed polling limit.</p>
+            <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check. Confirm the actual limit with the configured service. HTTP timeout covers model queries, upload, status and download. Polling interval sets the delay between status checks. Maximum polls limits those checks; <b>-1</b> means no fixed polling limit.</p>
             <h3>5. SharpED in iterative workflows</h3>
             <p><b>Run SharpED deblurring</b> enables server processing. <b>Symmetrize processed map with Superflip</b> performs symmetry averaging, not another charge-flipping reconstruction. <code>deblurred_xplor</code> feeds the processed map into the next cycle; <code>deblurred_edma_cif</code> feeds its EDMA structure.</p>
         """)
@@ -6143,7 +6144,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cycles_widget.value() != 1:
                     cycles_widget.setValue(1)
                 cycles_widget.setEnabled(False)
-                cycles_widget.setToolTip("Next-cycle modelfile is none, so there is no feedback model for later cycles. The run is therefore forced to one cycle.")
+                cycles_widget.setToolTip("Next-cycle model is none, so there is no feedback model for later cycles. The run is therefore forced to one cycle.")
             else:
                 cycles_widget.setEnabled(True)
                 cycles_widget.setToolTip(INPUT_TOOLTIPS.get("cycles", ""))
@@ -6158,7 +6159,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if mode in {"superflip_xplor", "deblurred_xplor"}:
                 damping_widget.setToolTip(INPUT_TOOLTIPS.get("damping_factor", ""))
             else:
-                damping_widget.setToolTip("XPLOR damping is used only when Next-cycle modelfile is superflip_xplor or deblurred_xplor.")
+                damping_widget.setToolTip("XPLOR damping is used only when Next-cycle model is superflip_xplor or deblurred_xplor.")
         if isinstance(symmetrize_widget, QCheckBox):
             symmetrize_widget.setEnabled(mode != "superflip_xplor")
             symmetrize_label = self.input_labels.get("symmetrize_deblurred_map")
