@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 
+CONTROL_ARROW_BUTTON_WIDTH = 26
+CONTROL_ARROW_WIDTH = 8.0
+CONTROL_ARROW_HEIGHT = 4.0
+CONTROL_ARROW_STROKE_WIDTH = 1.5
+
+
 _SHARPED_QSS = """
 QWidget {
     background-color: #ffffff;
@@ -49,12 +55,12 @@ QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus, QDoubleS
     border-bottom: 2px solid #2264b8;
 }
 QSpinBox, QDoubleSpinBox {
-    padding-right: 23px;
+    padding-right: 29px;
 }
 QSpinBox::up-button, QDoubleSpinBox::up-button {
     subcontrol-origin: border;
     subcontrol-position: top right;
-    width: 20px;
+    width: 25px;
     background-color: #f2f4f9;
     border: none;
     border-left: 1px solid #cbd7ea;
@@ -63,44 +69,39 @@ QSpinBox::up-button, QDoubleSpinBox::up-button {
 QSpinBox::down-button, QDoubleSpinBox::down-button {
     subcontrol-origin: border;
     subcontrol-position: bottom right;
-    width: 20px;
+    width: 25px;
     background-color: #f2f4f9;
     border: none;
     border-left: 1px solid #cbd7ea;
 }
 QSpinBox::up-button:hover, QSpinBox::down-button:hover,
 QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
-    background-color: #44b7ff;
+    background-color: #e2f4ff;
 }
-QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
-QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-    width: 10px;
-    height: 7px;
-}
-QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-    image: url("__PHASE_STUDIO_ARROW_UP_XPM__");
-}
-QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-    image: url("__PHASE_STUDIO_ARROW_DOWN_XPM__");
+QSpinBox::up-button:pressed, QSpinBox::down-button:pressed,
+QDoubleSpinBox::up-button:pressed, QDoubleSpinBox::down-button:pressed {
+    background-color: #c8eaff;
 }
 QComboBox {
-    padding-right: 25px;
+    padding-right: 29px;
 }
 QComboBox::drop-down {
-    subcontrol-origin: padding;
+    subcontrol-origin: border;
     subcontrol-position: top right;
-    width: 22px;
+    width: 25px;
     background-color: #f2f4f9;
     border: none;
     border-left: 1px solid #cbd7ea;
 }
 QComboBox::drop-down:hover {
-    background-color: #44b7ff;
+    background-color: #e2f4ff;
 }
-QComboBox::down-arrow {
-    image: url("__PHASE_STUDIO_ARROW_DOWN_XPM__");
-    width: 10px;
-    height: 7px;
+QComboBox::drop-down:pressed, QComboBox::drop-down:on {
+    background-color: #c8eaff;
+}
+QWidget#phaseStudioArrowOverlay {
+    background-color: transparent;
+    border: none;
 }
 QWidget#settingsPage QLineEdit,
 QWidget#settingsPage QSpinBox,
@@ -120,18 +121,39 @@ QWidget#settingsPage QDoubleSpinBox {
     max-height: 22px;
     padding-top: 2px;
     padding-bottom: 3px;
-    padding-right: 23px;
+    padding-right: 29px;
 }
 QWidget#settingsPage QComboBox {
-    padding-right: 25px;
+    padding-right: 29px;
 }
 QWidget#settingsPage QPushButton {
     min-height: 21px;
     padding: 3px 10px;
 }
-QWidget#settingsPage QPushButton#pathBrowseButton {
-    min-height: 20px;
+QPushButton#pathBrowseButton {
+    min-height: 21px;
     padding: 3px 0;
+    color: #001170;
+    background-color: #f2f4f9;
+    border: none;
+    border-left: 1px solid #cbd7ea;
+    border-bottom: 1px solid #cbd7ea;
+}
+QPushButton#pathBrowseButton:hover {
+    color: #2264b8;
+    background-color: #e2f4ff;
+    border-left-color: #cbd7ea;
+    border-bottom-color: #8fb6da;
+}
+QPushButton#pathBrowseButton:pressed {
+    color: #001170;
+    background-color: #c8eaff;
+}
+QPushButton#pathBrowseButton:disabled {
+    color: #8794ad;
+    background-color: #e7ecf3;
+    border-left-color: #cbd7ea;
+    border-bottom-color: #cbd7ea;
 }
 QPushButton {
     background-color: #ffffff;
@@ -157,12 +179,12 @@ QPushButton:disabled {
 }
 QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
 QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
-    color: #7183a6;
-    background-color: #f2f5f9;
+    color: #8794ad;
+    background-color: #f1f4f8;
     border-bottom-color: #cbd7ea;
 }
 QLabel:disabled, QCheckBox:disabled {
-    color: #7183a6;
+    color: #8794ad;
 }
 QLineEdit[configurationLocked="true"]:disabled,
 QTextEdit[configurationLocked="true"]:disabled,
@@ -176,7 +198,7 @@ QComboBox[configurationLocked="true"]:disabled {
 }
 QLabel[configurationLocked="true"]:disabled,
 QCheckBox[configurationLocked="true"]:disabled {
-    color: #5d6b86;
+    color: #7183a6;
 }
 QSpinBox:disabled::up-button, QSpinBox:disabled::down-button,
 QDoubleSpinBox:disabled::up-button, QDoubleSpinBox:disabled::down-button,
@@ -375,6 +397,11 @@ QLabel#sectionLabel {
     letter-spacing: 1px;
     padding: 2px 0 1px 0;
 }
+QLabel#structureRotationHint {
+    color: #7183a6;
+    font-size: 8pt;
+    padding: 0 3px 0 0;
+}
 QWidget#resultSection {
     border: none;
     background-color: #ffffff;
@@ -388,7 +415,7 @@ QTextEdit#executionLog {
     border: none;
     border-top: 1px solid #cbd7ea;
     border-radius: 0;
-    padding: 6px;
+    padding: 5px 9px;
     background-color: #ffffff;
     color: #14204a;
     font-family: "Cascadia Mono", "Consolas", monospace;
@@ -681,6 +708,10 @@ QGroupBox#diagnosticSection {
     margin-top: 1.25em;
     padding: 10px 6px 5px 6px;
 }
+QGroupBox#diagnosticSection[summaryDensity="compact"] {
+    margin-top: 1.05em;
+    padding: 3px 4px 1px 4px;
+}
 QGroupBox#diagnosticSection::title,
 QLabel#diagnosticSectionTitle {
     color: #2264b8;
@@ -842,10 +873,13 @@ QLabel#splashStatus {
     background-color: transparent;
     font-size: 9.5pt;
 }
-QLabel#splashFooter, QLabel#splashLogo {
-    color: #7183a6;
+QLabel#splashFooter {
+    color: #8794ad;
     background-color: transparent;
     font-size: 8.5pt;
+}
+QLabel#splashLogo {
+    background-color: transparent;
 }
 QProgressBar#splashProgress {
     min-height: 4px;
@@ -863,60 +897,198 @@ a { color: #2264b8; }
 def apply_phase_studio_style(app: object) -> None:
     """Apply the SharpED logo palette and Phase Studio visual system."""
     try:
-        from PySide6.QtCore import QPoint, Qt
-        from PySide6.QtGui import QColor, QPolygon
-        from PySide6.QtWidgets import QProxyStyle, QStyle, QStyleFactory
+        from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
+        from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
+        from PySide6.QtWidgets import QAbstractSpinBox, QComboBox, QProxyStyle, QStyle, QStyleFactory, QWidget
 
         class PhaseStudioStyle(QProxyStyle):
             """Keep Fusion behavior while drawing crisp, theme-independent arrows."""
+
+            @staticmethod
+            def _draw_chevron(painter, rect, *, up: bool, enabled: bool, hovered: bool, pressed: bool) -> None:
+                logical_rect = QRectF(rect)
+                center = logical_rect.center()
+                half_width = CONTROL_ARROW_WIDTH / 2.0
+                half_height = CONTROL_ARROW_HEIGHT / 2.0
+                path = QPainterPath()
+                if up:
+                    path.moveTo(QPointF(center.x() - half_width, center.y() + half_height))
+                    path.lineTo(QPointF(center.x(), center.y() - half_height))
+                    path.lineTo(QPointF(center.x() + half_width, center.y() + half_height))
+                else:
+                    path.moveTo(QPointF(center.x() - half_width, center.y() - half_height))
+                    path.lineTo(QPointF(center.x(), center.y() + half_height))
+                    path.lineTo(QPointF(center.x() + half_width, center.y() - half_height))
+                color = "#8794ad" if not enabled else ("#001170" if pressed else ("#2264b8" if hovered else "#001170"))
+                pen = QPen(QColor(color), CONTROL_ARROW_STROKE_WIDTH)
+                pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+                pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+                painter.save()
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                painter.setPen(pen)
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawPath(path)
+                painter.restore()
 
             def drawPrimitive(self, element, option, painter, widget=None):  # type: ignore[override]
                 up_elements = {QStyle.PE_IndicatorArrowUp, QStyle.PE_IndicatorSpinUp}
                 down_elements = {QStyle.PE_IndicatorArrowDown, QStyle.PE_IndicatorSpinDown}
                 if element in up_elements or element in down_elements:
-                    rect = option.rect
-                    center = rect.center()
-                    half_width = 4
-                    half_height = 3
-                    if element in up_elements:
-                        points = QPolygon([
-                            QPoint(center.x() - half_width, center.y() + half_height // 2),
-                            QPoint(center.x() + half_width, center.y() + half_height // 2),
-                            QPoint(center.x(), center.y() - half_height),
-                        ])
-                    else:
-                        points = QPolygon([
-                            QPoint(center.x() - half_width, center.y() - half_height // 2),
-                            QPoint(center.x() + half_width, center.y() - half_height // 2),
-                            QPoint(center.x(), center.y() + half_height),
-                        ])
                     enabled = bool(option.state & QStyle.State_Enabled)
                     hovered = bool(option.state & QStyle.State_MouseOver)
-                    color = "#2264b8" if hovered else ("#001170" if enabled else "#8794ad")
-                    painter.save()
-                    painter.setRenderHint(painter.Antialiasing, True)
-                    painter.setPen(Qt.NoPen)
-                    painter.setBrush(QColor(color))
-                    painter.drawPolygon(points)
-                    painter.restore()
+                    pressed = bool(option.state & (QStyle.State_Sunken | QStyle.State_On))
+                    self._draw_chevron(
+                        painter,
+                        QRectF(option.rect),
+                        up=element in up_elements,
+                        enabled=enabled,
+                        hovered=hovered,
+                        pressed=pressed,
+                    )
                     return
                 super().drawPrimitive(element, option, painter, widget)
 
         base_style = QStyleFactory.create("Fusion")
         if base_style is not None:
             app.setStyle(PhaseStudioStyle(base_style))
+
+        class ControlArrowOverlay(QWidget):
+            """Paint one canonical vector chevron family above styled Qt subcontrols."""
+
+            def __init__(self, owner) -> None:
+                super().__init__(owner)
+                self.owner = owner
+                self.hovered_part = ""
+                self.pressed_part = ""
+                self.setObjectName("phaseStudioArrowOverlay")
+                self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+                self.setAutoFillBackground(False)
+
+            def arrow_rects(self):
+                full_rect = QRectF(0.0, 0.0, float(self.width()), float(self.height()))
+                if isinstance(self.owner, QComboBox):
+                    return (("down", full_rect, False),)
+                half_height = full_rect.height() / 2.0
+                return (
+                    ("up", QRectF(0.0, 0.0, full_rect.width(), half_height), True),
+                    ("down", QRectF(0.0, half_height, full_rect.width(), half_height), False),
+                )
+
+            def _background_for(self, part: str, enabled: bool) -> str:
+                if not enabled:
+                    return "#e7ecf3"
+                if self.pressed_part == part:
+                    return "#c8eaff"
+                if self.hovered_part == part:
+                    return "#e2f4ff"
+                return "#f2f4f9"
+
+            def paintEvent(self, event) -> None:  # type: ignore[override]
+                del event
+                painter = QPainter(self)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                enabled = self.owner.isEnabled()
+                parts = self.arrow_rects()
+                for part, rect, _up in parts:
+                    painter.fillRect(rect, QColor(self._background_for(part, enabled)))
+                separator_pen = QPen(QColor("#cbd7ea"), 1.0)
+                painter.setPen(separator_pen)
+                painter.drawLine(QPointF(0.5, 0.0), QPointF(0.5, float(self.height())))
+                if len(parts) == 2:
+                    midpoint = float(self.height()) / 2.0
+                    painter.drawLine(QPointF(0.5, midpoint), QPointF(float(self.width()), midpoint))
+                bottom_color = "#2264b8" if self.owner.hasFocus() else ("#8fb6da" if self.owner.underMouse() else "#cbd7ea")
+                bottom_width = 2.0 if self.owner.hasFocus() else 1.0
+                bottom_pen = QPen(QColor(bottom_color), bottom_width)
+                painter.setPen(bottom_pen)
+                painter.drawLine(
+                    QPointF(0.0, float(self.height()) - bottom_width / 2.0),
+                    QPointF(float(self.width()), float(self.height()) - bottom_width / 2.0),
+                )
+                for part, rect, up in parts:
+                    PhaseStudioStyle._draw_chevron(
+                        painter,
+                        rect,
+                        up=up,
+                        enabled=enabled,
+                        hovered=self.hovered_part == part,
+                        pressed=self.pressed_part == part,
+                    )
+
+        class ControlArrowFilter(QObject):
+            """Attach and synchronize transparent arrow overlays application-wide."""
+
+            @staticmethod
+            def _is_control(widget) -> bool:
+                return isinstance(widget, (QComboBox, QAbstractSpinBox))
+
+            def _ensure_overlay(self, owner):
+                overlay = getattr(owner, "_phase_studio_arrow_overlay", None)
+                if overlay is None or not hasattr(overlay, "hovered_part"):
+                    overlay = ControlArrowOverlay(owner)
+                    owner._phase_studio_arrow_overlay = overlay
+                    owner.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+                    owner.setMouseTracking(True)
+                button_width = min(CONTROL_ARROW_BUTTON_WIDTH, owner.width())
+                overlay.setGeometry(owner.width() - button_width, 0, button_width, owner.height())
+                overlay.setVisible(owner.isVisible())
+                overlay.raise_()
+                return overlay
+
+            @staticmethod
+            def _part_at(owner, position) -> str:
+                if position.x() < owner.width() - CONTROL_ARROW_BUTTON_WIDTH:
+                    return ""
+                if isinstance(owner, QComboBox):
+                    return "down"
+                return "up" if position.y() < owner.height() / 2.0 else "down"
+
+            def eventFilter(self, watched, event):  # type: ignore[override]
+                if not self._is_control(watched):
+                    return False
+                event_type = event.type()
+                if event_type in {
+                    QEvent.Type.Polish,
+                    QEvent.Type.Show,
+                    QEvent.Type.Resize,
+                    QEvent.Type.EnabledChange,
+                    QEvent.Type.StyleChange,
+                }:
+                    self._ensure_overlay(watched).update()
+                elif event_type in {QEvent.Type.HoverMove, QEvent.Type.MouseMove}:
+                    overlay = self._ensure_overlay(watched)
+                    position = event.position()
+                    part = self._part_at(watched, position)
+                    if overlay.hovered_part != part:
+                        overlay.hovered_part = part
+                        overlay.update()
+                elif event_type == QEvent.Type.MouseButtonPress:
+                    overlay = self._ensure_overlay(watched)
+                    overlay.pressed_part = self._part_at(watched, event.position())
+                    overlay.update()
+                elif event_type == QEvent.Type.MouseButtonRelease:
+                    overlay = self._ensure_overlay(watched)
+                    overlay.pressed_part = ""
+                    overlay.hovered_part = self._part_at(watched, event.position())
+                    overlay.update()
+                elif event_type in {QEvent.Type.Leave, QEvent.Type.Hide}:
+                    overlay = self._ensure_overlay(watched)
+                    overlay.hovered_part = ""
+                    overlay.pressed_part = ""
+                    overlay.update()
+                return False
+
+        previous_filter = getattr(app, "_phase_studio_control_arrow_filter", None)
+        if previous_filter is not None:
+            app.removeEventFilter(previous_filter)
+        arrow_filter = ControlArrowFilter(app)
+        app._phase_studio_control_arrow_filter = arrow_filter
+        app.installEventFilter(arrow_filter)
+        for existing_widget in app.allWidgets():
+            if arrow_filter._is_control(existing_widget):
+                arrow_filter._ensure_overlay(existing_widget)
     except Exception:
         pass
 
-    try:
-        from pathlib import Path
-
-        assets = Path(__file__).resolve().parent / "assets"
-        qss = _SHARPED_QSS.replace(
-            "__PHASE_STUDIO_ARROW_UP_XPM__", assets.joinpath("arrow_up.xpm").as_posix()
-        ).replace(
-            "__PHASE_STUDIO_ARROW_DOWN_XPM__", assets.joinpath("arrow_down.xpm").as_posix()
-        )
-    except Exception:
-        qss = _SHARPED_QSS
-    app.setStyleSheet(qss)
+    app.setStyleSheet(_SHARPED_QSS)

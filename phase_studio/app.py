@@ -6,7 +6,8 @@ Phase Studio Qt application.
 Iterative Superflip -> optional SharpED server deblur -> EDMA reconstruction with
 persistent settings and standardized metric plotting.
 
-Reference CIF supplies cell, symmetry, composition and metrics. Superflip
+The selected metadata source supplies cell, symmetry and composition; a
+reference structure can additionally supply atom sites and comparison metrics. Superflip
 referencefile is optional and is written only when the user explicitly
 selects an external reference file (CIF/Jana/XPLOR/CCP4). The first Superflip run has no
 modelfile. Later cycles can use EDMA CIF coordinates, raw Superflip XPLOR, or
@@ -87,8 +88,8 @@ except Exception as exc:
 # Import the selected Qt binding before Matplotlib's Qt backend.
 # The application and the frozen executable use PySide6 exclusively.
 try:
-    from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QRectF
-    from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCharFormat, QTextCursor
+    from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QPoint, QRect, QRectF, QSize
+    from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
         QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
@@ -176,6 +177,8 @@ class StructureDepthArtists:
     scatter: object
     atom_coordinates: np.ndarray
     atom_base_colors: np.ndarray
+    atom_sizes: np.ndarray
+    atom_draw_order: np.ndarray
     cell_collection: object
     cell_midpoints: np.ndarray
     cell_corners: np.ndarray
@@ -195,33 +198,42 @@ def structure_camera_direction(elev: float, azim: float) -> np.ndarray:
     )
 
 
+def structure_camera_depth(points: np.ndarray, elev: float, azim: float) -> np.ndarray:
+    """Project centered Cartesian coordinates onto the current camera direction."""
+    point_array = np.asarray(points, dtype=np.float64).reshape((-1, 3))
+    if point_array.size == 0:
+        return np.asarray([], dtype=np.float64)
+    centered = point_array - np.mean(point_array, axis=0, keepdims=True)
+    return centered @ structure_camera_direction(elev, azim)
+
+
 def structure_depth_fade(
     points: np.ndarray,
     bounds: np.ndarray,
     elev: float,
     azim: float,
     *,
-    front_hold: float = 0.08,
-    gamma: float = 1.45,
-    maximum: float = 0.76,
+    front_hold: float = 0.25,
+    gamma: float = 1.25,
+    maximum: float = 0.68,
 ) -> np.ndarray:
     """Map current camera depth to a monotonic blend amount toward white.
 
-    The shared unit-cell bounds make the mapping identical in Reference,
-    Superflip and SharpED.  A small unmodified front band prevents foreground
-    atoms from looking washed out, while the nonlinear tail strongly separates
-    rear geometry.
+    ``bounds`` is the visible geometry used to normalize this individual
+    structure.  The nearest quarter remains at its original color; only middle
+    and rear geometry is progressively blended toward white.
     """
     point_array = np.asarray(points, dtype=np.float64).reshape((-1, 3))
     bound_array = np.asarray(bounds, dtype=np.float64).reshape((-1, 3))
     if point_array.size == 0:
         return np.asarray([], dtype=np.float64)
+    center = np.mean(bound_array, axis=0, keepdims=True)
     direction = structure_camera_direction(elev, azim)
-    projected_bounds = bound_array @ direction
+    projected_bounds = (bound_array - center) @ direction
     front = float(np.max(projected_bounds))
     back = float(np.min(projected_bounds))
     span = max(front - back, 1.0e-12)
-    rear_depth = np.clip((front - point_array @ direction) / span, 0.0, 1.0)
+    rear_depth = np.clip((front - (point_array - center) @ direction) / span, 0.0, 1.0)
     hold = max(0.0, min(0.45, float(front_hold)))
     normalized = np.clip((rear_depth - hold) / max(1.0e-12, 1.0 - hold), 0.0, 1.0)
     return np.clip(float(maximum), 0.0, 0.95) * np.power(normalized, max(0.2, float(gamma)))
@@ -234,6 +246,67 @@ def blend_structure_colors(base_colors: np.ndarray, fade: np.ndarray) -> np.ndar
         colors = np.repeat(colors.reshape((1, 3)), len(fade), axis=0)
     amounts = np.asarray(fade, dtype=np.float64).reshape((-1, 1))
     return np.clip(colors * (1.0 - amounts) + amounts, 0.0, 1.0)
+
+
+def fitted_dialog_client_size(
+    available_size: QSize,
+    frame_extra: QSize = QSize(0, 0),
+    preferred_size: QSize = QSize(1180, 835),
+) -> QSize:
+    """Return an initial client size whose complete frame fits the usable desktop."""
+    max_outer_width = max(1, int(math.floor(available_size.width() * 0.95)))
+    # On short high-DPI desktops, use the available work area rather than
+    # sacrificing scientific plot height to a large decorative outer margin.
+    # The native frame is still measured and kept wholly above the taskbar.
+    max_outer_height = max(1, int(math.floor(available_size.height() * 0.97)))
+    client_width = min(preferred_size.width(), max(1, max_outer_width - max(0, frame_extra.width())))
+    client_height = min(preferred_size.height(), max(1, max_outer_height - max(0, frame_extra.height())))
+    return QSize(client_width, client_height)
+
+
+def fit_dialog_to_available_screen(
+    dialog: QDialog,
+    preferred_size: QSize = QSize(1180, 835),
+) -> QRect:
+    """Size and center a dialog inside its screen's availableGeometry()."""
+    dialog.ensurePolished()
+    dialog.winId()  # Ensure native frame margins are available before sizing.
+    screen = dialog.screen() or QGuiApplication.primaryScreen()
+    if screen is None:
+        fallback = QRect(0, 0, preferred_size.width(), preferred_size.height())
+        dialog.resize(preferred_size)
+        return fallback
+
+    available = screen.availableGeometry()
+    frame = dialog.frameGeometry()
+    client = dialog.geometry()
+    frame_extra = QSize(
+        max(0, frame.width() - client.width()),
+        max(0, frame.height() - client.height()),
+    )
+    target = fitted_dialog_client_size(available.size(), frame_extra, preferred_size)
+    dialog.setMinimumSize(min(760, target.width()), min(520, target.height()))
+    dialog.resize(target)
+
+    frame = dialog.frameGeometry()
+    target_frame_top_left = QPoint(
+        available.x() + max(0, (available.width() - frame.width()) // 2),
+        available.y() + max(0, (available.height() - frame.height()) // 2),
+    )
+    dialog.move(dialog.pos() + target_frame_top_left - frame.topLeft())
+
+    # A window manager may adjust frame margins after the first move. Clamp a
+    # second time so the full native frame, including its title bar, stays in
+    # the usable rectangle above the taskbar.
+    frame = dialog.frameGeometry()
+    dx = max(available.left() - frame.left(), 0) - max(frame.right() - available.right(), 0)
+    dy = max(available.top() - frame.top(), 0) - max(frame.bottom() - available.bottom(), 0)
+    if dx or dy:
+        dialog.move(dialog.pos() + QPoint(dx, dy))
+
+    dialog.available_geometry_at_open = QRect(available)  # type: ignore[attr-defined]
+    dialog.initial_client_size = QSize(dialog.size())  # type: ignore[attr-defined]
+    return available
 
 @dataclass
 class ReferenceContext:
@@ -295,6 +368,15 @@ LOG_DETAIL_PREFIXES = (
     "standardized hkl export",
     "superflip map:",
     "deblurred map:",
+    "removed stale superflip",
+    "xplor map normalized",
+    "cif-only exclude settings",
+    "superflip reads normalized xplor",
+    "original/viewer xplor",
+    "superflip modelfile is set",
+    "superflip symmetry voxel grid",
+    "tls fallback detail:",
+    "sharped protocol detail:",
 )
 
 
@@ -356,15 +438,17 @@ def classify_log_record(
     if resolved_level not in LOG_LEVELS:
         if "error" in lowered or "failed" in lowered or "failure" in lowered:
             resolved_level = "ERROR"
+        elif lowered.startswith(LOG_DETAIL_PREFIXES):
+            resolved_level = "DETAIL"
         elif any(word in lowered for word in ("warning", "could not", "skipped", "omitted")):
             resolved_level = "WARNING"
         elif stripped.startswith("$") or stripped.startswith("$ ") or stripped.startswith("  $"):
-            resolved_level = "COMMAND"
+            resolved_level = "DETAIL"
         elif stripped.startswith("===") or re.match(r"^cycle\s+\d+\s*/\s*\d+", lowered):
             resolved_level = "STEP"
         elif any(word in lowered for word in ("completed", " complete", "finished", "done.")):
             resolved_level = "SUCCESS"
-        elif text.startswith(("  ", "\t")) or lowered.startswith(LOG_DETAIL_PREFIXES):
+        elif text.startswith(("  ", "\t")):
             resolved_level = "DETAIL"
         else:
             resolved_level = "INFO"
@@ -4358,8 +4442,32 @@ CONFIG_PAGE_MARGIN_VERTICAL = 8
 CONFIG_MAJOR_SECTION_SPACING = 10
 CONFIG_GUIDED_GROUP_MARGINS = (8, 5, 8, 6)
 CONFIG_GUIDED_GROUP_SPACING = 5
-CONFIG_BROWSE_BUTTON_WIDTH = 34
+CONFIG_BROWSE_BUTTON_WIDTH = 28
 CONFIG_CONTROL_VISIBLE_HEIGHT = 28
+
+
+class MiddleElidedLabel(QLabel):
+    """Single-line label that keeps its complete value in the tooltip."""
+
+    def __init__(self, text: str, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._full_text = str(text)
+        self.setToolTip(self._full_text)
+        self.setMinimumWidth(1)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self._update_elided_text()
+
+    def _update_elided_text(self) -> None:
+        available_width = max(1, self.contentsRect().width())
+        QLabel.setText(
+            self,
+            self.fontMetrics().elidedText(self._full_text, Qt.ElideMiddle, available_width),
+        )
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._update_elided_text()
+
 
 class PathRow(QWidget):
     def __init__(self, label: str, default: str = "", mode: str = "file", file_filter: str = "All files (*)") -> None:
@@ -4376,7 +4484,7 @@ class PathRow(QWidget):
         self.edit = QLineEdit(default)
         self.button = QPushButton("…")
         self.button.setObjectName("pathBrowseButton")
-        self.button.setFixedWidth(CONFIG_BROWSE_BUTTON_WIDTH)
+        self.button.setFixedSize(CONFIG_BROWSE_BUTTON_WIDTH, CONFIG_CONTROL_VISIBLE_HEIGHT)
         layout.addWidget(self.edit, 1)
         layout.addWidget(self.button)
         self.button.clicked.connect(self.browse)
@@ -4625,62 +4733,82 @@ class WorkflowDiagram(QWidget):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(190)
+        self.setMinimumHeight(198)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setToolTip("Optional branches depend on the Workflow settings.")
+
+    @staticmethod
+    def _diagram_geometry(width: float) -> Tuple[List[QRectF], List[QRectF]]:
+        width = max(240.0, float(width))
+        margin = 8.0
+        gap = max(7.0, min(16.0, width * 0.025))
+        box_w = max(44.0, (width - 2.0 * margin - 3.0 * gap) / 4.0)
+        box_h = 42.0
+        make_row = lambda y: [
+            QRectF(margin + index * (box_w + gap), y, box_w, box_h)
+            for index in range(4)
+        ]
+        return make_row(22.0), make_row(104.0)
 
     def paintEvent(self, event) -> None:  # type: ignore[override]
         super().paintEvent(event)
         painter = QPainter(self)
         try:
             painter.setRenderHint(QPainter.Antialiasing, True)
-            width = max(520.0, float(self.width()))
-            scale = min(1.0, width / 760.0)
-            box_w = 116.0 * scale
-            box_h = 34.0
-            gap = max(18.0, (width - 5.0 * box_w - 32.0) / 4.0)
-            y = 30.0
-            labels = ("Reflections", "Superflip", "XPLOR map", "SharpED", "Next-cycle model")
-            boxes: List[QRectF] = []
-            x = 8.0
-            for label in labels:
-                box = QRectF(x, y, box_w, box_h)
-                boxes.append(box)
-                painter.setPen(QPen(QColor("#44b7ff"), 1.0))
-                painter.setBrush(QColor("#f2f4f9"))
-                painter.drawRect(box)
-                painter.setPen(QColor("#001170"))
-                painter.drawText(box, Qt.AlignCenter, label)
-                x += box_w + gap
+            width = max(240.0, float(self.width()))
+            margin = 8.0
+            top_boxes, bottom_boxes = self._diagram_geometry(width)
+            top_labels = ("Reflections", "Superflip", "XPLOR map", "SharpED")
+            bottom_labels = ("EDMA", "Processed map", "Next-cycle model", "Jana2020")
+            diagram_font = painter.font()
+            diagram_font.setPointSizeF(8.5)
+            painter.setFont(diagram_font)
+
+            def draw_row(labels: Sequence[str], boxes: Sequence[QRectF]) -> None:
+                for label, box in zip(labels, boxes):
+                    painter.setPen(QPen(QColor("#44b7ff"), 1.0))
+                    painter.setBrush(QColor("#f2f4f9"))
+                    painter.drawRect(box)
+                    painter.setPen(QColor("#001170"))
+                    painter.drawText(box.adjusted(4.0, 2.0, -4.0, -2.0), Qt.AlignCenter | Qt.TextWordWrap, label)
+
+            draw_row(top_labels, top_boxes)
+            draw_row(bottom_labels, bottom_boxes)
 
             def arrow(start_x: float, start_y: float, end_x: float, end_y: float) -> None:
-                painter.setPen(QPen(QColor("#2264b8"), 1.5))
+                painter.setPen(QPen(QColor("#2264b8"), 1.35))
                 painter.drawLine(int(start_x), int(start_y), int(end_x), int(end_y))
-                painter.drawLine(int(end_x), int(end_y), int(end_x - 6), int(end_y - 4))
-                painter.drawLine(int(end_x), int(end_y), int(end_x - 6), int(end_y + 4))
+                angle = math.atan2(end_y - start_y, end_x - start_x)
+                head = 6.0
+                spread = 0.58
+                for delta in (-spread, spread):
+                    painter.drawLine(
+                        int(end_x),
+                        int(end_y),
+                        int(end_x - head * math.cos(angle + delta)),
+                        int(end_y - head * math.sin(angle + delta)),
+                    )
 
-            for first, second in zip(boxes, boxes[1:]):
-                arrow(first.right() + 3, first.center().y(), second.left() - 3, second.center().y())
+            for first, second in zip(top_boxes, top_boxes[1:]):
+                arrow(first.right() + 2.0, first.center().y(), second.left() - 2.0, second.center().y())
 
-            edma_box = QRectF(boxes[2].center().x() - box_w / 2.0, 100.0, box_w, box_h)
-            painter.setPen(QPen(QColor("#44b7ff"), 1.0))
-            painter.setBrush(QColor("#f2f4f9"))
-            painter.drawRect(edma_box)
-            painter.setPen(QColor("#001170"))
-            painter.drawText(edma_box, Qt.AlignCenter, "EDMA")
-            painter.setPen(QPen(QColor("#2264b8"), 1.5))
-            painter.drawLine(int(boxes[2].center().x()), int(boxes[2].bottom() + 3), int(edma_box.center().x()), int(edma_box.top() - 3))
+            # Optional scientific branches from the raw XPLOR map and SharpED.
+            arrow(top_boxes[2].center().x(), top_boxes[2].bottom() + 2.0, bottom_boxes[0].center().x(), bottom_boxes[0].top() - 2.0)
+            arrow(top_boxes[3].center().x(), top_boxes[3].bottom() + 2.0, bottom_boxes[1].center().x(), bottom_boxes[1].top() - 2.0)
+            painter.setPen(QPen(QColor("#2264b8"), 1.35))
+            route_y = 158.0
+            painter.drawLine(int(bottom_boxes[0].center().x()), int(bottom_boxes[0].bottom() + 2.0), int(bottom_boxes[0].center().x()), int(route_y))
+            painter.drawLine(int(bottom_boxes[0].center().x()), int(route_y), int(bottom_boxes[2].center().x()), int(route_y))
+            arrow(bottom_boxes[2].center().x(), route_y, bottom_boxes[2].center().x(), bottom_boxes[2].bottom() + 2.0)
+            arrow(bottom_boxes[1].right() + 2.0, bottom_boxes[1].center().y(), bottom_boxes[2].left() - 2.0, bottom_boxes[2].center().y())
+            arrow(bottom_boxes[2].right() + 2.0, bottom_boxes[2].center().y(), bottom_boxes[3].left() - 2.0, bottom_boxes[3].center().y())
 
-            jana_box = QRectF(boxes[4].center().x() - box_w / 2.0, 100.0, box_w, box_h)
-            painter.setPen(QPen(QColor("#44b7ff"), 1.0))
-            painter.setBrush(QColor("#f2f4f9"))
-            painter.drawRect(jana_box)
-            painter.setPen(QColor("#001170"))
-            painter.drawText(jana_box, Qt.AlignCenter, "Jana2020")
-            painter.setPen(QPen(QColor("#2264b8"), 1.5))
-            painter.drawLine(int(boxes[4].center().x()), int(boxes[4].bottom() + 3), int(jana_box.center().x()), int(jana_box.top() - 3))
             painter.setPen(QColor("#2264b8"))
-            painter.drawText(QRectF(8.0, 152.0, width - 16.0, 24.0), Qt.AlignCenter, "Branches are optional · selected result → Jana2020")
+            painter.drawText(
+                QRectF(margin, 170.0, width - 2.0 * margin, 20.0),
+                Qt.AlignCenter,
+                "Optional branches · selected result → Jana2020",
+            )
         finally:
             painter.end()
 
@@ -4693,6 +4821,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.msg_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
         self.worker: Optional[threading.Thread] = None
         self.hkl_task_worker: Optional[threading.Thread] = None
+        self._hkl_task_generation = 0
+        self._active_hkl_task_id: Optional[int] = None
+        self._completed_hkl_task_ids: set[int] = set()
         self.stop_after_cycle = threading.Event()
         self.stop_now = threading.Event()
         self.results: List[CycleResult] = []
@@ -4706,8 +4837,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_elev = 20.0
         self.structure_azim = 35.0
         self._structure_rotation_source: Optional[object] = None
-        self._metrics_compact_sizes: Optional[List[int]] = None
-        self._metrics_expanded = False
         self._configuration_locked = False
         self._run_status = "READY"
         self._cycle_progress_state: Optional[CycleProgressState] = None
@@ -4791,10 +4920,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._apply_input_tooltip(key, w)
         self._apply_form_label_tooltip(form, w, key)
 
-    def _add_checkbox(self, form: QFormLayout, key: str, label: str, default: bool = False) -> None:
+    def _add_checkbox(
+        self,
+        form: QFormLayout,
+        key: str,
+        label: str,
+        default: bool = False,
+        *,
+        align_with_fields: bool = False,
+    ) -> None:
         w = QCheckBox(label)
         w.setChecked(bool(default))
-        form.addRow(w)
+        if align_with_fields:
+            form.addRow("", w)
+        else:
+            form.addRow(w)
         self.inputs[key] = w
         self._apply_input_tooltip(key, w)
 
@@ -4987,15 +5127,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         def add_settings_tab(name: str, advanced: bool = False) -> QVBoxLayout:
             scroll = QScrollArea()
+            scroll.setObjectName("settingsScrollArea")
             scroll.setWidgetResizable(True)
             scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            if advanced:
+                scroll.setViewportMargins(0, 2, 0, 0)
             page = QWidget()
             page.setObjectName("settingsPage")
             page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             layout = QVBoxLayout(page)
             layout.setContentsMargins(
                 CONFIG_PAGE_MARGIN_HORIZONTAL,
-                CONFIG_PAGE_MARGIN_VERTICAL,
+                CONFIG_PAGE_MARGIN_VERTICAL + (2 if advanced else 0),
                 CONFIG_PAGE_MARGIN_HORIZONTAL,
                 CONFIG_PAGE_MARGIN_VERTICAL,
             )
@@ -5042,6 +5185,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             label.setObjectName("settingsCallout")
             label.setTextFormat(Qt.RichText)
             label.setWordWrap(True)
+            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
             return label
 
         right = QWidget()
@@ -5384,6 +5528,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         inference_form = add_form_group(sharped_tab, "Inference")
         self._add_text(inference_form, "sharped_elements", "Elements", "")
+        self.inputs["sharped_elements"].setPlaceholderText("Auto from composition")  # type: ignore[attr-defined]
         self._add_dspin(inference_form, "sharped_outres", "Output resolution", 0.2, 0.001, 10.0, 0.05, 4)
 
         network_form = add_form_group(sharped_tab, "Transfer and network")
@@ -5548,13 +5693,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_text(calculation_form, "delta", "Delta", "AUTO")
         self._add_text(calculation_form, "weakratio", "Weak ratio", "0.000")
         self._add_text(calculation_form, "biso", "Biso", "0.000")
-        self._add_checkbox(calculation_form, "polish", "Enable final polish", False)
+        self._add_checkbox(calculation_form, "polish", "Enable final polish", False, align_with_fields=True)
 
         density_form = add_form_group(superflip_tab, "Density / solution selection")
         self._add_text(density_form, "voxel", "Voxel grid", "omit")
         self._add_spin(density_form, "bestdensities_count", "Best densities: count", 1, 1, 100, 1)
         self._add_combo(density_form, "bestdensities_metric", "Best-density metric", ["rvalue", "peakiness", "symmetry", "reference"], "rvalue")
-        self._add_checkbox(density_form, "bestdensities_symmetry", "Use symmetry for best densities", False)
+        self._add_checkbox(density_form, "bestdensities_symmetry", "Use symmetry for best densities", False, align_with_fields=True)
         self.inputs["bestdensities_symmetry"].setToolTip(
             INPUT_TOOLTIPS["bestdensities_symmetry"]
         )  # type: ignore[attr-defined]
@@ -5571,12 +5716,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         output_options_form = add_form_group(superflip_tab, "Output")
         self._add_combo(output_options_form, "output_format", "Format", ["xplor", "jana", "ccp4", "m80"], "xplor")
-        self._add_checkbox(output_options_form, "write_auxiliary_outputs", "Write legacy auxiliary outputs", False)
-        self._add_checkbox(output_options_form, "export_superflip_xplor", "Save XPLOR map", True)
-        self._add_checkbox(output_options_form, "export_superflip_ccp4", "Save CCP4 map", False)
-        self._add_checkbox(output_options_form, "export_superflip_jana", "Save Jana m80/m81", False)
-        self._add_checkbox(output_options_form, "export_standard_hkl", "Save standardized HKL (I/σ/phase)", False)
-        self._add_checkbox(output_options_form, "export_jana_project", "Export Jana2020 project", False)
+        self._add_checkbox(output_options_form, "write_auxiliary_outputs", "Write legacy auxiliary outputs", False, align_with_fields=True)
+        self._add_checkbox(output_options_form, "export_superflip_xplor", "Save XPLOR map", True, align_with_fields=True)
+        self._add_checkbox(output_options_form, "export_superflip_ccp4", "Save CCP4 map", False, align_with_fields=True)
+        self._add_checkbox(output_options_form, "export_superflip_jana", "Save Jana m80/m81", False, align_with_fields=True)
+        self._add_checkbox(output_options_form, "export_standard_hkl", "Save standardized HKL (I/σ/phase)", False, align_with_fields=True)
+        self._add_checkbox(output_options_form, "export_jana_project", "Export Jana2020 project", False, align_with_fields=True)
 
         reference_density_form = add_form_group(superflip_tab, "Reference density")
         reference_density_form.addRow(self._secondary_help(
@@ -5605,7 +5750,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         symmetry_form = add_form_group(edma_tab, "Symmetry and peak positions")
         self._add_dspin(symmetry_form, "merge_distance", "Merge distance (Å)", 0.75, 0.0, 10.0, 0.05, 3)
         self._add_combo(symmetry_form, "edma_fullcell", "Full-cell", ["no", "yes"], "no")
-        self._add_checkbox(symmetry_form, "edma_centerofcharge", "Use center of charge", True)
+        self._add_checkbox(symmetry_form, "edma_centerofcharge", "Use center of charge", True, align_with_fields=True)
 
         chemical_form = add_form_group(edma_tab, "Chemical filtering")
         self._add_text(chemical_form, "edma_chlimit", "Charge limit", "0.2500")
@@ -5673,20 +5818,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         run_status_title = QLabel("RUN STATUS")
         run_status_title.setObjectName("runStatusTitle")
         run_status_layout.addWidget(run_status_title)
+        overall_progress_header = QHBoxLayout()
         self.overall_progress_label = QLabel("Overall")
         self.overall_progress_label.setObjectName("progressSectionLabel")
-        run_status_layout.addWidget(self.overall_progress_label)
+        self.overall_progress_value = QLabel("Idle")
+        self.overall_progress_value.setObjectName("progressStageCounter")
+        self.overall_progress_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        overall_progress_header.addWidget(self.overall_progress_label)
+        overall_progress_header.addStretch(1)
+        overall_progress_header.addWidget(self.overall_progress_value)
+        run_status_layout.addLayout(overall_progress_header)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setTextVisible(False)
         self.progress_bar.setFormat("Idle")
         self.progress_bar.setToolTip("Cycle-level progress indicator for the iterative pipeline.")
         run_status_layout.addWidget(self.progress_bar)
         current_cycle_header = QHBoxLayout()
         current_cycle_label = QLabel("Current cycle")
         current_cycle_label.setObjectName("progressSectionLabel")
-        self.current_cycle_stage_counter = QLabel("")
+        self.current_cycle_stage_counter = QLabel("Idle")
         self.current_cycle_stage_counter.setObjectName("progressStageCounter")
         self.current_cycle_stage_counter.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         current_cycle_header.addWidget(current_cycle_label)
@@ -5723,7 +5875,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.ax = self.figure.add_subplot(111)
         self.canvas = FigureCanvas(self.figure)
         self.canvas.setObjectName("metricsCanvas")
-        self.canvas.setMinimumHeight(150)
+        self.canvas.setMinimumHeight(140)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.canvas.mpl_connect("resize_event", lambda _event: self._layout_metrics_figure())
         self.canvas.setToolTip("")
@@ -5731,12 +5883,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.result_splitter.addWidget(metrics_section)
 
         structure_section, structure_layout = make_result_section("STRUCTURE COMPARISON")
+        self.structure_rotation_hint = QLabel("Drag to rotate all views · H hidden")
+        self.structure_rotation_hint.setObjectName("structureRotationHint")
+        self.structure_rotation_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.structure_rotation_hint.setVisible(False)
+        structure_layout.addWidget(self.structure_rotation_hint)
         self.structure_figure = Figure(figsize=(7.5, 3.0), dpi=100)
         self.structure_canvas = FigureCanvas(self.structure_figure)
         self.structure_canvas.setObjectName("structureCanvas")
         self.structure_canvas.setMinimumHeight(260)
         self.structure_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.structure_canvas.setToolTip("Drag any structure preview to rotate all three views together. Hydrogens are hidden.")
+        self.structure_canvas.setToolTip("")
         self.structure_canvas.mpl_connect("button_press_event", self._begin_structure_rotation)
         self.structure_canvas.mpl_connect("motion_notify_event", self._sync_structure_view_from_event)
         self.structure_canvas.mpl_connect("button_release_event", self._finish_structure_rotation)
@@ -5754,9 +5911,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         log_layout.addWidget(self.log_text, 1)
         self.result_splitter.addWidget(log_section)
         self.result_splitter.setStretchFactor(0, 2)
-        self.result_splitter.setStretchFactor(1, 5)
+        self.result_splitter.setStretchFactor(1, 6)
         self.result_splitter.setStretchFactor(2, 2)
-        self.result_splitter.setSizes([170, 390, 140])
+        self.result_splitter.setSizes([155, 425, 120])
         self._last_log_record: Optional[ExecutionLogRecord] = None
         self._append_execution_log("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL input mode.")
         self._append_execution_log(
@@ -6263,13 +6420,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if isinstance(button, QPushButton):
                 button.setEnabled(not running and not self._configuration_locked)
         pipeline_active = self.worker is not None and self.worker.is_alive()
-        if running and not pipeline_active:
+        run_is_idle = str(getattr(self, "_run_status", "READY")).upper() == "READY"
+        if running and not pipeline_active and run_is_idle:
             self.progress_bar.setRange(0, 0)
-            self.progress_bar.setFormat("HKL analysis...")
-        elif not running and not pipeline_active:
+            self._set_overall_progress_text("HKL analysis...")
+        elif not running and not pipeline_active and run_is_idle:
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(0)
-            self.progress_bar.setFormat("Idle")
+            self._set_overall_progress_text("Idle")
 
     def _start_hkl_background_task(self, label: str, worker_fn: Callable[[], object], done_kind: str) -> None:
         if self.hkl_task_worker is not None and self.hkl_task_worker.is_alive():
@@ -6280,12 +6438,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             return
         self._set_hkl_task_running(True)
-        self._append_execution_log(f"{label} started in background.")
+        self._hkl_task_generation += 1
+        task_id = self._hkl_task_generation
+        self._active_hkl_task_id = task_id
 
         def worker() -> None:
             try:
                 result = worker_fn()
-                self.msg_queue.put((done_kind, result))
+                self.msg_queue.put((done_kind, (task_id, result)))
             except Exception as exc:
                 report = build_error_report(
                     exc,
@@ -6293,9 +6453,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     operation=label,
                     extra_details=traceback.format_exc(),
                 )
-                self.msg_queue.put(("hkl_task_error", report))
+                self.msg_queue.put(("hkl_task_error", (task_id, report)))
             finally:
-                self.msg_queue.put(("hkl_task_finished", None))
+                self.msg_queue.put(("hkl_task_finished", (task_id, None)))
 
         self.hkl_task_worker = threading.Thread(target=worker, daemon=True)
         self.hkl_task_worker.start()
@@ -6312,11 +6472,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         self._start_hkl_background_task("HKL validation", worker, "hkl_load_result")
 
-    def _diagnostic_header(self, title: str, subtitle: str, status: Optional[str] = None) -> QWidget:
+    def _diagnostic_header(
+        self,
+        title: str,
+        subtitle: str,
+        status: Optional[str] = None,
+        *,
+        compact: bool = False,
+    ) -> QWidget:
         header = QWidget()
         header.setObjectName("diagnosticHeader")
+        header.setProperty("headerDensity", "compact" if compact else "standard")
         header_layout = QHBoxLayout(header)
-        header_layout.setContentsMargins(14, 10, 14, 10)
+        header_layout.setContentsMargins(14, 5 if compact else 10, 14, 5 if compact else 10)
         text_layout = QVBoxLayout()
         text_layout.setSpacing(1)
         title_label = QLabel(title)
@@ -6346,6 +6514,50 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     ) -> QGroupBox:
         box = QGroupBox("INPUT SUMMARY")
         box.setObjectName("diagnosticSection")
+        box.setProperty("summaryDensity", "compact" if compact else "standard")
+
+        if compact and not extra_rows:
+            grid = QGridLayout(box)
+            grid.setContentsMargins(8, 1, 8, 1)
+            grid.setHorizontalSpacing(12)
+            grid.setVerticalSpacing(2)
+
+            source_row = QWidget()
+            source_layout = QHBoxLayout(source_row)
+            source_layout.setContentsMargins(0, 0, 0, 0)
+            source_layout.setSpacing(5)
+            source_value = MiddleElidedLabel(hkl_path.name)
+            source_value.setObjectName("diagnosticSummaryValue")
+            source_value.setToolTip(str(hkl_path))
+            source_layout.addWidget(source_value, 1)
+            copy_path = QToolButton()
+            copy_path.setObjectName("diagnosticTextAction")
+            copy_path.setText("Copy path")
+            copy_path.setToolTip(str(hkl_path))
+            copy_path.clicked.connect(lambda: QApplication.clipboard().setText(str(hkl_path)))
+            source_layout.addWidget(copy_path)
+
+            values = (
+                ("Source", source_row),
+                ("Format", QLabel(data_mode)),
+                ("Unit cell", QLabel(f"{cell.a:.5g}  {cell.b:.5g}  {cell.c:.5g}  {cell.alpha:.4g}  {cell.beta:.4g}  {cell.gamma:.4g}")),
+                ("Space group", QLabel(spacegroup_hm)),
+            )
+            for index, (label_text, value_widget) in enumerate(values):
+                row, pair = divmod(index, 2)
+                label = QLabel(label_text)
+                label.setObjectName("diagnosticSummaryLabel")
+                if isinstance(value_widget, QLabel):
+                    value_widget.setObjectName("diagnosticSummaryValue")
+                    value_widget.setTextInteractionFlags(Qt.TextSelectableByMouse)
+                    value_widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                grid.addWidget(label, row, pair * 2)
+                grid.addWidget(value_widget, row, pair * 2 + 1)
+            grid.setColumnStretch(1, 3)
+            grid.setColumnStretch(3, 2)
+            box.setToolTip(source_note)
+            return box
+
         form = QFormLayout(box)
         form.setContentsMargins(10, 8 if compact else 12, 10, 4 if compact else 8)
         form.setHorizontalSpacing(18)
@@ -6397,7 +6609,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             card.setObjectName("diagnosticMetric")
             card.setProperty("metricDensity", "compact" if compact else "standard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(6 if compact else 8, 3 if compact else 7, 6 if compact else 8, 3 if compact else 7)
+            card_layout.setContentsMargins(6 if compact else 8, 0 if compact else 7, 6 if compact else 8, 0 if compact else 7)
             card_layout.setSpacing(0)
             value = QLabel(value_text)
             value.setObjectName("diagnosticMetricValue")
@@ -6576,14 +6788,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("hklCompletenessDialog")
         dialog.setWindowTitle("HKL Completeness")
-        dialog.resize(1180, 835)
-        dialog.setMinimumSize(900, 650)
         layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(9)
+        layout.setContentsMargins(9, 8, 9, 8)
+        layout.setSpacing(4)
         layout.addWidget(self._diagnostic_header(
             "HKL COMPLETENESS",
             "Resolution-dependent completeness and intensity statistics",
+            compact=True,
         ))
         d_min_text = format_resolution_d(analysis.d_min)
         d_full = format_resolution_d(analysis.d_full_98)
@@ -6619,15 +6830,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if threshold_stl is not None and threshold_stl > 0:
             threshold_d = 1.0 / (2.0 * threshold_stl)
         threshold_d_text = format_resolution_d(threshold_d)
-        layout.addWidget(self._diagnostic_input_summary(
+        input_summary = self._diagnostic_input_summary(
             analysis.hkl_path,
             analysis.data_mode,
             analysis.cell,
             analysis.spacegroup_hm,
             analysis.source_note,
             compact=True,
-        ))
-        layout.addWidget(self._diagnostic_metric_grid((
+        )
+        layout.addWidget(input_summary)
+        metrics_panel = self._diagnostic_metric_grid((
             (f"{len(analysis.reflections_unique):,}", "Unique reflections"),
             (d_min_text, "d_min"),
             (d_full, "d at 98% cumulative completeness"),
@@ -6635,110 +6847,256 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             (threshold_d_text, f"d where mean {signal_label} < {signal_threshold:.1f}"),
             (f"{phase_count:,} / {len(analysis.reflections_raw):,}", "Phase-value coverage"),
             (f"{raw_sigma_count:,} / {len(analysis.reflections_raw):,}", f"{sigma_label} coverage"),
-        ), compact=True, row_columns=(4, 3)))
+        ), compact=True, row_columns=(7,))
+        layout.addWidget(metrics_panel)
 
         content_splitter = QSplitter(Qt.Vertical)
         content_splitter.setObjectName("diagnosticSplitter")
         content_splitter.setChildrenCollapsible(False)
         plot_panel = QWidget()
+        plot_panel.setMinimumHeight(300)
         plot_layout = QVBoxLayout(plot_panel)
         plot_layout.setContentsMargins(0, 0, 0, 0)
         plot_layout.setSpacing(3)
         plot_title = QLabel("COMPLETENESS AND SIGNAL VS RESOLUTION")
         plot_title.setObjectName("diagnosticSectionTitle")
         plot_layout.addWidget(plot_title)
-        figure = Figure(figsize=(8.4, 5.6), dpi=100)
+        figure = Figure(figsize=(8.4, 6.4), dpi=100)
         canvas = FigureCanvas(figure)
         canvas.setObjectName("hklCompletenessCanvas")
-        canvas.setMinimumHeight(260)
-        ax1 = figure.add_subplot(211)
-        ax2 = figure.add_subplot(212)
+        canvas.setMinimumHeight(280)
+        canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        plot_grid = figure.add_gridspec(
+            2,
+            2,
+            # The nested first row becomes two equal 1.15-height axes; the
+            # histogram remains the deliberately secondary 0.65-height panel.
+            height_ratios=(2.30, 0.65),
+            width_ratios=(0.82, 0.18),
+            hspace=0.64,
+            wspace=0.04,
+            left=0.095,
+            right=0.985,
+            bottom=0.14,
+            top=0.942,
+        )
+
+        def adjust_plot_bottom_margin(event) -> None:
+            # Preserve a readable, unclipped histogram xlabel when the splitter
+            # compresses the canvas: Matplotlib margins are fractional, while
+            # the label needs approximately the same physical pixel clearance.
+            canvas_height = max(1.0, float(event.height))
+            responsive_bottom = min(0.21, max(0.14, 52.0 / canvas_height))
+            responsive_hspace = min(0.86, max(0.64, 0.64 + (340.0 - canvas_height) / 420.0))
+            responsive_top = min(0.942, 1.0 - 21.0 / canvas_height)
+            responsive_ylabel_size = 6.0 if canvas_height < 320.0 else (8.0 if canvas_height < 360.0 else 9.0)
+            if (
+                not math.isclose(float(plot_grid.bottom), responsive_bottom, abs_tol=0.001)
+                or not math.isclose(float(plot_grid.hspace), responsive_hspace, abs_tol=0.001)
+                or not math.isclose(float(plot_grid.top), responsive_top, abs_tol=0.001)
+            ):
+                plot_grid.update(bottom=responsive_bottom, hspace=responsive_hspace, top=responsive_top)
+                for plot_axis in figure.axes:
+                    subplot_spec = plot_axis.get_subplotspec()
+                    if subplot_spec is not None:
+                        plot_axis.set_position(subplot_spec.get_position(figure))
+                for resolution_axis in figure.axes[:2]:
+                    resolution_axis.yaxis.label.set_fontsize(responsive_ylabel_size)
+                if figure.legends:
+                    responsive_legend_column = plot_grid[0, 1].get_position(figure)
+                    figure.legends[0].set_bbox_to_anchor(
+                        (
+                            responsive_legend_column.x0 + 0.008,
+                            (responsive_legend_column.y0 + responsive_legend_column.y1) / 2.0,
+                        ),
+                        transform=figure.transFigure,
+                    )
+                canvas.draw_idle()
+
+        layout_resize_cid = canvas.mpl_connect("resize_event", adjust_plot_bottom_margin)
+        resolution_grid = plot_grid[0, 0].subgridspec(
+            2,
+            1,
+            height_ratios=(1.0, 1.0),
+            hspace=0.15,
+        )
+        ax_completeness = figure.add_subplot(resolution_grid[0, 0])
+        ax_signal = figure.add_subplot(resolution_grid[1, 0], sharex=ax_completeness)
+        ax_histogram = figure.add_subplot(plot_grid[1, 0])
         centers = [float(b["center"]) for b in analysis.bins]
         widths = [max(0.0001, float(b["hi"]) - float(b["lo"])) for b in analysis.bins]
         completeness = [float(b["completeness"]) for b in analysis.bins]
         mean_signal = [float(b["mean_signal_to_noise"]) if math.isfinite(float(b["mean_signal_to_noise"])) else np.nan for b in analysis.bins]
         signal_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
         signal_values = [float(v) for v in signal_values if v is not None and math.isfinite(float(v))]
+        signal_math_label = r"$I/\sigma(I)$"
+        mean_signal_math_label = r"Mean $I/\sigma(I)$"
+        threshold_math_label = rf"$I/\sigma(I) = {signal_threshold:.1f}$"
+        resolution_math_label = r"$\sin\theta/\lambda$"
         d_min_stl = 1.0 / (2.0 * analysis.d_min) if analysis.d_min > 0 else None
         d_full_stl = 1.0 / (2.0 * analysis.d_full_98) if analysis.d_full_98 is not None and analysis.d_full_98 > 0 else None
+        d_min_plot_text = rf"{analysis.d_min:.5g} $\AA$" if d_min_stl is not None else "n/a"
+        d_full_plot_text = rf"{analysis.d_full_98:.5g} $\AA$" if d_full_stl is not None else "n/a"
         figure.patch.set_facecolor("#ffffff")
-        ax1.set_facecolor("#ffffff")
-        ax2.set_facecolor("#ffffff")
-        ax1.bar(centers, completeness, width=widths, align="center", color="#2264b8", alpha=0.72, label="Completeness")
-        ax1.axhline(98.0, color="#001170", linewidth=1.0, linestyle="--")
-        reference_labels: List[Tuple[float, str, str]] = []
+        for axis in (ax_completeness, ax_signal, ax_histogram):
+            axis.set_facecolor("#ffffff")
+        completeness_artist = ax_completeness.bar(
+            centers,
+            completeness,
+            width=widths,
+            align="center",
+            color="#2264b8",
+            alpha=0.60,
+            edgecolor="none",
+            zorder=2,
+            label="Completeness",
+        )
+        ax_completeness.step(
+            centers,
+            completeness,
+            where="mid",
+            color="#2264b8",
+            linewidth=1.3,
+            zorder=3,
+        )
+        ax_completeness.axhline(98.0, color="#001170", linewidth=1.0, linestyle="--", zorder=3)
+        reference_labels: List[Tuple[float, str]] = []
+        d_min_artist = None
+        d_full_artist = None
         if d_min_stl is not None:
-            ax1.axvline(d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label="d_min")
-            reference_labels.append((d_min_stl, f"d_min · {d_min_text}", "#14204a"))
+            d_min_artist = ax_completeness.axvline(
+                d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label=r"$d_{\mathrm{min}}$"
+            )
+            ax_signal.axvline(d_min_stl, color="#001170", linewidth=1.1, linestyle="-")
+            reference_labels.append((d_min_stl, r"$d_{\mathrm{min}}$" + "\n" + d_min_plot_text))
         if d_full_stl is not None:
-            ax1.axvline(d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label="d_full 98%")
-            reference_labels.append((d_full_stl, f"98% · {d_full}", "#14204a"))
-        ax1.set_ylabel("Completeness (%)", labelpad=6, fontsize=9)
-        ax1.set_xlabel("sinθ/λ")
-        ax1.set_ylim(0, 105)
-        ax1.grid(True, axis="y", color="#cbd7ea", linewidth=0.55, alpha=0.62)
-        ax1b = ax1.twinx()
-        ax1b.plot(centers, mean_signal, marker="o", color="#001170", linewidth=1.8, label=f"Mean {signal_label}")
-        ax1b.axhline(signal_threshold, color="#2264b8", linewidth=1.0, linestyle="--", label=f"{signal_label} = {signal_threshold:.1f}")
-        ax1b.set_ylabel(f"Mean {signal_label}", labelpad=6, fontsize=9)
+            d_full_artist = ax_completeness.axvline(
+                d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label="d at 98%"
+            )
+            ax_signal.axvline(d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":")
+            reference_labels.append((d_full_stl, f"98%\n{d_full_plot_text}"))
+        ax_completeness.set_ylabel("Completeness (%)", labelpad=8, fontsize=9)
+        shared_ylabel_x = -0.075
+        ax_completeness.yaxis.set_label_coords(shared_ylabel_x, 0.5)
+        ax_completeness.set_ylim(0, 102)
+        ax_completeness.set_yticks((0, 50, 100))
+        ax_completeness.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+        ax_completeness.grid(True, axis="y", color="#cbd7ea", linewidth=0.45, alpha=0.42)
+        mean_artist, = ax_signal.plot(
+            centers,
+            mean_signal,
+            marker="o",
+            color="#001170",
+            linewidth=1.9,
+            markersize=4.5,
+            zorder=3,
+            label=mean_signal_math_label,
+        )
+        threshold_artist = ax_signal.axhline(
+            signal_threshold,
+            color="#2264b8",
+            linewidth=1.0,
+            linestyle="--",
+            zorder=2,
+            label=threshold_math_label,
+        )
+        ax_signal.set_ylabel(mean_signal_math_label, labelpad=8, fontsize=9)
+        ax_signal.yaxis.set_label_coords(shared_ylabel_x, 0.5)
+        ax_signal.set_xlabel(resolution_math_label, labelpad=2)
+        ax_signal.yaxis.set_major_locator(MaxNLocator(nbins=4, min_n_ticks=3))
+        ax_signal.margins(y=0.08)
+        ax_signal.grid(True, axis="y", color="#cbd7ea", linewidth=0.45, alpha=0.42)
         if threshold_stl is not None:
-            ax1.axvline(threshold_stl, color="#2264b8", linewidth=1.1, linestyle="-.", label=f"{signal_label} < {signal_threshold:.1f}")
-            threshold_label = f"{signal_label} = 3 · {threshold_d_text}" if threshold_d is not None else f"{signal_label} = 3"
-            reference_labels.append((threshold_stl, threshold_label, "#14204a"))
+            ax_signal.axvline(threshold_stl, color="#2264b8", linewidth=1.1, linestyle="-.")
+            threshold_plot_text = rf"{threshold_d:.5g} $\AA$" if threshold_d is not None else ""
+            threshold_label = (
+                rf"$I/\sigma(I)=3$ · {threshold_plot_text}"
+                if threshold_plot_text
+                else r"$I/\sigma(I)=3$"
+            )
+            ax_signal.annotate(
+                threshold_label,
+                xy=(threshold_stl, signal_threshold),
+                xytext=(4, 5),
+                textcoords="offset points",
+                ha="left",
+                va="bottom",
+                color="#52658b",
+                fontsize=7.0,
+            )
         ordered_labels = sorted(reference_labels, key=lambda item: item[0])
-        horizontal_offsets = (-24, 0, 24) if len(ordered_labels) == 3 else tuple(0 for _ in ordered_labels)
-        for index, (x_position, label_text, _color) in enumerate(ordered_labels):
-            ax1.annotate(
+        for x_position, label_text in ordered_labels:
+            ax_completeness.annotate(
                 label_text,
-                xy=(x_position, 1.0),
-                xycoords=ax1.get_xaxis_transform(),
-                xytext=(horizontal_offsets[index], 7),
+                xy=(x_position, 0.99),
+                xycoords=ax_completeness.get_xaxis_transform(),
+                xytext=(0, -1.0),
                 textcoords="offset points",
                 ha="center",
-                va="bottom",
+                va="top",
                 color="#14204a",
                 fontsize=7.2,
                 bbox={"boxstyle": "square,pad=0.16", "facecolor": "#ffffff", "edgecolor": "none", "alpha": 0.88},
                 annotation_clip=False,
             )
-        lines1, labels1 = ax1.get_legend_handles_labels()
-        lines2, labels2 = ax1b.get_legend_handles_labels()
+        legend_handles = [completeness_artist, mean_artist, threshold_artist]
+        legend_labels = ["Completeness", mean_signal_math_label, threshold_math_label]
+        if d_full_artist is not None:
+            legend_handles.append(d_full_artist)
+            legend_labels.append("d at 98%")
+        if d_min_artist is not None:
+            legend_handles.append(d_min_artist)
+            legend_labels.append(r"$d_{\mathrm{min}}$")
+        legend_column = plot_grid[0, 1].get_position(figure)
+        legend_anchor = (
+            legend_column.x0 + 0.008,
+            (legend_column.y0 + legend_column.y1) / 2.0,
+        )
         figure.legend(
-            lines1 + lines2,
-            labels1 + labels2,
-            loc="upper center",
-            bbox_to_anchor=(0.5, 0.985),
-            ncol=max(1, len(lines1 + lines2)),
+            legend_handles,
+            legend_labels,
+            loc="center left",
+            bbox_to_anchor=legend_anchor,
+            bbox_transform=figure.transFigure,
+            ncol=1,
             frameon=False,
-            fontsize=7.0,
-            handlelength=1.25,
-            columnspacing=0.75,
-            handletextpad=0.35,
-            labelspacing=0.2,
+            fontsize=8.0,
+            handlelength=1.10,
+            handletextpad=0.30,
+            labelspacing=0.26,
             borderaxespad=0.0,
         )
         histogram_denominator = max(1, len(analysis.reflections_unique))
         if signal_values:
             histogram_bins = np.arange(0.0, 16.0, 1.0)
             histogram_weights = np.full(len(signal_values), 100.0 / float(histogram_denominator), dtype=np.float64)
-            ax2.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#44b7ff", alpha=0.82)
+            ax_histogram.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#44b7ff", alpha=0.82)
         else:
-            ax2.text(0.5, 0.5, "No sigma values available", transform=ax2.transAxes, ha="center", va="center")
-        ax2.set_title("REFLECTION DISTRIBUTION", loc="left", color="#001170", fontsize=9, fontweight="bold", pad=10)
-        ax2.set_xlabel(signal_label)
-        ax2.set_ylabel("Reflections (%)", labelpad=6, fontsize=9)
-        ax2.set_xlim(0.0, 15.0)
-        ax2.set_xticks(np.arange(0.0, 16.0, 1.0))
-        ax2.grid(True, axis="y", color="#cbd7ea", linewidth=0.55, alpha=0.62)
-        for axis in (ax1, ax1b, ax2):
+            ax_histogram.text(0.5, 0.5, "No sigma values available", transform=ax_histogram.transAxes, ha="center", va="center")
+        histogram_title_artist = ax_histogram.set_title(
+            "REFLECTION DISTRIBUTION",
+            loc="left",
+            pad=9,
+            color="#001170",
+            fontsize=9,
+            fontweight="bold",
+        )
+        ax_histogram.set_xlabel(signal_math_label, labelpad=4)
+        ax_histogram.set_ylabel("Reflections (%)", labelpad=8, fontsize=9)
+        ax_histogram.set_xlim(0.0, 15.0)
+        ax_histogram.set_xticks(np.arange(0.0, 16.0, 1.0))
+        ax_histogram.grid(True, axis="y", color="#cbd7ea", linewidth=0.45, alpha=0.42)
+        for axis in (ax_completeness, ax_signal, ax_histogram):
             axis.tick_params(colors="#14204a")
             axis.xaxis.label.set_color("#14204a")
             axis.yaxis.label.set_color("#14204a")
-        figure.subplots_adjust(left=0.08, right=0.91, bottom=0.16, top=0.83, hspace=0.82)
+            for spine in ("top", "right"):
+                axis.spines[spine].set_visible(False)
         plot_layout.addWidget(canvas, 1)
         content_splitter.addWidget(plot_panel)
 
         bins_panel = QWidget()
+        bins_panel.setMinimumHeight(94)
         bins_layout = QVBoxLayout(bins_panel)
         bins_layout.setContentsMargins(0, 0, 0, 0)
         bins_layout.setSpacing(3)
@@ -6747,6 +7105,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         bins_layout.addWidget(bins_title)
         headers = ["sinθ/λ range", "Observed", "Theoretical", "Completeness (%)", f"Mean {signal_label}"]
         table = QTableWidget(len(analysis.bins), len(headers))
+        table.setMinimumHeight(68)
         self._configure_diagnostic_table(table)
         table.setHorizontalHeaderLabels(headers)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
@@ -6764,8 +7123,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 table.setItem(row, column, cell_item)
         bins_layout.addWidget(table, 1)
         content_splitter.addWidget(bins_panel)
-        content_splitter.setSizes([390, 175])
-        content_splitter.setStretchFactor(0, 3)
+        # Give the scientific plots the reclaimed height while retaining a
+        # fully visible, independently scrollable resolution-bin table.
+        content_splitter.setSizes([450, 100])
+        content_splitter.setStretchFactor(0, 5)
         content_splitter.setStretchFactor(1, 1)
         layout.addWidget(content_splitter, 1)
 
@@ -6820,14 +7181,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         footer.addWidget(close_button)
         layout.addLayout(footer)
         dialog.hkl_bins_table = table  # type: ignore[attr-defined]
+        dialog.hkl_input_summary = input_summary  # type: ignore[attr-defined]
+        dialog.hkl_metrics_panel = metrics_panel  # type: ignore[attr-defined]
+        dialog.hkl_plot_panel = plot_panel  # type: ignore[attr-defined]
         dialog.hkl_figure = figure  # type: ignore[attr-defined]
         dialog.hkl_canvas = canvas  # type: ignore[attr-defined]
+        dialog.hkl_resolution_axes = (ax_completeness, ax_signal)  # type: ignore[attr-defined]
+        dialog.hkl_histogram_axis = ax_histogram  # type: ignore[attr-defined]
+        dialog.hkl_histogram_title_artist = histogram_title_artist  # type: ignore[attr-defined]
+        dialog.hkl_bins_title = bins_title  # type: ignore[attr-defined]
+        dialog.hkl_plot_grid = plot_grid  # type: ignore[attr-defined]
+        dialog.hkl_resolution_grid = resolution_grid  # type: ignore[attr-defined]
+        dialog.hkl_legend_column_bounds = legend_column  # type: ignore[attr-defined]
+        dialog.hkl_layout_resize_cid = layout_resize_cid  # type: ignore[attr-defined]
+        dialog.hkl_content_splitter = content_splitter  # type: ignore[attr-defined]
         dialog.summary_text = summary_text  # type: ignore[attr-defined]
         dialog.full_source_path = str(analysis.hkl_path)  # type: ignore[attr-defined]
+        fit_dialog_to_available_screen(dialog)
         return dialog
 
     def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
         dialog = self._build_hkl_completeness_dialog(analysis)
+        QTimer.singleShot(0, lambda: fit_dialog_to_available_screen(dialog))
         dialog.exec()
 
     def save_settings(self) -> None:
@@ -6883,6 +7258,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return 0.0
         return float(widget.value())  # type: ignore[attr-defined]
 
+    def _set_overall_progress_text(self, text: str) -> None:
+        display = str(text)
+        self.progress_bar.setFormat(display)
+        if hasattr(self, "overall_progress_value"):
+            self.overall_progress_value.setText(display)
+
     def clear_log_plot(self) -> None:
         self.log_text.clear()
         self._last_log_record = None
@@ -6893,10 +7274,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_cell = None
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("Idle")
+        self._set_overall_progress_text("Idle")
         self._cycle_progress_state = None
         self.current_cycle_detail.setText("Idle")
-        self.current_cycle_stage_counter.setText("")
+        self.current_cycle_stage_counter.setText("Idle")
         self.current_cycle_progress.setRange(0, 1)
         self.current_cycle_progress.setValue(0)
         self._set_run_status("Ready")
@@ -6933,18 +7314,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         cursor.movePosition(QTextCursor.End)
         if self.log_text.document().characterCount() > 1:
             cursor.insertBlock()
+        block_format = cursor.blockFormat()
+        block_format.setLineHeight(112.0, QTextBlockFormat.ProportionalHeight.value)
+        cursor.setBlockFormat(block_format)
         text_format = QTextCharFormat()
         colors = {
-            "INFO": "#001170",
+            "INFO": "#14204a",
             "STEP": "#001170",
             "SUCCESS": "#2264b8",
             "WARNING": "#8a5a00",
             "ERROR": "#b42318",
-            "COMMAND": "#2264b8",
-            "DETAIL": "#5d6b86",
+            "COMMAND": "#52658b",
+            "DETAIL": "#7183a6",
         }
         text_format.setForeground(QColor(colors.get(record.level, "#001170")))
-        text_format.setFontWeight(QFont.Bold if record.level in {"STEP", "SUCCESS", "ERROR"} else QFont.Normal)
+        workflow_subsystem = record.subsystem.casefold() in {"superflip", "sharped", "edma"}
+        workflow_heading = (
+            record.level not in {"DETAIL", "COMMAND"}
+            and (
+                workflow_subsystem
+                or record.level in {"STEP", "SUCCESS", "ERROR"}
+                or bool(re.match(r"^(?:===\s*)?cycle\s+\d+", record.text.strip(), re.IGNORECASE))
+            )
+        )
+        text_format.setFontWeight(QFont.DemiBold if workflow_heading else QFont.Normal)
         text_format.setFontFixedPitch(True)
         cursor.insertText(record.text, text_format)
         if was_following:
@@ -6998,7 +7391,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         completed_stages = stage_total if state.complete else max(0, min(stage_total, int(state.stage_index) - 1))
         self.current_cycle_progress.setValue(completed_stages)
         display_text = state.display_text()
-        if str(getattr(self, "_run_status", "")).upper() == "STOPPING":
+        if self.stop_after_cycle.is_set():
             stop_detail = "Stopping immediately..." if self.stop_now.is_set() else "Stopping after current cycle..."
             display_text = f"{display_text} · {stop_detail}"
         self.current_cycle_detail.setText(display_text)
@@ -7014,6 +7407,44 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         text = state.display_text()
         self.current_cycle_detail.setText(f"{text} · {detail}" if detail else text)
 
+    def _set_terminal_cycle_state(self, terminal: str) -> None:
+        """Preserve the last reached stage without retaining active-state wording."""
+        state = self._cycle_progress_state
+        if state is None:
+            self.current_cycle_progress.setRange(0, 1)
+            self.current_cycle_progress.setValue(0)
+            self.current_cycle_stage_counter.setText(terminal)
+            self.current_cycle_detail.setText("Stopped by user" if terminal == "Stopped" else terminal)
+            return
+
+        stage_total = max(1, int(state.stage_total))
+        stage_index = max(1, min(stage_total, int(state.stage_index)))
+        self.current_cycle_progress.setRange(0, stage_total)
+        self.current_cycle_progress.setValue(max(self.current_cycle_progress.value(), stage_index))
+        self.current_cycle_stage_counter.setText(f"{terminal} at stage {stage_index} / {stage_total}")
+        parts = [f"Cycle {state.cycle_index} / {state.cycle_total}", state.stage_name]
+        if terminal != "Stopped" and state.sub_index is not None and state.sub_total is not None:
+            parts.append(f"repeat {state.sub_index} / {state.sub_total}")
+        parts.append("stopped by user" if terminal == "Stopped" else terminal.lower())
+        self.current_cycle_detail.setText(" · ".join(parts))
+
+    def _finish_cancelled_run(self) -> None:
+        """Apply the single user-facing terminal state for either stop action."""
+        self.worker = None
+        completed_cycles = max(len(self.results), self.progress_bar.value() if self.progress_bar.maximum() > 0 else 0)
+        total_cycles = max(1, int(getattr(self.last_run_config, "cycles", 1)), completed_cycles)
+        self.progress_bar.setRange(0, total_cycles)
+        self.progress_bar.setValue(min(completed_cycles, total_cycles))
+        self._set_overall_progress_text("Cancelled")
+        self._set_terminal_cycle_state("Stopped")
+        self.stop_after_cycle.clear()
+        self.stop_now.clear()
+        self._set_run_status("Cancelled")
+        self.run_btn.setText("Run pipeline")
+        self.handoff_btn.setEnabled(False)
+        self._update_action_states()
+        self._append_execution_log("Pipeline cancelled by the user.", level="WARNING", subsystem="Pipeline")
+
     def _set_run_status(self, status: str) -> None:
         normalized = str(status).strip().upper() or "READY"
         normalized = {
@@ -7022,6 +7453,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "COMPLETED": "COMPLETE",
             "FAILED": "ERROR",
             "CANCELED": "CANCELLED",
+            "STOPPING": "RUNNING",
         }.get(normalized, normalized)
         self._run_status = normalized
         if hasattr(self, "status_badge"):
@@ -7037,14 +7469,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _update_action_states(self) -> None:
         status = str(getattr(self, "_run_status", "READY")).upper()
-        active = status in {"RUNNING", "STOPPING"}
+        active = status == "RUNNING"
         self._set_configuration_locked(active)
         if hasattr(self, "run_btn"):
             self.run_btn.setEnabled(not active and bool(getattr(self, "_metadata_valid", False)))
         if hasattr(self, "stop_btn"):
-            self.stop_btn.setEnabled(status == "RUNNING")
+            self.stop_btn.setEnabled(status == "RUNNING" and not self.stop_after_cycle.is_set())
         if hasattr(self, "stop_now_btn"):
-            self.stop_now_btn.setEnabled(status in {"RUNNING", "STOPPING"})
+            self.stop_now_btn.setEnabled(status == "RUNNING" and not self.stop_now.is_set())
         if hasattr(self, "clear_btn"):
             has_results = bool(getattr(self, "results", []))
             has_log = bool(hasattr(self, "log_text") and self.log_text.toPlainText().strip())
@@ -7054,16 +7486,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def request_stop_after_cycle(self) -> None:
         self.stop_after_cycle.set()
-        self._set_run_status("Stopping")
         self._annotate_cycle_progress("Stopping after current cycle...")
-        self.log("Stop after current cycle requested.")
+        self._update_action_states()
+        self.log("Stop after current cycle requested.", level="DETAIL")
 
     def request_immediate_stop(self) -> None:
         self.stop_after_cycle.set()
         self.stop_now.set()
-        self._set_run_status("Stopping")
         self._annotate_cycle_progress("Stopping immediately...")
-        self.log("Immediate stop requested.")
+        self._update_action_states()
+        self.log("Immediate stop requested.", level="DETAIL")
 
     def refresh_sharped_models(self) -> None:
         base_widget = self.inputs.get("sharped_base_url")
@@ -7169,25 +7601,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return show_phase_studio_error(self, report, self._error_actions(report))
 
     def _handle_pipeline_error(self, report: ErrorReport) -> None:
+        cancelled = report.category == "cancelled"
+        if cancelled:
+            self._finish_cancelled_run()
+            return
         self.worker = None
         self.stop_after_cycle.clear()
         self.stop_now.clear()
-        cancelled = report.category == "cancelled"
-        self._set_run_status("Cancelled" if cancelled else "Error")
+        self._set_run_status("Error")
         if self.progress_bar.minimum() == 0 and self.progress_bar.maximum() == 0:
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("Stopped" if cancelled else "Error")
-        self.current_cycle_progress.setRange(0, 1)
-        self.current_cycle_progress.setValue(0)
-        self._annotate_cycle_progress("Stopped" if cancelled else "Error")
+        self._set_overall_progress_text("Error")
+        self._set_terminal_cycle_state("Error")
         self.run_btn.setText("Run pipeline")
         self.handoff_btn.setEnabled(False)
         self._update_action_states()
-        if cancelled:
-            self._append_execution_log("Pipeline stopped by the user.", level="WARNING", subsystem="Pipeline")
-        else:
-            self._show_error_report(report)
+        self._show_error_report(report)
 
     def _poll_queue(self) -> None:
         try:
@@ -7195,6 +7625,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             while processed < 250:
                 kind, payload = self.msg_queue.get_nowait()
                 processed += 1
+                hkl_task_id: Optional[int] = None
+                if kind.startswith("hkl_") and isinstance(payload, tuple) and len(payload) == 2 and isinstance(payload[0], int):
+                    hkl_task_id, payload = payload
+                    if hkl_task_id != self._active_hkl_task_id:
+                        continue
+                    if kind != "hkl_task_finished":
+                        if hkl_task_id in self._completed_hkl_task_ids:
+                            continue
+                        self._completed_hkl_task_ids.add(hkl_task_id)
                 if kind == "log":
                     self._append_execution_log(payload)
                     self._update_action_states()
@@ -7240,11 +7679,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         widget.blockSignals(False)
                     self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
                 elif kind == "hkl_load_result":
-                    self._append_execution_log("HKL validation finished.", level="SUCCESS")
+                    parsed_count = len(payload.reflections) if isinstance(payload, HklLoadResult) else 0
+                    unique_count = len(payload.unique_reflections) if isinstance(payload, HklLoadResult) else 0
+                    self._append_execution_log(
+                        f"[HKL] Validation completed · {parsed_count:,} parsed / {unique_count:,} unique",
+                        level="SUCCESS",
+                        subsystem="HKL",
+                    )
                     self._set_hkl_task_running(False)
                     self._show_hkl_load_result_dialog(payload)
                 elif kind == "hkl_completeness_result":
-                    self._append_execution_log("HKL completeness analysis finished.", level="SUCCESS")
+                    resolution = format_resolution_d(payload.d_min) if isinstance(payload, HklAnalysis) else "n/a"
+                    self._append_execution_log(
+                        f"[HKL] Completeness analysis completed · d_min {resolution}",
+                        level="SUCCESS",
+                        subsystem="HKL",
+                    )
                     self._set_hkl_task_running(False)
                     self._show_hkl_completeness_dialog(payload)  # type: ignore[arg-type]
                 elif kind == "hkl_task_error":
@@ -7252,6 +7702,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, subsystem="HKL", operation="HKL analysis")
                     self._show_error_report(report)
                 elif kind == "hkl_task_finished":
+                    if hkl_task_id is not None:
+                        self._active_hkl_task_id = None
+                        self.hkl_task_worker = None
                     self._set_hkl_task_running(False)
                 elif kind == "handoff_done":
                     self._set_run_status("Transferred")
@@ -7272,28 +7725,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     total = max(1, int(payload))
                     self.progress_bar.setRange(0, total)
                     self.progress_bar.setValue(0)
-                    self.progress_bar.setFormat("0/%m cycles")
+                    self._set_overall_progress_text("Running")
                     self.current_cycle_progress.setRange(0, 0)
                     self.current_cycle_detail.setText(f"Cycle 1 / {total} · Preparing cycle")
-                    self.current_cycle_stage_counter.setText("")
+                    self.current_cycle_stage_counter.setText("Preparing")
                 elif kind == "cycle_progress":
                     self._apply_cycle_progress_state(payload)  # type: ignore[arg-type]
                 elif kind == "progress":
                     value = int(payload)
                     self.progress_bar.setValue(value)
-                    self.progress_bar.setFormat(f"{value}/{self.progress_bar.maximum()} cycles")
+                    self._set_overall_progress_text("Running")
                 elif kind == "error":
                     report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run pipeline")
                     self._handle_pipeline_error(report)
                 elif kind == "error_report":
                     report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run pipeline")
                     self._handle_pipeline_error(report)
+                elif kind == "cancelled":
+                    self._finish_cancelled_run()
                 elif kind == "done":
+                    self.worker = None
+                    self.stop_after_cycle.clear()
+                    self.stop_now.clear()
                     self._set_run_status("Complete")
                     self._append_execution_log("=== Pipeline complete ===", level="SUCCESS")
                     if payload is not None:
                         self.progress_bar.setValue(int(payload))
-                    self.progress_bar.setFormat("Done")
+                    self._set_overall_progress_text("Complete")
                     if self._cycle_progress_state is None:
                         self.current_cycle_detail.setText("Pipeline complete")
                         self.current_cycle_stage_counter.setText("Completed")
@@ -7547,32 +8005,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 transform=self.figure.transFigure,
             )
 
-    def _set_metrics_data_layout(self, has_data: bool) -> None:
-        if not hasattr(self, "result_splitter"):
-            return
-        if has_data == self._metrics_expanded:
-            return
-        sizes = self.result_splitter.sizes()
-        if len(sizes) != 3 or sum(sizes) <= 0:
-            return
-        if has_data:
-            self._metrics_compact_sizes = list(sizes)
-            available = sum(sizes)
-            desired_metrics = min(max(sizes[0] + 45, 215), int(available * 0.34))
-            increase = max(0, desired_metrics - sizes[0])
-            structure_room = max(0, sizes[1] - 330)
-            from_structure = min(increase, structure_room)
-            from_log = min(increase - from_structure, max(0, sizes[2] - 110))
-            self.result_splitter.setSizes([
-                sizes[0] + from_structure + from_log,
-                sizes[1] - from_structure,
-                sizes[2] - from_log,
-            ])
-        elif self._metrics_compact_sizes:
-            self.result_splitter.setSizes(self._metrics_compact_sizes)
-            self._metrics_compact_sizes = None
-        self._metrics_expanded = has_data
-
     def _update_plot(self) -> None:
         self.figure.clear()
         self.ax = self.figure.add_subplot(111)
@@ -7580,7 +8012,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.ax.set_facecolor("#ffffff")
         cycles = [r.cycle for r in self.results]
         if not cycles:
-            self._set_metrics_data_layout(False)
             status = str(getattr(self, "_run_status", "READY")).upper()
             if status in {"RUNNING", "STOPPING"}:
                 empty_message = "Waiting for the first convergence metrics…"
@@ -7603,7 +8034,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.canvas.draw_idle()
             return
 
-        self._set_metrics_data_layout(True)
         self.ax.set_title("")
         self.ax.set_xlabel("")
         self.figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#14204a", fontsize=8.5)
@@ -7743,13 +8173,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _plot_structure_atoms(self, ax, atoms: Sequence[AtomSite], empty_text: str = "No structure available") -> str:
         if not atoms:
             ax.set_axis_off()
-            ax.text2D(0.5, 0.50, empty_text, ha="center", va="center", fontsize=8, color="#7183a6", transform=ax.transAxes)
+            ax.text2D(0.5, 0.50, empty_text, ha="center", va="center", fontsize=8, color="#5d6b86", transform=ax.transAxes)
             return ""
 
         non_h_atoms = [a for a in atoms if clean_element_symbol(a.element) not in {"H", "D", "He"}]
         if not non_h_atoms:
             ax.set_axis_off()
-            ax.text2D(0.5, 0.50, "No non-H/He atoms", ha="center", va="center", fontsize=8, color="#7183a6", transform=ax.transAxes)
+            ax.text2D(0.5, 0.50, "No non-H/He atoms", ha="center", va="center", fontsize=8, color="#5d6b86", transform=ax.transAxes)
             return ""
 
         ax.set_axis_on()
@@ -7806,7 +8236,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             [10, 50, 200, 500, 1000, 2000],
             [1.30, 1.0, 0.72, 0.48, 0.34, 0.22],
         ))
-        sizes = [max(4.0, min(76.0, (10.0 + 1.2 * element_atomic_number(a.element)) * count_scale)) for a in plot_atoms]
+        sizes = np.asarray(
+            [max(4.0, min(76.0, (10.0 + 1.2 * element_atomic_number(a.element)) * count_scale)) for a in plot_atoms],
+            dtype=np.float64,
+        )
         scatter = ax.scatter(
             coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=atom_base_colors,
             alpha=1.0, edgecolors="#ffffff", linewidths=0.18, depthshade=False,
@@ -7815,6 +8248,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             scatter=scatter,
             atom_coordinates=coords,
             atom_base_colors=atom_base_colors,
+            atom_sizes=sizes,
+            atom_draw_order=np.arange(len(coords), dtype=np.int64),
             cell_collection=cell_collection,
             cell_midpoints=np.asarray(cell_midpoints, dtype=np.float64),
             cell_corners=cell_corners,
@@ -7828,21 +8263,34 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
         atom_fade = structure_depth_fade(
             artists.atom_coordinates,
-            artists.cell_corners,
+            artists.atom_coordinates,
             elev,
             azim,
         )
         atom_colors = blend_structure_colors(artists.atom_base_colors, atom_fade)
-        artists.scatter.set_facecolors(np.column_stack((atom_colors, np.ones(len(atom_colors), dtype=np.float64))))
+        camera_depth = structure_camera_depth(artists.atom_coordinates, elev, azim)
+        draw_order = np.argsort(camera_depth, kind="stable")  # rear first, nearest/front last
+        artists.atom_draw_order = draw_order
+        ordered_coordinates = artists.atom_coordinates[draw_order]
+        ordered_colors = atom_colors[draw_order]
+        artists.scatter._offsets3d = (
+            ordered_coordinates[:, 0],
+            ordered_coordinates[:, 1],
+            ordered_coordinates[:, 2],
+        )
+        artists.scatter.set_sizes(artists.atom_sizes[draw_order])
+        artists.scatter.set_facecolors(
+            np.column_stack((ordered_colors, np.ones(len(ordered_colors), dtype=np.float64)))
+        )
 
         edge_fade = structure_depth_fade(
             artists.cell_midpoints,
-            artists.cell_corners,
+            artists.cell_midpoints,
             elev,
             azim,
-            front_hold=0.04,
-            gamma=1.35,
-            maximum=0.78,
+            front_hold=0.20,
+            gamma=1.20,
+            maximum=0.58,
         )
         edge_colors = blend_structure_colors(np.asarray(to_rgb("#44b7ff"), dtype=np.float64), edge_fade)
         artists.cell_collection.set_color(np.column_stack((edge_colors, np.ones(len(edge_colors), dtype=np.float64))))
@@ -7945,6 +8393,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "Waiting for SharpED result…" if waiting else ("SharpED result unavailable" if failed else "No structure available"),
             ),
         ]
+        has_interactive_structure = any(
+            any(clean_element_symbol(atom.element) not in {"H", "D", "He"} for atom in atoms)
+            for _title, atoms, _empty_text in panels
+        )
+        self.structure_canvas.setToolTip("")
+        self.structure_rotation_hint.setVisible(has_interactive_structure)
         panel_metadata = []
         for idx, (_title, atoms, empty_text) in enumerate(panels, start=1):
             ax = self.structure_figure.add_subplot(1, 3, idx, projection="3d")
@@ -8168,11 +8622,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_now.clear()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("Starting...")
+        self._set_overall_progress_text("Running")
         self._cycle_progress_state = None
         self.current_cycle_progress.setRange(0, 0)
         self.current_cycle_detail.setText("Preparing pipeline...")
-        self.current_cycle_stage_counter.setText("")
+        self.current_cycle_stage_counter.setText("Preparing")
         self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
@@ -8185,35 +8639,43 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         try:
             self.log("=== Pipeline started ===", level="STEP")
             mode = normalize_input_source_mode(cfg.input_source_mode)
-            input_name = cfg.jana_inflip.name if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} and cfg.jana_inflip is not None else cfg.hkl.name
-            self.log(f"Input: {INPUT_MODE_LABELS.get(mode, mode)} · {input_name}")
-            self.log(f"Work directory: {cfg.work_dir}")
+            self.log("Input", level="STEP")
+            self.log(f"  Mode: {INPUT_MODE_LABELS.get(mode, mode)}")
+            self.log(f"  Work directory: {cfg.work_dir}")
             if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
                 if cfg.jana_inflip is None:
                     raise RuntimeError("Jana input mode selected, but no Jana .inflip file is configured.")
-                self.log(f"Jana2020 .inflip primary input: {cfg.jana_inflip}")
+                self.log(f"  Jana2020 .inflip: {cfg.jana_inflip}", level="DETAIL")
                 if mode == INPUT_MODE_INFLIP or not cfg.hkl.is_file():
                     cfg.hkl = extract_embedded_hkl_from_inflip(cfg.jana_inflip, cfg.work_dir)
-                    self.log(f"HKL source exported from Jana .inflip: {cfg.hkl}")
+                    self.log("  HKL source: embedded fbegin/endf block exported from Jana .inflip", level="DETAIL")
                 else:
-                    self.log(f"HKL source override: {cfg.hkl}")
+                    self.log("  HKL source: external override", level="DETAIL")
 
                 declared_ref = inflip_declared_reference(cfg.jana_inflip)
                 if not cfg.reference_cif.is_file():
                     if declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
                         cfg.reference_cif = declared_ref
-                        self.log(f"Reference structure declared by Jana .inflip: {cfg.reference_cif}")
+                        self.log(f"  Reference structure: {cfg.reference_cif}")
                 elif cfg.reference_cif.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
-                    self.log(f"External reference structure: {cfg.reference_cif}")
+                    self.log(f"  Reference structure: {cfg.reference_cif}")
 
                 if cfg.superflip_referencefile is None and declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() in REFERENCE_DENSITY_SUFFIXES:
                     cfg.superflip_referencefile = declared_ref
                     cfg.referencefile_mode = referencefile_mode_for_path(cfg.superflip_referencefile)
-                    self.log(f"External reference density declared by Jana .inflip: {cfg.superflip_referencefile}")
+                    self.log(f"  Reference density: {cfg.superflip_referencefile}")
             else:
-                self.log(f"External HKL source: {cfg.hkl}")
                 if cfg.superflip_referencefile is not None:
-                    self.log(f"External reference file: {cfg.superflip_referencefile}")
+                    self.log(f"  Reference: {cfg.superflip_referencefile}")
+            self.log(f"  HKL: {cfg.hkl}")
+            configured_data_mode = resolve_reflection_data_mode_from_sources(
+                cfg.hkl, cfg.reflection_data_mode, cfg.jana_inflip
+            )
+            value_col, sigma_col, include_000 = reflection_columns_for_mode(configured_data_mode)
+            refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
+            refl = merge_duplicate_reflections(refl_raw)
+            current_reflections = list(refl)
+            self.log(f"  Reflections: {len(refl_raw)} parsed / {len(refl)} unique", level="INFO")
             if str(cfg.referencefile_mode).strip().lower() in {"reference_xplor", "reference_density"} and cfg.superflip_reference_xplor is None and cfg.superflip_referencefile is None:
                 cfg.referencefile_mode = "omit"
             atom_source: Optional[Path] = None
@@ -8233,43 +8695,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.msg_queue.put(("reference_atoms", expand_atoms_by_symmetry(ref_ctx.atoms, ref_ctx.spacegroup)))
             self.log("Crystal metadata", level="STEP")
             metadata_label = METADATA_SOURCE_LABELS.get(cfg.crystal_metadata.source, cfg.crystal_metadata.source)
-            self.log(f"  Source: {metadata_label}", level="DETAIL")
+            self.log(f"  Source: {metadata_label}", level="INFO")
             if cfg.crystal_metadata.source_path is not None:
                 self.log(f"  Metadata file: {cfg.crystal_metadata.source_path}", level="DETAIL")
+            self.log(f"  Cell: {ref_ctx.cell.a:.5f} {ref_ctx.cell.b:.5f} {ref_ctx.cell.c:.5f} {ref_ctx.cell.alpha:.3f} {ref_ctx.cell.beta:.3f} {ref_ctx.cell.gamma:.3f}")
+            self.log(f"  Space group: {ref_ctx.spacegroup_hm} (#{ref_ctx.spacegroup.number})")
+            self.log(f"  Composition: {ref_ctx.composition}")
             self.log(
                 f"  Atom sites: {atom_source.name if atom_source is not None else 'none'} · {len(ref_ctx.atoms)} atoms",
-                level="DETAIL",
+                level="INFO",
             )
-            self.log(f"  Working EDMA/metrics reference: {ref_ctx.work_ref_cif}", level="DETAIL")
-            self.log(f"Cell: {ref_ctx.cell.a:.5f} {ref_ctx.cell.b:.5f} {ref_ctx.cell.c:.5f} {ref_ctx.cell.alpha:.3f} {ref_ctx.cell.beta:.3f} {ref_ctx.cell.gamma:.3f}")
-            self.log(f"Space group: {ref_ctx.spacegroup_hm} (#{ref_ctx.spacegroup.number})")
-            self.log(f"Composition: {ref_ctx.composition}")
-            self.log("Configuration details:", level="DETAIL")
-            self.log(f"  Superflip executable: {cfg.superflip_exe}", level="DETAIL")
-            self.log(f"  EDMA executable: {cfg.edma_exe}", level="DETAIL")
-            self.log(f"EDMA plimit after Superflip: {cfg.plimit_superflip:g} sigma multiplier")
-            self.log(f"EDMA plimit after deblurring: {cfg.plimit_deblur:g} sigma multiplier")
-            self.log(f"EDMA maxima/fullcell/numberofatoms: {cfg.edma_maxima} / {cfg.edma_fullcell} / {cfg.edma_numberofatoms}")
             sharped_elements = cfg.sharped_elements.strip() or sharped_elements_from_composition(ref_ctx.composition)
-            self.log(f"SharpED inference server: {cfg.sharped_base_url}")
-            self.log(f"SharpED model: {cfg.sharped_model or 'default'}")
-            self.log(f"SharpED elements: {sharped_elements}")
-            self.log(f"SharpED maximum upload size: {cfg.sharped_max_upload_mb:g} MB" if cfg.sharped_max_upload_mb > 0 else "SharpED maximum upload size: disabled")
             requested_modelfile_mode = normalize_modelfile_source(cfg.modelfile_source)
             modelfile_mode = requested_modelfile_mode
             use_xplor_modelfile = modelfile_mode in {"superflip_xplor", "deblurred_xplor"}
             use_superflip_xplor_modelfile = modelfile_mode == "superflip_xplor"
             use_cif_modelfile = modelfile_mode == "deblurred_edma_cif"
-            self.log(f"Next-cycle modelfile source: {modelfile_mode}")
-            if use_xplor_modelfile:
-                self.log(
-                    f"XPLOR damping 1/x: {max(0.001, min(1.0, float(cfg.damping_factor))):g} "
-                    f"(effective old factor {effective_xplor_damping_factor(cfg.damping_factor):g})"
-                )
-            if use_superflip_xplor_modelfile:
-                self.log("Next-cycle XPLOR modelfile uses the raw Superflip map; SharpED deblurring is not required for cycling.")
-            if use_cif_modelfile:
-                self.log("CIF modelfiles are written without an explicit CIF format keyword; Superflip infers CIF from the .cif extension.")
             workflow = ["Superflip"]
             if cfg.run_edma_superflip:
                 workflow.append("EDMA")
@@ -8279,7 +8720,36 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 workflow.append("symmetry averaging")
             if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
                 workflow.append("EDMA")
-            self.log("Workflow: " + " → ".join(workflow), level="STEP")
+            self.log("Workflow", level="STEP")
+            self.log("  Stages: " + " → ".join(workflow), level="INFO")
+            self.log(f"  Cycles: {cfg.cycles}", level="INFO")
+            self.log(f"  Next-cycle model: {modelfile_mode}", level="INFO")
+            if use_xplor_modelfile:
+                self.log(
+                    f"  XPLOR damping 1/x: {max(0.001, min(1.0, float(cfg.damping_factor))):g}",
+                    level="INFO",
+                )
+            self.log("External programs", level="STEP")
+            self.log(f"  Superflip: {cfg.superflip_exe}")
+            self.log(f"  EDMA: {cfg.edma_exe}")
+            self.log("SharpED", level="STEP")
+            self.log(f"  Server: {cfg.sharped_base_url}")
+            self.log(f"  Model: {cfg.sharped_model or 'default'}")
+            self.log(f"  Elements: {sharped_elements}")
+
+            self.log(f"EDMA plimit after Superflip: {cfg.plimit_superflip:g} sigma multiplier", level="DETAIL")
+            self.log(f"EDMA plimit after deblurring: {cfg.plimit_deblur:g} sigma multiplier", level="DETAIL")
+            self.log(f"EDMA maxima/fullcell/numberofatoms: {cfg.edma_maxima} / {cfg.edma_fullcell} / {cfg.edma_numberofatoms}", level="DETAIL")
+            self.log(f"SharpED maximum upload size: {cfg.sharped_max_upload_mb:g} MB" if cfg.sharped_max_upload_mb > 0 else "SharpED maximum upload size: disabled", level="DETAIL")
+            if use_xplor_modelfile:
+                self.log(
+                    f"XPLOR damping detail: effective old factor {effective_xplor_damping_factor(cfg.damping_factor):g}",
+                    level="DETAIL",
+                )
+            if use_superflip_xplor_modelfile:
+                self.log("Next-cycle XPLOR modelfile uses the raw Superflip map; SharpED deblurring is not required for cycling.", level="DETAIL")
+            if use_cif_modelfile:
+                self.log("CIF modelfiles are written without an explicit CIF format keyword; Superflip infers CIF from the .cif extension.", level="DETAIL")
             self.log(f"Superflip perform: {cfg.perform_algorithm.upper()}")
             self.log(f"Superflip requested outputformat: {cfg.output_format}")
             self.log(
@@ -8296,7 +8766,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log(f"First-cycle external modelfile: {cfg.first_cycle_modelfile}")
             explicit_superflip_referencefile = cfg.superflip_referencefile
             if explicit_superflip_referencefile is not None:
-                self.log(f"External reference file: {explicit_superflip_referencefile}")
+                self.log("External reference role: structure and Superflip referencefile", level="DETAIL")
                 if explicit_superflip_referencefile.suffix.lower() == ".cif" and not parse_cif_atoms(explicit_superflip_referencefile):
                     self.log(
                         "Selected reference CIF contains no readable atom sites; it is used for "
@@ -8311,16 +8781,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log("Superflip referencefile keyword omitted: no external reference file was selected.")
             if referencefile_mode == "reference_cif":
                 if explicit_superflip_referencefile is not None:
-                    self.log(f"Superflip referencefile: {explicit_superflip_referencefile} (format inferred from CIF suffix)")
+                    self.log("Superflip referencefile format: inferred from CIF suffix", level="DETAIL")
                 else:
-                    self.log(f"Superflip referencefile: {ref_ctx.work_ref_cif} (format inferred from CIF suffix)")
+                    self.log(f"Superflip referencefile: {ref_ctx.work_ref_cif} (format inferred from CIF suffix)", level="DETAIL")
             elif referencefile_mode in {"reference_xplor", "reference_density"} and (explicit_superflip_referencefile is not None or cfg.superflip_reference_xplor is not None):
-                self.log(f"Superflip referencefile: {explicit_superflip_referencefile or cfg.superflip_reference_xplor} (format inferred from filename)")
+                self.log(f"Superflip referencefile: {explicit_superflip_referencefile or cfg.superflip_reference_xplor} (format inferred from filename)", level="DETAIL")
             else:
-                self.log("Superflip referencefile keyword: no")
+                self.log("Superflip referencefile keyword: no", level="DETAIL")
             self.log(f"Superflip bestdensities: {cfg.bestdensities_count} {'symmetry' if cfg.bestdensities_symmetry else cfg.bestdensities_metric}")
             self.log(f"Superflip polish: {'yes' if cfg.polish else 'no'}")
-            configured_data_mode = resolve_reflection_data_mode_from_sources(cfg.hkl, cfg.reflection_data_mode, cfg.jana_inflip)
             self.log(f"Superflip HKL data mode: {configured_data_mode}")
             if cfg.resolution_d_min > 0:
                 self.log(f"Superflip resolution cutoff: d >= {cfg.resolution_d_min:g} A")
@@ -8334,10 +8803,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     f"intensity_max_value_sigma={cfg.map_feedback_intensity_max_i_over_sigma:g}"
                 )
             self.msg_queue.put(("progress_setup", cfg.cycles))
-            value_col, sigma_col, include_000 = reflection_columns_for_mode(configured_data_mode)
-            refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
-            refl = merge_duplicate_reflections(refl_raw)
-            current_reflections = list(refl)
             data_modes_needed = {configured_data_mode}
             observed_hkls: Dict[str, Path] = {}
             for data_mode in sorted(data_modes_needed):
@@ -8349,7 +8814,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 standard_hkl = cfg.work_dir / "observed_unique_standardized_I_sigma_phase.hkl"
                 n_standard = write_standardized_hkl_with_phase(standard_hkl, refl, cfg.i_over_sigma_min, configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 self.log(f"Standardized HKL export: {standard_hkl} ({n_standard} reflections)")
-            self.log(f"Reflections: {len(refl_raw)} parsed / {len(refl)} unique")
             current_model: Optional[Path] = None
             current_model_metric: Optional[float] = None
             exclude_labels = parse_atom_label_list(cfg.exclude_atoms)
@@ -8358,7 +8822,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             progress_stages = cycle_progress_stages(cfg)
             for cyc in range(1, cfg.cycles + 1):
                 if self.stop_after_cycle.is_set():
-                    self.log("Stop requested before next cycle."); break
+                    self.msg_queue.put(("cancelled", completed_cycles))
+                    return
                 self._emit_cycle_progress(
                     cyc,
                     cfg.cycles,
@@ -8441,15 +8906,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     detail="reading metrics",
                 )
                 if sf_log_metrics.rvalue is not None:
+                    peaks_text = "n/a" if sf_log_metrics.peaks is None else f"{float(sf_log_metrics.peaks):.3g}"
+                    symm_text = "n/a" if sf_log_metrics.symm is None else f"{float(sf_log_metrics.symm):.3g}"
+                    ref_match_text = "n/a" if sf_log_metrics.ref_match is None else f"{float(sf_log_metrics.ref_match):.3g}"
+                    success_rate_text = "n/a" if sf_log_metrics.success_rate is None else f"{float(sf_log_metrics.success_rate):.3g}"
                     self.log(
                         "[Superflip] Metrics\n"
                         f"  R={sf_log_metrics.rvalue:.3f} · "
-                        f"Peaks={sf_log_metrics.peaks if sf_log_metrics.peaks is not None else 'n/a'} · "
-                        f"Symm={sf_log_metrics.symm if sf_log_metrics.symm is not None else 'n/a'}\n"
+                        f"Peaks={peaks_text} · Symm={symm_text}\n"
                         f"  Derived SG={sf_log_metrics.derived_sg or 'n/a'} · "
                         f"Saved run={sf_log_metrics.saved_run if sf_log_metrics.saved_run is not None else 'n/a'} · "
-                        f"Ref.match={sf_log_metrics.ref_match if sf_log_metrics.ref_match is not None else 'n/a'} · "
-                        f"SR={sf_log_metrics.success_rate if sf_log_metrics.success_rate is not None else 'n/a'}%",
+                        f"Ref.match={ref_match_text} · SR={success_rate_text}%",
                         subsystem="Superflip",
                     )
                 sf_edma_dir = cycle_dir / "edma_superflip"
@@ -8470,8 +8937,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.export_jana_project and cfg.run_edma_superflip:
                     export_jana2020_project(cycle_dir / "jana2020_superflip", sf_prefix, cycle_dir, sf_edma_dir, sf_map, sf_edma_cif, ref_ctx, self.log)
                 sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
+                sf_metric_text = "n/a" if sf_metric is None else f"{float(sf_metric):.3f}"
                 self.log(
-                    f"[EDMA] Completed · Superflip map · RMSD={sf_metric if sf_metric is not None else 'n/a'} Å\n"
+                    f"[EDMA] Completed · Superflip map · RMSD={sf_metric_text} Å\n"
                     f"  output: {sf_edma_cif}",
                     subsystem="EDMA",
                 )
@@ -8559,9 +9027,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.export_jana_project and cfg.run_edma_deblurred:
                     export_jana2020_project(cycle_dir / "jana2020_deblurred", deblur_prefix, cycle_dir, deblur_edma_dir, deblur_map, deblur_edma_cif, ref_ctx, self.log)
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
+                deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
                 self.log(
-                    f"[EDMA] Completed · Deblurred map · RMSD={deblur_metric if deblur_metric is not None else 'n/a'} Å\n"
+                    f"[EDMA] Completed · Deblurred map · RMSD={deblur_metric_text} Å\n"
                     f"  output: {deblur_edma_cif}",
                     subsystem="EDMA",
                 )
@@ -8651,6 +9120,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     detail="completed",
                     complete=True,
                 )
+                if self.stop_after_cycle.is_set():
+                    self.msg_queue.put(("cancelled", completed_cycles))
+                    return
             self.msg_queue.put(("done", completed_cycles))
         except Exception as exc:
             self.msg_queue.put((
@@ -8693,7 +9165,9 @@ class PhaseStudioSplash(QSplashScreen):
         header.addWidget(logo, 0, Qt.AlignTop)
         root.addLayout(header)
 
-        root.addStretch(1)
+        # Keep the title/status relationship compact while retaining a little
+        # breathing room above the footer at the fixed splash size.
+        root.addStretch(2)
         self.status_label = QLabel("Loading application…")
         self.status_label.setObjectName("splashStatus")
         root.addWidget(self.status_label)
@@ -8705,6 +9179,7 @@ class PhaseStudioSplash(QSplashScreen):
         footer = QLabel("Crystallographic reconstruction workspace")
         footer.setObjectName("splashFooter")
         root.addWidget(footer)
+        root.addStretch(1)
 
     def set_status(self, text: str) -> None:
         self.status_label.setText(str(text))

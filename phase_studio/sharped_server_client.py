@@ -124,7 +124,8 @@ class SharpEDServerClient:
 
     def _log_tls_fallback(self, log: ProgressLog) -> None:
         if log and self.tls_fallback_message and not self._tls_fallback_logged:
-            log(self.tls_fallback_message)
+            log("[SharpED] Using fallback certificate validation.")
+            log(f"TLS fallback detail: {self.tls_fallback_message}")
             self._tls_fallback_logged = True
 
     def get_models(self, log: ProgressLog = None) -> ModelsResult:
@@ -168,7 +169,7 @@ class SharpEDServerClient:
         self._raise_if_stopped(stop_event)
         if status.download_bytes is not None:
             if log:
-                log(f"[SharpED] Downloading result to {out_path}")
+                log(f"  Result path: {out_path}")
             self._write_download_body(status.download_bytes, out_path)
         else:
             self.download(status.download_url, out_path, primary_token=upload.token, fallback_token=bearer_token, log=log)
@@ -254,7 +255,11 @@ class SharpEDServerClient:
             probe = self._probe_download(job_token, bearer_token)
             if probe is not None:
                 if log:
-                    log("SharpED server: result is downloadable although status still reports processing; continuing.")
+                    log("[SharpED] Result available · downloading...")
+                    log(
+                        "SharpED protocol detail: result became downloadable while status still reported "
+                        f"{status.status or 'processing'}."
+                    )
                 return StatusResult(
                     status=status.status or "downloadable",
                     output_file_name=status.output_file_name,
