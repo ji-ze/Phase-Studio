@@ -27,9 +27,14 @@ from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 try:
-    from phase_studio import __version__
+    from phase_studio.version import VERSION as __version__
 except Exception:
-    __version__ = "1.0.3"
+    from version import VERSION as __version__
+
+try:
+    from phase_studio.error_reporting import ErrorReport, build_error_report, sanitize_error_details, show_phase_studio_error
+except Exception:
+    from error_reporting import ErrorReport, build_error_report, sanitize_error_details, show_phase_studio_error
 
 try:
     from phase_studio.sharped_server_client import SharpEDServerClient
@@ -255,7 +260,7 @@ class JanaLogger:
             pass
 
     def __call__(self, message: str) -> None:
-        text = str(message)
+        text = sanitize_error_details(message)
         print(text, flush=True)
         self._fh.write(text + "\n")
         self._fh.flush()
@@ -1028,14 +1033,30 @@ def show_simplified_handoff_dialog(
     source = str(map_combo.currentData() or "deblurred")
     selected = next((r for r in results if int(r.cycle) == selected_cycle), None)
     if selected is None:
-        QMessageBox.warning(dialog, "Jana2020 hand-off", "Selected cycle is no longer available.")
+        report = build_error_report(
+            RuntimeError("Selected Jana2020 hand-off cycle is no longer available."),
+            subsystem="Jana2020",
+            operation="Jana2020 hand-off",
+            severity="warning",
+        )
+        log(f"[ERROR][Jana2020] {report.title}.")
+        show_phase_studio_error(dialog, report)
         return 1
     selected_map = selected.superflip_map if source.startswith("super") else selected.deblurred_map
     try:
         return final_jana_handoff(inflip_path, selected_map, base_name, original_superflip, log)
     except Exception as exc:
-        QMessageBox.critical(dialog, "Jana2020 hand-off failed", str(exc))
-        raise
+        report = build_error_report(
+            exc,
+            subsystem="Jana2020",
+            operation="Jana2020 hand-off",
+            paths=(inflip_path, selected_map),
+            extra_details=traceback.format_exc(),
+        )
+        log(f"[ERROR][Jana2020] {report.title}.")
+        log(report.diagnostic_block())
+        show_phase_studio_error(dialog, report)
+        return 1
 
 
 def parse_simple_superflip_metrics(log_path: Path) -> JanaCycleMetrics:
@@ -1567,17 +1588,13 @@ def _qt_imports():
 
 
 def _show_missing_token_warning(parent: object, qt: dict[str, object]) -> None:
-    QMessageBox = qt["QMessageBox"]
-    message = QMessageBox(parent)
-    message.setIcon(QMessageBox.Warning)
-    message.setWindowTitle("SharpED credentials required")
-    message.setText("An API token is required to run SharpED deblurring.")
-    message.setInformativeText(
-        "Open SharpED connection settings and enter your API token, or define "
-        "the SHARPED_API_TOKEN environment variable before starting the job."
+    report = build_error_report(
+        RuntimeError("Missing SharpED API token."),
+        subsystem="SharpED",
+        operation="Validate Jana2020 launcher settings",
+        severity="warning",
     )
-    message.setStandardButtons(QMessageBox.Ok)
-    message.exec()
+    show_phase_studio_error(parent, report)
 
 
 def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRunOptions:
@@ -1925,16 +1942,11 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         refresh_timer.stop()
         refresh_models_button.setEnabled(True)
         if state == "error":
-            error_text = str(payload)
             model_status.setText("Unable to retrieve the model list.")
-            QMessageBox.warning(
-                dialog,
-                "SharpED model discovery failed",
-                "The list of available SharpED models could not be retrieved.\n\n"
-                f"Server: {server_url.text().strip() or DEFAULT_SERVER_URL}\n"
-                f"Reason: {error_text}\n\n"
-                "Verify the server URL and network connection. A model identifier may "
-                "still be entered manually.",
+            model_status.setToolTip(
+                "Model discovery failed. Verify the server URL and network connection; "
+                "a model identifier may still be entered manually.\n\n"
+                + sanitize_error_details(payload)
             )
             return
 
@@ -2048,11 +2060,17 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             if not reference_override.text().strip():
                 missing.append("reference CIF / XPLOR")
             if missing:
-                QMessageBox.warning(
-                    dialog,
-                    "Crystallographic input required",
-                    "The selected input mode requires: " + ", ".join(missing) + ".",
+                report = ErrorReport(
+                    category="input_validation",
+                    subsystem="Input",
+                    title="Crystallographic input required",
+                    summary="The selected input mode is missing: " + ", ".join(missing) + ".",
+                    guidance="Select the required input files before starting the Jana2020 calculation.",
+                    technical_details="Missing input: " + ", ".join(missing),
+                    operation="Validate Jana2020 launcher settings",
+                    severity="warning",
                 )
+                show_phase_studio_error(dialog, report)
                 return False
         return True
 
@@ -2105,36 +2123,49 @@ def launch_phase_studio_from_jana(inflip_path: Optional[Path], options: JanaRunO
     from phase_studio.app import (
         IterativeSuperflipPipelineQtGUI,
         create_startup_splash,
+        initialize_main_window,
         parse_inflip_settings,
     )
+
+    handoff_import: Optional[JanaHandoffImport] = None
+    if inflip_path is not None:
+        if not inflip_path.is_file():
+            raise FileNotFoundError(f"Jana2020 .inflip file not found: {inflip_path}")
+        parsed = parse_inflip_settings(inflip_path)
+        handoff_import = build_jana_handoff_import(inflip_path, options, parsed)
 
     app = QApplication.instance() or QApplication(sys.argv)
     apply_phase_studio_style(app)
     splash = create_startup_splash()
     splash.show()
     app.processEvents()
-    win = IterativeSuperflipPipelineQtGUI()
-    if inflip_path is not None and inflip_path.is_file():
-        parsed = parse_inflip_settings(inflip_path)
-        handoff_import = build_jana_handoff_import(inflip_path, options, parsed)
-        applied_keys: list[str] = []
-        for key, value in handoff_import.values.items():
-            widget = win.inputs.get(key)
-            if widget is not None:
-                win._set_widget_value_from_string(widget, value)
-                applied_keys.append(key)
-        win._sync_input_source_mode_widgets()
-        win._sync_workflow_widgets()
-        for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
-            win._append_execution_log(line, subsystem="Jana2020")
-        win._append_execution_log(
-            "After the full pipeline finishes, use the 'Pass data to Jana2020' button to choose the cycle and map source for the final Jana2020 hand-off.",
-            level="DETAIL",
-            subsystem="Jana2020",
-        )
-    win.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
-    win.show()
-    splash.finish(win)
+
+    def build_window() -> IterativeSuperflipPipelineQtGUI:
+        win = IterativeSuperflipPipelineQtGUI()
+        if inflip_path is not None and handoff_import is not None:
+            splash.set_status("Loading Jana2020 hand-off…")
+            app.processEvents()
+            applied_keys: list[str] = []
+            for key, value in handoff_import.values.items():
+                widget = win.inputs.get(key)
+                if widget is not None:
+                    win._set_widget_value_from_string(widget, value)
+                    applied_keys.append(key)
+            win._sync_input_source_mode_widgets()
+            win._sync_workflow_widgets()
+            for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
+                win._append_execution_log(line, subsystem="Jana2020")
+            win._append_execution_log(
+                "After the full pipeline finishes, use the 'Pass data to Jana2020' button to choose the cycle and map source for the final Jana2020 hand-off.",
+                level="DETAIL",
+                subsystem="Jana2020",
+            )
+        win.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
+        return win
+
+    win = initialize_main_window(app, splash, build_window)
+    if win is None:
+        return 1
     return int(app.exec())
 
 
@@ -2167,14 +2198,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         logger("Wrapper finished")
         return int(code)
     except Exception as exc:
-        logger("ERROR: " + str(exc))
-        logger(traceback.format_exc())
+        report = build_error_report(
+            exc,
+            subsystem="Jana2020",
+            operation="Run Jana2020 calculation",
+            extra_details=traceback.format_exc(),
+        )
+        logger(f"[ERROR][{report.subsystem}] {report.title}.")
+        logger(report.diagnostic_block())
         try:
             qt = _qt_imports()
             QApplication = qt["QApplication"]
-            QMessageBox = qt["QMessageBox"]
-            QApplication.instance() or QApplication([sys.argv[0]])
-            QMessageBox.critical(None, f"Phase Studio {__version__} for Jana2020 — calculation error", str(exc))
+            app = QApplication.instance() or QApplication([sys.argv[0]])
+            apply_phase_studio_style(app)
+            show_phase_studio_error(None, report)
         except Exception:
             pass
         return 1

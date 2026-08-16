@@ -25,6 +25,7 @@ except Exception:
     pass
 
 datas = []
+datas += [(str(project_dir / "phase_studio" / "assets"), "phase_studio/assets")]
 try:
     datas += collect_data_files("qtvscodestyle")
 except Exception:

@@ -39,6 +39,7 @@ import subprocess
 import sys
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -46,9 +47,28 @@ from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 try:
-    from phase_studio import __version__
+    from phase_studio.version import VERSION as __version__
 except Exception:
-    __version__ = "1.0.3"
+    from version import VERSION as __version__
+
+try:
+    from phase_studio.error_reporting import (
+        ErrorAction,
+        ErrorReport,
+        build_error_report,
+        build_validation_report,
+        sanitize_error_details,
+        show_phase_studio_error,
+    )
+except Exception:
+    from error_reporting import (
+        ErrorAction,
+        ErrorReport,
+        build_error_report,
+        build_validation_report,
+        sanitize_error_details,
+        show_phase_studio_error,
+    )
 
 try:
     from phase_studio.sharped_server_client import SharpEDServerClient
@@ -71,7 +91,7 @@ try:
     from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (
         QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-        QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+        QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
         QDialog, QDialogButtonBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QSplashScreen, QToolButton,
         QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QTextEdit, QVBoxLayout, QWidget
     )
@@ -225,6 +245,18 @@ class ReferenceContext:
     composition: str
     atoms: List[AtomSite]
 
+
+@dataclass(frozen=True)
+class CrystalMetadata:
+    """Validated crystallographic metadata selected for one pipeline run."""
+
+    cell: gemmi.UnitCell
+    spacegroup: gemmi.SpaceGroup
+    spacegroup_hm: str
+    composition: str
+    source: str
+    source_path: Optional[Path] = None
+
 @dataclass
 class SuperflipLogMetrics:
     saved_run: Optional[int] = None
@@ -273,33 +305,15 @@ class ExecutionLogRecord:
     subsystem: str = "Pipeline"
 
 
-_LOG_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(\b(?:api[_ -]?token|access[_ -]?token|authorization[_ -]?token|"
-    r"job[_ -]?token|download[_ -]?token|token)\b[\"']?\s*[:=]\s*)"
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
-)
-_LOG_BEARER_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)[^\s,;]+")
-_LOG_SECRET_URL_RE = re.compile(
-    r"(?i)(/api/user/sharp-ed/(?:status|download)/)[^\s/?#]+"
-)
-_LOG_SECRET_QUERY_RE = re.compile(
-    r"(?i)([?&](?:token|access_token|api_token)=)[^&#\s]+"
-)
-
-
 def redact_log_secrets(message: object) -> str:
     """Remove credentials and job-access tokens from user-visible diagnostics."""
-    text = str(message)
-    text = _LOG_BEARER_RE.sub(r"\1[REDACTED]", text)
-    text = _LOG_SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", text)
-    text = _LOG_SECRET_URL_RE.sub(r"\1[REDACTED]", text)
-    return _LOG_SECRET_QUERY_RE.sub(r"\1[REDACTED]", text)
+    return sanitize_error_details(message)
 
 
 def relative_log_paths(message: str, work_dir: Optional[Path]) -> str:
     """Make paths below the already-announced work directory concise."""
     text = str(message)
-    if work_dir is None or text.lstrip().lower().startswith("work dir:"):
+    if work_dir is None or re.match(r"^\s*work (?:dir|directory):", text, re.IGNORECASE):
         return text
     try:
         root = str(Path(work_dir).expanduser().resolve())
@@ -390,6 +404,27 @@ INPUT_MODE_LABELS = {
     INPUT_MODE_EXTERNAL: "External HKL + CIF reference",
 }
 
+METADATA_SOURCE_INFLIP = "jana_inflip"
+METADATA_SOURCE_REFERENCE = "reference_file"
+METADATA_SOURCE_MANUAL = "manual"
+
+METADATA_SOURCE_LABELS = {
+    METADATA_SOURCE_INFLIP: "Jana .inflip",
+    METADATA_SOURCE_REFERENCE: "Reference file",
+    METADATA_SOURCE_MANUAL: "Manual",
+}
+
+
+def normalize_metadata_source(value: str) -> str:
+    text = str(value or "").strip().lower()
+    if text in {METADATA_SOURCE_INFLIP, "inflip", "jana", "jana .inflip"}:
+        return METADATA_SOURCE_INFLIP
+    if text in {METADATA_SOURCE_REFERENCE, "reference", "reference file"}:
+        return METADATA_SOURCE_REFERENCE
+    if text in {METADATA_SOURCE_MANUAL, "manual input"}:
+        return METADATA_SOURCE_MANUAL
+    return METADATA_SOURCE_INFLIP
+
 def normalize_input_source_mode(value: str) -> str:
     text = str(value or "").strip().lower()
     if text in {INPUT_MODE_INFLIP, "inflip", "jana", "jana .inflip"}:
@@ -409,6 +444,7 @@ class RunConfig:
     first_cycle_modelfile: Optional[Path]
     input_source_mode: str
     jana_inflip: Optional[Path]
+    crystal_metadata: CrystalMetadata
     jana_return_to_jana: bool
     work_dir: Path
     cycles: int
@@ -549,6 +585,7 @@ class HklAnalysisRequest:
     ref_text: str
     work_text: str
     configured_mode: str
+    metadata: Optional[CrystalMetadata] = None
 
 @dataclass
 class HklLoadResult:
@@ -673,6 +710,18 @@ def get_spacegroup_from_name(name: str) -> gemmi.SpaceGroup:
             continue
     return gemmi.SpaceGroup("P 1")
 
+
+def resolve_spacegroup_symbol(name: str) -> Optional[gemmi.SpaceGroup]:
+    """Resolve a user-entered symbol without silently falling back to P 1."""
+    if not str(name or "").strip():
+        return None
+    for candidate in spacegroup_name_candidates(name):
+        try:
+            return gemmi.SpaceGroup(candidate)
+        except Exception:
+            continue
+    return None
+
 def get_spacegroup_from_number(number_text: str) -> Optional[gemmi.SpaceGroup]:
     parsed = parse_cif_number(number_text, math.nan) if str(number_text or "").strip() else math.nan
     number = int(parsed) if np.isfinite(parsed) else 0
@@ -689,6 +738,61 @@ def get_spacegroup_from_number(number_text: str) -> Optional[gemmi.SpaceGroup]:
         except Exception:
             continue
     return None
+
+
+def compact_spacegroup_symbol(spacegroup: gemmi.SpaceGroup) -> str:
+    try:
+        return str(spacegroup.short_name()).strip()
+    except Exception:
+        return str(spacegroup.hm).strip()
+
+
+def validate_composition_text(value: str) -> str:
+    """Validate the existing whitespace-separated Superflip composition syntax."""
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Composition is missing.")
+    tokens = [token for token in re.split(r"[\s,;]+", text) if token]
+    awaiting_count = False
+    saw_element = False
+    for token in tokens:
+        match = re.fullmatch(r"([A-Z][a-z]?|D)([0-9]+(?:\.[0-9]+)?)?", token)
+        if match:
+            symbol = "H" if match.group(1) == "D" else match.group(1)
+            try:
+                if gemmi.Element(symbol).atomic_number <= 0:
+                    raise ValueError
+            except Exception as exc:
+                raise ValueError(f"Composition contains an unknown element: {match.group(1)}") from exc
+            if match.group(2) is not None and float(match.group(2)) <= 0:
+                raise ValueError(f"Composition count must be positive: {token}")
+            awaiting_count = match.group(2) is None
+            saw_element = True
+            continue
+        if awaiting_count and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", token):
+            if float(token) <= 0:
+                raise ValueError(f"Composition count must be positive: {token}")
+            awaiting_count = False
+            continue
+        raise ValueError(
+            f"Invalid composition token '{token}'. Use the existing Superflip syntax, for example Ag196 S108 O40 B1000."
+        )
+    if not saw_element:
+        raise ValueError("Composition is missing.")
+    return text
+
+
+def validate_crystal_cell(cell: gemmi.UnitCell) -> gemmi.UnitCell:
+    values = (cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
+    if not all(math.isfinite(float(value)) for value in values):
+        raise ValueError("Unit-cell parameters must be finite numbers.")
+    if min(cell.a, cell.b, cell.c) <= 0.0:
+        raise ValueError("Unit-cell lengths a, b and c must be greater than zero.")
+    if not all(0.0 < angle < 180.0 for angle in (cell.alpha, cell.beta, cell.gamma)):
+        raise ValueError("Unit-cell angles alpha, beta and gamma must be between 0 and 180 degrees.")
+    if not math.isfinite(float(cell.volume)) or cell.volume <= 0.0:
+        raise ValueError("The supplied unit cell has no physical positive volume.")
+    return cell
 
 def get_cif_blocks(cif_path: Path) -> List[gemmi.cif.Block]:
     doc = gemmi.cif.read_file(str(cif_path))
@@ -1002,25 +1106,90 @@ def composition_from_full_cell_atoms(atoms: Sequence[AtomSite], cell: gemmi.Unit
                 expanded.append(AtomSite(label=atom.label, element=elem, frac=frac, density=atom.density))
     return composition_from_atoms(expanded) if expanded else ""
 
+
+def read_reference_crystal_metadata(reference_file: Path) -> CrystalMetadata:
+    """Read one complete metadata set from the selected structure reference."""
+    path = Path(reference_file).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Reference metadata file not found: {path}")
+    if path.suffix.lower() not in REFERENCE_STRUCTURE_SUFFIXES:
+        raise ValueError("Reference metadata requires a CIF/INS/RES structure file.")
+
+    cell, spacegroup, hm = parse_cif_cell_and_sg(path)
+    validate_crystal_cell(cell)
+    sg_symbol = raw_cif_value(
+        path,
+        [
+            "_space_group_name_H-M_alt",
+            "_symmetry_space_group_name_H-M_alt",
+            "_symmetry_space_group_name_H-M",
+        ],
+    )
+    sg_number = raw_cif_value(
+        path,
+        ["_space_group_IT_number", "_symmetry_Int_Tables_number", "_space_group.it_number"],
+    )
+    if path.suffix.lower() == ".cif" and not (sg_symbol or sg_number):
+        raise ValueError("Reference file does not contain space-group metadata.")
+
+    atoms = parse_cif_atoms(path)
+    formula = composition_from_formula(
+        raw_cif_value(path, ["_chemical_formula_sum", "_chemical_formula_moiety"])
+    )
+    composition = composition_from_full_cell_atoms(atoms, cell, spacegroup) or formula or composition_from_atoms(atoms)
+    composition = validate_composition_text(composition)
+    return CrystalMetadata(
+        cell=cell,
+        spacegroup=spacegroup,
+        spacegroup_hm=str(hm or spacegroup.hm).strip(),
+        composition=composition,
+        source=METADATA_SOURCE_REFERENCE,
+        source_path=path,
+    )
+
+
+def reference_context_from_metadata(
+    metadata: CrystalMetadata,
+    atom_source: Optional[Path],
+    work_dir: Path,
+) -> ReferenceContext:
+    """Create the existing downstream context from one authoritative metadata set."""
+    atoms: List[AtomSite] = []
+    source_path = metadata.source_path or Path("phase_studio_manual_metadata")
+    if atom_source is not None and Path(atom_source).is_file() and Path(atom_source).suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
+        source_path = Path(atom_source).resolve()
+        atoms = parse_cif_atoms(source_path)
+    work_ref = Path(work_dir) / "phase_studio_reference_for_metrics.cif"
+    write_structure_cif(
+        work_ref,
+        metadata.cell,
+        metadata.spacegroup,
+        metadata.spacegroup_hm,
+        atoms,
+        metadata.composition,
+    )
+    return ReferenceContext(
+        cif_path=Path(source_path),
+        work_ref_cif=work_ref,
+        cell=metadata.cell,
+        spacegroup=metadata.spacegroup,
+        spacegroup_hm=metadata.spacegroup_hm,
+        composition=metadata.composition,
+        atoms=atoms,
+    )
+
 def load_reference_context(reference_cif: Path, work_dir: Path, composition_override: str = "") -> ReferenceContext:
-    cell, sg, hm = parse_cif_cell_and_sg(reference_cif)
-    if min(cell.a, cell.b, cell.c) <= 2.0:
-        raise ValueError(f"Unphysical reference cell parsed from CIF: {cell.a} {cell.b} {cell.c}")
-    atoms = parse_cif_atoms(reference_cif)
-    if not atoms:
-        # Jana .inflip files can provide a complete cell/space-group/reflection
-        # definition without atomic coordinates.  In that mode Phase Studio can
-        # still run Superflip, SharpED, EDMA and parse Superflip quality metrics;
-        # only reference-coordinate RMSD is unavailable.
-        atoms = []
-    formula_comp = composition_from_formula(raw_cif_value(reference_cif, ["_chemical_formula_sum", "_chemical_formula_moiety"]))
-    full_cell_comp = composition_from_full_cell_atoms(atoms, cell, sg)
-    comp = composition_override.strip() if composition_override.strip() else (full_cell_comp or formula_comp or composition_from_atoms(atoms))
-    work_ref = work_dir / "phase_studio_reference_for_metrics.cif"
-    # Write a clean reference CIF for EDMA metrics and downstream structure handling. This is
-    # safer than copying database CIFs with multiple blocks or unusual tags.
-    write_structure_cif(work_ref, cell, sg, hm, atoms)
-    return ReferenceContext(reference_cif, work_ref, cell, sg, hm, comp, atoms)
+    metadata = read_reference_crystal_metadata(reference_cif)
+    if composition_override.strip():
+        metadata = CrystalMetadata(
+            metadata.cell,
+            metadata.spacegroup,
+            metadata.spacegroup_hm,
+            validate_composition_text(composition_override),
+            metadata.source,
+            metadata.source_path,
+        )
+    return reference_context_from_metadata(metadata, reference_cif, work_dir)
 
 
 
@@ -2532,8 +2701,8 @@ def inflip_declared_reference(inflip_path: Path) -> Optional[Path]:
 
 def parse_inflip_crystallography(inflip_path: Path) -> Tuple[gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
     cell_values: Optional[List[float]] = None
-    hm = "P 1"
-    composition = "C1"
+    hm = ""
+    composition = ""
     for raw in Path(inflip_path).read_text(encoding="utf-8", errors="replace").splitlines():
         parts = split_inflip_line(raw)
         if not parts:
@@ -2551,14 +2720,79 @@ def parse_inflip_crystallography(inflip_path: Path) -> Tuple[gemmi.UnitCell, gem
             composition = " ".join(parts[1:]).strip() or composition
     if cell_values is None:
         raise ValueError(f"Jana .inflip does not contain a readable cell keyword: {inflip_path}")
+    if not hm:
+        raise ValueError(f"Jana .inflip does not contain a spacegroup keyword: {inflip_path}")
+    if not composition:
+        raise ValueError(f"Jana .inflip does not contain a composition keyword: {inflip_path}")
     sg = get_spacegroup_from_number(hm) if re.fullmatch(r"\d+(?:\.0+)?", str(hm).strip()) else None
     if sg is None:
-        sg = get_spacegroup_from_name(hm)
-    try:
-        hm_out = str(sg.hm).strip() or hm
-    except Exception:
-        hm_out = hm
-    return gemmi.UnitCell(*cell_values), sg, hm_out, composition
+        sg = resolve_spacegroup_symbol(hm)
+    if sg is None:
+        raise ValueError(f"Jana .inflip contains an unrecognized space group: {hm}")
+    low = hm.lower().replace("'", "").replace('"', "").replace(" ", "")
+    if "21/n" in low:
+        hm_out = "P 21/n"
+    elif "21/c" in low:
+        hm_out = "P 21/c"
+    else:
+        try:
+            hm_out = str(sg.hm).strip() or hm
+        except Exception:
+            hm_out = hm
+    cell = validate_crystal_cell(gemmi.UnitCell(*cell_values))
+    return cell, sg, hm_out, validate_composition_text(composition)
+
+
+def resolve_crystal_metadata(
+    source: str,
+    *,
+    jana_inflip: Optional[Path] = None,
+    reference_file: Optional[Path] = None,
+    manual_cell: Optional[Sequence[float]] = None,
+    manual_spacegroup_number: int = 0,
+    manual_spacegroup_symbol: str = "",
+    manual_composition: str = "",
+) -> CrystalMetadata:
+    """Resolve exactly one selected metadata source into a validated object."""
+    resolved_source = normalize_metadata_source(source)
+    if resolved_source == METADATA_SOURCE_INFLIP:
+        if jana_inflip is None or not Path(jana_inflip).is_file():
+            raise ValueError("Crystal metadata is incomplete. Select a readable Jana .inflip file.")
+        path = Path(jana_inflip).expanduser().resolve()
+        cell, spacegroup, hm, composition = parse_inflip_crystallography(path)
+        return CrystalMetadata(cell, spacegroup, hm, composition, resolved_source, path)
+
+    if resolved_source == METADATA_SOURCE_REFERENCE:
+        if reference_file is None:
+            raise ValueError("Crystal metadata is incomplete. Select a reference structure file.")
+        return read_reference_crystal_metadata(Path(reference_file))
+
+    values = list(manual_cell or [])
+    if len(values) != 6 or any(not math.isfinite(float(value)) for value in values):
+        raise ValueError("Crystal metadata is incomplete. Provide all six manual unit-cell parameters.")
+    if any(float(value) <= 0.0 for value in values):
+        raise ValueError("Manual unit-cell lengths and angles must all be set to positive values.")
+    cell = validate_crystal_cell(gemmi.UnitCell(*[float(value) for value in values]))
+    number = int(manual_spacegroup_number)
+    if number < 1 or number > 230:
+        raise ValueError("Manual space-group number must be between 1 and 230.")
+    by_number = get_spacegroup_from_number(str(number))
+    by_symbol = resolve_spacegroup_symbol(manual_spacegroup_symbol)
+    if by_symbol is None:
+        raise ValueError(f"Manual space-group symbol is not recognized: {manual_spacegroup_symbol or '(empty)'}")
+    if by_number is None or by_number.number != by_symbol.number:
+        raise ValueError(
+            f"Manual space-group number and symbol contradict each other: #{number} versus {manual_spacegroup_symbol}."
+        )
+    composition = validate_composition_text(manual_composition)
+    return CrystalMetadata(
+        cell=cell,
+        spacegroup=by_symbol,
+        spacegroup_hm=str(by_symbol.hm).strip(),
+        composition=composition,
+        source=resolved_source,
+        source_path=None,
+    )
 
 def reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Optional[str]:
     if inflip_path is None or not Path(inflip_path).is_file():
@@ -2632,10 +2866,7 @@ def resolve_reflection_data_mode_from_sources(
 def write_reference_cif_from_inflip(inflip_path: Path, output_cif: Path) -> Path:
     cell, sg, hm, composition = parse_inflip_crystallography(inflip_path)
     output_cif.parent.mkdir(parents=True, exist_ok=True)
-    write_structure_cif(output_cif, cell, sg, hm, [])
-    # Add formula tags used by Phase Studio/Superflip composition handling.
-    with output_cif.open("a", encoding="utf-8") as f:
-        f.write(f"_chemical_formula_sum '{composition}'\n")
+    write_structure_cif(output_cif, cell, sg, hm, [], composition)
     return output_cif
 
 
@@ -2999,7 +3230,14 @@ def superflip_normalize_keyword_lines(normalize: str, nresshells: int, log: Opti
         log(f"Superflip normalize value {normalize!r} may be unsupported by this executable; omitting normalize keyword.")
     return []
 
-def write_structure_cif(output_cif: Path, cell: gemmi.UnitCell, sg: gemmi.SpaceGroup, sg_hm: str, atoms: Sequence[AtomSite]) -> None:
+def write_structure_cif(
+    output_cif: Path,
+    cell: gemmi.UnitCell,
+    sg: gemmi.SpaceGroup,
+    sg_hm: str,
+    atoms: Sequence[AtomSite],
+    composition: str = "",
+) -> None:
     output_cif.parent.mkdir(parents=True, exist_ok=True)
     group_ops = sg.operations()
     ops = [op.translated(cen) for op in group_ops.sym_ops for cen in group_ops.cen_ops]
@@ -3012,6 +3250,8 @@ def write_structure_cif(output_cif: Path, cell: gemmi.UnitCell, sg: gemmi.SpaceG
             f.write(f"_symmetry_Int_Tables_number {sg.number}\n_space_group_IT_number {sg.number}\n")
         except Exception:
             pass
+        if str(composition or "").strip():
+            f.write(f"_chemical_formula_sum '{str(composition).strip()}'\n")
         f.write("loop_\n_space_group_symop_operation_xyz\n")
         for op in ops:
             f.write(f"'{op.triplet()}'\n")
@@ -3814,10 +4054,12 @@ def run_edma_on_xplor(
             f.write(f"writem40 {outbase}.m40\n")
         for line in clean_keyword_lines(extra_edma_keywords):
             f.write(line + "\n")
+    map_label = "Deblurred map" if "deblur" in prefix.lower() else "Superflip map"
+    log(f"[EDMA] {map_label} · threshold {plimit_sigma:g} σ")
     if map_sigma is None:
-        log(f"[EDMA] {xplor_map.name} at {plimit_sigma:g} (input keyword: plimit {float(absolute_plimit):g})")
+        log(f"  plimit={float(absolute_plimit):g}")
     else:
-        log(f"[EDMA] {xplor_map.name} at {plimit_sigma:g} sigma; map sigma={map_sigma:g}, input keyword: plimit {float(absolute_plimit):g}")
+        log(f"  map σ={map_sigma:g} · plimit={float(absolute_plimit):g}")
     run_command([edma_exe, inp.name], cwd=out_dir, log_path=edma_log, log=log, stop_event=stop_event)
     log_text = edma_log.read_text(encoding="utf-8", errors="replace") if edma_log.is_file() else ""
     lower_log = log_text.lower()
@@ -3836,13 +4078,11 @@ def run_edma_on_xplor(
     if len(frac) == 0:
         log(f"EDMA coordinate output contains no peaks above plimit for {xplor_map.name}; writing empty CIF.")
         write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
-        log(f"[EDMA] Completed · output: {cif}")
         return cif
     frac, dens = symmetry_merge_peaks(frac, dens, ref_ctx, merge_distance_a)
     elements = assign_elements_by_reference_composition(dens, ref_ctx.atoms)
     atoms = [AtomSite(label=f"{elements[i]}{i+1}", element=elements[i], frac=frac[i], density=float(dens[i])) for i in range(len(frac))]
     write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms)
-    log(f"[EDMA] Completed · output: {cif}")
     return cif
 
 def extract_jana_embedded_files(cif_path: Path, export_dir: Path, prefix: str) -> List[Path]:
@@ -4189,10 +4429,20 @@ class PathRow(QWidget):
         self.edit.setToolTip(tooltip)
 
 INPUT_TOOLTIPS = {
-    "input_source_mode": "Choose how crystallographic input is supplied: use the Jana .inflip as the primary source, use it with selected external HKL/reference replacements, or use an external HKL plus CIF reference without a Jana input file.",
+    "input_source_mode": "Choose whether reflections come from Jana .inflip, selected overrides, or an external HKL file.",
     "jana_inflip": "Jana2020 Superflip input file. In Jana modes its fbegin/endf reflection block is the default HKL source, and its cell/space-group/composition keywords can provide the reference metadata.",
     "hkl": "External reflection file. In Jana override mode it replaces only the fbegin/endf reflection block; in external mode it is the required reflection source.",
-    "reference_cif": "External reference file. CIF/INS/RES files provide the crystallographic reference model; Jana/XPLOR/CCP4 density maps are written as Superflip referencefile inputs. External HKL-only mode requires a CIF-compatible reference.",
+    "metadata_source": "Authoritative source for unit cell, space group and composition.",
+    "manual_cell_a": "Manual unit-cell length a in angstrom.",
+    "manual_cell_b": "Manual unit-cell length b in angstrom.",
+    "manual_cell_c": "Manual unit-cell length c in angstrom.",
+    "manual_cell_alpha": "Manual unit-cell angle alpha in degrees.",
+    "manual_cell_beta": "Manual unit-cell angle beta in degrees.",
+    "manual_cell_gamma": "Manual unit-cell angle gamma in degrees.",
+    "manual_spacegroup_number": "International Tables space-group number from 1 to 230.",
+    "manual_spacegroup_symbol": "Recognized Hermann-Mauguin space-group symbol.",
+    "manual_composition": "Composition in the existing Superflip syntax, for example Ag196 S108 O40 B1000.",
+    "reference_cif": "Optional external reference. CIF/INS/RES files can provide metadata and atom sites; Jana/XPLOR/CCP4 maps can be Superflip reference densities.",
     "first_cycle_modelfile": "Optional external density or structure model for cycle 1. Supported Superflip modelfile inputs are XPLOR, CCP4 and CIF.",
     "work_dir": "Output directory for generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics.",
     "superflip_exe": "Absolute path to the original Jana2020 Superflip executable. Default: C:\\Jana2020\\SUPERFLIP\\superflip_original.exe. Do not select the Phase Studio wrapper named superflip.exe.",
@@ -4461,6 +4711,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._configuration_locked = False
         self._run_status = "READY"
         self._cycle_progress_state: Optional[CycleProgressState] = None
+        self._syncing_metadata_controls = False
+        self._metadata_source_user_selected = False
+        self._metadata_valid = False
+        self._metadata_error_report: Optional[ErrorReport] = None
+        self._structure_parse_errors: set[str] = set()
         self.inputs: Dict[str, object] = {}
         self.input_labels: Dict[str, QWidget] = {}
         self.settings = QSettings("PhaseStudio", "PhaseStudio")
@@ -4628,31 +4883,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _external_link_icon(self, url: str, tooltip: str) -> QToolButton:
         def chain_pixmap(color: str) -> QPixmap:
-            pixmap = QPixmap(20, 20)
+            pixmap = QPixmap(16, 16)
             pixmap.fill(Qt.transparent)
             painter = QPainter(pixmap)
             try:
                 painter.setRenderHint(QPainter.Antialiasing, True)
-                pen = QPen(QColor(color), 1.7)
+                pen = QPen(QColor(color), 1.35)
                 pen.setJoinStyle(Qt.RoundJoin)
                 painter.setPen(pen)
                 painter.setBrush(Qt.NoBrush)
                 painter.save()
-                painter.translate(7.2, 11.7)
+                painter.translate(5.8, 9.4)
                 painter.rotate(-38.0)
-                painter.drawRoundedRect(QRectF(-5.5, -3.0, 10.0, 6.0), 3.0, 3.0)
+                painter.drawRoundedRect(QRectF(-4.4, -2.4, 8.0, 4.8), 2.4, 2.4)
                 painter.restore()
                 painter.save()
-                painter.translate(12.8, 8.3)
+                painter.translate(10.2, 6.6)
                 painter.rotate(-38.0)
-                painter.drawRoundedRect(QRectF(-4.5, -3.0, 10.0, 6.0), 3.0, 3.0)
+                painter.drawRoundedRect(QRectF(-3.6, -2.4, 8.0, 4.8), 2.4, 2.4)
                 painter.restore()
             finally:
                 painter.end()
             return pixmap
 
-        normal_pixmap = chain_pixmap("#2264b8")
-        active_pixmap = chain_pixmap("#001170")
+        normal_pixmap = chain_pixmap("#7183a6")
+        active_pixmap = chain_pixmap("#2264b8")
         icon = QIcon()
         icon.addPixmap(normal_pixmap, QIcon.Normal, QIcon.Off)
         icon.addPixmap(active_pixmap, QIcon.Active, QIcon.Off)
@@ -4664,7 +4919,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         link.setCursor(Qt.PointingHandCursor)
         link.setToolTip(tooltip)
         link.setAccessibleName(tooltip)
-        link.setFixedSize(24, 24)
+        link.setFixedSize(20, 20)
         link.clicked.connect(lambda _checked=False, target=url: QDesktopServices.openUrl(QUrl(target)))
         return link
 
@@ -4674,7 +4929,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         main_layout = QHBoxLayout(central)
         main_layout.setContentsMargins(8, 8, 8, 8)
         self.main_splitter = QSplitter(Qt.Horizontal)
-        self.main_splitter.setHandleWidth(3)
+        self.main_splitter.setObjectName("mainSplitter")
+        self.main_splitter.setHandleWidth(1)
         main_layout.addWidget(self.main_splitter)
 
         left = QWidget()
@@ -4884,6 +5140,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         try:
             self.inputs["input_source_mode"].currentTextChanged.connect(self._sync_input_source_mode_widgets)  # type: ignore[attr-defined]
+            self.inputs["input_source_mode"].activated.connect(self._input_mode_user_changed)  # type: ignore[attr-defined]
         except Exception:
             pass
         self._add_path(data_input_form, "jana_inflip", "Jana2020 .inflip file", "", "file", "Superflip input (*.inflip *.inp);;All files (*)")
@@ -4912,8 +5169,140 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         hkl_button_row.addWidget(self.analyze_hkl_btn)
         data_input_form.addRow("", hkl_button_row)
 
+        metadata_form = add_form_group(paths_tab, "Crystal metadata")
+        self._add_combo(
+            metadata_form,
+            "metadata_source",
+            "Metadata source",
+            [
+                METADATA_SOURCE_LABELS[METADATA_SOURCE_INFLIP],
+                METADATA_SOURCE_LABELS[METADATA_SOURCE_REFERENCE],
+                METADATA_SOURCE_LABELS[METADATA_SOURCE_MANUAL],
+            ],
+            METADATA_SOURCE_LABELS[METADATA_SOURCE_INFLIP],
+        )
+        self.inputs["metadata_source"].currentTextChanged.connect(self._sync_metadata_source_widgets)  # type: ignore[attr-defined]
+        self.inputs["metadata_source"].activated.connect(self._metadata_source_activated)  # type: ignore[attr-defined]
+
+        self.metadata_summary_panel = QWidget()
+        self.metadata_summary_panel.setObjectName("metadataSummaryPanel")
+        metadata_summary_layout = self._configure_form(QFormLayout(self.metadata_summary_panel))
+        self.metadata_cell_summary = QLabel("No metadata loaded.")
+        self.metadata_cell_summary.setWordWrap(True)
+        self.metadata_spacegroup_summary = QLabel("")
+        self.metadata_spacegroup_summary.setWordWrap(True)
+        self.metadata_composition_summary = QLabel("")
+        self.metadata_composition_summary.setWordWrap(True)
+        metadata_summary_layout.addRow("Cell", self.metadata_cell_summary)
+        metadata_summary_layout.addRow("Space group", self.metadata_spacegroup_summary)
+        metadata_summary_layout.addRow("Composition", self.metadata_composition_summary)
+        metadata_form.addRow("", self.metadata_summary_panel)
+
+        self.manual_metadata_panel = QWidget()
+        self.manual_metadata_panel.setObjectName("manualMetadataPanel")
+        manual_layout = QGridLayout(self.manual_metadata_panel)
+        manual_layout.setContentsMargins(0, 0, 0, 0)
+        manual_layout.setHorizontalSpacing(8)
+        manual_layout.setVerticalSpacing(CONFIG_FORM_VERTICAL_SPACING)
+
+        unit_cell_heading = QLabel("Unit cell")
+        unit_cell_heading.setObjectName("inlineGroupTitle")
+        manual_layout.addWidget(unit_cell_heading, 0, 0, 1, 6)
+
+        def add_manual_cell_control(key: str, row: int, column: int, label_text: str, unit: str) -> None:
+            label = QLabel(label_text)
+            control = QDoubleSpinBox()
+            control.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            control.setFixedHeight(CONFIG_CONTROL_VISIBLE_HEIGHT)
+            control.setRange(0.0, 10000.0 if "cell_" in key and not key.endswith(("alpha", "beta", "gamma")) else 179.99999)
+            control.setDecimals(5)
+            control.setSingleStep(0.1)
+            control.setSpecialValueText("Not set")
+            control.setValue(0.0)
+            manual_layout.addWidget(label, row, column)
+            manual_layout.addWidget(control, row, column + 1)
+            manual_layout.addWidget(QLabel(unit), row, column + 2)
+            self.inputs[key] = control
+            self.input_labels[key] = label
+            self._apply_input_tooltip(key, control)
+            if control.toolTip():
+                label.setToolTip(control.toolTip())
+            control.valueChanged.connect(self._manual_metadata_value_changed)
+
+        for row, (length_key, length_label, angle_key, angle_label) in enumerate(
+            (
+                ("manual_cell_a", "a", "manual_cell_alpha", "alpha"),
+                ("manual_cell_b", "b", "manual_cell_beta", "beta"),
+                ("manual_cell_c", "c", "manual_cell_gamma", "gamma"),
+            ),
+            start=1,
+        ):
+            add_manual_cell_control(length_key, row, 0, length_label, "Å")
+            add_manual_cell_control(angle_key, row, 3, angle_label, "°")
+
+        symmetry_heading = QLabel("Symmetry")
+        symmetry_heading.setObjectName("inlineGroupTitle")
+        manual_layout.addWidget(symmetry_heading, 4, 0, 1, 6)
+        number_label = QLabel("Number")
+        number_control = QSpinBox()
+        number_control.setRange(0, 230)
+        number_control.setSpecialValueText("Not set")
+        number_control.setFixedHeight(CONFIG_CONTROL_VISIBLE_HEIGHT)
+        symbol_label = QLabel("Symbol")
+        symbol_control = QLineEdit()
+        symbol_control.setFixedHeight(CONFIG_CONTROL_VISIBLE_HEIGHT)
+        manual_layout.addWidget(number_label, 5, 0)
+        manual_layout.addWidget(number_control, 5, 1, 1, 2)
+        manual_layout.addWidget(symbol_label, 5, 3)
+        manual_layout.addWidget(symbol_control, 5, 4, 1, 2)
+        self.inputs["manual_spacegroup_number"] = number_control
+        self.inputs["manual_spacegroup_symbol"] = symbol_control
+        self.input_labels["manual_spacegroup_number"] = number_label
+        self.input_labels["manual_spacegroup_symbol"] = symbol_label
+        self._apply_input_tooltip("manual_spacegroup_number", number_control)
+        self._apply_input_tooltip("manual_spacegroup_symbol", symbol_control)
+        number_control.valueChanged.connect(self._manual_spacegroup_number_changed)
+        symbol_control.editingFinished.connect(self._manual_spacegroup_symbol_changed)
+
+        composition_heading = QLabel("Composition")
+        composition_heading.setObjectName("inlineGroupTitle")
+        composition_control = QLineEdit()
+        composition_control.setFixedHeight(CONFIG_CONTROL_VISIBLE_HEIGHT)
+        composition_control.setPlaceholderText("Ag196 S108 O40 B1000")
+        manual_layout.addWidget(composition_heading, 6, 0, 1, 6)
+        manual_layout.addWidget(composition_control, 7, 0, 1, 6)
+        self.inputs["manual_composition"] = composition_control
+        self.input_labels["manual_composition"] = composition_heading
+        self._apply_input_tooltip("manual_composition", composition_control)
+        composition_control.editingFinished.connect(self._manual_metadata_value_changed)
+
+        self.manual_metadata_status = QLabel("")
+        self.manual_metadata_status.setObjectName("secondaryHelp")
+        self.manual_metadata_status.setWordWrap(True)
+        manual_layout.addWidget(self.manual_metadata_status, 8, 0, 1, 6)
+        metadata_form.addRow("", self.manual_metadata_panel)
+
+        self.metadata_error_panel = QWidget()
+        self.metadata_error_panel.setObjectName("metadataErrorPanel")
+        metadata_error_layout = QHBoxLayout(self.metadata_error_panel)
+        metadata_error_layout.setContentsMargins(9, 7, 7, 7)
+        metadata_error_layout.setSpacing(8)
+        self.metadata_error_text = QLabel("")
+        self.metadata_error_text.setObjectName("metadataErrorText")
+        self.metadata_error_text.setWordWrap(True)
+        self.metadata_error_details_btn = QToolButton()
+        self.metadata_error_details_btn.setObjectName("metadataErrorDetails")
+        self.metadata_error_details_btn.setText("Details")
+        self.metadata_error_details_btn.clicked.connect(self._show_metadata_error_details)
+        metadata_error_layout.addWidget(self.metadata_error_text, 1)
+        metadata_error_layout.addWidget(self.metadata_error_details_btn, 0, Qt.AlignTop)
+        self.metadata_error_panel.setVisible(False)
+        metadata_form.addRow("", self.metadata_error_panel)
+
         reference_form = add_form_group(paths_tab, "Reference and initial model")
         self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
+        self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
+        self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
         self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
 
         output_form = add_form_group(paths_tab, "Output")
@@ -4946,8 +5335,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             pass
         self._add_spin(workflow_form, "cycles", "Cycles", 1, 1, 999, 1)
         self.inputs["cycles"].valueChanged.connect(self._update_plot)  # type: ignore[attr-defined]
-        self._add_text(workflow_form, "composition_override", "Composition override", "")
-        workflow_form.addRow("", self._secondary_help("Leave blank to use the reference composition."))
         self._add_combo(workflow_form, "modelfile_source", "Next-cycle model", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "superflip_xplor")
         try:
             self.inputs["modelfile_source"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
@@ -5029,7 +5416,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         reference_tab.addLayout(contents_row)
         setup_help_layout = add_help_section(reference_tab, "setup", "Systematic setup guide", """
             <h3>1. Select the input</h3>
-            <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file with a crystallographic reference.</p>
+            <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
+            <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
             <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
             <h3>2. Choose a workflow preset</h3>
             <p>Use a preset as a starting point, then adjust advanced parameters only when necessary.</p>
@@ -5253,6 +5641,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.handoff_btn = QPushButton("Send to Jana2020")
         self.run_btn.setObjectName("primaryButton")
         self.handoff_btn.setObjectName("handoffButton")
+        self.stop_btn.setObjectName("stopAfterButton")
+        self.stop_now_btn.setObjectName("stopNowButton")
+        self.clear_btn.setObjectName("clearButton")
         for action_button in (self.run_btn, self.stop_btn, self.stop_now_btn, self.clear_btn, self.handoff_btn):
             action_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.handoff_btn.setEnabled(False)
@@ -5274,18 +5665,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         left_layout.addLayout(primary_buttons)
         left_layout.addLayout(secondary_buttons)
 
-        overall_progress_label = QLabel("OVERALL PROGRESS")
-        overall_progress_label.setObjectName("progressSectionLabel")
-        left_layout.addWidget(overall_progress_label)
+        self.run_status_panel = QWidget()
+        self.run_status_panel.setObjectName("runStatusPanel")
+        run_status_layout = QVBoxLayout(self.run_status_panel)
+        run_status_layout.setContentsMargins(8, 6, 8, 7)
+        run_status_layout.setSpacing(3)
+        run_status_title = QLabel("RUN STATUS")
+        run_status_title.setObjectName("runStatusTitle")
+        run_status_layout.addWidget(run_status_title)
+        self.overall_progress_label = QLabel("Overall")
+        self.overall_progress_label.setObjectName("progressSectionLabel")
+        run_status_layout.addWidget(self.overall_progress_label)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setFormat("Idle")
         self.progress_bar.setToolTip("Cycle-level progress indicator for the iterative pipeline.")
-        left_layout.addWidget(self.progress_bar)
+        run_status_layout.addWidget(self.progress_bar)
         current_cycle_header = QHBoxLayout()
-        current_cycle_label = QLabel("CURRENT CYCLE")
+        current_cycle_label = QLabel("Current cycle")
         current_cycle_label.setObjectName("progressSectionLabel")
         self.current_cycle_stage_counter = QLabel("")
         self.current_cycle_stage_counter.setObjectName("progressStageCounter")
@@ -5293,22 +5692,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         current_cycle_header.addWidget(current_cycle_label)
         current_cycle_header.addStretch(1)
         current_cycle_header.addWidget(self.current_cycle_stage_counter)
-        left_layout.addLayout(current_cycle_header)
+        run_status_layout.addLayout(current_cycle_header)
         self.current_cycle_detail = QLabel("Idle")
         self.current_cycle_detail.setObjectName("currentCycleDetail")
         self.current_cycle_detail.setWordWrap(True)
-        left_layout.addWidget(self.current_cycle_detail)
+        run_status_layout.addWidget(self.current_cycle_detail)
         self.current_cycle_progress = QProgressBar()
         self.current_cycle_progress.setObjectName("currentCycleProgress")
         self.current_cycle_progress.setRange(0, 1)
         self.current_cycle_progress.setValue(0)
         self.current_cycle_progress.setTextVisible(False)
         self.current_cycle_progress.setToolTip("Stage-based progress for the active cycle; this is not an elapsed-time estimate.")
-        left_layout.addWidget(self.current_cycle_progress)
+        run_status_layout.addWidget(self.current_cycle_progress)
         self.configuration_lock_hint = QLabel("Configuration locked while the pipeline is running.")
         self.configuration_lock_hint.setObjectName("configurationLockHint")
         self.configuration_lock_hint.setVisible(False)
-        left_layout.addWidget(self.configuration_lock_hint)
+        run_status_layout.addWidget(self.configuration_lock_hint)
+        left_layout.addWidget(self.run_status_panel)
         self._set_run_status("Ready")
 
         # Right-side resizable scientific dashboard
@@ -5358,7 +5758,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.result_splitter.setStretchFactor(2, 2)
         self.result_splitter.setSizes([170, 390, 140])
         self._last_log_record: Optional[ExecutionLogRecord] = None
-        self._append_execution_log("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL + CIF input mode.")
+        self._append_execution_log("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL input mode.")
         self._append_execution_log(
             "Defaults: later-cycle Superflip modelfiles can use raw Superflip XPLOR, deblurred XPLOR, or EDMA CIF.",
             level="DETAIL",
@@ -5368,6 +5768,211 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._update_structure_views()
         self._sync_input_source_mode_widgets()
         self._sync_workflow_widgets()
+
+    def _metadata_source_value(self) -> str:
+        return normalize_metadata_source(
+            self._combo_value("metadata_source") if "metadata_source" in self.inputs else ""
+        )
+
+    def _set_metadata_source(self, source: str) -> None:
+        widget = self.inputs.get("metadata_source")
+        if not isinstance(widget, QComboBox):
+            return
+        label = METADATA_SOURCE_LABELS[normalize_metadata_source(source)]
+        index = widget.findText(label)
+        if index >= 0 and index != widget.currentIndex():
+            widget.setCurrentIndex(index)
+        else:
+            self._sync_metadata_source_widgets()
+
+    def _default_metadata_source_for_input(self) -> str:
+        mode = normalize_input_source_mode(
+            self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else ""
+        )
+        if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
+            return METADATA_SOURCE_INFLIP
+        reference_text = self._path_value("reference_cif").strip() if "reference_cif" in self.inputs else ""
+        if reference_text:
+            path = Path(reference_text).expanduser()
+            if path.is_file() and path.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
+                return METADATA_SOURCE_REFERENCE
+        return METADATA_SOURCE_MANUAL
+
+    def _input_mode_user_changed(self, _index: int = -1) -> None:
+        self._metadata_source_user_selected = False
+        self._set_metadata_source(self._default_metadata_source_for_input())
+        self._sync_input_source_mode_widgets()
+
+    def _metadata_source_activated(self, _index: int = -1) -> None:
+        self._metadata_source_user_selected = True
+        self._sync_metadata_source_widgets()
+        self._sync_input_source_mode_widgets()
+
+    def _jana_inflip_path_changed(self) -> None:
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode"))
+        if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} and not self._metadata_source_user_selected:
+            self._metadata_source_user_selected = False
+            self._set_metadata_source(METADATA_SOURCE_INFLIP)
+        self._sync_metadata_source_widgets()
+        self.save_settings()
+
+    def _reference_path_changed(self) -> None:
+        reference_text = self._path_value("reference_cif").strip()
+        reference_path = Path(reference_text).expanduser() if reference_text else None
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode"))
+        if (
+            not self._metadata_source_user_selected
+            and mode == INPUT_MODE_EXTERNAL
+            and reference_path is not None
+            and reference_path.is_file()
+            and reference_path.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES
+        ):
+            self._metadata_source_user_selected = False
+            self._set_metadata_source(METADATA_SOURCE_REFERENCE)
+        self._sync_metadata_source_widgets()
+        self.save_settings()
+
+    def _manual_spacegroup_number_changed(self, number: int) -> None:
+        if self._syncing_metadata_controls:
+            return
+        self._syncing_metadata_controls = True
+        try:
+            symbol_widget = self.inputs.get("manual_spacegroup_symbol")
+            if isinstance(symbol_widget, QLineEdit):
+                spacegroup = get_spacegroup_from_number(str(number)) if number else None
+                symbol_widget.setText(compact_spacegroup_symbol(spacegroup) if spacegroup is not None else "")
+                symbol_widget.setProperty("metadataInvalid", False)
+                symbol_widget.style().unpolish(symbol_widget)
+                symbol_widget.style().polish(symbol_widget)
+        finally:
+            self._syncing_metadata_controls = False
+        self._manual_metadata_value_changed()
+
+    def _manual_spacegroup_symbol_changed(self) -> None:
+        if self._syncing_metadata_controls:
+            return
+        symbol_widget = self.inputs.get("manual_spacegroup_symbol")
+        number_widget = self.inputs.get("manual_spacegroup_number")
+        if not isinstance(symbol_widget, QLineEdit) or not isinstance(number_widget, QSpinBox):
+            return
+        spacegroup = resolve_spacegroup_symbol(symbol_widget.text())
+        invalid = spacegroup is None
+        symbol_widget.setProperty("metadataInvalid", invalid)
+        symbol_widget.style().unpolish(symbol_widget)
+        symbol_widget.style().polish(symbol_widget)
+        if spacegroup is not None:
+            self._syncing_metadata_controls = True
+            try:
+                number_widget.setValue(int(spacegroup.number))
+                symbol_widget.setText(compact_spacegroup_symbol(spacegroup))
+            finally:
+                self._syncing_metadata_controls = False
+        self._manual_metadata_value_changed()
+
+    def _manual_metadata_values(self) -> Tuple[List[float], int, str, str]:
+        cell = [
+            self._dspin_value(key)
+            for key in (
+                "manual_cell_a",
+                "manual_cell_b",
+                "manual_cell_c",
+                "manual_cell_alpha",
+                "manual_cell_beta",
+                "manual_cell_gamma",
+            )
+        ]
+        return (
+            cell,
+            self._spin_value("manual_spacegroup_number"),
+            self._line_value("manual_spacegroup_symbol"),
+            self._line_value("manual_composition"),
+        )
+
+    def _resolve_crystal_metadata_from_inputs(self) -> CrystalMetadata:
+        jana_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
+        reference_text = self._path_value("reference_cif").strip() if "reference_cif" in self.inputs else ""
+        manual_cell, manual_number, manual_symbol, manual_composition = self._manual_metadata_values()
+        return resolve_crystal_metadata(
+            self._metadata_source_value(),
+            jana_inflip=Path(jana_text).expanduser().resolve() if jana_text else None,
+            reference_file=Path(reference_text).expanduser().resolve() if reference_text else None,
+            manual_cell=manual_cell,
+            manual_spacegroup_number=manual_number,
+            manual_spacegroup_symbol=manual_symbol,
+            manual_composition=manual_composition,
+        )
+
+    @staticmethod
+    def _metadata_summary_values(metadata: CrystalMetadata) -> Tuple[str, str, str]:
+        cell = metadata.cell
+        cell_text = (
+            f"{cell.a:.5f} × {cell.b:.5f} × {cell.c:.5f} Å · "
+            f"{cell.alpha:.3f}°, {cell.beta:.3f}°, {cell.gamma:.3f}°"
+        )
+        group_text = f"{compact_spacegroup_symbol(metadata.spacegroup)} (#{metadata.spacegroup.number})"
+        return cell_text, group_text, metadata.composition
+
+    def _manual_metadata_value_changed(self, *_args) -> None:
+        if self._syncing_metadata_controls or self._metadata_source_value() != METADATA_SOURCE_MANUAL:
+            return
+        try:
+            metadata = self._resolve_crystal_metadata_from_inputs()
+            self.manual_metadata_status.setText(
+                f"Valid · {compact_spacegroup_symbol(metadata.spacegroup)} (#{metadata.spacegroup.number})"
+            )
+            self._clear_metadata_error()
+        except Exception as exc:
+            self.manual_metadata_status.setText("")
+            self._set_metadata_error(exc)
+
+    def _set_metadata_error(self, error: object) -> None:
+        report = build_error_report(error, subsystem="Crystal metadata", operation="Resolve crystal metadata")
+        self._metadata_valid = False
+        self._metadata_error_report = report
+        if hasattr(self, "metadata_error_text"):
+            self.metadata_error_text.setText(f"{report.title}\n{report.guidance}")
+            self.metadata_error_panel.setVisible(True)
+        if hasattr(self, "run_btn"):
+            self.run_btn.setEnabled(False)
+
+    def _clear_metadata_error(self) -> None:
+        self._metadata_valid = True
+        self._metadata_error_report = None
+        if hasattr(self, "metadata_error_panel"):
+            self.metadata_error_panel.setVisible(False)
+        if hasattr(self, "run_btn"):
+            active = str(getattr(self, "_run_status", "READY")).upper() in {"RUNNING", "STOPPING"}
+            self.run_btn.setEnabled(not active)
+
+    def _show_metadata_error_details(self) -> None:
+        report = self._metadata_error_report
+        if report is not None:
+            self._show_error_report(report)
+
+    def _sync_metadata_source_widgets(self, *_args) -> None:
+        if not hasattr(self, "manual_metadata_panel"):
+            return
+        source = self._metadata_source_value()
+        manual = source == METADATA_SOURCE_MANUAL
+        self.manual_metadata_panel.setVisible(manual)
+        self.metadata_summary_panel.setVisible(not manual)
+        if manual:
+            self._manual_metadata_value_changed()
+            return
+        try:
+            metadata = self._resolve_crystal_metadata_from_inputs()
+            cell_text, group_text, composition = self._metadata_summary_values(metadata)
+            self.metadata_cell_summary.setText(cell_text)
+            self.metadata_spacegroup_summary.setText(group_text)
+            self.metadata_composition_summary.setText(composition)
+            self.metadata_summary_panel.setVisible(True)
+            self._clear_metadata_error()
+        except Exception as exc:
+            self.metadata_cell_summary.setText("")
+            self.metadata_spacegroup_summary.setText("")
+            self.metadata_composition_summary.setText("")
+            self.metadata_summary_panel.setVisible(False)
+            self._set_metadata_error(exc)
 
     def _sync_workflow_widgets(self) -> None:
         if self._configuration_locked:
@@ -5412,7 +6017,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if self._configuration_locked:
             return
         mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
-        jana_enabled = mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}
+        jana_enabled = mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} or self._metadata_source_value() == METADATA_SOURCE_INFLIP
         override_enabled = mode == INPUT_MODE_INFLIP_OVERRIDES
         external_enabled = mode == INPUT_MODE_EXTERNAL
         for key, enabled in (
@@ -5426,16 +6031,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             label = self.input_labels.get(key)
             if label is not None:
                 label.setEnabled(bool(enabled))
+        self._sync_metadata_source_widgets()
 
     def _set_configuration_locked(self, locked: bool) -> None:
         locked = bool(locked)
         was_locked = self._configuration_locked
         self._configuration_locked = locked
         for key, widget in self.inputs.items():
+            styled_widgets = [widget]
+            if isinstance(widget, QWidget):
+                styled_widgets.extend(widget.findChildren(QWidget))
+            for styled_widget in styled_widgets:
+                styled_widget.setProperty("configurationLocked", locked)
             if hasattr(widget, "setEnabled"):
                 widget.setEnabled(not locked)  # type: ignore[attr-defined]
             label = self.input_labels.get(key)
             if label is not None:
+                label.setProperty("configurationLocked", locked)
                 label.setEnabled(not locked)
         for name in ("test_hkl_btn", "analyze_hkl_btn", "refresh_models_btn", "load_inflip_btn"):
             action = getattr(self, name, None)
@@ -5445,6 +6057,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.configuration_lock_hint.setVisible(locked)
         if was_locked and not locked:
             self._sync_input_source_mode_widgets()
+            self._sync_metadata_source_widgets()
             self._sync_workflow_widgets()
 
     def _widget_value_as_string(self, widget: object) -> str:
@@ -5488,6 +6101,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             pass
 
     def load_settings(self) -> None:
+        saved_metadata_source = self.settings.value("inputs/metadata_source", None)
         for key, widget in self.inputs.items():
             value = self.settings.value(f"inputs/{key}", None)
             if value is not None:
@@ -5527,7 +6141,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             legacy_reference = legacy_superflip_referencefile or legacy_reference_xplor
             if legacy_reference:
                 self._set_widget_value_from_string(referencefile_widget, str(legacy_reference))
+        if saved_metadata_source is None:
+            self._set_metadata_source(self._default_metadata_source_for_input())
         self._sync_input_source_mode_widgets()
+        self._sync_metadata_source_widgets()
         geom = self.settings.value("window/geometry", None)
         if geom is not None:
             try:
@@ -5562,9 +6179,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     continue
                 self._set_widget_value_from_string(widget, value)
                 applied += 1
-            QMessageBox.information(self, "Loaded .inflip settings", f"Loaded {applied} GUI settings from:\n{path}\n\nHKL data format was imported when dataformat/dataitemwidths were present. Reflection records and crystallographic blocks were not copied into editable fields.")
+            self._append_execution_log(
+                f"Loaded {applied} GUI settings from {path}",
+                level="SUCCESS",
+                subsystem="Jana2020",
+            )
+            self._append_execution_log(
+                "HKL data format was imported when dataformat/dataitemwidths were present; "
+                "reflection records and crystallographic blocks were not copied into editable fields.",
+                level="DETAIL",
+                subsystem="Jana2020",
+            )
         except Exception as exc:
-            QMessageBox.critical(self, "Load .inflip failed", str(exc))
+            self._show_error_report(
+                build_error_report(exc, subsystem="Jana2020", operation="Load .inflip settings", paths=(path,))
+            )
 
     def _collect_hkl_analysis_request(self) -> HklAnalysisRequest:
         mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
@@ -5573,7 +6202,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ref_text = self._path_value("reference_cif").strip() if "reference_cif" in self.inputs else ""
         work_text = self._path_value("work_dir").strip() if "work_dir" in self.inputs else ""
         configured_mode = self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO
-        return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode)
+        metadata = self._resolve_crystal_metadata_from_inputs()
+        return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode, metadata)
 
     def _resolve_hkl_analysis_inputs(self, request: HklAnalysisRequest) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
         work_dir = Path(request.work_text).expanduser().resolve() if request.work_text else Path.cwd()
@@ -5583,7 +6213,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if jana_path is None or not jana_path.is_file():
                 raise FileNotFoundError("Jana .inflip is required to test or analyze embedded HKL data.")
             hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
-            cell, sg, hm, _composition = parse_inflip_crystallography(jana_path)
             source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
         else:
             if not request.hkl_text:
@@ -5591,15 +6220,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             hkl_path = Path(request.hkl_text).expanduser().resolve()
             if not hkl_path.is_file():
                 raise FileNotFoundError(f"HKL file not found: {hkl_path}")
-            if request.ref_text and Path(request.ref_text).expanduser().is_file() and Path(request.ref_text).suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
-                ref_path = Path(request.ref_text).expanduser().resolve()
-                cell, sg, hm = parse_cif_cell_and_sg(ref_path)
-                source_note = f"HKL source: {hkl_path}; cell/symmetry source: {ref_path}"
-            elif jana_path is not None and jana_path.is_file():
-                cell, sg, hm, _composition = parse_inflip_crystallography(jana_path)
-                source_note = f"HKL source: {hkl_path}; cell/symmetry source: {jana_path}"
-            else:
-                raise FileNotFoundError("Select a CIF-compatible reference file or Jana .inflip so Phase Studio can calculate d-spacings and completeness.")
+            source_note = f"HKL source: {hkl_path}"
+        metadata = request.metadata
+        if metadata is None:
+            raise ValueError("Crystal metadata is incomplete. Provide unit-cell, symmetry and composition information.")
+        cell = metadata.cell
+        sg = metadata.spacegroup
+        hm = metadata.spacegroup_hm
+        metadata_name = metadata.source_path if metadata.source_path is not None else "manual input"
+        source_note += f"; cell/symmetry source: {metadata_name}"
         if use_inflip_hkl:
             data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
         else:
@@ -5644,7 +6273,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _start_hkl_background_task(self, label: str, worker_fn: Callable[[], object], done_kind: str) -> None:
         if self.hkl_task_worker is not None and self.hkl_task_worker.is_alive():
-            QMessageBox.information(self, "HKL analysis already running", "Wait for the current HKL load/completeness job to finish before starting another one.")
+            self._append_execution_log(
+                "HKL analysis is already running; wait for it to finish before starting another analysis.",
+                level="WARNING",
+                subsystem="HKL",
+            )
             return
         self._set_hkl_task_running(True)
         self._append_execution_log(f"{label} started in background.")
@@ -5654,7 +6287,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 result = worker_fn()
                 self.msg_queue.put((done_kind, result))
             except Exception as exc:
-                self.msg_queue.put(("hkl_task_error", (label, str(exc))))
+                report = build_error_report(
+                    exc,
+                    subsystem="HKL",
+                    operation=label,
+                    extra_details=traceback.format_exc(),
+                )
+                self.msg_queue.put(("hkl_task_error", report))
             finally:
                 self.msg_queue.put(("hkl_task_finished", None))
 
@@ -5662,7 +6301,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.hkl_task_worker.start()
 
     def test_hkl_load_dialog(self) -> None:
-        request = self._collect_hkl_analysis_request()
+        try:
+            request = self._collect_hkl_analysis_request()
+        except Exception as exc:
+            self._show_error_report(build_error_report(exc, subsystem="HKL", operation="HKL validation"))
+            return
 
         def worker() -> object:
             return self._build_hkl_load_result(request)
@@ -5699,13 +6342,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         spacegroup_hm: str,
         source_note: str,
         extra_rows: Sequence[Tuple[str, str]] = (),
+        compact: bool = False,
     ) -> QGroupBox:
         box = QGroupBox("INPUT SUMMARY")
         box.setObjectName("diagnosticSection")
         form = QFormLayout(box)
-        form.setContentsMargins(10, 12, 10, 8)
+        form.setContentsMargins(10, 8 if compact else 12, 10, 4 if compact else 8)
         form.setHorizontalSpacing(18)
-        form.setVerticalSpacing(5)
+        form.setVerticalSpacing(3 if compact else 5)
         form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
 
         source_row = QWidget()
@@ -5739,19 +6383,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         box.setToolTip(source_note)
         return box
 
-    def _diagnostic_metric_grid(self, metrics: Sequence[Tuple[str, str]]) -> QWidget:
+    def _diagnostic_metric_grid(
+        self,
+        metrics: Sequence[Tuple[str, str]],
+        compact: bool = False,
+        row_columns: Sequence[int] = (),
+    ) -> QWidget:
         panel = QWidget()
         panel.setObjectName("diagnosticMetrics")
-        grid = QGridLayout(panel)
-        grid.setContentsMargins(0, 0, 0, 0)
-        grid.setHorizontalSpacing(6)
-        grid.setVerticalSpacing(6)
-        columns = min(4, max(1, len(metrics)))
-        for index, (value_text, label_text) in enumerate(metrics):
+        cards: List[QWidget] = []
+        for value_text, label_text in metrics:
             card = QWidget()
             card.setObjectName("diagnosticMetric")
+            card.setProperty("metricDensity", "compact" if compact else "standard")
             card_layout = QVBoxLayout(card)
-            card_layout.setContentsMargins(8, 7, 8, 7)
+            card_layout.setContentsMargins(6 if compact else 8, 3 if compact else 7, 6 if compact else 8, 3 if compact else 7)
             card_layout.setSpacing(0)
             value = QLabel(value_text)
             value.setObjectName("diagnosticMetricValue")
@@ -5762,9 +6408,36 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             label.setWordWrap(True)
             card_layout.addWidget(value)
             card_layout.addWidget(label)
-            grid.addWidget(card, index // columns, index % columns)
-        for column in range(columns):
-            grid.setColumnStretch(column, 1)
+            cards.append(card)
+
+        requested_rows = tuple(int(count) for count in row_columns if int(count) > 0)
+        if requested_rows and sum(requested_rows) == len(cards):
+            rows_layout = QVBoxLayout(panel)
+            rows_layout.setContentsMargins(0, 0, 0, 0)
+            rows_layout.setSpacing(6)
+            offset = 0
+            for count in requested_rows:
+                row_widget = QWidget()
+                row_widget.setObjectName("diagnosticMetricRow")
+                row_widget.setProperty("metricColumns", count)
+                row_layout = QHBoxLayout(row_widget)
+                row_layout.setContentsMargins(0, 0, 0, 0)
+                row_layout.setSpacing(6)
+                for card in cards[offset:offset + count]:
+                    card.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+                    row_layout.addWidget(card, 1)
+                rows_layout.addWidget(row_widget)
+                offset += count
+        else:
+            grid = QGridLayout(panel)
+            grid.setContentsMargins(0, 0, 0, 0)
+            grid.setHorizontalSpacing(6)
+            grid.setVerticalSpacing(6)
+            columns = min(4, max(1, len(metrics)))
+            for index, card in enumerate(cards):
+                grid.addWidget(card, index // columns, index % columns)
+            for column in range(columns):
+                grid.setColumnStretch(column, 1)
         return panel
 
     @staticmethod
@@ -5886,7 +6559,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog.exec()
 
     def open_hkl_completeness_dialog(self) -> None:
-        request = self._collect_hkl_analysis_request()
+        try:
+            request = self._collect_hkl_analysis_request()
+        except Exception as exc:
+            self._show_error_report(build_error_report(exc, subsystem="HKL", operation="HKL completeness analysis"))
+            return
 
         def worker() -> object:
             hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
@@ -5899,8 +6576,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog = QDialog(self)
         dialog.setObjectName("hklCompletenessDialog")
         dialog.setWindowTitle("HKL Completeness")
-        dialog.resize(1180, 860)
-        dialog.setMinimumSize(900, 680)
+        dialog.resize(1180, 835)
+        dialog.setMinimumSize(900, 650)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(9)
@@ -5948,6 +6625,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             analysis.cell,
             analysis.spacegroup_hm,
             analysis.source_note,
+            compact=True,
         ))
         layout.addWidget(self._diagnostic_metric_grid((
             (f"{len(analysis.reflections_unique):,}", "Unique reflections"),
@@ -5957,7 +6635,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             (threshold_d_text, f"d where mean {signal_label} < {signal_threshold:.1f}"),
             (f"{phase_count:,} / {len(analysis.reflections_raw):,}", "Phase-value coverage"),
             (f"{raw_sigma_count:,} / {len(analysis.reflections_raw):,}", f"{sigma_label} coverage"),
-        )))
+        ), compact=True, row_columns=(4, 3)))
 
         content_splitter = QSplitter(Qt.Vertical)
         content_splitter.setObjectName("diagnosticSplitter")
@@ -5991,35 +6669,36 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         reference_labels: List[Tuple[float, str, str]] = []
         if d_min_stl is not None:
             ax1.axvline(d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label="d_min")
-            reference_labels.append((d_min_stl, f"d_min\n{d_min_text}", "#001170"))
+            reference_labels.append((d_min_stl, f"d_min · {d_min_text}", "#14204a"))
         if d_full_stl is not None:
             ax1.axvline(d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label="d_full 98%")
-            reference_labels.append((d_full_stl, f"98%\n{d_full}", "#2264b8"))
+            reference_labels.append((d_full_stl, f"98% · {d_full}", "#14204a"))
         ax1.set_ylabel("Completeness (%)", labelpad=6, fontsize=9)
         ax1.set_xlabel("sinθ/λ")
         ax1.set_ylim(0, 105)
-        ax1.grid(True, axis="y", color="#44b7ff", linewidth=0.6, alpha=0.20)
+        ax1.grid(True, axis="y", color="#cbd7ea", linewidth=0.55, alpha=0.62)
         ax1b = ax1.twinx()
         ax1b.plot(centers, mean_signal, marker="o", color="#001170", linewidth=1.8, label=f"Mean {signal_label}")
         ax1b.axhline(signal_threshold, color="#2264b8", linewidth=1.0, linestyle="--", label=f"{signal_label} = {signal_threshold:.1f}")
         ax1b.set_ylabel(f"Mean {signal_label}", labelpad=6, fontsize=9)
         if threshold_stl is not None:
             ax1.axvline(threshold_stl, color="#2264b8", linewidth=1.1, linestyle="-.", label=f"{signal_label} < {signal_threshold:.1f}")
-            threshold_label = f"{signal_label} = 3\n{threshold_d_text}" if threshold_d is not None else f"{signal_label} = 3"
-            reference_labels.append((threshold_stl, threshold_label, "#001170"))
+            threshold_label = f"{signal_label} = 3 · {threshold_d_text}" if threshold_d is not None else f"{signal_label} = 3"
+            reference_labels.append((threshold_stl, threshold_label, "#14204a"))
         ordered_labels = sorted(reference_labels, key=lambda item: item[0])
         horizontal_offsets = (-24, 0, 24) if len(ordered_labels) == 3 else tuple(0 for _ in ordered_labels)
-        for index, (x_position, label_text, color) in enumerate(ordered_labels):
+        for index, (x_position, label_text, _color) in enumerate(ordered_labels):
             ax1.annotate(
                 label_text,
                 xy=(x_position, 1.0),
                 xycoords=ax1.get_xaxis_transform(),
-                xytext=(horizontal_offsets[index], 6 + 13 * (index % 2)),
+                xytext=(horizontal_offsets[index], 7),
                 textcoords="offset points",
                 ha="center",
                 va="bottom",
-                color=color,
-                fontsize=7.5,
+                color="#14204a",
+                fontsize=7.2,
+                bbox={"boxstyle": "square,pad=0.16", "facecolor": "#ffffff", "edgecolor": "none", "alpha": 0.88},
                 annotation_clip=False,
             )
         lines1, labels1 = ax1.get_legend_handles_labels()
@@ -6029,11 +6708,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             labels1 + labels2,
             loc="upper center",
             bbox_to_anchor=(0.5, 0.985),
-            ncol=3,
+            ncol=max(1, len(lines1 + lines2)),
             frameon=False,
-            fontsize=7.8,
-            handlelength=1.7,
-            columnspacing=1.2,
+            fontsize=7.0,
+            handlelength=1.25,
+            columnspacing=0.75,
+            handletextpad=0.35,
+            labelspacing=0.2,
+            borderaxespad=0.0,
         )
         histogram_denominator = max(1, len(analysis.reflections_unique))
         if signal_values:
@@ -6042,17 +6724,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ax2.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#44b7ff", alpha=0.82)
         else:
             ax2.text(0.5, 0.5, "No sigma values available", transform=ax2.transAxes, ha="center", va="center")
-        ax2.set_title("REFLECTION DISTRIBUTION", loc="left", color="#2264b8", fontsize=9, fontweight="bold", pad=7)
+        ax2.set_title("REFLECTION DISTRIBUTION", loc="left", color="#001170", fontsize=9, fontweight="bold", pad=10)
         ax2.set_xlabel(signal_label)
         ax2.set_ylabel("Reflections (%)", labelpad=6, fontsize=9)
         ax2.set_xlim(0.0, 15.0)
         ax2.set_xticks(np.arange(0.0, 16.0, 1.0))
-        ax2.grid(True, axis="y", color="#44b7ff", linewidth=0.6, alpha=0.20)
+        ax2.grid(True, axis="y", color="#cbd7ea", linewidth=0.55, alpha=0.62)
         for axis in (ax1, ax1b, ax2):
-            axis.tick_params(colors="#001170")
-            axis.xaxis.label.set_color("#001170")
-            axis.yaxis.label.set_color("#001170")
-        figure.subplots_adjust(left=0.08, right=0.91, bottom=0.16, top=0.77, hspace=0.68)
+            axis.tick_params(colors="#14204a")
+            axis.xaxis.label.set_color("#14204a")
+            axis.yaxis.label.set_color("#14204a")
+        figure.subplots_adjust(left=0.08, right=0.91, bottom=0.16, top=0.83, hspace=0.82)
         plot_layout.addWidget(canvas, 1)
         content_splitter.addWidget(plot_panel)
 
@@ -6358,7 +7040,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         active = status in {"RUNNING", "STOPPING"}
         self._set_configuration_locked(active)
         if hasattr(self, "run_btn"):
-            self.run_btn.setEnabled(not active)
+            self.run_btn.setEnabled(not active and bool(getattr(self, "_metadata_valid", False)))
         if hasattr(self, "stop_btn"):
             self.stop_btn.setEnabled(status == "RUNNING")
         if hasattr(self, "stop_now_btn"):
@@ -6440,6 +7122,73 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("bestdensities_symmetry", "true")
         self._sync_workflow_widgets()
 
+    def _open_configuration_page(self, name: str, *, advanced: bool = False) -> None:
+        self.category_tabs.setCurrentIndex(1 if advanced else 0)
+        tabs = self.advanced_tabs if advanced else self.basic_tabs
+        for index in range(tabs.count()):
+            if tabs.tabText(index) == name:
+                tabs.setCurrentIndex(index)
+                break
+
+    def _error_actions(self, report: ErrorReport) -> List[ErrorAction]:
+        category = report.category
+        if category == "reference_missing":
+            row = self.inputs.get("reference_cif")
+            actions: List[ErrorAction] = []
+            if isinstance(row, PathRow):
+                actions.append(ErrorAction("Select file…", row.browse, True))
+            actions.append(ErrorAction("Use Manual metadata", lambda: self._set_metadata_source(METADATA_SOURCE_MANUAL)))
+            return actions
+        if category == "hkl_missing":
+            row = self.inputs.get("hkl")
+            return [ErrorAction("Select HKL…", row.browse, True)] if isinstance(row, PathRow) else []
+        if category == "superflip_missing":
+            row = self.inputs.get("superflip_exe")
+            return [ErrorAction("Locate Superflip…", row.browse, True)] if isinstance(row, PathRow) else []
+        if category == "edma_missing":
+            row = self.inputs.get("edma_exe")
+            return [ErrorAction("Locate EDMA…", row.browse, True)] if isinstance(row, PathRow) else []
+        if category in {"file_permission", "file_write"}:
+            row = self.inputs.get("work_dir")
+            return [ErrorAction("Choose folder…", row.browse, True)] if isinstance(row, PathRow) else []
+        if category.startswith("sharped_"):
+            return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED"), True)]
+        if category == "input_validation":
+            actions = [ErrorAction("Open Paths", lambda: self._open_configuration_page("Paths"), True)]
+            if "SharpED" in report.summary:
+                actions.append(ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED")))
+            return actions
+        if category in {"hkl_invalid", "metadata", "unit_cell", "space_group", "composition", "inflip"}:
+            return [ErrorAction("Open Paths", lambda: self._open_configuration_page("Paths"), True)]
+        return []
+
+    def _show_error_report(self, report: ErrorReport, *, write_log: bool = True) -> str:
+        if write_log and hasattr(self, "log_text"):
+            self._append_execution_log(report.title + ".", level="ERROR", subsystem=report.subsystem)
+            self._append_execution_log(report.diagnostic_block(), level="DETAIL", subsystem=report.subsystem)
+        return show_phase_studio_error(self, report, self._error_actions(report))
+
+    def _handle_pipeline_error(self, report: ErrorReport) -> None:
+        self.worker = None
+        self.stop_after_cycle.clear()
+        self.stop_now.clear()
+        cancelled = report.category == "cancelled"
+        self._set_run_status("Cancelled" if cancelled else "Error")
+        if self.progress_bar.minimum() == 0 and self.progress_bar.maximum() == 0:
+            self.progress_bar.setRange(0, 1)
+            self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Stopped" if cancelled else "Error")
+        self.current_cycle_progress.setRange(0, 1)
+        self.current_cycle_progress.setValue(0)
+        self._annotate_cycle_progress("Stopped" if cancelled else "Error")
+        self.run_btn.setText("Run pipeline")
+        self.handoff_btn.setEnabled(False)
+        self._update_action_states()
+        if cancelled:
+            self._append_execution_log("Pipeline stopped by the user.", level="WARNING", subsystem="Pipeline")
+        else:
+            self._show_error_report(report)
+
     def _poll_queue(self) -> None:
         try:
             processed = 0
@@ -6499,10 +7248,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self._set_hkl_task_running(False)
                     self._show_hkl_completeness_dialog(payload)  # type: ignore[arg-type]
                 elif kind == "hkl_task_error":
-                    label, message = payload  # type: ignore[misc]
                     self._set_hkl_task_running(False)
-                    QMessageBox.critical(self, f"{label} failed", str(message))
-                    self._append_execution_log(f"{label} ERROR: {message}", level="ERROR")
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, subsystem="HKL", operation="HKL analysis")
+                    self._show_error_report(report)
                 elif kind == "hkl_task_finished":
                     self._set_hkl_task_running(False)
                 elif kind == "handoff_done":
@@ -6516,12 +7264,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     QTimer.singleShot(400, QApplication.instance().quit)
                 elif kind == "handoff_error":
                     self._set_run_status("Error")
-                    QMessageBox.critical(self, "Jana2020 hand-off failed", str(payload))
-                    self._append_execution_log(
-                        "Jana2020 hand-off ERROR: " + str(payload),
-                        level="ERROR",
-                        subsystem="Jana2020",
-                    )
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, subsystem="Jana2020", operation="Jana2020 hand-off")
+                    self._show_error_report(report)
                     self.handoff_btn.setEnabled(bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None))
                 elif kind == "progress_setup":
                     self._set_run_status("Running")
@@ -6539,14 +7283,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.progress_bar.setValue(value)
                     self.progress_bar.setFormat(f"{value}/{self.progress_bar.maximum()} cycles")
                 elif kind == "error":
-                    self._set_run_status("Error")
-                    QMessageBox.critical(self, "Pipeline error", str(payload))
-                    self._append_execution_log("ERROR: " + str(payload), level="ERROR")
-                    self.progress_bar.setFormat("Error")
-                    self._annotate_cycle_progress("Error")
-                    self.run_btn.setEnabled(True)
-                    self.handoff_btn.setEnabled(False)
-                    self.run_btn.setText("Run pipeline")
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run pipeline")
+                    self._handle_pipeline_error(report)
+                elif kind == "error_report":
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run pipeline")
+                    self._handle_pipeline_error(report)
                 elif kind == "done":
                     self._set_run_status("Complete")
                     self._append_execution_log("=== Pipeline complete ===", level="SUCCESS")
@@ -6591,10 +7332,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def open_jana_handoff_dialog(self) -> None:
         cfg = self.last_run_config
         if cfg is None or cfg.jana_inflip is None:
-            QMessageBox.warning(self, "Jana2020 hand-off", "This run was not started from a Jana .inflip file.")
+            self._show_error_report(
+                build_error_report(
+                    RuntimeError("Jana2020 hand-off requires a run started from a Jana .inflip file."),
+                    subsystem="Jana2020",
+                    operation="Jana2020 hand-off",
+                    severity="warning",
+                )
+            )
             return
         if not self.results:
-            QMessageBox.warning(self, "Jana2020 hand-off", "No completed cycle is available for hand-off.")
+            self._show_error_report(
+                build_error_report(
+                    RuntimeError("No completed cycle is available for Jana2020 hand-off."),
+                    subsystem="Jana2020",
+                    operation="Jana2020 hand-off",
+                    severity="warning",
+                )
+            )
             return
 
         dialog = QDialog(self)
@@ -6727,7 +7482,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         selected_map = str(map_combo.currentData() or "deblurred")
         selected_result = next((r for r in self.results if int(r.cycle) == selected_cycle), None)
         if selected_result is None:
-            QMessageBox.warning(self, "Jana2020 hand-off", "Selected cycle is no longer available.")
+            self._show_error_report(
+                build_error_report(
+                    RuntimeError("Selected Jana2020 hand-off cycle is no longer available."),
+                    subsystem="Jana2020",
+                    operation="Jana2020 hand-off",
+                    severity="warning",
+                )
+            )
             return
 
         self.handoff_btn.setEnabled(False)
@@ -6742,7 +7504,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 perform_jana_handoff(cfg, selected_result, selected_map, log=self.log)
                 self.msg_queue.put(("handoff_done", None))
             except Exception as exc:
-                self.msg_queue.put(("handoff_error", exc))
+                self.msg_queue.put((
+                    "handoff_error",
+                    build_error_report(
+                        exc,
+                        subsystem="Jana2020",
+                        operation="Jana2020 hand-off",
+                        extra_details=traceback.format_exc(),
+                    ),
+                ))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -6825,7 +7595,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 empty_message,
                 ha="center",
                 va="center",
-                color="#2264b8",
+                color="#7183a6",
+                fontsize=8.5,
                 transform=self.ax.transAxes,
             )
             self._layout_metrics_figure()
@@ -6835,7 +7606,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_metrics_data_layout(True)
         self.ax.set_title("")
         self.ax.set_xlabel("")
-        self.figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#2264b8", fontsize=8.5)
+        self.figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#14204a", fontsize=8.5)
         self.ax.set_ylim(-0.04, 1.04)
         self.ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
         self.ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
@@ -6849,8 +7620,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.ax.set_xticks(list(range(1, x_max + 1)))
         else:
             self.ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12, min_n_ticks=2))
-        self.ax.grid(True, axis="y", color="#44b7ff", linewidth=0.7, alpha=0.24)
-        self.ax.grid(True, axis="x", color="#44b7ff", linewidth=0.55, alpha=0.14)
+        self.ax.grid(True, axis="y", color="#cbd7ea", linewidth=0.6, alpha=0.64)
+        self.ax.grid(True, axis="x", color="#cbd7ea", linewidth=0.5, alpha=0.42)
         for spine in ("top", "right"):
             self.ax.spines[spine].set_visible(False)
         self.ax.spines["left"].set_color("#001170")
@@ -6924,7 +7695,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "No finite metrics yet",
                 ha="center",
                 va="center",
-                color="#2264b8",
+                color="#7183a6",
                 transform=self.ax.transAxes,
             )
         self._layout_metrics_figure()
@@ -6972,13 +7743,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _plot_structure_atoms(self, ax, atoms: Sequence[AtomSite], empty_text: str = "No structure available") -> str:
         if not atoms:
             ax.set_axis_off()
-            ax.text2D(0.5, 0.50, empty_text, ha="center", va="center", fontsize=9, color="#2264b8", transform=ax.transAxes)
+            ax.text2D(0.5, 0.50, empty_text, ha="center", va="center", fontsize=8, color="#7183a6", transform=ax.transAxes)
             return ""
 
         non_h_atoms = [a for a in atoms if clean_element_symbol(a.element) not in {"H", "D", "He"}]
         if not non_h_atoms:
             ax.set_axis_off()
-            ax.text2D(0.5, 0.50, "No non-H/He atoms", ha="center", va="center", fontsize=9, color="#2264b8", transform=ax.transAxes)
+            ax.text2D(0.5, 0.50, "No non-H/He atoms", ha="center", va="center", fontsize=8, color="#7183a6", transform=ax.transAxes)
             return ""
 
         ax.set_axis_on()
@@ -7086,7 +7857,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         try:
             _, sg, _ = parse_cif_cell_and_sg(Path(path))
             return expand_atoms_by_symmetry(parse_cif_atoms(Path(path)), sg)
-        except Exception:
+        except Exception as exc:
+            key = str(Path(path))
+            if key not in self._structure_parse_errors and hasattr(self, "log_text"):
+                self._structure_parse_errors.add(key)
+                report = build_error_report(
+                    exc,
+                    subsystem="Structure viewer",
+                    operation="Load structure preview",
+                    paths=(Path(path),),
+                )
+                self._append_execution_log(
+                    f"Structure preview could not load {Path(path).name}.",
+                    level="WARNING",
+                    subsystem="Structure viewer",
+                )
+                self._append_execution_log(report.diagnostic_block(), level="DETAIL", subsystem="Structure viewer")
             return []
 
     def _begin_structure_rotation(self, event) -> None:
@@ -7185,7 +7971,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ha="center",
                 va="center",
                 fontsize=7.5,
-                color="#2264b8",
+                color="#52658b",
             )
             for x_position, metadata in zip((1.0 / 6.0, 0.5, 5.0 / 6.0), panel_metadata)
         ]
@@ -7194,7 +7980,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             separator = Line2D(
                 [x_position, x_position], [0.08, 0.90],
                 transform=self.structure_figure.transFigure,
-                color="#44b7ff", linewidth=0.55, alpha=0.45,
+                color="#cbd7ea", linewidth=0.45, alpha=0.62,
             )
             self.structure_figure.add_artist(separator)
             self.structure_separators.append(separator)
@@ -7226,6 +8012,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         cycles_value = max(1, self._spin_value("cycles"))
         if modelfile_source_value == "none":
             cycles_value = 1
+        crystal_metadata = self._resolve_crystal_metadata_from_inputs()
         return RunConfig(
             hkl=hkl_path,
             reference_cif=reference_cif_path,
@@ -7234,12 +8021,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             first_cycle_modelfile=first_model,
             input_source_mode=input_source_mode,
             jana_inflip=jana_inflip,
+            crystal_metadata=crystal_metadata,
             jana_return_to_jana=bool(jana_inflip is not None),
             work_dir=Path(self._path_value("work_dir")).expanduser().resolve(),
             cycles=cycles_value,
             superflip_exe=self._path_value("superflip_exe") or "superflip",
             edma_exe=self._path_value("edma_exe") or "EDMA",
-            composition_override=self._line_value("composition_override"),
+            composition_override="",
             plimit_superflip=self._dspin_value("plimit_superflip"),
             plimit_deblur=self._dspin_value("plimit_deblur"),
             merge_distance=self._dspin_value("merge_distance"),
@@ -7305,62 +8093,77 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sharped_max_polls=self._spin_value("sharped_max_polls"),
         )
 
+    def _validate_run_config(self, cfg: RunConfig) -> Tuple[List[str], str]:
+        issues: List[str] = []
+        details: List[str] = []
+        mode = normalize_input_source_mode(cfg.input_source_mode)
+        hkl_text = self._path_value("hkl").strip()
+        ref_text = self._path_value("reference_cif").strip()
+        ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
+        if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
+            if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
+                issues.append("The Jana .inflip file does not exist or cannot be read.")
+                details.append(f"Jana .inflip: {cfg.jana_inflip or '(not selected)'}")
+            if mode == INPUT_MODE_INFLIP_OVERRIDES:
+                if hkl_text and not cfg.hkl.is_file():
+                    issues.append("The external HKL override does not exist.")
+                    details.append(f"HKL override: {cfg.hkl}")
+                if ref_text and (cfg.superflip_referencefile is None or not cfg.superflip_referencefile.is_file()):
+                    issues.append("The external reference file does not exist.")
+                    details.append(f"Reference: {cfg.superflip_referencefile}")
+        elif not cfg.hkl.is_file():
+            issues.append("The external HKL file does not exist.")
+            details.append(f"HKL: {cfg.hkl}")
+        if cfg.first_cycle_modelfile is not None and not cfg.first_cycle_modelfile.is_file():
+            issues.append("The initial model file does not exist.")
+            details.append(f"Initial model: {cfg.first_cycle_modelfile}")
+        if cfg.superflip_referencefile is not None:
+            if not cfg.superflip_referencefile.is_file():
+                issues.append("The external reference file does not exist.")
+                details.append(f"Reference: {cfg.superflip_referencefile}")
+            elif ref_suffix not in REFERENCE_FILE_SUFFIXES:
+                issues.append("The external reference format is not supported.")
+                details.append(f"Reference suffix: {ref_suffix or '(none)'}")
+        if not any([cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana, cfg.export_standard_hkl, cfg.export_jana_project]):
+            issues.append("At least one Superflip output format must be selected.")
+        if cfg.run_sharped and not cfg.sharped_api_token.strip():
+            issues.append("A SharpED API token is required for the selected workflow.")
+        for exe, label in ((cfg.superflip_exe, "Superflip"), (cfg.edma_exe, "EDMA")):
+            if resolve_executable_for_validation(exe) is None:
+                issues.append(f"The {label} executable was not found.")
+                details.append(f"{label} executable: {exe or '(not selected)'}")
+        return list(dict.fromkeys(issues)), sanitize_error_details("\n".join(details))
+
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
-            QMessageBox.warning(self, "Already running", "Pipeline is already running.")
+            self._append_execution_log("Pipeline is already running.", level="WARNING", subsystem="Pipeline")
             return
         try:
             cfg = self.get_config()
-            mode = normalize_input_source_mode(cfg.input_source_mode)
-            hkl_text = self._path_value("hkl").strip()
-            ref_text = self._path_value("reference_cif").strip()
-            ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
-            if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
-                if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
-                    raise FileNotFoundError("Jana .inflip input mode requires a readable Jana .inflip file.")
-                if mode == INPUT_MODE_INFLIP:
-                    self._append_execution_log("Input mode: Jana .inflip. HKL and reference metadata will be taken from the .inflip file.")
-                else:
-                    if hkl_text and not cfg.hkl.is_file():
-                        raise FileNotFoundError(f"HKL override not found: {cfg.hkl}")
-                    if ref_text and (cfg.superflip_referencefile is None or not cfg.superflip_referencefile.is_file()):
-                        raise FileNotFoundError(f"External reference file not found: {cfg.superflip_referencefile}")
-                    if not hkl_text:
-                        self._append_execution_log("HKL override is empty; the Jana .inflip fbegin/endf block will be used.", level="DETAIL")
-                    if not ref_text:
-                        self._append_execution_log("External reference file is empty; the Jana .inflip cell/space group/composition will be used.", level="DETAIL")
-            else:
-                if not cfg.hkl.is_file():
-                    raise FileNotFoundError(f"External HKL not found: {cfg.hkl}")
-                if cfg.superflip_referencefile is None or not cfg.superflip_referencefile.is_file():
-                    raise FileNotFoundError(f"External reference file not found: {cfg.superflip_referencefile}")
-                if ref_suffix not in REFERENCE_STRUCTURE_SUFFIXES:
-                    raise ValueError(
-                        "External HKL mode requires External reference file to be a CIF/INS/RES structure, "
-                        "because Phase Studio needs cell, symmetry, composition and reference atoms. "
-                        "Jana/XPLOR/CCP4 density reference files are supported in Jana .inflip modes."
-                    )
-            if cfg.first_cycle_modelfile is not None and not cfg.first_cycle_modelfile.is_file():
-                raise FileNotFoundError(f"First-cycle modelfile not found: {cfg.first_cycle_modelfile}")
-            if cfg.superflip_referencefile is not None:
-                if not cfg.superflip_referencefile.is_file():
-                    raise FileNotFoundError(f"External reference file not found: {cfg.superflip_referencefile}")
-                if ref_suffix not in REFERENCE_FILE_SUFFIXES:
-                    raise ValueError("External reference file must be a Jana, XPLOR, CCP4 or CIF-compatible file.")
-            if not any([cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana, cfg.export_standard_hkl, cfg.export_jana_project]):
-                raise ValueError("Select at least one Superflip export: XPLOR, CCP4, Jana m80/m81, standardized HKL, or Jana2020 project.")
-            if cfg.run_sharped and not cfg.sharped_api_token.strip():
-                raise ValueError("SharpED API token is required for server inference. Fill SharpED -> API token or set SHARPED_API_TOKEN.")
-            for exe, label in [(cfg.superflip_exe, "Superflip"), (cfg.edma_exe, "EDMA")]:
-                missing = resolve_executable_for_validation(exe)
-                if missing is None:
-                    raise FileNotFoundError(f"{label} executable not found: {exe}")
+        except Exception as exc:
+            self._show_error_report(build_error_report(exc, subsystem="Input", operation="Pre-run validation"))
+            return
+        issues, technical_details = self._validate_run_config(cfg)
+        if issues:
+            self._show_error_report(build_validation_report(issues, technical_details=technical_details))
+            return
+        try:
             cfg.work_dir.mkdir(parents=True, exist_ok=True)
             self.last_run_config = cfg
             self.save_settings()
         except Exception as exc:
-            QMessageBox.critical(self, "Input error", str(exc))
+            self._show_error_report(
+                build_error_report(exc, subsystem="Files", operation="Create working directory", paths=(cfg.work_dir,))
+            )
             return
+        mode = normalize_input_source_mode(cfg.input_source_mode)
+        if mode == INPUT_MODE_INFLIP:
+            self._append_execution_log("Input mode: Jana .inflip. Embedded HKL data will be used.")
+        elif mode == INPUT_MODE_INFLIP_OVERRIDES:
+            if not self._path_value("hkl").strip():
+                self._append_execution_log("HKL override is empty; the Jana .inflip fbegin/endf block will be used.", level="DETAIL")
+            if not self._path_value("reference_cif").strip():
+                self._append_execution_log("External reference file is empty; no external reference density or atom sites will be used.", level="DETAIL")
         self.stop_after_cycle.clear()
         self.stop_now.clear()
         self.progress_bar.setRange(0, 0)
@@ -7374,17 +8177,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
         self.run_btn.setText("Running...")
-        self._append_execution_log("=== Starting pipeline ===", level="STEP")
+        self._append_execution_log("Preparing validated pipeline inputs...", level="DETAIL")
         QApplication.processEvents()
         self.worker = threading.Thread(target=self.pipeline_worker, args=(cfg,), daemon=True)
         self.worker.start()
     def pipeline_worker(self, cfg: RunConfig) -> None:
         try:
             self.log("=== Pipeline started ===", level="STEP")
-            self.log(f"Work dir: {cfg.work_dir}")
             mode = normalize_input_source_mode(cfg.input_source_mode)
             input_name = cfg.jana_inflip.name if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} and cfg.jana_inflip is not None else cfg.hkl.name
             self.log(f"Input: {INPUT_MODE_LABELS.get(mode, mode)} · {input_name}")
+            self.log(f"Work directory: {cfg.work_dir}")
             if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
                 if cfg.jana_inflip is None:
                     raise RuntimeError("Jana input mode selected, but no Jana .inflip file is configured.")
@@ -7396,14 +8199,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log(f"HKL source override: {cfg.hkl}")
 
                 declared_ref = inflip_declared_reference(cfg.jana_inflip)
-                if mode == INPUT_MODE_INFLIP or not cfg.reference_cif.is_file():
-                    if declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() == ".cif" and mode != INPUT_MODE_INFLIP_OVERRIDES:
+                if not cfg.reference_cif.is_file():
+                    if declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
                         cfg.reference_cif = declared_ref
-                        self.log(f"Reference CIF declared by Jana .inflip: {cfg.reference_cif}")
-                    else:
-                        cfg.reference_cif = write_reference_cif_from_inflip(cfg.jana_inflip, cfg.work_dir / f"{cfg.jana_inflip.stem}_embedded_reference.cif")
-                        self.log(f"Reference CIF synthesized from Jana .inflip cell/space group/composition: {cfg.reference_cif}")
-                else:
+                        self.log(f"Reference structure declared by Jana .inflip: {cfg.reference_cif}")
+                elif cfg.reference_cif.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
                     self.log(f"External reference structure: {cfg.reference_cif}")
 
                 if cfg.superflip_referencefile is None and declared_ref is not None and declared_ref.is_file() and declared_ref.suffix.lower() in REFERENCE_DENSITY_SUFFIXES:
@@ -7412,34 +8212,39 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log(f"External reference density declared by Jana .inflip: {cfg.superflip_referencefile}")
             else:
                 self.log(f"External HKL source: {cfg.hkl}")
-                self.log(f"External reference file: {cfg.superflip_referencefile or cfg.reference_cif}")
+                if cfg.superflip_referencefile is not None:
+                    self.log(f"External reference file: {cfg.superflip_referencefile}")
             if str(cfg.referencefile_mode).strip().lower() in {"reference_xplor", "reference_density"} and cfg.superflip_reference_xplor is None and cfg.superflip_referencefile is None:
                 cfg.referencefile_mode = "omit"
-            ref_ctx = load_reference_context(cfg.reference_cif, cfg.work_dir, cfg.composition_override)
-            # If the user selected a real CIF as Superflip referencefile in Jana .inflip mode,
-            # do not turn it into an empty metadata-only reference.  Use its atom sites for
-            # metrics/EDMA while preserving the Jana .inflip cell/spacegroup/reflection setup.
-            if cfg.superflip_referencefile is not None and cfg.superflip_referencefile.suffix.lower() == ".cif":
-                ref_ctx = reference_context_with_external_atom_sites(
-                    ref_ctx, cfg.superflip_referencefile, cfg.work_dir, cfg.composition_override, self.log
-                )
+            atom_source: Optional[Path] = None
+            for candidate in (cfg.superflip_referencefile, cfg.reference_cif):
+                if (
+                    candidate is not None
+                    and Path(candidate).is_file()
+                    and Path(candidate).suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES
+                ):
+                    atom_source = Path(candidate)
+                    break
+            ref_ctx = reference_context_from_metadata(cfg.crystal_metadata, atom_source, cfg.work_dir)
             self.msg_queue.put(("structure_cell", (
                 ref_ctx.cell.a, ref_ctx.cell.b, ref_ctx.cell.c,
                 ref_ctx.cell.alpha, ref_ctx.cell.beta, ref_ctx.cell.gamma,
             )))
             self.msg_queue.put(("reference_atoms", expand_atoms_by_symmetry(ref_ctx.atoms, ref_ctx.spacegroup)))
-            self.log("Reference:", level="STEP")
-            metadata_origin = cfg.jana_inflip.name if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} and cfg.jana_inflip is not None else cfg.reference_cif.name
-            self.log(f"  Metadata: {metadata_origin} · crystallographic CIF: {cfg.reference_cif}", level="DETAIL")
-            if cfg.superflip_referencefile is not None and cfg.superflip_referencefile.suffix.lower() == ".cif":
-                self.log(f"  Atom sites: {cfg.superflip_referencefile.name} · {len(ref_ctx.atoms)} atoms", level="DETAIL")
-            else:
-                self.log(f"  Atom sites: {cfg.reference_cif.name} · {len(ref_ctx.atoms)} atoms", level="DETAIL")
+            self.log("Crystal metadata", level="STEP")
+            metadata_label = METADATA_SOURCE_LABELS.get(cfg.crystal_metadata.source, cfg.crystal_metadata.source)
+            self.log(f"  Source: {metadata_label}", level="DETAIL")
+            if cfg.crystal_metadata.source_path is not None:
+                self.log(f"  Metadata file: {cfg.crystal_metadata.source_path}", level="DETAIL")
+            self.log(
+                f"  Atom sites: {atom_source.name if atom_source is not None else 'none'} · {len(ref_ctx.atoms)} atoms",
+                level="DETAIL",
+            )
             self.log(f"  Working EDMA/metrics reference: {ref_ctx.work_ref_cif}", level="DETAIL")
             self.log(f"Cell: {ref_ctx.cell.a:.5f} {ref_ctx.cell.b:.5f} {ref_ctx.cell.c:.5f} {ref_ctx.cell.alpha:.3f} {ref_ctx.cell.beta:.3f} {ref_ctx.cell.gamma:.3f}")
-            self.log(f"Space group: {ref_ctx.spacegroup_hm}")
+            self.log(f"Space group: {ref_ctx.spacegroup_hm} (#{ref_ctx.spacegroup.number})")
             self.log(f"Composition: {ref_ctx.composition}")
-            self.log("Configuration details:", level="STEP")
+            self.log("Configuration details:", level="DETAIL")
             self.log(f"  Superflip executable: {cfg.superflip_exe}", level="DETAIL")
             self.log(f"  EDMA executable: {cfg.edma_exe}", level="DETAIL")
             self.log(f"EDMA plimit after Superflip: {cfg.plimit_superflip:g} sigma multiplier")
@@ -7666,7 +8471,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     export_jana2020_project(cycle_dir / "jana2020_superflip", sf_prefix, cycle_dir, sf_edma_dir, sf_map, sf_edma_cif, ref_ctx, self.log)
                 sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
                 self.log(
-                    f"[EDMA] Superflip map · RMSD={sf_metric if sf_metric is not None else 'n/a'} Å\n"
+                    f"[EDMA] Completed · Superflip map · RMSD={sf_metric if sf_metric is not None else 'n/a'} Å\n"
                     f"  output: {sf_edma_cif}",
                     subsystem="EDMA",
                 )
@@ -7756,7 +8561,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
                 self.log(
-                    f"[EDMA] Deblurred map · RMSD={deblur_metric if deblur_metric is not None else 'n/a'} Å\n"
+                    f"[EDMA] Completed · Deblurred map · RMSD={deblur_metric if deblur_metric is not None else 'n/a'} Å\n"
                     f"  output: {deblur_edma_cif}",
                     subsystem="EDMA",
                 )
@@ -7836,7 +8641,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     current_model = None
                     current_model_metric = None
                 completed_cycles = cyc
-                self.log(f"Cycle {cyc} / {cfg.cycles} complete.", level="SUCCESS")
+                self.log(f"Cycle {cyc} complete.", level="SUCCESS")
                 self.msg_queue.put(("progress", completed_cycles))
                 self._emit_cycle_progress(
                     cyc,
@@ -7848,48 +8653,104 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 )
             self.msg_queue.put(("done", completed_cycles))
         except Exception as exc:
-            self.msg_queue.put(("error", exc))
+            self.msg_queue.put((
+                "error_report",
+                build_error_report(
+                    exc,
+                    operation="Run pipeline",
+                    extra_details=traceback.format_exc(),
+                ),
+            ))
 
 
-def create_startup_splash() -> QSplashScreen:
-    pixmap = QPixmap(520, 250)
-    pixmap.fill(QColor("#ffffff"))
+class PhaseStudioSplash(QSplashScreen):
+    def __init__(self) -> None:
+        pixmap = QPixmap(500, 205)
+        pixmap.fill(QColor("#ffffff"))
+        super().__init__(pixmap)
+        self.setObjectName("phaseStudioSplash")
+        self.setFixedSize(500, 205)
 
-    painter = QPainter(pixmap)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(22, 18, 22, 17)
+        root.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        title_stack = QVBoxLayout()
+        title_stack.setSpacing(2)
+        title = QLabel(f"Phase Studio {__version__}")
+        title.setObjectName("splashTitle")
+        subtitle = QLabel("Superflip · SharpED · EDMA workflow")
+        subtitle.setObjectName("splashSubtitle")
+        title_stack.addWidget(title)
+        title_stack.addWidget(subtitle)
+        header.addLayout(title_stack, 1)
+        logo = QLabel()
+        logo.setObjectName("splashLogo")
+        logo.setPixmap(create_phase_studio_logo_pixmap(72))
+        logo.setAlignment(Qt.AlignRight | Qt.AlignTop)
+        header.addWidget(logo, 0, Qt.AlignTop)
+        root.addLayout(header)
+
+        root.addStretch(1)
+        self.status_label = QLabel("Loading application…")
+        self.status_label.setObjectName("splashStatus")
+        root.addWidget(self.status_label)
+        self.progress = QProgressBar()
+        self.progress.setObjectName("splashProgress")
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        root.addWidget(self.progress)
+        footer = QLabel("Crystallographic reconstruction workspace")
+        footer.setObjectName("splashFooter")
+        root.addWidget(footer)
+
+    def set_status(self, text: str) -> None:
+        self.status_label.setText(str(text))
+
+
+def create_startup_splash() -> PhaseStudioSplash:
+    return PhaseStudioSplash()
+
+
+def initialize_main_window(
+    app: QApplication,
+    splash: PhaseStudioSplash,
+    window_factory: Callable[[], IterativeSuperflipPipelineQtGUI] = IterativeSuperflipPipelineQtGUI,
+) -> Optional[IterativeSuperflipPipelineQtGUI]:
     try:
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(QColor("#44b7ff"), 1))
-        painter.setBrush(QColor("#ffffff"))
-        painter.drawRoundedRect(10, 10, 500, 230, 8, 8)
-
-        painter.setPen(QColor("#001170"))
-        title_font = QFont()
-        title_font.setPointSize(20)
-        title_font.setBold(True)
-        painter.setFont(title_font)
-        painter.drawText(34, 70, f"Phase Studio {__version__}")
-        painter.drawPixmap(386, 26, create_phase_studio_logo_pixmap(96))
-
-        painter.setPen(QColor("#001170"))
-        body_font = QFont()
-        body_font.setPointSize(10)
-        painter.setFont(body_font)
-        painter.drawText(34, 108, "Starting crystallographic pipeline workspace")
-        painter.drawText(34, 134, "Loading settings, plots and structure views...")
-
-        painter.setPen(QPen(QColor("#2264b8"), 3))
-        painter.drawLine(34, 180, 486, 180)
-        painter.setPen(QColor("#001170"))
-        small_font = QFont()
-        small_font.setPointSize(8)
-        painter.setFont(small_font)
-        painter.drawText(34, 210, "Superflip and EDMA are resolved from your configured paths or PATH.")
-    finally:
-        painter.end()
-
-    splash = QSplashScreen(pixmap)
-    splash.showMessage("Starting...", Qt.AlignBottom | Qt.AlignRight, QColor("#001170"))
-    return splash
+        splash.set_status("Initializing interface…")
+        app.processEvents()
+        win = window_factory()
+        splash.set_status("Finalizing workspace…")
+        app.processEvents()
+        win.show()
+        app.processEvents()
+        splash.set_status("Ready")
+        splash.finish(win)
+        return win
+    except Exception as exc:
+        splash.close()
+        app.processEvents()
+        report = build_error_report(
+            exc,
+            subsystem="Startup",
+            operation="Initialize Phase Studio",
+            extra_details=traceback.format_exc(),
+        )
+        report = ErrorReport(
+            category="startup",
+            subsystem="Startup",
+            title="Phase Studio could not start",
+            summary="Application initialization failed.",
+            guidance="Close this dialog, review the technical details, and restart Phase Studio.",
+            technical_details=report.technical_details,
+            operation=report.operation,
+            severity="error",
+        )
+        show_phase_studio_error(None, report)
+        return None
 
 
 def main() -> None:
@@ -7898,9 +8759,9 @@ def main() -> None:
     splash = create_startup_splash()
     splash.show()
     app.processEvents()
-    win = IterativeSuperflipPipelineQtGUI()
-    win.show()
-    splash.finish(win)
+    win = initialize_main_window(app, splash)
+    if win is None:
+        raise SystemExit(1)
     raise SystemExit(app.exec())
 
 if __name__ == "__main__":

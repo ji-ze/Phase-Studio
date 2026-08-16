@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import mimetypes
-import re
 import ssl
 import time
 import uuid
@@ -13,22 +12,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
 
+try:
+    from phase_studio.error_reporting import sanitize_error_details
+except Exception:
+    from error_reporting import sanitize_error_details
+
 
 ProgressLog = Optional[Callable[[str], None]]
 
 
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(\b(?:api[_ -]?token|access[_ -]?token|job[_ -]?token|download[_ -]?token|token)"
-    r"\b[\"']?\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
-)
-_SECRET_BEARER_RE = re.compile(r"(?i)(\bAuthorization\s*:\s*Bearer\s+)[^\s,;]+")
-_SECRET_URL_RE = re.compile(r"(?i)(/api/user/sharp-ed/(?:status|download)/)[^\s/?#]+")
-
-
 def redact_server_diagnostic(value: object) -> str:
-    text = _SECRET_BEARER_RE.sub(r"\1[REDACTED]", str(value))
-    text = _SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", text)
-    return _SECRET_URL_RE.sub(r"\1[REDACTED]", text)
+    return sanitize_error_details(value)
 
 
 @dataclass
