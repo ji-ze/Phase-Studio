@@ -5780,7 +5780,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         primary_buttons.setSpacing(8)
         secondary_buttons = QHBoxLayout()
         secondary_buttons.setSpacing(8)
-        self.run_btn = QPushButton("Run pipeline")
+        self.run_btn = QPushButton("Run phasing")
         self.stop_btn = QPushButton("Stop after current cycle")
         self.stop_now_btn = QPushButton("Stop immediately")
         self.clear_btn = QPushButton("Clear results")
