@@ -359,8 +359,7 @@ LOG_DETAIL_PREFIXES = (
     "xplor damping",
     "cif modelfiles",
     "superflip perform",
-    "superflip requested outputformat",
-    "superflip exports",
+    "output formats",
     "superflip bestdensities",
     "superflip polish",
     "superflip hkl data mode",
@@ -552,13 +551,9 @@ class RunConfig:
     modelfile_source: str
     exclude_atoms: str
     perform_algorithm: str
-    output_format: str
-    write_auxiliary_outputs: bool
-    export_superflip_xplor: bool
-    export_superflip_ccp4: bool
-    export_superflip_jana: bool
+    map_export_format: str
+    structure_export_format: str
     export_standard_hkl: bool
-    export_jana_project: bool
     referencefile_mode: str
     voxel: str
     bestdensities_count: int
@@ -3175,10 +3170,6 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
         value = " ".join(parts[1:]).strip()
         if key == "composition":
             settings["composition_override"] = value
-        elif key == "outputformat":
-            settings["output_format"] = normalize_output_format(value)
-        elif key == "outputfile":
-            settings["write_auxiliary_outputs"] = "true" if len(parts) > 2 else "false"
         elif key == "referencefile":
             saw_reference_keyword = True
             ref_name = parts[1].strip().strip('"') if len(parts) > 1 else ""
@@ -3255,6 +3246,22 @@ def normalize_output_format(value: str) -> str:
     if fmt in {"jana", "xplor", "ccp4", "m80"}:
         return fmt
     return "xplor"
+
+def normalize_map_export_format(value: str) -> str:
+    """XPLOR is always produced internally for EDMA/SharpED/Superflip; this picks one
+    additional saved map format on top of it."""
+    fmt = str(value or "xplor").strip().lower()
+    if fmt in {"xplor", "ccp4", "jana"}:
+        return fmt
+    return "xplor"
+
+def normalize_structure_export_format(value: str) -> str:
+    """CIF is always produced internally as the EDMA structure/modelfile; this picks
+    one additional saved structure format on top of it."""
+    fmt = str(value or "cif").strip().lower()
+    if fmt in {"cif", "xyz", "pdb"}:
+        return fmt
+    return "cif"
 
 def normalize_bestdensities_metric(value: str) -> str:
     metric = str(value or "rvalue").strip().lower()
@@ -3431,10 +3438,15 @@ def write_structure_pdb(output_pdb: Path, cell: gemmi.UnitCell, sg_hm: str, atom
             )
         f.write("END\n")
 
-def write_structure_bundle(output_cif: Path, cell: gemmi.UnitCell, sg: gemmi.SpaceGroup, sg_hm: str, atoms: Sequence[AtomSite]) -> None:
+def write_structure_bundle(output_cif: Path, cell: gemmi.UnitCell, sg: gemmi.SpaceGroup, sg_hm: str, atoms: Sequence[AtomSite], structure_format: str = "cif") -> None:
+    """Write the CIF that EDMA/next-cycle modelfiles always need, plus one optional
+    extra structure format (xyz or pdb) selected by the user."""
     write_structure_cif(output_cif, cell, sg, sg_hm, atoms)
-    write_structure_xyz(output_cif.with_suffix(".xyz"), cell, atoms)
-    write_structure_pdb(output_cif.with_suffix(".pdb"), cell, sg_hm, atoms)
+    fmt = normalize_structure_export_format(structure_format)
+    if fmt == "xyz":
+        write_structure_xyz(output_cif.with_suffix(".xyz"), cell, atoms)
+    elif fmt == "pdb":
+        write_structure_pdb(output_cif.with_suffix(".pdb"), cell, sg_hm, atoms)
 
 def write_filtered_cif(input_cif: Path, output_cif: Path, exclude_labels: Sequence[str]) -> Tuple[Path, int, int]:
     atoms = parse_cif_atoms(input_cif)
@@ -4130,7 +4142,6 @@ def run_edma_on_xplor(
     merge_distance_a: float,
     edma_exe: str,
     log: Callable[[str], None],
-    write_m40_for_jana: bool = False,
     stop_event: Optional[threading.Event] = None,
     maxima: str = "all",
     fullcell: str = "no",
@@ -4139,6 +4150,7 @@ def run_edma_on_xplor(
     chlimit: str = "0.2500",
     chlimlist: str = "0.0057 relative",
     extra_edma_keywords: str = "",
+    structure_format: str = "cif",
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     inp = out_dir / f"{prefix}_edma.inp"
@@ -4167,17 +4179,18 @@ def run_edma_on_xplor(
             fullcell_value = "no"
         f.write(f"scale fractional\nmaxima {maxima_value}\nfullcell {fullcell_value}\n")
         f.write(f"plimit {float(absolute_plimit):g}\n")
-        if write_m40_for_jana:
-            f.write(f"composition {ref_ctx.composition}\n")
-            if str(numberofatoms or "").strip():
-                f.write(f"numberofatoms {str(numberofatoms).strip()}\n")
-            f.write("centerofcharge yes\n" if centerofcharge else "centerofcharge no\n")
-            if str(chlimit or "").strip():
-                f.write(f"chlimit {str(chlimit).strip()}\n")
-            if str(chlimlist or "").strip():
-                f.write(f"chlimlist {str(chlimlist).strip()}\n")
-            f.write("m40forjana yes\n")
-            f.write(f"writem40 {outbase}.m40\n")
+        # Jana-format peaks (m40) are written unconditionally alongside the CIF/XYZ/PDB
+        # bundle; it costs nothing and keeps the atom-count/charge settings below meaningful.
+        f.write(f"composition {ref_ctx.composition}\n")
+        if str(numberofatoms or "").strip():
+            f.write(f"numberofatoms {str(numberofatoms).strip()}\n")
+        f.write("centerofcharge yes\n" if centerofcharge else "centerofcharge no\n")
+        if str(chlimit or "").strip():
+            f.write(f"chlimit {str(chlimit).strip()}\n")
+        if str(chlimlist or "").strip():
+            f.write(f"chlimlist {str(chlimlist).strip()}\n")
+        f.write("m40forjana yes\n")
+        f.write(f"writem40 {outbase}.m40\n")
         for line in clean_keyword_lines(extra_edma_keywords):
             f.write(line + "\n")
     map_label = "Deblurred map" if "deblur" in prefix.lower() else "Superflip map"
@@ -4203,110 +4216,13 @@ def run_edma_on_xplor(
     frac, dens = parse_edma_coo(coo)
     if len(frac) == 0:
         log(f"EDMA coordinate output contains no peaks above plimit for {xplor_map.name}; writing empty CIF.")
-        write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
+        write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], structure_format)
         return cif
     frac, dens = symmetry_merge_peaks(frac, dens, ref_ctx, merge_distance_a)
     elements = assign_elements_by_reference_composition(dens, ref_ctx.atoms)
     atoms = [AtomSite(label=f"{elements[i]}{i+1}", element=elements[i], frac=frac[i], density=float(dens[i])) for i in range(len(frac))]
-    write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms)
+    write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms, structure_format)
     return cif
-
-def extract_jana_embedded_files(cif_path: Path, export_dir: Path, prefix: str) -> List[Path]:
-    if not Path(cif_path).is_file():
-        return []
-    text = Path(cif_path).read_text(encoding="utf-8", errors="replace")
-    extracted: List[Path] = []
-    tags = {
-        "_jana_m40_file": f"{prefix}_reference.m40",
-        "_jana_m50_file": f"{prefix}.m50",
-        "_jana_m90_file": f"{prefix}.m90",
-        "_jana_m95_file": f"{prefix}.m95",
-    }
-    lines = text.splitlines()
-    idx = 0
-    while idx < len(lines):
-        tag = lines[idx].strip().lower()
-        if tag not in tags:
-            idx += 1
-            continue
-        idx += 1
-        while idx < len(lines) and not lines[idx].strip():
-            idx += 1
-        if idx >= len(lines) or lines[idx].strip() != ";":
-            continue
-        idx += 1
-        payload: List[str] = []
-        while idx < len(lines) and lines[idx].strip() != ";":
-            payload.append(lines[idx])
-            idx += 1
-        out_path = export_dir / tags[tag]
-        out_path.write_text("\n".join(payload).rstrip() + "\n", encoding="utf-8")
-        extracted.append(out_path)
-        idx += 1
-    return extracted
-
-def export_jana2020_project(
-    export_dir: Path,
-    prefix: str,
-    cycle_dir: Path,
-    edma_dir: Path,
-    map_path: Path,
-    cif_path: Path,
-    ref_ctx: ReferenceContext,
-    log: Callable[[str], None],
-) -> Path:
-    export_dir.mkdir(parents=True, exist_ok=True)
-    embedded = extract_jana_embedded_files(ref_ctx.cif_path, export_dir, prefix)
-    if not embedded and ref_ctx.work_ref_cif != ref_ctx.cif_path:
-        embedded = extract_jana_embedded_files(ref_ctx.work_ref_cif, export_dir, prefix)
-    candidates = [
-        cycle_dir / f"{prefix}.m80",
-        cycle_dir / f"{prefix}.m81",
-        cycle_dir / f"{prefix}.sflog",
-        cycle_dir / f"{prefix}.superflip.log",
-        cycle_dir / f"{prefix}.inflip",
-        edma_dir / f"{prefix}_edma.m40",
-        edma_dir / f"{prefix}_edma.inp",
-        edma_dir / f"{prefix}_edma.log",
-        map_path,
-        cif_path,
-        ref_ctx.work_ref_cif,
-    ]
-    copied = 0
-    for src in candidates:
-        if src is None or not Path(src).is_file():
-            continue
-        dst = export_dir / Path(src).name
-        if Path(src).resolve() != dst.resolve():
-            shutil.copy2(src, dst)
-        copied += 1
-    copied += len(embedded)
-    readme = export_dir / "README_Jana2020_export.txt"
-    readme.write_text(
-        "\n".join(
-            [
-                "Phase Studio Jana2020 export",
-                f"Prefix: {prefix}",
-                "",
-                "Primary files:",
-                f"- {prefix}.m80 / {prefix}.m81: Superflip Jana output files when produced by this Superflip build.",
-                f"- {prefix}_edma.m40: EDMA/Jana peak file when produced by this EDMA build.",
-                f"- {prefix}.m50 / {prefix}.m90 / {prefix}.m95: Jana project/data files extracted from an embedded Jana CIF when present.",
-                f"- {Path(map_path).name}: XPLOR density map.",
-                f"- {Path(cif_path).name}: EDMA peak model exported as CIF.",
-                "",
-                "For a full Jana project, open/use the extracted m50/m90 files together with the m40/m80/m81 files when present.",
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-    log(f"Jana2020 export: {export_dir} ({copied} files)")
-    if not (export_dir / f"{prefix}_edma.m40").is_file():
-        log("  Jana2020 export note: EDMA did not produce an m40 file; m80/m81/map/CIF were still exported.")
-    if not (export_dir / f"{prefix}.m50").is_file() or not (export_dir / f"{prefix}.m90").is_file():
-        log("  Jana2020 export note: no embedded m50/m90 project files were found in the reference CIF.")
-    return export_dir
 
 def parse_superflip_log_metrics(log_path: Path) -> SuperflipLogMetrics:
     """Extract the saved-density metrics from a Superflip log.
@@ -4618,13 +4534,9 @@ INPUT_TOOLTIPS = {
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
-    "output_format": "Superflip outputformat keyword. Imported Jana/Superflip templates commonly use jana while still listing an .xplor output file.",
-    "write_auxiliary_outputs": "Write three outputfile names, m81, m80 and xplor, like Jana/Superflip templates.",
-    "export_superflip_xplor": "Request an XPLOR map from Superflip. XPLOR is also kept internally because EDMA and SharpED consume this map format.",
-    "export_superflip_ccp4": "Request an additional CCP4 map from Superflip for external crystallographic and molecular-graphics viewers.",
-    "export_superflip_jana": "Request Jana density and reflection outputs from Superflip: m81 density map and m80 phased-reflection list.",
+    "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files.",
+    "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
     "export_standard_hkl": "Write a standardized observed-reflection export with h k l I sigma(I) phase(deg). Phase is 0 unless supplied by the selected input mode.",
-    "export_jana_project": "Create a Jana2020 export folder for each cycle with Superflip m80/m81, EDMA m40, maps, CIF and logs.",
     "referencefile_mode": "Internal automatic setting derived from External reference file. Phase Studio writes only referencefile and lets Superflip infer jana/xplor/ccp4/cif from the filename.",
     "voxel": "Superflip voxel grid. The default omit/blank skips the keyword. Use three integers, for example 180 80 160, or AUTO to compute a 0.2 A grid from the unit cell.",
     "bestdensities_count": "First argument of bestdensities: how many best density maps Superflip keeps.",
@@ -5494,22 +5406,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         output_form = add_form_group(paths_tab, "Output")
         self._add_path(output_form, "work_dir", "Working directory", str(cwd / "iterative_superflip_qt_run"), "dir")
-
-        programs_form = add_form_group(paths_tab, "External programs")
-        self._add_path(programs_form, "superflip_exe", "Superflip executable", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
-        self._add_path(programs_form, "edma_exe", "EDMA executable", r"C:\Jana2020\SUPERFLIP\EDMA.exe", "file", "Executables (*.exe);;All files (*)")
-        program_links = QVBoxLayout()
-        program_links.setSpacing(3)
-        for program_name, tooltip in (
-            ("Superflip website", "Open the official Superflip website"),
-            ("EDMA website", "Open the official EDMA website"),
-        ):
-            program_row = QHBoxLayout()
-            program_row.addWidget(QLabel(program_name))
-            program_row.addWidget(self._external_link_icon("https://superflip.fzu.cz/", tooltip))
-            program_row.addStretch(1)
-            program_links.addLayout(program_row)
-        programs_form.addRow("Downloads", program_links)
+        self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana"], "xplor")
+        self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
+        self._add_checkbox(output_form, "export_standard_hkl", "Save standardized HKL (I/σ/phase)", False, align_with_fields=True)
+        output_form.addRow("", self._secondary_help(
+            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles; "
+            "Map/Structure format add one extra saved format on top for external use or Jana2020."
+        ))
         paths_tab.addStretch(1)
 
         # Basic / Workflow
@@ -5545,20 +5448,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         # Basic / SharpED
         sharped_tab = add_settings_tab("SharpED")
-        server_form = add_form_group(sharped_tab, "Server connection", "sharped")
-        self._add_text(server_form, "sharped_base_url", "Server URL", "https://jana.fzu.cz")
-        self._add_text(server_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
-        try:
-            self.inputs["sharped_api_token"].setEchoMode(QLineEdit.Password)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        token_link_row = QHBoxLayout()
-        token_link_row.addWidget(QLabel("Get SharpED token"))
-        token_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
-        token_link_row.addStretch(1)
-        server_form.addRow("", token_link_row)
-
-        model_form = add_form_group(sharped_tab, "SharpED model")
+        model_form = add_form_group(sharped_tab, "SharpED model", "sharped")
         self._add_combo(model_form, "sharped_model", "Model", ["default"], "default")
         try:
             self.inputs["sharped_model"].setEditable(True)  # type: ignore[attr-defined]
@@ -5568,18 +5458,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
         self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
         model_form.addRow("", self.refresh_models_btn)
-
-        inference_form = add_form_group(sharped_tab, "Inference")
-        self._add_text(inference_form, "sharped_elements", "Elements", "")
-        self.inputs["sharped_elements"].setPlaceholderText("Auto from composition")  # type: ignore[attr-defined]
-        self._add_dspin(inference_form, "sharped_outres", "Output resolution", 0.2, 0.001, 10.0, 0.05, 4)
-
-        network_form = add_form_group(sharped_tab, "Transfer and network")
-        self._add_dspin(network_form, "sharped_max_upload_mb", "Upload limit (MB)", 100.0, 0.0, 100000.0, 10.0, 1)
-        self._add_spin(network_form, "sharped_timeout_seconds", "HTTP timeout (s)", 600, 600, 7200, 60)
-        self._add_spin(network_form, "sharped_poll_seconds", "Polling interval (s)", 2, 1, 3600, 1)
-        self._add_spin(network_form, "sharped_max_polls", "Maximum polls", -1, -1, 1000000, 1)
-        network_form.addRow("", self._secondary_help("Use -1 for no fixed polling limit."))
+        model_form.addRow("", self._secondary_help(
+            "Server URL and API token are in Advanced → Setup. Elements, output resolution and transfer/network settings are in Advanced → SharpED."
+        ))
         sharped_tab.addStretch(1)
 
         # Basic / Help
@@ -5641,7 +5522,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>6. Symmetry</h3>
             <p><b>Search symmetry</b> maps to <code>searchsymmetry</code>; <b>Derive symmetry</b> maps to <code>derivesymmetry</code>.</p>
             <h3>7. Output</h3>
-            <p>XPLOR is important internally because EDMA and SharpED consume XPLOR density maps. Other outputs support external inspection, Jana2020 interoperability and export.</p>
+            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Paths &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020.</p>
             <h3>8. Advanced keywords</h3>
             <p><b>Extra Superflip keywords</b> lets expert users append documented keywords without dedicated GUI controls.</p>
         """)
@@ -5666,6 +5547,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_help_layout = add_help_section(reference_tab, "sharped", "SharpED guide", """
             <h3>What SharpED does</h3>
             <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
+            <p><b>Model</b> selection stays on the Basic &rarr; SharpED page. Server connection, elements, output resolution and upload/network settings are on Advanced &rarr; Setup (server URL/API token) and Advanced &rarr; SharpED (everything else below).</p>
             <h3>1. Server connection</h3>
             <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
             <h3>2. Model and elements</h3>
@@ -5724,6 +5606,38 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         add_back_to_contents(about_layout)
         reference_tab.addStretch(1)
 
+        # Advanced / Setup
+        setup_tab = add_settings_tab("Setup", advanced=True)
+        programs_form = add_form_group(setup_tab, "External programs")
+        self._add_path(programs_form, "superflip_exe", "Superflip executable", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
+        self._add_path(programs_form, "edma_exe", "EDMA executable", r"C:\Jana2020\SUPERFLIP\EDMA.exe", "file", "Executables (*.exe);;All files (*)")
+        program_links = QVBoxLayout()
+        program_links.setSpacing(3)
+        for program_name, tooltip in (
+            ("Superflip website", "Open the official Superflip website"),
+            ("EDMA website", "Open the official EDMA website"),
+        ):
+            program_row = QHBoxLayout()
+            program_row.addWidget(QLabel(program_name))
+            program_row.addWidget(self._external_link_icon("https://superflip.fzu.cz/", tooltip))
+            program_row.addStretch(1)
+            program_links.addLayout(program_row)
+        programs_form.addRow("Downloads", program_links)
+
+        sharped_api_form = add_form_group(setup_tab, "SharpED API")
+        self._add_text(sharped_api_form, "sharped_base_url", "Server URL", "https://jana.fzu.cz")
+        self._add_text(sharped_api_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
+        try:
+            self.inputs["sharped_api_token"].setEchoMode(QLineEdit.Password)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        token_link_row = QHBoxLayout()
+        token_link_row.addWidget(QLabel("Get SharpED token"))
+        token_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
+        token_link_row.addStretch(1)
+        sharped_api_form.addRow("", token_link_row)
+        setup_tab.addStretch(1)
+
         # Advanced / Superflip
         superflip_tab = add_settings_tab("Superflip", advanced=True)
         calculation_form = add_form_group(superflip_tab, "Calculation", "superflip")
@@ -5757,15 +5671,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_spin(reflection_form, "nresshells", "Resolution shells", 100, 0, 100000, 10)
         self._add_text(reflection_form, "missing", "Missing-reflection keyword", "bound 0.5 2.5")
         self._add_text(reflection_form, "electrons", "Electrons", "")
-
-        output_options_form = add_form_group(superflip_tab, "Output")
-        self._add_combo(output_options_form, "output_format", "Format", ["xplor", "jana", "ccp4", "m80"], "xplor")
-        self._add_checkbox(output_options_form, "write_auxiliary_outputs", "Write legacy auxiliary outputs", False, align_with_fields=True)
-        self._add_checkbox(output_options_form, "export_superflip_xplor", "Save XPLOR map", True, align_with_fields=True)
-        self._add_checkbox(output_options_form, "export_superflip_ccp4", "Save CCP4 map", False, align_with_fields=True)
-        self._add_checkbox(output_options_form, "export_superflip_jana", "Save Jana m80/m81", False, align_with_fields=True)
-        self._add_checkbox(output_options_form, "export_standard_hkl", "Save standardized HKL (I/σ/phase)", False, align_with_fields=True)
-        self._add_checkbox(output_options_form, "export_jana_project", "Export Jana2020 project", False, align_with_fields=True)
 
         reference_density_form = add_form_group(superflip_tab, "Reference density")
         reference_density_form.addRow(self._secondary_help(
@@ -5806,8 +5711,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_multiline(edma_extra_form, "extra_edma_keywords", "Extra EDMA keywords", "", 110)
         edma_tab.addStretch(1)
 
+        # Advanced / SharpED
+        sharped_advanced_tab = add_settings_tab("SharpED", advanced=True)
+        inference_form = add_form_group(sharped_advanced_tab, "Inference")
+        self._add_text(inference_form, "sharped_elements", "Elements", "")
+        self.inputs["sharped_elements"].setPlaceholderText("Auto from composition")  # type: ignore[attr-defined]
+        self._add_dspin(inference_form, "sharped_outres", "Output resolution", 0.2, 0.001, 10.0, 0.05, 4)
+
+        network_form = add_form_group(sharped_advanced_tab, "Transfer and network")
+        self._add_dspin(network_form, "sharped_max_upload_mb", "Upload limit (MB)", 100.0, 0.0, 100000.0, 10.0, 1)
+        self._add_spin(network_form, "sharped_timeout_seconds", "HTTP timeout (s)", 600, 600, 7200, 60)
+        self._add_spin(network_form, "sharped_poll_seconds", "Polling interval (s)", 2, 1, 3600, 1)
+        self._add_spin(network_form, "sharped_max_polls", "Maximum polls", -1, -1, 1000000, 1)
+        network_form.addRow("", self._secondary_help("Use -1 for no fixed polling limit."))
+        sharped_advanced_tab.addStretch(1)
+
         # Advanced / Map feedback
         feedback_tab = add_settings_tab("Map feedback", advanced=True)
+        feedback_tab.addWidget(settings_callout(
+            "Warning",
+            "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later "
+            "cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.",
+        ))
         missing_feedback_form = add_form_group(feedback_tab, "Missing-reflection completion", "map_feedback")
         self._add_spin(missing_feedback_form, "map_feedback_missing_from_cycle", "Start after cycle", 0, 0, 999, 1)
         self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Added limit (%)", 0.0, 0.0, 100.0, 1.0, 3)
@@ -6347,6 +6272,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._set_widget_value_from_string(self.inputs["plimit_superflip"], str(old_plimit))
             if self.settings.value("inputs/plimit_deblur", None) is None and "plimit_deblur" in self.inputs:
                 self._set_widget_value_from_string(self.inputs["plimit_deblur"], str(old_plimit))
+        # Backward compatibility with older GUI versions that had separate
+        # export_superflip_ccp4/export_superflip_jana checkboxes instead of one
+        # Map format choice.
+        if self.settings.value("inputs/map_export_format", None) is None:
+            legacy_jana = str(self.settings.value("inputs/export_superflip_jana", "")).strip().lower() in {"1", "true", "yes", "on"}
+            legacy_ccp4 = str(self.settings.value("inputs/export_superflip_ccp4", "")).strip().lower() in {"1", "true", "yes", "on"}
+            map_format_widget = self.inputs.get("map_export_format")
+            if map_format_widget is not None and (legacy_jana or legacy_ccp4):
+                self._set_widget_value_from_string(map_format_widget, "jana" if legacy_jana else "ccp4")
         legacy_reference_xplor = self.settings.value("inputs/superflip_reference_xplor", None)
         legacy_superflip_referencefile = self.settings.value("inputs/superflip_referencefile", None)
         referencefile_widget = self.inputs.get("reference_cif")
@@ -7496,7 +7430,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_after_cycle.clear()
         self.stop_now.clear()
         self._set_run_status("Cancelled")
-        self.run_btn.setText("Run pipeline")
+        self.run_btn.setText("Run phasing")
         self.handoff_btn.setEnabled(False)
         self._update_action_states()
         self._append_execution_log("Pipeline cancelled by the user.", level="WARNING", subsystem="Pipeline")
@@ -7590,8 +7524,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("plimit_deblur", "3.0")
             set_value("resolution_d_min", "0.9")
             set_value("bestdensities_symmetry", "true")
-            set_value("export_superflip_xplor", "true")
-            set_value("export_superflip_jana", "true")
+            set_value("map_export_format", "jana")
         elif "medium" in name:
             set_value("reflection_data_mode", REFLECTION_DATA_MODE_AUTO)
             set_value("modelfile_source", "deblurred_edma_cif")
@@ -7641,12 +7574,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if category in {"file_permission", "file_write"}:
             row = self.inputs.get("work_dir")
             return [ErrorAction("Choose folder…", row.browse, True)] if isinstance(row, PathRow) else []
+        if category == "sharped_authentication":
+            return [ErrorAction("Open SharpED API settings", lambda: self._open_configuration_page("Setup", advanced=True), True)]
         if category.startswith("sharped_"):
-            return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED"), True)]
+            return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED", advanced=True), True)]
         if category == "input_validation":
             actions = [ErrorAction("Open Paths", lambda: self._open_configuration_page("Paths"), True)]
             if "SharpED" in report.summary:
-                actions.append(ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED")))
+                actions.append(ErrorAction("Open SharpED API settings", lambda: self._open_configuration_page("Setup", advanced=True)))
             return actions
         if category in {"hkl_invalid", "metadata", "unit_cell", "space_group", "composition", "inflip"}:
             return [ErrorAction("Open Paths", lambda: self._open_configuration_page("Paths"), True)]
@@ -7672,7 +7607,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.progress_bar.setValue(0)
         self._set_overall_progress_text("Error")
         self._set_terminal_cycle_state("Error")
-        self.run_btn.setText("Run pipeline")
+        self.run_btn.setText("Run phasing")
         self.handoff_btn.setEnabled(False)
         self._update_action_states()
         self._show_error_report(report)
@@ -7814,7 +7749,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self.current_cycle_detail.setText("Pipeline complete")
                         self.current_cycle_stage_counter.setText("Completed")
                     self.run_btn.setEnabled(True)
-                    self.run_btn.setText("Run pipeline")
+                    self.run_btn.setText("Run phasing")
                     can_handoff = bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None)
                     self.handoff_btn.setEnabled(can_handoff)
                     if can_handoff:
@@ -8554,13 +8489,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             modelfile_source=modelfile_source_value,
             exclude_atoms=self._line_value("exclude_atoms") or "none",
             perform_algorithm=self._combo_value("perform_algorithm") or "CF",
-            output_format=normalize_output_format(self._combo_value("output_format")),
-            write_auxiliary_outputs=self._check_value("write_auxiliary_outputs"),
-            export_superflip_xplor=self._check_value("export_superflip_xplor"),
-            export_superflip_ccp4=self._check_value("export_superflip_ccp4"),
-            export_superflip_jana=self._check_value("export_superflip_jana"),
+            map_export_format=normalize_map_export_format(self._combo_value("map_export_format")),
+            structure_export_format=normalize_structure_export_format(self._combo_value("structure_export_format")),
             export_standard_hkl=self._check_value("export_standard_hkl"),
-            export_jana_project=self._check_value("export_jana_project"),
             referencefile_mode=referencefile_mode,
             voxel=self._line_value("voxel"),
             bestdensities_count=self._spin_value("bestdensities_count"),
@@ -8636,8 +8567,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif ref_suffix not in REFERENCE_FILE_SUFFIXES:
                 issues.append("The external reference format is not supported.")
                 details.append(f"Reference suffix: {ref_suffix or '(none)'}")
-        if not any([cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana, cfg.export_standard_hkl, cfg.export_jana_project]):
-            issues.append("At least one Superflip output format must be selected.")
         if cfg.run_sharped and not cfg.sharped_api_token.strip():
             issues.append("A SharpED API token is required for the selected workflow.")
         for exe, label in ((cfg.superflip_exe, "Superflip"), (cfg.edma_exe, "EDMA")):
@@ -8866,16 +8795,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if use_cif_modelfile:
                 self.log("CIF modelfiles are written without an explicit CIF format keyword; Superflip infers CIF from the .cif extension.", level="DETAIL")
             self.log(f"Superflip perform: {cfg.perform_algorithm.upper()}")
-            self.log(f"Superflip requested outputformat: {cfg.output_format}")
             self.log(
-                "Superflip exports: "
-                f"XPLOR={'yes' if cfg.export_superflip_xplor else 'internal'}, "
-                f"CCP4={'yes' if cfg.export_superflip_ccp4 else 'no'}, "
-                f"m80/m81={'yes' if cfg.export_superflip_jana or cfg.write_auxiliary_outputs else 'no'}, "
+                "Output formats: "
+                f"map={normalize_map_export_format(cfg.map_export_format)}, "
+                f"structure={normalize_structure_export_format(cfg.structure_export_format)}, "
                 f"standard HKL={'yes' if cfg.export_standard_hkl else 'no'}"
             )
-            if cfg.export_jana_project:
-                self.log("Jana2020 project export: yes")
             self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, Superflip symmetry/deblurred={'yes' if cfg.symmetrize_deblurred_map else 'no'}, EDMA/deblurred={'yes' if cfg.run_edma_deblurred else 'no'}")
             if cfg.first_cycle_modelfile is not None:
                 self.log(f"First-cycle external modelfile: {cfg.first_cycle_modelfile}")
@@ -9063,7 +8988,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     detail=f"repeat mode {effective_repeat} · running",
                     busy=True,
                 )
-            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, cfg.output_format, cfg.write_auxiliary_outputs or cfg.export_jana_project, cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana or cfg.export_jana_project, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
+            # XPLOR is always requested (mandatory internal working map for EDMA/SharpED);
+            # the single map-format choice only adds CCP4 or Jana m80/m81 on top of it.
+            sf_map_format = normalize_map_export_format(cfg.map_export_format)
+            sf_export_ccp4 = sf_map_format == "ccp4"
+            sf_export_jana = sf_map_format == "jana"
+            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
             self.log(f"Superflip map: {sf_map}")
             if self.stop_now.is_set():
                 raise RuntimeError("Immediate stop requested.")
@@ -9094,18 +9024,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · Superflip map", busy=True)
                 sf_edma_cif = run_edma_on_xplor(
                     sf_map, sf_edma_dir, sf_prefix, ref_ctx, cfg.plimit_superflip,
-                    cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
+                    cfg.merge_distance, cfg.edma_exe, self.log,
                     self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
-                    cfg.edma_chlimlist, cfg.extra_edma_keywords
+                    cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
                 )
             else:
                 sf_edma_dir.mkdir(parents=True, exist_ok=True)
                 sf_edma_cif = sf_edma_dir / f"{sf_prefix}_edma.cif"
-                write_structure_bundle(sf_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
+                write_structure_bundle(sf_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
                 self.log("EDMA after Superflip disabled; empty placeholder CIF/XYZ/PDB written.")
-            if cfg.export_jana_project and cfg.run_edma_superflip:
-                export_jana2020_project(cycle_dir / "jana2020_superflip", sf_prefix, cycle_dir, sf_edma_dir, sf_map, sf_edma_cif, ref_ctx, self.log)
             sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
             sf_metric_text = "n/a" if sf_metric is None else f"{float(sf_metric):.3f}"
             self.log(
@@ -9168,7 +9096,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     ref_ctx=ref_ctx,
                     input_map=deblur_map,
                     superflip_exe=cfg.superflip_exe,
-                    output_format=cfg.output_format,
+                    output_format="xplor",
                     voxel=cfg.voxel,
                     searchsymmetry=cfg.searchsymmetry,
                     derivesymmetry=cfg.derivesymmetry,
@@ -9181,21 +9109,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · deblurred map", busy=True)
                 deblur_edma_cif = run_edma_on_xplor(
                     deblur_map, deblur_edma_dir, deblur_prefix, ref_ctx, cfg.plimit_deblur,
-                    cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
+                    cfg.merge_distance, cfg.edma_exe, self.log,
                     self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
-                    cfg.edma_chlimlist, cfg.extra_edma_keywords
+                    cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
                 )
             else:
                 deblur_edma_dir.mkdir(parents=True, exist_ok=True)
                 deblur_edma_cif = deblur_edma_dir / f"{deblur_prefix}_edma.cif"
-                write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
+                write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
                 if use_superflip_xplor_modelfile:
                     self.log("EDMA after deblurred map skipped for raw Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
                 else:
                     self.log("EDMA after deblurred map disabled; empty placeholder CIF/XYZ/PDB written.")
-            if cfg.export_jana_project and cfg.run_edma_deblurred:
-                export_jana2020_project(cycle_dir / "jana2020_deblurred", deblur_prefix, cycle_dir, deblur_edma_dir, deblur_map, deblur_edma_cif, ref_ctx, self.log)
             deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
             deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")

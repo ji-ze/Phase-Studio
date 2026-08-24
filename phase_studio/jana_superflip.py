@@ -154,8 +154,9 @@ def build_jana_handoff_import(
         "sharped_elements": options.elements,
         "sharped_outres": str(options.outres),
         "modelfile_source": options.next_cycle_modelfile,
-        "export_superflip_xplor": "true",
-        "export_superflip_jana": "true",
+        # Must match one of the "Map format" combo items in app.py exactly (XPLOR is
+        # always produced regardless; "jana" additionally saves Jana m80/m81 for hand-off).
+        "map_export_format": "jana",
         "hkl": explicit_hkl,
     }
     if explicit_first_model:
