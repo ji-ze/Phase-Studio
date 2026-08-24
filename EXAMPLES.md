@@ -247,6 +247,41 @@ Manual metadata must describe the same crystallographic setting as the reflectio
 
 ---
 
+## Example 5 — SharpED phase recycling instead of iterative Superflip
+
+### Goal
+
+Use the experimental SharpED phase-recycling algorithm: Superflip runs at most once, and later cycles recompose a map from the observed |Fobs| and phases calculated (by FFT) from each cycle's SharpED-deblurred map, instead of re-running Superflip every cycle.
+
+### Use this workflow when
+
+- exploring whether SharpED-driven phase recycling converges better or faster than iterative charge flipping for a given dataset,
+- comparing a random-phase start against a Superflip-seeded start.
+
+### Configuration
+
+| Setting | Example value |
+|---|---|
+| Reconstruction algorithm | sharped_recycle (or sharped_recycle_random for the random-phase-start variant) |
+| Cycles | 10–20 |
+| Run EDMA on final map | Enabled, if a peak-picked structure is wanted at the end |
+
+### Procedure
+
+1. Open **Basic → Workflow**.
+2. Set **Reconstruction algorithm** to `sharped_recycle` to seed cycle 1 with a single Superflip run, or `sharped_recycle_random` to skip Superflip entirely and start from random phases.
+3. Set **Cycles** to the number of recycling rounds desired.
+4. Enable **Run EDMA on final map** if a peak-picked CIF/XYZ/PDB structure should be exported from the last cycle's map.
+5. Confirm the SharpED server URL and API token on **Advanced → Setup**.
+6. Click **Run phasing**.
+7. Inspect the per-cycle Superflip map (or random-phase start map) and the recomposed |Fobs|+phi_calc map for each cycle in the working directory.
+
+### Important check
+
+**Next-cycle model**, **XPLOR damping**, **Symmetrize processed map**, and the per-cycle EDMA checkboxes are ignored by this algorithm and are disabled in the GUI while it is selected.
+
+---
+
 ## General advice
 
 Before a production run:

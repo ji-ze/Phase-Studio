@@ -262,9 +262,21 @@ Treat presets as starting points rather than universal scientific recommendation
 
 The effective number of cycles can also depend on the selected next-cycle model policy.
 
-### 6.3 Next-cycle model
+### 6.3 Reconstruction algorithm
 
-The next-cycle model determines what is used to seed Superflip after the first cycle.
+**Reconstruction algorithm** chooses between the standard iterative Superflip cycle and two experimental SharpED phase-recycling algorithms:
+
+- **superflip** (default) — the standard charge-flipping cycle described in the rest of this section: Superflip runs every cycle, seeded by the next-cycle model.
+- **sharped_recycle** — Superflip runs only once (cycle 1). From then on, every cycle deblurs the previous cycle's map with SharpED, calculates phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map from the observed |Fobs| and phi_calc. That recomposed map is what SharpED deblurs in the next cycle.
+- **sharped_recycle_random** — the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases per reflection.
+
+When either recycling algorithm is selected, **Next-cycle model**, **XPLOR damping**, **Symmetrize processed map**, and the per-cycle EDMA checkboxes below are ignored (they are disabled in the GUI); the recycling algorithm defines its own next-cycle map and its own optional EDMA step (**Run EDMA on final map**, in Optional processing) instead.
+
+Only the SharpED server and the observed reflections are required for `sharped_recycle_random`; Superflip is never invoked in that mode.
+
+### 6.4 Next-cycle model
+
+The next-cycle model determines what is used to seed Superflip after the first cycle. It only applies when Reconstruction algorithm is superflip.
 
 Current workflow choices can include model sources such as:
 
@@ -275,9 +287,9 @@ Current workflow choices can include model sources such as:
 
 Use the exact option names shown by the current GUI.
 
-### 6.4 XPLOR damping
+### 6.5 XPLOR damping
 
-**XPLOR damping (1/x)** controls damping when XPLOR maps are reused as models.
+**XPLOR damping (1/x)** controls damping when XPLOR maps are reused as models. It only applies when Reconstruction algorithm is superflip.
 
 Examples:
 
@@ -289,20 +301,21 @@ Examples:
 
 Damping applies only to workflows that use an XPLOR map as the next-cycle model.
 
-### 6.5 Excluded atoms
+### 6.6 Excluded atoms
 
 When CIF models are used, selected atom labels can be excluded before a later-cycle model is prepared.
 
 This option does not apply to XPLOR-only model paths.
 
-### 6.6 Optional processing
+### 6.7 Optional processing
 
 The Workflow page can enable or disable stages such as:
 
 - EDMA after the raw Superflip map,
 - SharpED deblurring,
 - Superflip symmetry averaging of the processed map,
-- EDMA after the processed map.
+- EDMA after the processed map,
+- EDMA on the final map, for the sharped_recycle/sharped_recycle_random algorithms.
 
 Only enabled stages are included in the cycle.
 
