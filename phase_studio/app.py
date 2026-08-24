@@ -8,10 +8,13 @@ persistent settings and standardized metric plotting.
 
 The selected metadata source supplies cell, symmetry and composition; a
 reference structure can additionally supply atom sites and comparison metrics. Superflip
-referencefile is optional and is written only when the user explicitly
-selects an external reference file (CIF/Jana/XPLOR/CCP4). The first Superflip run has no
-modelfile. Later cycles can use EDMA CIF coordinates, raw Superflip XPLOR, or
-deblurred XPLOR as Superflip modelfile.
+referencefile is written when the user explicitly selects an external reference file
+(CIF/Jana/XPLOR/CCP4); otherwise, from the second cycle onward, it is filled in
+automatically from the most recent previous-cycle EDMA CIF (or the previous-cycle
+XPLOR map when EDMA produced no usable peaks) so Superflip keeps a fixed origin in
+reciprocal space across cycles. The first Superflip run has no modelfile. Later cycles
+can use EDMA CIF coordinates, raw Superflip XPLOR, or deblurred XPLOR as Superflip
+modelfile.
 
 Each cycle saves:
   cycle_NNN/cycle_NNN_superflip.xplor
@@ -1141,6 +1144,14 @@ def parse_cif_atoms(cif_path: Path) -> List[AtomSite]:
     except Exception:
         pass
     return atoms
+
+def cif_has_readable_atoms(cif_path: Optional[Path]) -> bool:
+    if cif_path is None or not cif_path.is_file():
+        return False
+    try:
+        return bool(parse_cif_atoms(cif_path))
+    except Exception:
+        return False
 
 def atom_element_counts(atoms: Sequence[AtomSite]) -> Tuple[Dict[str, int], List[str]]:
     counts: Dict[str, int] = collections.Counter()
@@ -5726,7 +5737,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         reference_density_form = add_form_group(superflip_tab, "Reference density")
         reference_density_form.addRow(self._secondary_help(
-            "The referencefile keyword is automatic: it is omitted by default and written only when a reference file is selected on Paths."
+            "The referencefile keyword is automatic: it is written only when a reference file is selected on Paths, or "
+            "from cycle 2 onward when none is selected, using the previous cycle's EDMA CIF (or its XPLOR map if EDMA "
+            "produced no usable peaks) so Superflip keeps a fixed origin in reciprocal space between cycles."
         ))
         reference_density_form.addRow(self._secondary_help(
             "dataitemwidths is unnecessary because Phase Studio writes whitespace-separated fbegin/endf records."
@@ -8787,6 +8800,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log(f"Superflip referencefile: {ref_ctx.work_ref_cif} (format inferred from CIF suffix)", level="DETAIL")
             elif referencefile_mode in {"reference_xplor", "reference_density"} and (explicit_superflip_referencefile is not None or cfg.superflip_reference_xplor is not None):
                 self.log(f"Superflip referencefile: {explicit_superflip_referencefile or cfg.superflip_reference_xplor} (format inferred from filename)", level="DETAIL")
+            elif referencefile_mode == "omit":
+                self.log(
+                    "Superflip referencefile keyword: no external reference file selected; "
+                    "cycle 1 omits it, later cycles fill it in automatically from the previous "
+                    "cycle's EDMA CIF (or XPLOR map if EDMA produced no usable peaks).",
+                    level="DETAIL",
+                )
             else:
                 self.log("Superflip referencefile keyword: no", level="DETAIL")
             self.log(f"Superflip bestdensities: {cfg.bestdensities_count} {'symmetry' if cfg.bestdensities_symmetry else cfg.bestdensities_metric}")
@@ -8817,6 +8837,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log(f"Standardized HKL export: {standard_hkl} ({n_standard} reflections)")
             current_model: Optional[Path] = None
             current_model_metric: Optional[float] = None
+            auto_reference_cif: Optional[Path] = None
+            auto_reference_xplor: Optional[Path] = None
             exclude_labels = parse_atom_label_list(cfg.exclude_atoms)
             all_results: List[CycleResult] = []
             completed_cycles = 0
@@ -8864,6 +8886,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else ref_ctx.work_ref_cif
                 elif referencefile_mode in {"reference_xplor", "reference_density"}:
                     reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else cfg.superflip_reference_xplor
+                elif referencefile_mode == "omit" and cyc > 1:
+                    # No user-selected reference file: without one, Superflip cannot fix the
+                    # phase origin against the previous cycle and the density map drifts.
+                    # Anchor it automatically on the most recent previous-cycle EDMA CIF, or
+                    # on the previous-cycle XPLOR map when EDMA produced no usable peaks.
+                    if auto_reference_cif is not None:
+                        reference_file_for_cycle = auto_reference_cif
+                        self.log(f"[Cycle reference] Auto referencefile (previous-cycle EDMA CIF): {reference_file_for_cycle}", level="DETAIL")
+                    elif auto_reference_xplor is not None:
+                        reference_file_for_cycle = auto_reference_xplor
+                        self.log(f"[Cycle reference] Auto referencefile (previous-cycle XPLOR map, EDMA unavailable): {reference_file_for_cycle}", level="DETAIL")
                 sf_voxel = cfg.voxel
                 sf_extra_superflip_keywords = cfg.extra_superflip_keywords
                 if cfg.run_sharped and not use_superflip_xplor_modelfile:
@@ -9110,6 +9143,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 else:
                     current_model = None
                     current_model_metric = None
+                if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile and cif_has_readable_atoms(deblur_edma_cif):
+                    auto_reference_cif = deblur_edma_cif
+                elif cfg.run_edma_superflip and cif_has_readable_atoms(sf_edma_cif):
+                    auto_reference_cif = sf_edma_cif
+                else:
+                    auto_reference_cif = None
+                auto_reference_xplor = deblur_map
                 completed_cycles = cyc
                 self.log(f"Cycle {cyc} complete.", level="SUCCESS")
                 self.msg_queue.put(("progress", completed_cycles))
