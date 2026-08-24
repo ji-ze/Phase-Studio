@@ -1,6 +1,6 @@
 # Building Phase Studio
 
-This document contains source-installation, packaging, and developer-oriented build information for **Phase Studio 1.0.4**.
+This document contains source-installation, packaging, and developer-oriented build information for **Phase Studio 1.0.5**.
 
 End users normally do not need these steps. See [README.md](README.md) and [MANUAL.md](MANUAL.md) instead.
 

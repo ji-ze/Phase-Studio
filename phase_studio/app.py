@@ -44,7 +44,7 @@ import sys
 import threading
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -601,6 +601,37 @@ class RunConfig:
     sharped_timeout_seconds: int
     sharped_poll_seconds: int
     sharped_max_polls: int
+
+
+@dataclass
+class PipelineState:
+    """Everything the cycle loop needs to resume exactly where it left off.
+
+    Built once per fresh run and mutated cycle by cycle; kept around after a stop
+    or a natural finish so Continue can pick the loop back up with the same
+    metadata, reflections, model/reference feedback and accumulated results.
+    """
+
+    cfg: RunConfig
+    ref_ctx: ReferenceContext
+    observed_hkls: Dict[str, Path]
+    configured_data_mode: str
+    referencefile_mode: str
+    explicit_superflip_referencefile: Optional[Path]
+    modelfile_mode: str
+    use_xplor_modelfile: bool
+    use_cif_modelfile: bool
+    use_superflip_xplor_modelfile: bool
+    sharped_elements: str
+    exclude_labels: List[str]
+    progress_stages: List[str]
+    current_reflections: List[Reflection]
+    all_results: List[CycleResult] = field(default_factory=list)
+    completed_cycles: int = 0
+    current_model: Optional[Path] = None
+    current_model_metric: Optional[float] = None
+    auto_reference_cif: Optional[Path] = None
+    auto_reference_xplor: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -4839,6 +4870,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_now = threading.Event()
         self.results: List[CycleResult] = []
         self.last_run_config: Optional[RunConfig] = None
+        self._resume_state: Optional[PipelineState] = None
         self.reference_atoms_for_plot: List[AtomSite] = []
         self.superflip_atoms_for_plot: List[AtomSite] = []
         self.deblur_atoms_for_plot: List[AtomSite] = []
@@ -5794,29 +5826,39 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         secondary_buttons = QHBoxLayout()
         secondary_buttons.setSpacing(8)
         self.run_btn = QPushButton("Run phasing")
+        self.continue_btn = QPushButton("Continue")
         self.stop_btn = QPushButton("Stop after current cycle")
         self.stop_now_btn = QPushButton("Stop immediately")
         self.clear_btn = QPushButton("Clear results")
         self.handoff_btn = QPushButton("Send to Jana2020")
         self.run_btn.setObjectName("primaryButton")
+        self.continue_btn.setObjectName("continueButton")
         self.handoff_btn.setObjectName("handoffButton")
         self.stop_btn.setObjectName("stopAfterButton")
         self.stop_now_btn.setObjectName("stopNowButton")
         self.clear_btn.setObjectName("clearButton")
-        for action_button in (self.run_btn, self.stop_btn, self.stop_now_btn, self.clear_btn, self.handoff_btn):
+        for action_button in (self.run_btn, self.continue_btn, self.stop_btn, self.stop_now_btn, self.clear_btn, self.handoff_btn):
             action_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.handoff_btn.setEnabled(False)
+        self.continue_btn.setEnabled(False)
         self.run_btn.setToolTip("Start the complete iterative crystallographic reconstruction workflow.")
+        self.continue_btn.setToolTip(
+            "Resume the previous run exactly where it stopped or finished, reusing the same metadata, "
+            "reflections and cycle feedback. If it already reached the configured cycle count, increase "
+            "Cycles above the completed count first."
+        )
         self.stop_btn.setToolTip("Request a graceful stop after the currently running cycle has completed.")
         self.stop_now_btn.setToolTip("Terminate the currently running external Superflip/EDMA process and stop the pipeline as soon as possible.")
         self.clear_btn.setToolTip("Clear the log panel and reset the plotted metrics for the current GUI session.")
         self.handoff_btn.setToolTip("After a completed run started from a Jana .inflip, select a cycle and pass either its Superflip map or deblurred map back to Jana2020.")
         self.run_btn.clicked.connect(self.start_run)
+        self.continue_btn.clicked.connect(self.continue_run)
         self.stop_btn.clicked.connect(self.request_stop_after_cycle)
         self.stop_now_btn.clicked.connect(self.request_immediate_stop)
         self.clear_btn.clicked.connect(self.clear_log_plot)
         self.handoff_btn.clicked.connect(self.open_jana_handoff_dialog)
         primary_buttons.addWidget(self.run_btn, 1)
+        primary_buttons.addWidget(self.continue_btn, 1)
         primary_buttons.addWidget(self.handoff_btn, 1)
         secondary_buttons.addWidget(self.stop_btn, 2)
         secondary_buttons.addWidget(self.stop_now_btn, 1)
@@ -7487,6 +7529,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_configuration_locked(active)
         if hasattr(self, "run_btn"):
             self.run_btn.setEnabled(not active and bool(getattr(self, "_metadata_valid", False)))
+        if hasattr(self, "continue_btn"):
+            self.continue_btn.setEnabled(not active and getattr(self, "_resume_state", None) is not None)
         if hasattr(self, "stop_btn"):
             self.stop_btn.setEnabled(status == "RUNNING" and not self.stop_after_cycle.is_set())
         if hasattr(self, "stop_now_btn"):
@@ -8649,7 +8693,64 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         QApplication.processEvents()
         self.worker = threading.Thread(target=self.pipeline_worker, args=(cfg,), daemon=True)
         self.worker.start()
-    def pipeline_worker(self, cfg: RunConfig) -> None:
+
+    def continue_run(self) -> None:
+        if self.worker and self.worker.is_alive():
+            self._append_execution_log("Pipeline is already running.", level="WARNING", subsystem="Pipeline")
+            return
+        state = self._resume_state
+        if state is None:
+            self._append_execution_log("Nothing to continue: no previous run to resume.", level="WARNING", subsystem="Pipeline")
+            return
+        requested_cycles = max(1, self._spin_value("cycles"))
+        if requested_cycles <= state.completed_cycles:
+            self._show_error_report(build_validation_report([
+                f"The previous run already completed {state.completed_cycles} cycle(s). "
+                f"Increase Cycles above {state.completed_cycles} before continuing."
+            ]))
+            return
+        state.cfg.cycles = requested_cycles
+        self.last_run_config = state.cfg
+        self.stop_after_cycle.clear()
+        self.stop_now.clear()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setValue(0)
+        self._set_overall_progress_text("Running")
+        self._cycle_progress_state = None
+        self.current_cycle_progress.setRange(0, 0)
+        self.current_cycle_detail.setText("Resuming pipeline...")
+        self.current_cycle_stage_counter.setText("Preparing")
+        self._set_run_status("Running")
+        self.run_btn.setEnabled(False)
+        self.handoff_btn.setEnabled(False)
+        self.run_btn.setText("Running...")
+        self._append_execution_log(
+            f"Continuing pipeline from cycle {state.completed_cycles + 1} of {requested_cycles}, "
+            "reusing the previous run's metadata, reflections and cycle feedback.",
+            level="DETAIL",
+        )
+        QApplication.processEvents()
+        self.worker = threading.Thread(
+            target=self.pipeline_worker, args=(None,), kwargs={"resume_state": state}, daemon=True
+        )
+        self.worker.start()
+
+    def pipeline_worker(self, cfg: Optional[RunConfig], resume_state: Optional[PipelineState] = None) -> None:
+        if resume_state is not None:
+            try:
+                self.log(
+                    f"=== Pipeline resumed at cycle {resume_state.completed_cycles + 1} / {resume_state.cfg.cycles} ===",
+                    level="STEP",
+                )
+                self.msg_queue.put(("progress_setup", resume_state.cfg.cycles))
+                self.msg_queue.put(("progress", resume_state.completed_cycles))
+                self._run_pipeline_cycles(resume_state)
+            except Exception as exc:
+                self.msg_queue.put((
+                    "error_report",
+                    build_error_report(exc, operation="Run pipeline", extra_details=traceback.format_exc()),
+                ))
+            return
         try:
             self.log("=== Pipeline started ===", level="STEP")
             mode = normalize_input_source_mode(cfg.input_source_mode)
@@ -8835,336 +8936,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 standard_hkl = cfg.work_dir / "observed_unique_standardized_I_sigma_phase.hkl"
                 n_standard = write_standardized_hkl_with_phase(standard_hkl, refl, cfg.i_over_sigma_min, configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 self.log(f"Standardized HKL export: {standard_hkl} ({n_standard} reflections)")
-            current_model: Optional[Path] = None
-            current_model_metric: Optional[float] = None
-            auto_reference_cif: Optional[Path] = None
-            auto_reference_xplor: Optional[Path] = None
-            exclude_labels = parse_atom_label_list(cfg.exclude_atoms)
-            all_results: List[CycleResult] = []
-            completed_cycles = 0
-            progress_stages = cycle_progress_stages(cfg)
-            for cyc in range(1, cfg.cycles + 1):
-                if self.stop_after_cycle.is_set():
-                    self.msg_queue.put(("cancelled", completed_cycles))
-                    return
-                self._emit_cycle_progress(
-                    cyc,
-                    cfg.cycles,
-                    progress_stages,
-                    "Preparing cycle",
-                    detail="preparing model and reflections",
-                )
-                cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
-                self.log(f"=== Cycle {cyc} / {cfg.cycles} ===", level="STEP")
-                model_for_sf: Optional[Path] = None
-                model_source = "none"
-                model_metric = current_model_metric
-                if cyc == 1 and cfg.first_cycle_modelfile is not None:
-                    model_source = "external_first_cycle"
-                    model_for_sf = cfg.first_cycle_modelfile
-                    self.log(f"[Cycle model] Source: external first-cycle model · {model_for_sf}")
-                elif current_model is not None and use_xplor_modelfile:
-                    model_source = modelfile_mode
-                    model_for_sf = current_model
-                    self.log(f"[Cycle model] Source: {modelfile_mode} from cycle {cyc - 1} · {model_for_sf}")
-                    self.log("  CIF-only exclude settings skipped for XPLOR modelfile.", level="DETAIL")
-                elif current_model is not None and use_cif_modelfile:
-                    model_source = "deblurred_edma_cif"
-                    model_for_sf = cycle_dir / f"cycle_{cyc:03d}_modelfile_prepared.cif"
-                    model_for_sf, removed, kept = write_filtered_cif(current_model, model_for_sf, exclude_labels)
-                    self.log(f"[Cycle model] Prepared CIF model · {model_for_sf}")
-                    self.log(f"  removed={removed}, kept={kept}", level="DETAIL")
-                    self.log("  Superflip infers CIF from the .cif extension; no explicit format keyword is written.", level="DETAIL")
-                    model_metric = nearest_metric_to_reference(model_for_sf, ref_ctx)
-                elif cyc > 1 and modelfile_mode == "none":
-                    self.log("[Cycle model] No Superflip modelfile for this cycle.")
-                observed_hkl_for_cycle = observed_hkls[configured_data_mode]
-                sf_prefix = f"cycle_{cyc:03d}_superflip"
-                reference_file_for_cycle: Optional[Path] = None
-                reference_format_for_cycle = ""
-                if referencefile_mode == "reference_cif":
-                    reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else ref_ctx.work_ref_cif
-                elif referencefile_mode in {"reference_xplor", "reference_density"}:
-                    reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else cfg.superflip_reference_xplor
-                elif referencefile_mode == "omit" and cyc > 1:
-                    # No user-selected reference file: without one, Superflip cannot fix the
-                    # phase origin against the previous cycle and the density map drifts.
-                    # Anchor it automatically on the most recent previous-cycle EDMA CIF, or
-                    # on the previous-cycle XPLOR map when EDMA produced no usable peaks.
-                    if auto_reference_cif is not None:
-                        reference_file_for_cycle = auto_reference_cif
-                        self.log(f"[Cycle reference] Auto referencefile (previous-cycle EDMA CIF): {reference_file_for_cycle}", level="DETAIL")
-                    elif auto_reference_xplor is not None:
-                        reference_file_for_cycle = auto_reference_xplor
-                        self.log(f"[Cycle reference] Auto referencefile (previous-cycle XPLOR map, EDMA unavailable): {reference_file_for_cycle}", level="DETAIL")
-                sf_voxel = cfg.voxel
-                sf_extra_superflip_keywords = cfg.extra_superflip_keywords
-                if cfg.run_sharped and not use_superflip_xplor_modelfile:
-                    sf_voxel = sharped_limited_superflip_voxel(cfg.voxel, ref_ctx.cell, cfg.sharped_max_upload_mb, self.log)
-                    if sf_voxel != cfg.voxel and cfg.polish:
-                        sf_extra_superflip_keywords = append_superflip_keyword(
-                            sf_extra_superflip_keywords,
-                            f"finevoxel {sf_voxel}",
-                        )
-                effective_repeat = 1 if model_for_sf is not None else max(1, int(cfg.repeatmode))
-                if effective_repeat == 1:
-                    self._emit_cycle_progress(
-                        cyc,
-                        cfg.cycles,
-                        progress_stages,
-                        "Superflip",
-                        sub_index=1,
-                        sub_total=1,
-                        detail="running",
-                        busy=True,
-                    )
-                else:
-                    self._emit_cycle_progress(
-                        cyc,
-                        cfg.cycles,
-                        progress_stages,
-                        "Superflip",
-                        detail=f"repeat mode {effective_repeat} · running",
-                        busy=True,
-                    )
-                sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, cfg.output_format, cfg.write_auxiliary_outputs or cfg.export_jana_project, cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana or cfg.export_jana_project, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
-                self.log(f"Superflip map: {sf_map}")
-                if self.stop_now.is_set():
-                    raise RuntimeError("Immediate stop requested.")
-                sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
-                self._emit_cycle_progress(
-                    cyc,
-                    cfg.cycles,
-                    progress_stages,
-                    "Superflip",
-                    detail="reading metrics",
-                )
-                if sf_log_metrics.rvalue is not None:
-                    peaks_text = "n/a" if sf_log_metrics.peaks is None else f"{float(sf_log_metrics.peaks):.3g}"
-                    symm_text = "n/a" if sf_log_metrics.symm is None else f"{float(sf_log_metrics.symm):.3g}"
-                    ref_match_text = "n/a" if sf_log_metrics.ref_match is None else f"{float(sf_log_metrics.ref_match):.3g}"
-                    success_rate_text = "n/a" if sf_log_metrics.success_rate is None else f"{float(sf_log_metrics.success_rate):.3g}"
-                    self.log(
-                        "[Superflip] Metrics\n"
-                        f"  R={sf_log_metrics.rvalue:.3f} · "
-                        f"Peaks={peaks_text} · Symm={symm_text}\n"
-                        f"  Derived SG={sf_log_metrics.derived_sg or 'n/a'} · "
-                        f"Saved run={sf_log_metrics.saved_run if sf_log_metrics.saved_run is not None else 'n/a'} · "
-                        f"Ref.match={ref_match_text} · SR={success_rate_text}%",
-                        subsystem="Superflip",
-                    )
-                sf_edma_dir = cycle_dir / "edma_superflip"
-                if cfg.run_edma_superflip:
-                    self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · Superflip map", busy=True)
-                    sf_edma_cif = run_edma_on_xplor(
-                        sf_map, sf_edma_dir, sf_prefix, ref_ctx, cfg.plimit_superflip,
-                        cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
-                        self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
-                        cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
-                        cfg.edma_chlimlist, cfg.extra_edma_keywords
-                    )
-                else:
-                    sf_edma_dir.mkdir(parents=True, exist_ok=True)
-                    sf_edma_cif = sf_edma_dir / f"{sf_prefix}_edma.cif"
-                    write_structure_bundle(sf_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
-                    self.log("EDMA after Superflip disabled; empty placeholder CIF/XYZ/PDB written.")
-                if cfg.export_jana_project and cfg.run_edma_superflip:
-                    export_jana2020_project(cycle_dir / "jana2020_superflip", sf_prefix, cycle_dir, sf_edma_dir, sf_map, sf_edma_cif, ref_ctx, self.log)
-                sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
-                sf_metric_text = "n/a" if sf_metric is None else f"{float(sf_metric):.3f}"
-                self.log(
-                    f"[EDMA] Completed · Superflip map · RMSD={sf_metric_text} Å\n"
-                    f"  output: {sf_edma_cif}",
-                    subsystem="EDMA",
-                )
-                self.msg_queue.put(("structure_update", ("superflip", sf_edma_cif)))
-                deblur_map = cycle_dir / f"cycle_{cyc:03d}_deblurred.xplor"
-                if cfg.run_sharped and not use_superflip_xplor_modelfile:
-                    if self.stop_now.is_set():
-                        raise RuntimeError("Immediate stop requested.")
-                    self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="preparing upload", busy=True)
-                    run_sharped_deblur(
-                        sf_map,
-                        deblur_map,
-                        cfg.sharped_base_url,
-                        cfg.sharped_api_token,
-                        cfg.sharped_model,
-                        sharped_elements,
-                        cfg.sharped_outres,
-                        cfg.sharped_max_upload_mb,
-                        cfg.sharped_timeout_seconds,
-                        cfg.sharped_poll_seconds,
-                        cfg.sharped_max_polls,
-                        self.log,
-                        self.stop_now,
-                        progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
-                            cycle,
-                            cfg.cycles,
-                            progress_stages,
-                            "SharpED",
-                            detail=detail,
-                            busy=detail != "completed",
-                        ),
-                    )
-                else:
-                    shutil.copy2(sf_map, deblur_map)
-                    if use_superflip_xplor_modelfile:
-                        self.log("SharpED deblurring skipped; raw Superflip XPLOR is used for the next-cycle modelfile.")
-                    else:
-                        self.log("SharpED disabled; deblurred map is a copy of the Superflip map.")
-                self.log(f"Deblurred map: {deblur_map}")
-                if cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
-                    if self.stop_now.is_set():
-                        raise RuntimeError("Immediate stop requested.")
-                    self._emit_cycle_progress(
-                        cyc,
-                        cfg.cycles,
-                        progress_stages,
-                        "Superflip symmetry averaging",
-                        detail="running",
-                        busy=True,
-                    )
-                    sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
-                    self.log("  Superflip symmetry uses the deblurred XPLOR map as both modelfile and referencefile.")
-                    deblur_map = run_superflip_symmetrize_map(
-                        cycle_dir=cycle_dir,
-                        prefix=sym_prefix,
-                        ref_ctx=ref_ctx,
-                        input_map=deblur_map,
-                        superflip_exe=cfg.superflip_exe,
-                        output_format=cfg.output_format,
-                        voxel=cfg.voxel,
-                        searchsymmetry=cfg.searchsymmetry,
-                        derivesymmetry=cfg.derivesymmetry,
-                        log=self.log,
-                        stop_event=self.stop_now,
-                    )
-                deblur_prefix = f"cycle_{cyc:03d}_deblurred"
-                deblur_edma_dir = cycle_dir / "edma_deblurred"
-                if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
-                    self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · deblurred map", busy=True)
-                    deblur_edma_cif = run_edma_on_xplor(
-                        deblur_map, deblur_edma_dir, deblur_prefix, ref_ctx, cfg.plimit_deblur,
-                        cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
-                        self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
-                        cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
-                        cfg.edma_chlimlist, cfg.extra_edma_keywords
-                    )
-                else:
-                    deblur_edma_dir.mkdir(parents=True, exist_ok=True)
-                    deblur_edma_cif = deblur_edma_dir / f"{deblur_prefix}_edma.cif"
-                    write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
-                    if use_superflip_xplor_modelfile:
-                        self.log("EDMA after deblurred map skipped for raw Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
-                    else:
-                        self.log("EDMA after deblurred map disabled; empty placeholder CIF/XYZ/PDB written.")
-                if cfg.export_jana_project and cfg.run_edma_deblurred:
-                    export_jana2020_project(cycle_dir / "jana2020_deblurred", deblur_prefix, cycle_dir, deblur_edma_dir, deblur_map, deblur_edma_cif, ref_ctx, self.log)
-                deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
-                deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
-                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
-                self.log(
-                    f"[EDMA] Completed · Deblurred map · RMSD={deblur_metric_text} Å\n"
-                    f"  output: {deblur_edma_cif}",
-                    subsystem="EDMA",
-                )
-                self.msg_queue.put(("structure_update", ("deblur", deblur_edma_cif)))
-                result = CycleResult(
-                    cycle=cyc,
-                    model_source=model_source,
-                    model_in=model_for_sf,
-                    model_metric=model_metric,
-                    superflip_map=sf_map,
-                    superflip_edma_cif=sf_edma_cif,
-                    superflip_metric=sf_metric,
-                    deblur_map=deblur_map,
-                    deblur_edma_cif=deblur_edma_cif,
-                    deblur_metric=deblur_metric,
-                    superflip_saved_run=sf_log_metrics.saved_run,
-                    superflip_rvalue=sf_log_metrics.rvalue,
-                    superflip_peaks=sf_log_metrics.peaks,
-                    superflip_symm=sf_log_metrics.symm,
-                    superflip_derived_sg=sf_log_metrics.derived_sg,
-                    superflip_ref_match=sf_log_metrics.ref_match,
-                    superflip_fom=sf_log_metrics.fom,
-                    superflip_success_rate=sf_log_metrics.success_rate,
-                    superflip_mean_cycles=sf_log_metrics.mean_cycles,
-                )
-                all_results.append(result)
-                write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
-                self.msg_queue.put(("result", result))
-                if cyc < cfg.cycles:
-                    add_missing = cfg.map_feedback_missing_from_cycle > 0 and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
-                    correct_intensities = cfg.map_feedback_intensity_from_cycle > 0 and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
-                    if add_missing or correct_intensities:
-                        current_reflections = apply_map_feedback_to_reflections(
-                            current_reflections,
-                            configured_data_mode,
-                            deblur_map,
-                            ref_ctx.cell,
-                            cfg.resolution_d_min,
-                            add_missing,
-                            cfg.map_feedback_missing_percent_limit,
-                            correct_intensities,
-                            cfg.map_feedback_intensity_damping,
-                            cfg.map_feedback_intensity_max_i_over_sigma,
-                            self.log,
-                        )
-                        feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
-                        n_feedback = write_observed_reflections(
-                            feedback_hkl,
-                            current_reflections,
-                            cfg.i_over_sigma_min,
-                            data_mode=configured_data_mode,
-                            cell=ref_ctx.cell,
-                            resolution_d_min=cfg.resolution_d_min,
-                        )
-                        observed_hkls[configured_data_mode] = feedback_hkl
-                        self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
-                if use_xplor_modelfile:
-                    next_xplor_model = sf_map if use_superflip_xplor_modelfile else deblur_map
-                    effective_damping = effective_xplor_damping_factor(cfg.damping_factor)
-                    if current_model is not None and effective_damping > 1.0:
-                        damped_model = cycle_dir / f"cycle_{cyc:03d}_damped_modelfile.xplor"
-                        current_model = blend_xplor_maps(current_model, next_xplor_model, damped_model, effective_damping, self.log)
-                    else:
-                        current_model = next_xplor_model
-                    current_model_metric = sf_metric if use_superflip_xplor_modelfile else deblur_metric
-                elif use_cif_modelfile:
-                    if cfg.run_edma_deblurred:
-                        current_model = deblur_edma_cif
-                        current_model_metric = deblur_metric
-                    elif cfg.run_edma_superflip:
-                        current_model = sf_edma_cif
-                        current_model_metric = sf_metric
-                    else:
-                        current_model = None
-                        current_model_metric = None
-                else:
-                    current_model = None
-                    current_model_metric = None
-                if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile and cif_has_readable_atoms(deblur_edma_cif):
-                    auto_reference_cif = deblur_edma_cif
-                elif cfg.run_edma_superflip and cif_has_readable_atoms(sf_edma_cif):
-                    auto_reference_cif = sf_edma_cif
-                else:
-                    auto_reference_cif = None
-                auto_reference_xplor = deblur_map
-                completed_cycles = cyc
-                self.log(f"Cycle {cyc} complete.", level="SUCCESS")
-                self.msg_queue.put(("progress", completed_cycles))
-                self._emit_cycle_progress(
-                    cyc,
-                    cfg.cycles,
-                    progress_stages,
-                    "Finalizing cycle",
-                    detail="completed",
-                    complete=True,
-                )
-                if self.stop_after_cycle.is_set():
-                    self.msg_queue.put(("cancelled", completed_cycles))
-                    return
-            self.msg_queue.put(("done", completed_cycles))
+            state = PipelineState(
+                cfg=cfg,
+                ref_ctx=ref_ctx,
+                observed_hkls=observed_hkls,
+                configured_data_mode=configured_data_mode,
+                referencefile_mode=referencefile_mode,
+                explicit_superflip_referencefile=explicit_superflip_referencefile,
+                modelfile_mode=modelfile_mode,
+                use_xplor_modelfile=use_xplor_modelfile,
+                use_cif_modelfile=use_cif_modelfile,
+                use_superflip_xplor_modelfile=use_superflip_xplor_modelfile,
+                sharped_elements=sharped_elements,
+                exclude_labels=parse_atom_label_list(cfg.exclude_atoms),
+                progress_stages=cycle_progress_stages(cfg),
+                current_reflections=current_reflections,
+            )
+            self._resume_state = state
+            self._run_pipeline_cycles(state)
         except Exception as exc:
             self.msg_queue.put((
                 "error_report",
@@ -9174,6 +8963,344 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     extra_details=traceback.format_exc(),
                 ),
             ))
+
+    def _run_pipeline_cycles(self, state: PipelineState) -> None:
+        cfg = state.cfg
+        ref_ctx = state.ref_ctx
+        observed_hkls = state.observed_hkls
+        configured_data_mode = state.configured_data_mode
+        referencefile_mode = state.referencefile_mode
+        explicit_superflip_referencefile = state.explicit_superflip_referencefile
+        modelfile_mode = state.modelfile_mode
+        use_xplor_modelfile = state.use_xplor_modelfile
+        use_cif_modelfile = state.use_cif_modelfile
+        use_superflip_xplor_modelfile = state.use_superflip_xplor_modelfile
+        sharped_elements = state.sharped_elements
+        exclude_labels = state.exclude_labels
+        progress_stages = state.progress_stages
+        all_results = state.all_results
+        for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
+            if self.stop_after_cycle.is_set():
+                self.msg_queue.put(("cancelled", state.completed_cycles))
+                return
+            self._emit_cycle_progress(
+                cyc,
+                cfg.cycles,
+                progress_stages,
+                "Preparing cycle",
+                detail="preparing model and reflections",
+            )
+            cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
+            self.log(f"=== Cycle {cyc} / {cfg.cycles} ===", level="STEP")
+            model_for_sf: Optional[Path] = None
+            model_source = "none"
+            model_metric = state.current_model_metric
+            if cyc == 1 and cfg.first_cycle_modelfile is not None:
+                model_source = "external_first_cycle"
+                model_for_sf = cfg.first_cycle_modelfile
+                self.log(f"[Cycle model] Source: external first-cycle model · {model_for_sf}")
+            elif state.current_model is not None and use_xplor_modelfile:
+                model_source = modelfile_mode
+                model_for_sf = state.current_model
+                self.log(f"[Cycle model] Source: {modelfile_mode} from cycle {cyc - 1} · {model_for_sf}")
+                self.log("  CIF-only exclude settings skipped for XPLOR modelfile.", level="DETAIL")
+            elif state.current_model is not None and use_cif_modelfile:
+                model_source = "deblurred_edma_cif"
+                model_for_sf = cycle_dir / f"cycle_{cyc:03d}_modelfile_prepared.cif"
+                model_for_sf, removed, kept = write_filtered_cif(state.current_model, model_for_sf, exclude_labels)
+                self.log(f"[Cycle model] Prepared CIF model · {model_for_sf}")
+                self.log(f"  removed={removed}, kept={kept}", level="DETAIL")
+                self.log("  Superflip infers CIF from the .cif extension; no explicit format keyword is written.", level="DETAIL")
+                model_metric = nearest_metric_to_reference(model_for_sf, ref_ctx)
+            elif cyc > 1 and modelfile_mode == "none":
+                self.log("[Cycle model] No Superflip modelfile for this cycle.")
+            observed_hkl_for_cycle = observed_hkls[configured_data_mode]
+            sf_prefix = f"cycle_{cyc:03d}_superflip"
+            reference_file_for_cycle: Optional[Path] = None
+            reference_format_for_cycle = ""
+            if referencefile_mode == "reference_cif":
+                reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else ref_ctx.work_ref_cif
+            elif referencefile_mode in {"reference_xplor", "reference_density"}:
+                reference_file_for_cycle = explicit_superflip_referencefile if explicit_superflip_referencefile is not None else cfg.superflip_reference_xplor
+            elif referencefile_mode == "omit" and cyc > 1:
+                # No user-selected reference file: without one, Superflip cannot fix the
+                # phase origin against the previous cycle and the density map drifts.
+                # Anchor it automatically on the most recent previous-cycle EDMA CIF, or
+                # on the previous-cycle XPLOR map when EDMA produced no usable peaks.
+                if state.auto_reference_cif is not None:
+                    reference_file_for_cycle = state.auto_reference_cif
+                    self.log(f"[Cycle reference] Auto referencefile (previous-cycle EDMA CIF): {reference_file_for_cycle}", level="DETAIL")
+                elif state.auto_reference_xplor is not None:
+                    reference_file_for_cycle = state.auto_reference_xplor
+                    self.log(f"[Cycle reference] Auto referencefile (previous-cycle XPLOR map, EDMA unavailable): {reference_file_for_cycle}", level="DETAIL")
+            sf_voxel = cfg.voxel
+            sf_extra_superflip_keywords = cfg.extra_superflip_keywords
+            if cfg.run_sharped and not use_superflip_xplor_modelfile:
+                sf_voxel = sharped_limited_superflip_voxel(cfg.voxel, ref_ctx.cell, cfg.sharped_max_upload_mb, self.log)
+                if sf_voxel != cfg.voxel and cfg.polish:
+                    sf_extra_superflip_keywords = append_superflip_keyword(
+                        sf_extra_superflip_keywords,
+                        f"finevoxel {sf_voxel}",
+                    )
+            effective_repeat = 1 if model_for_sf is not None else max(1, int(cfg.repeatmode))
+            if effective_repeat == 1:
+                self._emit_cycle_progress(
+                    cyc,
+                    cfg.cycles,
+                    progress_stages,
+                    "Superflip",
+                    sub_index=1,
+                    sub_total=1,
+                    detail="running",
+                    busy=True,
+                )
+            else:
+                self._emit_cycle_progress(
+                    cyc,
+                    cfg.cycles,
+                    progress_stages,
+                    "Superflip",
+                    detail=f"repeat mode {effective_repeat} · running",
+                    busy=True,
+                )
+            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, cfg.output_format, cfg.write_auxiliary_outputs or cfg.export_jana_project, cfg.export_superflip_xplor, cfg.export_superflip_ccp4, cfg.export_superflip_jana or cfg.export_jana_project, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
+            self.log(f"Superflip map: {sf_map}")
+            if self.stop_now.is_set():
+                raise RuntimeError("Immediate stop requested.")
+            sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
+            self._emit_cycle_progress(
+                cyc,
+                cfg.cycles,
+                progress_stages,
+                "Superflip",
+                detail="reading metrics",
+            )
+            if sf_log_metrics.rvalue is not None:
+                peaks_text = "n/a" if sf_log_metrics.peaks is None else f"{float(sf_log_metrics.peaks):.3g}"
+                symm_text = "n/a" if sf_log_metrics.symm is None else f"{float(sf_log_metrics.symm):.3g}"
+                ref_match_text = "n/a" if sf_log_metrics.ref_match is None else f"{float(sf_log_metrics.ref_match):.3g}"
+                success_rate_text = "n/a" if sf_log_metrics.success_rate is None else f"{float(sf_log_metrics.success_rate):.3g}"
+                self.log(
+                    "[Superflip] Metrics\n"
+                    f"  R={sf_log_metrics.rvalue:.3f} · "
+                    f"Peaks={peaks_text} · Symm={symm_text}\n"
+                    f"  Derived SG={sf_log_metrics.derived_sg or 'n/a'} · "
+                    f"Saved run={sf_log_metrics.saved_run if sf_log_metrics.saved_run is not None else 'n/a'} · "
+                    f"Ref.match={ref_match_text} · SR={success_rate_text}%",
+                    subsystem="Superflip",
+                )
+            sf_edma_dir = cycle_dir / "edma_superflip"
+            if cfg.run_edma_superflip:
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · Superflip map", busy=True)
+                sf_edma_cif = run_edma_on_xplor(
+                    sf_map, sf_edma_dir, sf_prefix, ref_ctx, cfg.plimit_superflip,
+                    cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
+                    self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
+                    cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
+                    cfg.edma_chlimlist, cfg.extra_edma_keywords
+                )
+            else:
+                sf_edma_dir.mkdir(parents=True, exist_ok=True)
+                sf_edma_cif = sf_edma_dir / f"{sf_prefix}_edma.cif"
+                write_structure_bundle(sf_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
+                self.log("EDMA after Superflip disabled; empty placeholder CIF/XYZ/PDB written.")
+            if cfg.export_jana_project and cfg.run_edma_superflip:
+                export_jana2020_project(cycle_dir / "jana2020_superflip", sf_prefix, cycle_dir, sf_edma_dir, sf_map, sf_edma_cif, ref_ctx, self.log)
+            sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
+            sf_metric_text = "n/a" if sf_metric is None else f"{float(sf_metric):.3f}"
+            self.log(
+                f"[EDMA] Completed · Superflip map · RMSD={sf_metric_text} Å\n"
+                f"  output: {sf_edma_cif}",
+                subsystem="EDMA",
+            )
+            self.msg_queue.put(("structure_update", ("superflip", sf_edma_cif)))
+            deblur_map = cycle_dir / f"cycle_{cyc:03d}_deblurred.xplor"
+            if cfg.run_sharped and not use_superflip_xplor_modelfile:
+                if self.stop_now.is_set():
+                    raise RuntimeError("Immediate stop requested.")
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="preparing upload", busy=True)
+                run_sharped_deblur(
+                    sf_map,
+                    deblur_map,
+                    cfg.sharped_base_url,
+                    cfg.sharped_api_token,
+                    cfg.sharped_model,
+                    sharped_elements,
+                    cfg.sharped_outres,
+                    cfg.sharped_max_upload_mb,
+                    cfg.sharped_timeout_seconds,
+                    cfg.sharped_poll_seconds,
+                    cfg.sharped_max_polls,
+                    self.log,
+                    self.stop_now,
+                    progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
+                        cycle,
+                        cfg.cycles,
+                        progress_stages,
+                        "SharpED",
+                        detail=detail,
+                        busy=detail != "completed",
+                    ),
+                )
+            else:
+                shutil.copy2(sf_map, deblur_map)
+                if use_superflip_xplor_modelfile:
+                    self.log("SharpED deblurring skipped; raw Superflip XPLOR is used for the next-cycle modelfile.")
+                else:
+                    self.log("SharpED disabled; deblurred map is a copy of the Superflip map.")
+            self.log(f"Deblurred map: {deblur_map}")
+            if cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
+                if self.stop_now.is_set():
+                    raise RuntimeError("Immediate stop requested.")
+                self._emit_cycle_progress(
+                    cyc,
+                    cfg.cycles,
+                    progress_stages,
+                    "Superflip symmetry averaging",
+                    detail="running",
+                    busy=True,
+                )
+                sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
+                self.log("  Superflip symmetry uses the deblurred XPLOR map as both modelfile and referencefile.")
+                deblur_map = run_superflip_symmetrize_map(
+                    cycle_dir=cycle_dir,
+                    prefix=sym_prefix,
+                    ref_ctx=ref_ctx,
+                    input_map=deblur_map,
+                    superflip_exe=cfg.superflip_exe,
+                    output_format=cfg.output_format,
+                    voxel=cfg.voxel,
+                    searchsymmetry=cfg.searchsymmetry,
+                    derivesymmetry=cfg.derivesymmetry,
+                    log=self.log,
+                    stop_event=self.stop_now,
+                )
+            deblur_prefix = f"cycle_{cyc:03d}_deblurred"
+            deblur_edma_dir = cycle_dir / "edma_deblurred"
+            if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · deblurred map", busy=True)
+                deblur_edma_cif = run_edma_on_xplor(
+                    deblur_map, deblur_edma_dir, deblur_prefix, ref_ctx, cfg.plimit_deblur,
+                    cfg.merge_distance, cfg.edma_exe, self.log, cfg.export_jana_project,
+                    self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
+                    cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
+                    cfg.edma_chlimlist, cfg.extra_edma_keywords
+                )
+            else:
+                deblur_edma_dir.mkdir(parents=True, exist_ok=True)
+                deblur_edma_cif = deblur_edma_dir / f"{deblur_prefix}_edma.cif"
+                write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [])
+                if use_superflip_xplor_modelfile:
+                    self.log("EDMA after deblurred map skipped for raw Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
+                else:
+                    self.log("EDMA after deblurred map disabled; empty placeholder CIF/XYZ/PDB written.")
+            if cfg.export_jana_project and cfg.run_edma_deblurred:
+                export_jana2020_project(cycle_dir / "jana2020_deblurred", deblur_prefix, cycle_dir, deblur_edma_dir, deblur_map, deblur_edma_cif, ref_ctx, self.log)
+            deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
+            deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
+            self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
+            self.log(
+                f"[EDMA] Completed · Deblurred map · RMSD={deblur_metric_text} Å\n"
+                f"  output: {deblur_edma_cif}",
+                subsystem="EDMA",
+            )
+            self.msg_queue.put(("structure_update", ("deblur", deblur_edma_cif)))
+            result = CycleResult(
+                cycle=cyc,
+                model_source=model_source,
+                model_in=model_for_sf,
+                model_metric=model_metric,
+                superflip_map=sf_map,
+                superflip_edma_cif=sf_edma_cif,
+                superflip_metric=sf_metric,
+                deblur_map=deblur_map,
+                deblur_edma_cif=deblur_edma_cif,
+                deblur_metric=deblur_metric,
+                superflip_saved_run=sf_log_metrics.saved_run,
+                superflip_rvalue=sf_log_metrics.rvalue,
+                superflip_peaks=sf_log_metrics.peaks,
+                superflip_symm=sf_log_metrics.symm,
+                superflip_derived_sg=sf_log_metrics.derived_sg,
+                superflip_ref_match=sf_log_metrics.ref_match,
+                superflip_fom=sf_log_metrics.fom,
+                superflip_success_rate=sf_log_metrics.success_rate,
+                superflip_mean_cycles=sf_log_metrics.mean_cycles,
+            )
+            all_results.append(result)
+            write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
+            self.msg_queue.put(("result", result))
+            if cyc < cfg.cycles:
+                add_missing = cfg.map_feedback_missing_from_cycle > 0 and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
+                correct_intensities = cfg.map_feedback_intensity_from_cycle > 0 and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
+                if add_missing or correct_intensities:
+                    state.current_reflections = apply_map_feedback_to_reflections(
+                        state.current_reflections,
+                        configured_data_mode,
+                        deblur_map,
+                        ref_ctx.cell,
+                        cfg.resolution_d_min,
+                        add_missing,
+                        cfg.map_feedback_missing_percent_limit,
+                        correct_intensities,
+                        cfg.map_feedback_intensity_damping,
+                        cfg.map_feedback_intensity_max_i_over_sigma,
+                        self.log,
+                    )
+                    feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
+                    n_feedback = write_observed_reflections(
+                        feedback_hkl,
+                        state.current_reflections,
+                        cfg.i_over_sigma_min,
+                        data_mode=configured_data_mode,
+                        cell=ref_ctx.cell,
+                        resolution_d_min=cfg.resolution_d_min,
+                    )
+                    observed_hkls[configured_data_mode] = feedback_hkl
+                    self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
+            if use_xplor_modelfile:
+                next_xplor_model = sf_map if use_superflip_xplor_modelfile else deblur_map
+                effective_damping = effective_xplor_damping_factor(cfg.damping_factor)
+                if state.current_model is not None and effective_damping > 1.0:
+                    damped_model = cycle_dir / f"cycle_{cyc:03d}_damped_modelfile.xplor"
+                    state.current_model = blend_xplor_maps(state.current_model, next_xplor_model, damped_model, effective_damping, self.log)
+                else:
+                    state.current_model = next_xplor_model
+                state.current_model_metric = sf_metric if use_superflip_xplor_modelfile else deblur_metric
+            elif use_cif_modelfile:
+                if cfg.run_edma_deblurred:
+                    state.current_model = deblur_edma_cif
+                    state.current_model_metric = deblur_metric
+                elif cfg.run_edma_superflip:
+                    state.current_model = sf_edma_cif
+                    state.current_model_metric = sf_metric
+                else:
+                    state.current_model = None
+                    state.current_model_metric = None
+            else:
+                state.current_model = None
+                state.current_model_metric = None
+            if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile and cif_has_readable_atoms(deblur_edma_cif):
+                state.auto_reference_cif = deblur_edma_cif
+            elif cfg.run_edma_superflip and cif_has_readable_atoms(sf_edma_cif):
+                state.auto_reference_cif = sf_edma_cif
+            else:
+                state.auto_reference_cif = None
+            state.auto_reference_xplor = deblur_map
+            state.completed_cycles = cyc
+            self.log(f"Cycle {cyc} complete.", level="SUCCESS")
+            self.msg_queue.put(("progress", state.completed_cycles))
+            self._emit_cycle_progress(
+                cyc,
+                cfg.cycles,
+                progress_stages,
+                "Finalizing cycle",
+                detail="completed",
+                complete=True,
+            )
+            if self.stop_after_cycle.is_set():
+                self.msg_queue.put(("cancelled", state.completed_cycles))
+                return
+        self.msg_queue.put(("done", state.completed_cycles))
 
 
 class PhaseStudioSplash(QSplashScreen):

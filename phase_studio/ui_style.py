@@ -447,6 +447,21 @@ QPushButton#handoffButton:disabled {
     background-color: #f7f9fc;
     border-color: #cbd7ea;
 }
+QPushButton#continueButton {
+    color: #2264b8;
+    background-color: #ffffff;
+    border: 1px solid #2264b8;
+    min-height: 31px;
+}
+QPushButton#continueButton:hover {
+    background-color: #44b7ff;
+    color: #001170;
+}
+QPushButton#continueButton:disabled {
+    color: #8794ad;
+    background-color: #f7f9fc;
+    border-color: #cbd7ea;
+}
 QPushButton#stopAfterButton {
     color: #52658b;
     background-color: #ffffff;

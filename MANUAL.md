@@ -1,6 +1,6 @@
 # Phase Studio User Manual
 
-**Version 1.0.4**
+**Version 1.0.5**
 
 ## 1. Introduction
 
@@ -497,7 +497,13 @@ Requests immediate termination of the active external calculation and stops the 
 
 After cancellation, Phase Studio retains information about where the run stopped.
 
-### 11.4 Overall and current-cycle progress
+### 11.4 Continue
+
+**Continue** resumes the most recent run exactly where it left off — whether it was stopped (gracefully or immediately) or reached its configured cycle count — reusing the same crystal metadata, reflections, and cycle-to-cycle model/reference feedback, so the reconstruction proceeds as if it had never been interrupted.
+
+If the previous run reached its configured number of **Cycles** without being stopped, Continue has no further cycles to run. Increase **Cycles** above the number of completed cycles before using Continue in that case.
+
+### 11.5 Overall and current-cycle progress
 
 The Run Status area contains two levels:
 
@@ -506,7 +512,7 @@ The Run Status area contains two levels:
 
 Phase Studio does not need to fabricate time-based percentages when no reliable denominator exists.
 
-### 11.5 Superflip Convergence
+### 11.6 Superflip Convergence
 
 The convergence panel can display metrics such as:
 
@@ -520,7 +526,7 @@ The convergence panel can display metrics such as:
 
 Unavailable series can be omitted in partial or cancelled runs.
 
-### 11.6 Structure Comparison
+### 11.7 Structure Comparison
 
 The current structure panel compares:
 
@@ -534,7 +540,7 @@ Hydrogens are hidden in the preview when this is the active visualization policy
 
 Depth cueing improves three-dimensional perception by rendering more distant atoms more lightly than atoms in the foreground.
 
-### 11.7 Execution Log
+### 11.8 Execution Log
 
 The log reports workflow progress and technical diagnostics.
 
