@@ -2517,16 +2517,34 @@ def normalize_reconstruction_mode(value: str) -> str:
     run Superflip at most once and instead recycle |Fobs| with phases calculated by
     FFT from the SharpED-deblurred map each cycle; "sharped_recycle" is the GUI's
     "1st Superflip, then SharpED"; "sharped_recycle_random" is the GUI's "SharpED"
-    and skips Superflip entirely, starting cycle 1 from random phases."""
+    and skips Superflip entirely, starting cycle 1 from random phases.
+
+    Must be idempotent (normalize(normalize(x)) == normalize(x)): callers may pass
+    either the raw combo text or an already-canonical code, sometimes more than
+    once on the same value. The canonical code "sharped_recycle" itself contains
+    "sharped" as a substring, so exact codes are matched before any fuzzy "sharped"
+    substring check -- otherwise re-normalizing "sharped_recycle" would wrongly
+    fall through to the random-start code."""
     text = str(value or "superflip").strip().lower()
+    exact = {
+        "superflip": "superflip",
+        "sharped_recycle": "sharped_recycle",
+        "recycle": "sharped_recycle",
+        "fourier_recycle": "sharped_recycle",
+        "sharped_recycle_superflip_start": "sharped_recycle",
+        "1st superflip, then sharped": "sharped_recycle",
+        "sharped": "sharped_recycle_random",
+        "sharped_recycle_random": "sharped_recycle_random",
+        "sharped_recycle_random_start": "sharped_recycle_random",
+        "random_start": "sharped_recycle_random",
+        "random": "sharped_recycle_random",
+    }
+    if text in exact:
+        return exact[text]
     if "superflip" in text and "sharped" in text:
         return "sharped_recycle"
-    if text in {"sharped", "sharped_recycle_random", "random_start", "random", "sharped_recycle_random_start"} or (
-        "sharped" in text and "superflip" not in text
-    ):
+    if "sharped" in text:
         return "sharped_recycle_random"
-    if text in {"sharped_recycle", "recycle", "fourier_recycle", "sharped_recycle_superflip_start"}:
-        return "sharped_recycle"
     return "superflip"
 
 def parse_atom_label_list(value: str) -> List[str]:
