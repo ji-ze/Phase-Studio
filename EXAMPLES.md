@@ -35,7 +35,7 @@ Reproduce an existing Jana2020 Superflip calculation, verify reflection parsing,
 1. Open **Basic → Paths**.
 2. Select the Jana `.inflip` input mode.
 3. Choose the `.inflip` file.
-4. Confirm the Superflip and EDMA executable paths.
+4. Confirm the Superflip and EDMA executable paths on **Advanced → Setup**.
 5. Click **Validate HKL**.
 6. Confirm that the reflection format and parsed columns are correct.
 7. Click **Analyze completeness** and inspect the resolution-dependent statistics.
@@ -45,7 +45,7 @@ Reproduce an existing Jana2020 Superflip calculation, verify reflection parsing,
 11. Enable EDMA on the raw Superflip map.
 12. Leave SharpED disabled.
 13. Review **Advanced → EDMA** if a different peak threshold is required.
-14. Click **Run pipeline**.
+14. Click **Run phasing**.
 
 ### What to inspect
 
@@ -108,14 +108,13 @@ Use the exact option labels shown by the current GUI.
 10. Enable SharpED.
 11. Optionally enable Superflip symmetry averaging of the processed map.
 12. Enable EDMA on the processed map if structural peaks are required from that branch.
-13. Open **Basic → SharpED**.
-14. Confirm the server URL and API token.
-15. Refresh the available model list if required.
-16. Leave **Elements** blank to use automatic composition-derived elements, or enter them explicitly.
-17. Review network and upload settings.
-18. Run the pipeline.
-19. Inspect convergence, structures, and EDMA outputs.
-20. When a suitable result is available, use **Send to Jana2020**.
+13. Open **Advanced → Setup** and confirm the SharpED server URL and API token.
+14. Open **Basic → SharpED** and refresh the available model list if required.
+15. Open **Advanced → SharpED**. Leave **Elements** blank to use automatic composition-derived elements, or enter them explicitly.
+16. Review network and upload settings on the same page.
+17. Run the pipeline.
+18. Inspect convergence, structures, and EDMA outputs.
+19. When a suitable result is available, use **Send to Jana2020**.
 
 ### SharpED model selection
 
