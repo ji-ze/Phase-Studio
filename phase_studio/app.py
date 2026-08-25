@@ -549,6 +549,8 @@ class RunConfig:
     extra_edma_keywords: str
     damping_factor: float
     modelfile_source: str
+    reconstruction_mode: str
+    run_edma_recycle_final: bool
     exclude_atoms: str
     perform_algorithm: str
     map_export_format: str
@@ -627,6 +629,7 @@ class PipelineState:
     current_model_metric: Optional[float] = None
     auto_reference_cif: Optional[Path] = None
     auto_reference_xplor: Optional[Path] = None
+    recycle_map: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -2288,6 +2291,108 @@ def xplor_fft_predictions(xplor_map: Path, hkls: Sequence[Tuple[int, int, int]])
         )
     return predictions
 
+def synthesize_xplor_map_from_phases(
+    reflections: Sequence[Reflection],
+    data_mode: str,
+    grid: Tuple[int, int, int, int, int, int, int, int, int],
+    cell: Tuple[float, float, float, float, float, float],
+    axis_order: str,
+    phases_by_hkl: Dict[Tuple[int, int, int], float],
+    title: str,
+    spacegroup: gemmi.SpaceGroup,
+) -> Tuple[XplorMap, int]:
+    """Fourier-synthesize a real map from |Fobs| (derived from `reflections`) combined
+    with phases (degrees) from `phases_by_hkl`, for hkl present in both. Each measured
+    hkl is expanded to every space-group-symmetry-equivalent reciprocal-lattice point
+    (matching amplitude, phase-shifted per the operation) -- leaving only the measured
+    asymmetric-unit point non-zero would discard most of the true signal and produce a
+    heavily smeared map. Everything outside that expanded set is zero. Any Friedel mate
+    still missing afterwards (non-centrosymmetric space groups) is filled by Hermitian
+    symmetry so the resulting map is real."""
+    nx, ny, nz = int(grid[0]), int(grid[3]), int(grid[6])
+    coeffs = np.zeros((nz, ny, nx), dtype=np.complex128)
+    direct: set = set()
+    ops = full_spacegroup_ops(spacegroup) or [gemmi.Op("x,y,z")]
+    used = 0
+    for r in reflections:
+        h, k, l = int(r.h), int(r.k), int(r.l)
+        phase_deg = phases_by_hkl.get((h, k, l))
+        if phase_deg is None:
+            continue
+        amplitude = math.sqrt(reflection_value_as_intensity(r, data_mode))
+        if amplitude <= 0:
+            continue
+        base_phase = math.radians(float(phase_deg))
+        for op in ops:
+            eh, ek, el = op.apply_to_hkl((h, k, l))
+            phase = base_phase + op.phase_shift((h, k, l))
+            index = (int(el) % nz, int(ek) % ny, int(eh) % nx)
+            coeffs[index] = complex(amplitude * math.cos(phase), amplitude * math.sin(phase))
+            direct.add(index)
+        used += 1
+    for lz, ky, hx in list(direct):
+        mate = ((-lz) % nz, (-ky) % ny, (-hx) % nx)
+        if mate not in direct:
+            coeffs[mate] = np.conj(coeffs[lz, ky, hx])
+    data = np.fft.ifftn(coeffs).real
+    return XplorMap(
+        title=title,
+        grid=tuple(int(v) for v in grid),
+        cell=tuple(float(v) for v in cell),
+        axis_order=axis_order or "ZYX",
+        data=data.reshape(-1),
+    ), used
+
+def compose_fobs_phicalc_map(
+    output_path: Path,
+    reflections: Sequence[Reflection],
+    data_mode: str,
+    deblurred_map: Path,
+    title: str,
+    spacegroup: gemmi.SpaceGroup,
+    log: Callable[[str], None],
+) -> Path:
+    """Recompose a map from the observed |Fobs| and phi_calc read (by FFT) from the
+    supplied deblurred map, for every measured hkl. This is the map handed to
+    SharpED in the next recycling cycle."""
+    xmap = read_xplor_map(deblurred_map)
+    hkls = [(int(r.h), int(r.k), int(r.l)) for r in reflections]
+    predictions = xplor_fft_predictions(deblurred_map, hkls)
+    phases_by_hkl = {hkl: phase for hkl, (_intensity, phase) in predictions.items()}
+    new_xmap, used = synthesize_xplor_map_from_phases(
+        reflections, data_mode, xmap.grid, xmap.cell, xmap.axis_order, phases_by_hkl, title, spacegroup
+    )
+    write_xplor_map(output_path, new_xmap)
+    log(f"[Fobs+phi_calc] {used}/{len(reflections)} observed hkl used from {deblurred_map.name} -> {output_path.name}")
+    return output_path
+
+def compose_random_phase_map(
+    output_path: Path,
+    reflections: Sequence[Reflection],
+    data_mode: str,
+    cell: gemmi.UnitCell,
+    spacegroup: gemmi.SpaceGroup,
+    randomseed: str,
+    title: str,
+    log: Callable[[str], None],
+) -> Path:
+    """Extreme variant of the first recycling cycle: skip Superflip entirely and
+    synthesize a map straight from |Fobs| with independent random phases."""
+    nx, ny, nz = superflip_default_voxel_triplet(cell, 0.2)
+    grid = (nx, 0, nx - 1, ny, 0, ny - 1, nz, 0, nz - 1)
+    cell_tuple = (cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
+    seed_text = str(randomseed or "").strip()
+    rng = np.random.default_rng(int(seed_text)) if seed_text.isdigit() else np.random.default_rng()
+    phases_by_hkl = {
+        (int(r.h), int(r.k), int(r.l)): float(rng.uniform(0.0, 360.0)) for r in reflections
+    }
+    new_xmap, used = synthesize_xplor_map_from_phases(
+        reflections, data_mode, grid, cell_tuple, "ZYX", phases_by_hkl, title, spacegroup
+    )
+    write_xplor_map(output_path, new_xmap)
+    log(f"[Random start] {used}/{len(reflections)} observed hkl given independent random phases on a {nx}x{ny}x{nz} grid -> {output_path.name}")
+    return output_path
+
 def candidate_missing_hkls_from_bounds(reflections: Sequence[Reflection], cell: gemmi.UnitCell, resolution_d_min: float) -> List[Tuple[int, int, int]]:
     if not reflections:
         return []
@@ -2405,6 +2510,43 @@ def normalize_modelfile_source(value: str) -> str:
     if wants_xplor_modelfile(text):
         return "deblurred_xplor"
     return "deblurred_edma_cif"
+
+def normalize_reconstruction_mode(value: str) -> str:
+    """Canonical internal code behind the "Phasing method" combo. "superflip" (GUI
+    label "Superflip") is the default charge-flipping cycle, unchanged. The other two
+    run Superflip at most once and instead recycle |Fobs| with phases calculated by
+    FFT from the SharpED-deblurred map each cycle; "sharped_recycle" is the GUI's
+    "1st Superflip, then SharpED"; "sharped_recycle_random" is the GUI's "SharpED"
+    and skips Superflip entirely, starting cycle 1 from random phases.
+
+    Must be idempotent (normalize(normalize(x)) == normalize(x)): callers may pass
+    either the raw combo text or an already-canonical code, sometimes more than
+    once on the same value. The canonical code "sharped_recycle" itself contains
+    "sharped" as a substring, so exact codes are matched before any fuzzy "sharped"
+    substring check -- otherwise re-normalizing "sharped_recycle" would wrongly
+    fall through to the random-start code."""
+    text = str(value or "superflip").strip().lower()
+    exact = {
+        "superflip": "superflip",
+        "sharped_recycle": "sharped_recycle",
+        "recycle": "sharped_recycle",
+        "fourier_recycle": "sharped_recycle",
+        "sharped_recycle_superflip_start": "sharped_recycle",
+        "1st superflip, then sharped": "sharped_recycle",
+        "sharped": "sharped_recycle_random",
+        "sharped (beta)": "sharped_recycle_random",
+        "sharped_recycle_random": "sharped_recycle_random",
+        "sharped_recycle_random_start": "sharped_recycle_random",
+        "random_start": "sharped_recycle_random",
+        "random": "sharped_recycle_random",
+    }
+    if text in exact:
+        return exact[text]
+    if "superflip" in text and "sharped" in text:
+        return "sharped_recycle"
+    if "sharped" in text:
+        return "sharped_recycle_random"
+    return "superflip"
 
 def parse_atom_label_list(value: str) -> List[str]:
     value = str(value or "").strip()
@@ -4528,6 +4670,8 @@ INPUT_TOOLTIPS = {
     "extra_edma_keywords": "Additional raw EDMA keyword lines appended to the generated EDMA input. Use this for documented EDMA options not exposed above.",
     "damping_factor": "Inverse XPLOR damping value 1/x. 1.0 means no damping; 0.5 is equivalent to the previous factor 2.0; 0.25 is equivalent to factor 4.0. Disabled/ignored for CIF or none.",
     "modelfile_source": "Authoritative source for cycle 2 and later. none forces the run to one cycle; superflip_xplor cycles without SharpED deblurring; deblurred_xplor uses the SharpED XPLOR map; deblurred_edma_cif ignores XPLOR damping.",
+    "reconstruction_mode": "Superflip runs the standard charge-flipping cycle every cycle (unchanged default). '1st Superflip, then SharpED' runs Superflip only once, then each cycle deblurs with SharpED, reads phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle. 'SharpED' skips Superflip entirely and starts cycle 1 from |Fobs| with independent random phases. Both are beta features.",
+    "run_edma_recycle_final": "Only used by the '1st Superflip, then SharpED' and 'SharpED' phasing methods: run EDMA peak extraction and structure export once, on the final cycle's |Fobs|+phi_calc map.",
     "exclude_atoms": "Optional atom labels to remove from CIF modelfiles before the next Superflip cycle. Use comma, semicolon or whitespace separation.",
     "run_edma_superflip": "Run EDMA peak search on the raw Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
@@ -4959,9 +5103,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if self.category_tabs.currentIndex() == 0:
             name = self.basic_tabs.tabText(self.basic_tabs.currentIndex())
             return {
-                "Paths": "setup",
+                "Input": "setup",
                 "Workflow": "setup",
-                "SharpED": "sharped",
+                "Model": "setup",
                 "Help": None,
             }.get(name, "setup")
         name = self.advanced_tabs.tabText(self.advanced_tabs.currentIndex())
@@ -5223,9 +5367,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         cwd = Path.cwd()
 
-        # Basic / Paths
-        paths_tab = add_settings_tab("Paths")
-        data_input_form = add_form_group(paths_tab, "Data input")
+        # Basic / Input
+        input_tab = add_settings_tab("Input")
+        data_input_form = add_form_group(input_tab, "Data input")
         self._add_combo(
             data_input_form,
             "input_source_mode",
@@ -5268,7 +5412,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         hkl_button_row.addWidget(self.analyze_hkl_btn)
         data_input_form.addRow("", hkl_button_row)
 
-        metadata_form = add_form_group(paths_tab, "Crystal metadata")
+        metadata_form = add_form_group(input_tab, "Crystal metadata")
         self._add_combo(
             metadata_form,
             "metadata_source",
@@ -5397,23 +5541,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metadata_error_layout.addWidget(self.metadata_error_details_btn, 0, Qt.AlignTop)
         self.metadata_error_panel.setVisible(False)
         metadata_form.addRow("", self.metadata_error_panel)
-
-        reference_form = add_form_group(paths_tab, "Reference and initial model")
-        self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
-        self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
-        self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
-        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
-
-        output_form = add_form_group(paths_tab, "Output")
-        self._add_path(output_form, "work_dir", "Working directory", str(cwd / "iterative_superflip_qt_run"), "dir")
-        self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana"], "xplor")
-        self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
-        self._add_checkbox(output_form, "export_standard_hkl", "Save standardized HKL (I/σ/phase)", False, align_with_fields=True)
-        output_form.addRow("", self._secondary_help(
-            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles; "
-            "Map/Structure format add one extra saved format on top for external use or Jana2020."
-        ))
-        paths_tab.addStretch(1)
+        input_tab.addStretch(1)
 
         # Basic / Workflow
         workflow_tab = add_settings_tab("Workflow")
@@ -5423,33 +5551,64 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.inputs["workflow_preset"].currentTextChanged.connect(self._apply_workflow_preset)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self._add_spin(workflow_form, "cycles", "Cycles", 1, 1, 999, 1)
+        self._add_spin(workflow_form, "cycles", "Cycles", 5, 1, 999, 1)
         self.inputs["cycles"].valueChanged.connect(self._update_plot)  # type: ignore[attr-defined]
-        self._add_combo(workflow_form, "modelfile_source", "Next-cycle model", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "superflip_xplor")
+        self._add_combo(workflow_form, "reconstruction_mode", "Phasing method", ["Superflip", "1st Superflip, then SharpED", "SharpED (beta)"], "Superflip")
+        try:
+            self.inputs["reconstruction_mode"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.reconstruction_mode_warning = settings_callout("", "")
+        self.reconstruction_mode_warning.setVisible(False)
+        workflow_form.addRow("", self.reconstruction_mode_warning)
+        self._add_combo(workflow_form, "modelfile_source", "Next-cycle model", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "deblurred_xplor")
         try:
             self.inputs["modelfile_source"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self._add_dspin(workflow_form, "damping_factor", "XPLOR damping (1/x)", 1.0, 0.001, 1.0, 0.05, 3)
+        self._add_dspin(workflow_form, "damping_factor", "XPLOR damping (1/x)", 0.3, 0.001, 1.0, 0.05, 3)
         self._add_text(workflow_form, "exclude_atoms", "Excluded atoms", "none")
         workflow_note = settings_callout(
             "Note",
             "Next-cycle model is authoritative: 'none' forces a one-cycle run. "
-            "superflip_xplor cycles without SharpED deblurring; XPLOR damping is active for XPLOR modes only."
+            "superflip_xplor cycles without SharpED deblurring; XPLOR damping is active for XPLOR modes only. "
+            "Both are ignored when Phasing method is not Superflip: the methods below define their own next-cycle map."
         )
         workflow_form.addRow("", workflow_note)
+        recycle_note = settings_callout(
+            "Phasing method",
+            "Superflip is the standard iterative charge-flipping cycle (unchanged). "
+            "1st Superflip, then SharpED runs Superflip only once, then each cycle deblurs the previous map with "
+            "SharpED, calculates phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map "
+            "from |Fobs| + phi_calc for the next cycle's SharpED input. "
+            "SharpED (beta) skips Superflip entirely: cycle 1 starts from |Fobs| with independent random phases instead."
+        )
+        workflow_form.addRow("", recycle_note)
 
         optional_form = add_form_group(workflow_tab, "Optional processing")
-        self._add_checkbox(optional_form, "run_edma_superflip", "Run EDMA on Superflip map", True)
-        self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True)
-        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize processed map with Superflip", False)
-        self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on processed map", True)
+        superflip_stages_label = QLabel("Superflip cycle")
+        superflip_stages_label.setObjectName("inlineGroupTitle")
+        optional_form.addRow(superflip_stages_label)
+        self._add_checkbox(optional_form, "run_edma_superflip", "Run EDMA on Superflip map", True, align_with_fields=True)
+        self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True, align_with_fields=True)
+        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize processed map with Superflip (beta)", False, align_with_fields=True)
+        self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on processed map", True, align_with_fields=True)
+        recycle_stages_label = QLabel("Phase-recycling methods")
+        recycle_stages_label.setObjectName("inlineGroupTitle")
+        optional_form.addRow(recycle_stages_label)
+        self._add_checkbox(optional_form, "run_edma_recycle_final", "Run EDMA on final map", False, align_with_fields=True)
         workflow_tab.addStretch(1)
 
-        # Basic / SharpED
-        sharped_tab = add_settings_tab("SharpED")
-        model_form = add_form_group(sharped_tab, "SharpED model", "sharped")
-        self._add_combo(model_form, "sharped_model", "Model", ["default"], "default")
+        # Basic / Model
+        model_output_tab = add_settings_tab("Model")
+        reference_form = add_form_group(model_output_tab, "Reference and initial model")
+        self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
+        self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
+        self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
+        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
+
+        model_form = add_form_group(model_output_tab, "SharpED model", "sharped")
+        self._add_combo(model_form, "sharped_model", "Model", ["koala 2.0"], "koala 2.0")
         try:
             self.inputs["sharped_model"].setEditable(True)  # type: ignore[attr-defined]
         except Exception:
@@ -5461,7 +5620,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         model_form.addRow("", self._secondary_help(
             "Server URL and API token are in Advanced → Setup. Elements, output resolution and transfer/network settings are in Advanced → SharpED."
         ))
-        sharped_tab.addStretch(1)
+
+        output_form = add_form_group(model_output_tab, "Output")
+        self._add_path(output_form, "work_dir", "Working directory", str(cwd / "iterative_superflip_qt_run"), "dir")
+        self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana"], "xplor")
+        self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
+        self._add_checkbox(output_form, "export_standard_hkl", "Save standardized HKL (I/σ/phase)", False, align_with_fields=True)
+        output_form.addRow("", self._secondary_help(
+            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles; "
+            "Map/Structure format add one extra saved format on top for external use or Jana2020."
+        ))
+        model_output_tab.addStretch(1)
 
         # Basic / Help
         reference_tab = add_settings_tab("Help")
@@ -5522,7 +5691,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>6. Symmetry</h3>
             <p><b>Search symmetry</b> maps to <code>searchsymmetry</code>; <b>Derive symmetry</b> maps to <code>derivesymmetry</code>.</p>
             <h3>7. Output</h3>
-            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Paths &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020.</p>
+            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Model &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020.</p>
             <h3>8. Advanced keywords</h3>
             <p><b>Extra Superflip keywords</b> lets expert users append documented keywords without dedicated GUI controls.</p>
         """)
@@ -5547,7 +5716,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_help_layout = add_help_section(reference_tab, "sharped", "SharpED guide", """
             <h3>What SharpED does</h3>
             <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
-            <p><b>Model</b> selection stays on the Basic &rarr; SharpED page. Server connection, elements, output resolution and upload/network settings are on Advanced &rarr; Setup (server URL/API token) and Advanced &rarr; SharpED (everything else below).</p>
+            <p><b>Model</b> selection stays on the Basic &rarr; Model page. Server connection, elements, output resolution and upload/network settings are on Advanced &rarr; Setup (server URL/API token) and Advanced &rarr; SharpED (everything else below).</p>
             <h3>1. Server connection</h3>
             <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
             <h3>2. Model and elements</h3>
@@ -5645,19 +5814,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.inputs["perform_algorithm"].setToolTip(
             INPUT_TOOLTIPS["perform_algorithm"]
         )  # type: ignore[attr-defined]
-        self._add_spin(calculation_form, "maxcycles", "Maximum iterations", 1000, 1, 100000, 100)
-        self._add_spin(calculation_form, "repeatmode", "Repeat mode", 12, 1, 10000, 1)
-        self._add_text(calculation_form, "randomseed", "Random seed", "12345")
+        self._add_spin(calculation_form, "maxcycles", "Maximum iterations", 2000, 1, 100000, 100)
+        self._add_spin(calculation_form, "repeatmode", "Repeat mode", 10, 1, 10000, 1)
+        self._add_text(calculation_form, "randomseed", "Random seed", "AUTO")
         self._add_text(calculation_form, "delta", "Delta", "AUTO")
         self._add_text(calculation_form, "weakratio", "Weak ratio", "0.000")
         self._add_text(calculation_form, "biso", "Biso", "0.000")
-        self._add_checkbox(calculation_form, "polish", "Enable final polish", False, align_with_fields=True)
+        self._add_checkbox(calculation_form, "polish", "Enable final polish", True, align_with_fields=True)
 
         density_form = add_form_group(superflip_tab, "Density / solution selection")
-        self._add_text(density_form, "voxel", "Voxel grid", "omit")
+        self._add_text(density_form, "voxel", "Voxel grid", "")
         self._add_spin(density_form, "bestdensities_count", "Best densities: count", 1, 1, 100, 1)
         self._add_combo(density_form, "bestdensities_metric", "Best-density metric", ["rvalue", "peakiness", "symmetry", "reference"], "rvalue")
-        self._add_checkbox(density_form, "bestdensities_symmetry", "Use symmetry for best densities", False, align_with_fields=True)
+        self._add_checkbox(density_form, "bestdensities_symmetry", "Use symmetry for best densities", True, align_with_fields=True)
         self.inputs["bestdensities_symmetry"].setToolTip(
             INPUT_TOOLTIPS["bestdensities_symmetry"]
         )  # type: ignore[attr-defined]
@@ -5665,16 +5834,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_text(density_form, "derivesymmetry", "Derive symmetry", "yes")
 
         reflection_form = add_form_group(superflip_tab, "Reflection handling")
-        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum value/σ", 0.0, 0.0, 100.0, 0.5, 3)
+        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum value/σ", 2.0, 0.0, 100.0, 0.5, 3)
         self._add_dspin(reflection_form, "resolution_d_min", "d_min cutoff (Å)", 0.0, 0.0, 20.0, 0.1, 3)
-        self._add_combo(reflection_form, "normalize", "Normalization", ["none", "local", "atoms", "wilson"], "none")
+        self._add_combo(reflection_form, "normalize", "Normalization", ["none", "local", "atoms", "wilson"], "atoms")
         self._add_spin(reflection_form, "nresshells", "Resolution shells", 100, 0, 100000, 10)
         self._add_text(reflection_form, "missing", "Missing-reflection keyword", "bound 0.5 2.5")
         self._add_text(reflection_form, "electrons", "Electrons", "")
 
         reference_density_form = add_form_group(superflip_tab, "Reference density")
         reference_density_form.addRow(self._secondary_help(
-            "The referencefile keyword is automatic: it is written only when a reference file is selected on Paths, or "
+            "The referencefile keyword is automatic: it is written only when a reference file is selected on Model, or "
             "from cycle 2 onward when none is selected, using the previous cycle's EDMA CIF (or its XPLOR map if EDMA "
             "produced no usable peaks) so Superflip keeps a fixed origin in reciprocal space between cycles."
         ))
@@ -6114,6 +6283,51 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _sync_workflow_widgets(self) -> None:
         if self._configuration_locked:
+            return
+        reconstruction_mode = normalize_reconstruction_mode(self._combo_value("reconstruction_mode") if "reconstruction_mode" in self.inputs else "")
+        is_recycling = reconstruction_mode != "superflip"
+        for key, tooltip_when_disabled in (
+            ("modelfile_source", "Ignored: the selected Phasing method defines its own next-cycle map instead of Next-cycle model."),
+            ("damping_factor", "Ignored: XPLOR damping applies only to the Superflip phasing method's next-cycle model."),
+            ("symmetrize_deblurred_map", "Ignored: symmetry averaging is not part of the selected Phasing method."),
+            ("run_edma_superflip", "Ignored: EDMA after the Superflip map is not part of the selected Phasing method."),
+            ("run_sharped", "Ignored: the selected Phasing method always deblurs with SharpED every cycle."),
+            ("run_edma_deblurred", "Ignored: EDMA after the deblurred map is not part of the selected Phasing method; use Run EDMA on final map instead."),
+        ):
+            widget = self.inputs.get(key)
+            if hasattr(widget, "setEnabled"):
+                widget.setEnabled(not is_recycling)  # type: ignore[attr-defined]
+            label = self.input_labels.get(key)
+            if label is not None:
+                label.setEnabled(not is_recycling)
+            if hasattr(widget, "setToolTip"):
+                widget.setToolTip(tooltip_when_disabled if is_recycling else INPUT_TOOLTIPS.get(key, ""))  # type: ignore[attr-defined]
+        recycle_final_widget = self.inputs.get("run_edma_recycle_final")
+        if hasattr(recycle_final_widget, "setEnabled"):
+            recycle_final_widget.setEnabled(is_recycling)  # type: ignore[attr-defined]
+        if hasattr(recycle_final_widget, "setToolTip"):
+            recycle_final_widget.setToolTip(  # type: ignore[attr-defined]
+                INPUT_TOOLTIPS.get("run_edma_recycle_final", "") if is_recycling
+                else "Ignored: only used by the '1st Superflip, then SharpED' and 'SharpED' phasing methods."
+            )
+        recycle_final_label = self.input_labels.get("run_edma_recycle_final")
+        if recycle_final_label is not None:
+            recycle_final_label.setEnabled(is_recycling)
+        warning_widget = getattr(self, "reconstruction_mode_warning", None)
+        if warning_widget is not None:
+            if reconstruction_mode == "sharped_recycle":
+                warning_widget.setText("<b>Beta feature</b><br>1st Superflip, then SharpED is experimental.")
+                warning_widget.setVisible(True)
+            elif reconstruction_mode == "sharped_recycle_random":
+                warning_widget.setText(
+                    "<b>Beta feature</b><br>SharpED (random-phase start) is experimental. It can take extremely "
+                    "long to converge, even for simple structures (hundreds of cycles), and convergence is not guaranteed."
+                )
+                warning_widget.setVisible(True)
+            else:
+                warning_widget.setVisible(False)
+        if is_recycling:
+            self._update_plot()
             return
         mode = normalize_modelfile_source(self._combo_value("modelfile_source") if "modelfile_source" in self.inputs else "")
         cycles_widget = self.inputs.get("cycles")
@@ -7579,12 +7793,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if category.startswith("sharped_"):
             return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED", advanced=True), True)]
         if category == "input_validation":
-            actions = [ErrorAction("Open Paths", lambda: self._open_configuration_page("Paths"), True)]
+            actions = [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
             if "SharpED" in report.summary:
                 actions.append(ErrorAction("Open SharpED API settings", lambda: self._open_configuration_page("Setup", advanced=True)))
             return actions
         if category in {"hkl_invalid", "metadata", "unit_cell", "space_group", "composition", "inflip"}:
-            return [ErrorAction("Open Paths", lambda: self._open_configuration_page("Paths"), True)]
+            return [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
         return []
 
     def _show_error_report(self, report: ErrorReport, *, write_log: bool = True) -> str:
@@ -8487,6 +8701,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             extra_edma_keywords=self._multiline_value("extra_edma_keywords"),
             damping_factor=self._dspin_value("damping_factor"),
             modelfile_source=modelfile_source_value,
+            reconstruction_mode=normalize_reconstruction_mode(self._combo_value("reconstruction_mode")),
+            run_edma_recycle_final=self._check_value("run_edma_recycle_final"),
             exclude_atoms=self._line_value("exclude_atoms") or "none",
             perform_algorithm=self._combo_value("perform_algorithm") or "CF",
             map_export_format=normalize_map_export_format(self._combo_value("map_export_format")),
@@ -8567,10 +8783,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif ref_suffix not in REFERENCE_FILE_SUFFIXES:
                 issues.append("The external reference format is not supported.")
                 details.append(f"Reference suffix: {ref_suffix or '(none)'}")
-        if cfg.run_sharped and not cfg.sharped_api_token.strip():
+        reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
+        is_recycling = reconstruction_mode != "superflip"
+        if (cfg.run_sharped or is_recycling) and not cfg.sharped_api_token.strip():
             issues.append("A SharpED API token is required for the selected workflow.")
-        for exe, label in ((cfg.superflip_exe, "Superflip"), (cfg.edma_exe, "EDMA")):
-            if resolve_executable_for_validation(exe) is None:
+        needs_superflip = not is_recycling or reconstruction_mode == "sharped_recycle"
+        needs_edma = (not is_recycling and (cfg.run_edma_superflip or cfg.run_edma_deblurred)) or (is_recycling and cfg.run_edma_recycle_final)
+        for exe, label, needed in (
+            (cfg.superflip_exe, "Superflip", needs_superflip),
+            (cfg.edma_exe, "EDMA", needs_edma),
+        ):
+            if needed and resolve_executable_for_validation(exe) is None:
                 issues.append(f"The {label} executable was not found.")
                 details.append(f"{label} executable: {exe or '(not selected)'}")
         return list(dict.fromkeys(issues)), sanitize_error_details("\n".join(details))
@@ -8673,7 +8896,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 )
                 self.msg_queue.put(("progress_setup", resume_state.cfg.cycles))
                 self.msg_queue.put(("progress", resume_state.completed_cycles))
-                self._run_pipeline_cycles(resume_state)
+                if normalize_reconstruction_mode(resume_state.cfg.reconstruction_mode) == "superflip":
+                    self._run_pipeline_cycles(resume_state)
+                else:
+                    self._run_sharped_recycle_cycles(resume_state)
             except Exception as exc:
                 self.msg_queue.put((
                     "error_report",
@@ -8750,6 +8976,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 level="INFO",
             )
             sharped_elements = cfg.sharped_elements.strip() or sharped_elements_from_composition(ref_ctx.composition)
+            reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
+            if reconstruction_mode != "superflip":
+                variant = "SharpED, random-phase start, no Superflip" if reconstruction_mode == "sharped_recycle_random" else "1st Superflip, then SharpED"
+                self.log(f"Phasing method: {variant} (beta)", level="STEP")
             requested_modelfile_mode = normalize_modelfile_source(cfg.modelfile_source)
             modelfile_mode = requested_modelfile_mode
             use_xplor_modelfile = modelfile_mode in {"superflip_xplor", "deblurred_xplor"}
@@ -8878,7 +9108,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 current_reflections=current_reflections,
             )
             self._resume_state = state
-            self._run_pipeline_cycles(state)
+            if reconstruction_mode == "superflip":
+                self._run_pipeline_cycles(state)
+            else:
+                self._run_sharped_recycle_cycles(state)
         except Exception as exc:
             self.msg_queue.put((
                 "error_report",
@@ -9223,6 +9456,134 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 detail="completed",
                 complete=True,
             )
+            if self.stop_after_cycle.is_set():
+                self.msg_queue.put(("cancelled", state.completed_cycles))
+                return
+        self.msg_queue.put(("done", state.completed_cycles))
+
+    def _run_sharped_recycle_cycles(self, state: PipelineState) -> None:
+        """SharpED phase-recycling algorithm: Superflip runs at most once (or not at
+        all in the random-start variant); every cycle deblurs the previous map with
+        SharpED, reads phi_calc by FFT from that deblurred map for every measured
+        hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle."""
+        cfg = state.cfg
+        ref_ctx = state.ref_ctx
+        reflections = state.current_reflections
+        configured_data_mode = state.configured_data_mode
+        sharped_elements = state.sharped_elements
+        all_results = state.all_results
+        random_start = normalize_reconstruction_mode(cfg.reconstruction_mode) == "sharped_recycle_random"
+        progress_stages = ["Preparing cycle", "Superflip", "SharpED", "Phase calculation", "Finalizing cycle"]
+        for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
+            if self.stop_after_cycle.is_set():
+                self.msg_queue.put(("cancelled", state.completed_cycles))
+                return
+            self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Preparing cycle", detail="preparing input map")
+            cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
+            self.log(f"=== Cycle {cyc} / {cfg.cycles} (SharpED phase recycling) ===", level="STEP")
+
+            sf_log_metrics = SuperflipLogMetrics()
+            if state.recycle_map is None:
+                if random_start:
+                    input_map = cycle_dir / f"cycle_{cyc:03d}_random_phase_start.xplor"
+                    self.log("[Cycle 1] No Superflip: synthesizing a map from |Fobs| and independent random phases.", level="DETAIL")
+                    compose_random_phase_map(input_map, reflections, configured_data_mode, ref_ctx.cell, ref_ctx.spacegroup, cfg.randomseed, f"cycle_{cyc:03d}_random_start", self.log)
+                else:
+                    self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Superflip", sub_index=1, sub_total=1, detail="running", busy=True)
+                    sf_prefix = f"cycle_{cyc:03d}_superflip"
+                    observed_hkl_for_cycle = state.observed_hkls[configured_data_mode]
+                    sf_map_format = normalize_map_export_format(cfg.map_export_format)
+                    sf_export_ccp4 = sf_map_format == "ccp4"
+                    sf_export_jana = sf_map_format == "jana"
+                    reference_file_for_cycle: Optional[Path] = None
+                    if state.referencefile_mode == "reference_cif":
+                        reference_file_for_cycle = state.explicit_superflip_referencefile if state.explicit_superflip_referencefile is not None else ref_ctx.work_ref_cif
+                    elif state.referencefile_mode in {"reference_xplor", "reference_density"}:
+                        reference_file_for_cycle = state.explicit_superflip_referencefile if state.explicit_superflip_referencefile is not None else cfg.superflip_reference_xplor
+                    input_map = run_superflip_cycle(
+                        cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, None, reference_file_for_cycle, "",
+                        cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana,
+                        cfg.voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish,
+                        cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode,
+                        cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons,
+                        cfg.dataitemwidths, cfg.extra_superflip_keywords, self.log, self.stop_now,
+                    )
+                    self.log(f"[Cycle 1] Superflip map: {input_map}")
+                    if self.stop_now.is_set():
+                        raise RuntimeError("Immediate stop requested.")
+                    sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
+            else:
+                input_map = state.recycle_map
+
+            if self.stop_now.is_set():
+                raise RuntimeError("Immediate stop requested.")
+            self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="preparing upload", busy=True)
+            deblur_map = cycle_dir / f"cycle_{cyc:03d}_deblurred.xplor"
+            run_sharped_deblur(
+                input_map, deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model, sharped_elements,
+                cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds,
+                cfg.sharped_max_polls, self.log, self.stop_now,
+                progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
+                    cycle, cfg.cycles, progress_stages, "SharpED", detail=detail, busy=detail != "completed",
+                ),
+            )
+            self.log(f"Deblurred map: {deblur_map}")
+            if self.stop_now.is_set():
+                raise RuntimeError("Immediate stop requested.")
+
+            self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Phase calculation", busy=True)
+            composed_map = cycle_dir / f"cycle_{cyc:03d}_fobs_phicalc.xplor"
+            compose_fobs_phicalc_map(composed_map, reflections, configured_data_mode, deblur_map, f"cycle_{cyc:03d}_fobs_phicalc", ref_ctx.spacegroup, self.log)
+            self.log(f"Composed |Fobs|+phi_calc map: {composed_map}")
+            state.recycle_map = composed_map
+
+            is_final_cycle = cyc == cfg.cycles
+            deblur_edma_cif = cycle_dir / f"cycle_{cyc:03d}_edma.cif"
+            deblur_metric: Optional[float] = None
+            if is_final_cycle and cfg.run_edma_recycle_final:
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="EDMA on final map", busy=True)
+                edma_dir = cycle_dir / "edma_final"
+                deblur_edma_cif = run_edma_on_xplor(
+                    composed_map, edma_dir, f"cycle_{cyc:03d}_final", ref_ctx, cfg.plimit_deblur,
+                    cfg.merge_distance, cfg.edma_exe, self.log,
+                    self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
+                    cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
+                    cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
+                )
+                deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx)
+                self.log(f"[EDMA] Completed · Final map · output: {deblur_edma_cif}", subsystem="EDMA")
+                self.msg_queue.put(("structure_update", ("deblur", deblur_edma_cif)))
+            else:
+                write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
+
+            result = CycleResult(
+                cycle=cyc,
+                model_source="sharped_recycle_random" if random_start else "sharped_recycle",
+                model_in=input_map,
+                model_metric=None,
+                superflip_map=input_map,
+                superflip_edma_cif=deblur_edma_cif,
+                superflip_metric=None,
+                deblur_map=composed_map,
+                deblur_edma_cif=deblur_edma_cif,
+                deblur_metric=deblur_metric,
+                superflip_saved_run=sf_log_metrics.saved_run,
+                superflip_rvalue=sf_log_metrics.rvalue,
+                superflip_peaks=sf_log_metrics.peaks,
+                superflip_symm=sf_log_metrics.symm,
+                superflip_derived_sg=sf_log_metrics.derived_sg,
+                superflip_ref_match=sf_log_metrics.ref_match,
+                superflip_fom=sf_log_metrics.fom,
+                superflip_success_rate=sf_log_metrics.success_rate,
+                superflip_mean_cycles=sf_log_metrics.mean_cycles,
+            )
+            all_results.append(result)
+            write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
+            self.msg_queue.put(("result", result))
+            state.completed_cycles = cyc
+            self.log(f"Cycle {cyc} complete.", level="SUCCESS")
+            self.msg_queue.put(("progress", state.completed_cycles))
+            self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="completed", complete=True)
             if self.stop_after_cycle.is_set():
                 self.msg_queue.put(("cancelled", state.completed_cycles))
                 return
