@@ -478,6 +478,7 @@ class CycleResult:
     superflip_fom: Optional[float] = None
     superflip_success_rate: Optional[float] = None
     superflip_mean_cycles: Optional[float] = None
+    recycle_map_correlation: Optional[float] = None
 
 
 INPUT_MODE_INFLIP = "jana_inflip"
@@ -2393,6 +2394,21 @@ def compose_random_phase_map(
     log(f"[Random start] {used}/{len(reflections)} observed hkl given independent random phases on a {nx}x{ny}x{nz} grid -> {output_path.name}")
     return output_path
 
+def xplor_map_correlation(map_a: Path, map_b: Path) -> Optional[float]:
+    """Pearson correlation between two XPLOR density grids, used as a cheap,
+    reference-free convergence proxy for the SharpED phase-recycling cycle loop
+    (no EDMA/reference structure required, unlike the other per-cycle metrics)."""
+    try:
+        a = read_xplor_map(map_a).data.ravel()
+        b = read_xplor_map(map_b).data.ravel()
+        if a.shape != b.shape or a.size == 0:
+            return None
+        if np.std(a) < 1e-12 or np.std(b) < 1e-12:
+            return None
+        return float(np.corrcoef(a, b)[0, 1])
+    except Exception:
+        return None
+
 def candidate_missing_hkls_from_bounds(reflections: Sequence[Reflection], cell: gemmi.UnitCell, resolution_d_min: float) -> List[Tuple[int, int, int]]:
     if not reflections:
         return []
@@ -2516,8 +2532,9 @@ def normalize_reconstruction_mode(value: str) -> str:
     label "Superflip") is the default charge-flipping cycle, unchanged. The other two
     run Superflip at most once and instead recycle |Fobs| with phases calculated by
     FFT from the SharpED-deblurred map each cycle; "sharped_recycle" is the GUI's
-    "1st Superflip, then SharpED"; "sharped_recycle_random" is the GUI's "SharpED"
-    and skips Superflip entirely, starting cycle 1 from random phases.
+    "1st Superflip, then SharpED (beta)"; "sharped_recycle_random" is the GUI's
+    "SharpED (experimental)" and skips Superflip entirely, starting cycle 1 from
+    random phases.
 
     Must be idempotent (normalize(normalize(x)) == normalize(x)): callers may pass
     either the raw combo text or an already-canonical code, sometimes more than
@@ -2533,8 +2550,10 @@ def normalize_reconstruction_mode(value: str) -> str:
         "fourier_recycle": "sharped_recycle",
         "sharped_recycle_superflip_start": "sharped_recycle",
         "1st superflip, then sharped": "sharped_recycle",
+        "1st superflip, then sharped (beta)": "sharped_recycle",
         "sharped": "sharped_recycle_random",
         "sharped (beta)": "sharped_recycle_random",
+        "sharped (experimental)": "sharped_recycle_random",
         "sharped_recycle_random": "sharped_recycle_random",
         "sharped_recycle_random_start": "sharped_recycle_random",
         "random_start": "sharped_recycle_random",
@@ -4506,6 +4525,7 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
             "superflip_fom",
             "superflip_success_rate_percent",
             "superflip_mean_cycles",
+            "recycle_map_correlation",
         ])
         for r in results:
             w.writerow([
@@ -4528,6 +4548,7 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
                 "" if r.superflip_fom is None else r.superflip_fom,
                 "" if r.superflip_success_rate is None else r.superflip_success_rate,
                 "" if r.superflip_mean_cycles is None else r.superflip_mean_cycles,
+                "" if r.recycle_map_correlation is None else r.recycle_map_correlation,
             ])
 
 
@@ -4655,7 +4676,7 @@ INPUT_TOOLTIPS = {
     "work_dir": "Output directory for generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics.",
     "superflip_exe": "Absolute path to the original Jana2020 Superflip executable. Default: C:\\Jana2020\\SUPERFLIP\\superflip_original.exe. Do not select the Phase Studio wrapper named superflip.exe.",
     "edma_exe": "Absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps. Default: C:\\Jana2020\\SUPERFLIP\\EDMA.exe.",
-    "workflow_preset": "High-level starting preset for common crystallographic workflows. It sets only basic defaults; all advanced Superflip and EDMA keywords remain editable.",
+    "workflow_preset": "Applies a bundle of starting values for a common crystallographic workflow. 'Recommended' is a general-purpose baseline (matches the built-in defaults); the others tune settings for a specific sample type. All values remain individually editable afterward, and 'custom' leaves everything untouched.",
     "cycles": "Number of iterative Superflip -> EDMA -> SharpED -> EDMA cycles to run.",
     "composition_override": "Optional Superflip composition string. Leave blank to derive composition from the reference CIF formula or atom list.",
     "plimit_superflip": "Peak threshold as a multiplier of the XPLOR map sigma. Phase Studio converts it to EDMA's absolute 'plimit <value>'.",
@@ -4670,8 +4691,8 @@ INPUT_TOOLTIPS = {
     "extra_edma_keywords": "Additional raw EDMA keyword lines appended to the generated EDMA input. Use this for documented EDMA options not exposed above.",
     "damping_factor": "Inverse XPLOR damping value 1/x. 1.0 means no damping; 0.5 is equivalent to the previous factor 2.0; 0.25 is equivalent to factor 4.0. Disabled/ignored for CIF or none.",
     "modelfile_source": "Authoritative source for cycle 2 and later. none forces the run to one cycle; superflip_xplor cycles without SharpED deblurring; deblurred_xplor uses the SharpED XPLOR map; deblurred_edma_cif ignores XPLOR damping.",
-    "reconstruction_mode": "Superflip runs the standard charge-flipping cycle every cycle (unchanged default). '1st Superflip, then SharpED' runs Superflip only once, then each cycle deblurs with SharpED, reads phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle. 'SharpED' skips Superflip entirely and starts cycle 1 from |Fobs| with independent random phases. Both are beta features.",
-    "run_edma_recycle_final": "Only used by the '1st Superflip, then SharpED' and 'SharpED' phasing methods: run EDMA peak extraction and structure export once, on the final cycle's |Fobs|+phi_calc map.",
+    "reconstruction_mode": "Superflip runs the standard charge-flipping cycle every cycle (unchanged default). '1st Superflip, then SharpED (beta)' runs Superflip only once, then each cycle deblurs with SharpED, reads phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle; it does not work well with some models. 'SharpED (experimental)' skips Superflip entirely and starts cycle 1 from |Fobs| with independent random phases; it does not work yet and is intended for development, not production use. Hidden unless 'Show beta and experimental features' is enabled on Advanced -> Setup.",
+    "run_edma_recycle_final": "Only used by the '1st Superflip, then SharpED (beta)' and 'SharpED (experimental)' phasing methods: run EDMA peak extraction and structure export once, on the final cycle's |Fobs|+phi_calc map.",
     "exclude_atoms": "Optional atom labels to remove from CIF modelfiles before the next Superflip cycle. Use comma, semicolon or whitespace separation.",
     "run_edma_superflip": "Run EDMA peak search on the raw Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
@@ -4712,6 +4733,7 @@ INPUT_TOOLTIPS = {
     "map_feedback_intensity_max_i_over_sigma": "Apply map-based intensity correction only to non-zero reflections with value/sigma below this limit. Use 0 to correct all non-zero reflections.",
     "sharped_base_url": "SharpED inference server base URL. The C++ reference client uses https://jana.fzu.cz.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
+    "show_beta_features": "When off (default), beta and experimental Phasing methods and the settings that only apply to them are hidden entirely from the Basic tabs, not just disabled. Enable to make them selectable.",
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
     "sharped_elements": "Chemical elements sent to the SharpED server. Leave blank to derive unique non-H elements from the reference composition.",
     "sharped_outres": "Output resolution sent as the outres multipart field.",
@@ -5105,7 +5127,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return {
                 "Input": "setup",
                 "Workflow": "setup",
-                "Model": "setup",
+                "Model and output": "setup",
                 "Help": None,
             }.get(name, "setup")
         name = self.advanced_tabs.tabText(self.advanced_tabs.currentIndex())
@@ -5546,14 +5568,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # Basic / Workflow
         workflow_tab = add_settings_tab("Workflow")
         workflow_form = add_form_group(workflow_tab, "Reconstruction", "setup")
-        self._add_combo(workflow_form, "workflow_preset", "Workflow preset", ["custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "custom")
+        self._workflow_form = workflow_form
+        self._add_combo(workflow_form, "workflow_preset", "Starting preset", ["Recommended", "custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "Recommended")
         try:
             self.inputs["workflow_preset"].currentTextChanged.connect(self._apply_workflow_preset)  # type: ignore[attr-defined]
         except Exception:
             pass
         self._add_spin(workflow_form, "cycles", "Cycles", 5, 1, 999, 1)
         self.inputs["cycles"].valueChanged.connect(self._update_plot)  # type: ignore[attr-defined]
-        self._add_combo(workflow_form, "reconstruction_mode", "Phasing method", ["Superflip", "1st Superflip, then SharpED", "SharpED (beta)"], "Superflip")
+        self._add_combo(workflow_form, "reconstruction_mode", "Phasing method", ["Superflip", "1st Superflip, then SharpED (beta)", "SharpED (experimental)"], "Superflip")
         try:
             self.inputs["reconstruction_mode"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
@@ -5578,14 +5601,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         recycle_note = settings_callout(
             "Phasing method",
             "Superflip is the standard iterative charge-flipping cycle (unchanged). "
-            "1st Superflip, then SharpED runs Superflip only once, then each cycle deblurs the previous map with "
+            "1st Superflip, then SharpED (beta) runs Superflip only once, then each cycle deblurs the previous map with "
             "SharpED, calculates phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map "
             "from |Fobs| + phi_calc for the next cycle's SharpED input. "
-            "SharpED (beta) skips Superflip entirely: cycle 1 starts from |Fobs| with independent random phases instead."
+            "SharpED (experimental) skips Superflip entirely: cycle 1 starts from |Fobs| with independent random phases instead."
         )
         workflow_form.addRow("", recycle_note)
 
         optional_form = add_form_group(workflow_tab, "Optional processing")
+        self._optional_form = optional_form
         superflip_stages_label = QLabel("Superflip cycle")
         superflip_stages_label.setObjectName("inlineGroupTitle")
         optional_form.addRow(superflip_stages_label)
@@ -5599,8 +5623,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(optional_form, "run_edma_recycle_final", "Run EDMA on final map", False, align_with_fields=True)
         workflow_tab.addStretch(1)
 
-        # Basic / Model
-        model_output_tab = add_settings_tab("Model")
+        # Basic / Model and output
+        model_output_tab = add_settings_tab("Model and output")
         reference_form = add_form_group(model_output_tab, "Reference and initial model")
         self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
         self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
@@ -5805,6 +5829,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         token_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
         token_link_row.addStretch(1)
         sharped_api_form.addRow("", token_link_row)
+
+        interface_form = add_form_group(setup_tab, "Interface")
+        self._add_checkbox(interface_form, "show_beta_features", "Show beta and experimental features in settings", False, align_with_fields=True)
+        try:
+            self.inputs["show_beta_features"].toggled.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        interface_form.addRow("", self._secondary_help(
+            "Off by default: beta and experimental Phasing methods (and settings that only apply to them) are hidden "
+            "entirely, not just disabled. Enable this to make them selectable again."
+        ))
         setup_tab.addStretch(1)
 
         # Advanced / Superflip
@@ -6281,9 +6316,39 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.metadata_summary_panel.setVisible(False)
             self._set_metadata_error(exc)
 
+    def _apply_beta_feature_visibility(self) -> None:
+        """Beta/experimental Phasing method options are hidden entirely (not just
+        disabled) unless 'Show beta and experimental features' is checked on
+        Advanced -> Setup, per the user's request that they not appear at all by default."""
+        show_beta = self._check_value("show_beta_features") if "show_beta_features" in self.inputs else False
+        combo = self.inputs.get("reconstruction_mode")
+        if isinstance(combo, QComboBox):
+            full_items = ["Superflip", "1st Superflip, then SharpED (beta)", "SharpED (experimental)"]
+            allowed = full_items if show_beta else full_items[:1]
+            existing = [combo.itemText(i) for i in range(combo.count())]
+            if existing != allowed:
+                current = combo.currentText()
+                combo.blockSignals(True)
+                combo.clear()
+                combo.addItems(allowed)
+                combo.setCurrentText(current if current in allowed else "Superflip")
+                combo.blockSignals(False)
+        symmetrize_widget = self.inputs.get("symmetrize_deblurred_map")
+        if isinstance(symmetrize_widget, QCheckBox):
+            if hasattr(self, "_optional_form"):
+                try:
+                    self._optional_form.setRowVisible(symmetrize_widget, show_beta)
+                except Exception:
+                    symmetrize_widget.setVisible(show_beta)
+            else:
+                symmetrize_widget.setVisible(show_beta)
+            if not show_beta and symmetrize_widget.isChecked():
+                symmetrize_widget.setChecked(False)
+
     def _sync_workflow_widgets(self) -> None:
         if self._configuration_locked:
             return
+        self._apply_beta_feature_visibility()
         reconstruction_mode = normalize_reconstruction_mode(self._combo_value("reconstruction_mode") if "reconstruction_mode" in self.inputs else "")
         is_recycling = reconstruction_mode != "superflip"
         for key, tooltip_when_disabled in (
@@ -6316,16 +6381,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         warning_widget = getattr(self, "reconstruction_mode_warning", None)
         if warning_widget is not None:
             if reconstruction_mode == "sharped_recycle":
-                warning_widget.setText("<b>Beta feature</b><br>1st Superflip, then SharpED is experimental.")
-                warning_widget.setVisible(True)
+                warning_widget.setText(
+                    "<b>Beta feature</b><br>1st Superflip, then SharpED does not work well with some models."
+                )
+                show_warning = True
             elif reconstruction_mode == "sharped_recycle_random":
                 warning_widget.setText(
-                    "<b>Beta feature</b><br>SharpED (random-phase start) is experimental. It can take extremely "
-                    "long to converge, even for simple structures (hundreds of cycles), and convergence is not guaranteed."
+                    "<b>Experimental feature</b><br>SharpED (random-phase start) does not work well yet and is "
+                    "intended for development, not production use. It can take extremely long to converge, even "
+                    "for simple structures (hundreds of cycles), and convergence is not guaranteed."
                 )
-                warning_widget.setVisible(True)
+                show_warning = True
             else:
-                warning_widget.setVisible(False)
+                show_warning = False
+            warning_widget.setVisible(show_warning)
+            if hasattr(self, "_workflow_form"):
+                try:
+                    self._workflow_form.setRowVisible(warning_widget, show_warning)
+                except Exception:
+                    pass
         if is_recycling:
             self._update_plot()
             return
@@ -7731,7 +7805,41 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if widget is not None:
                 self._set_widget_value_from_string(widget, value)
 
-        if "atomic" in name:
+        if "recommended" in name:
+            set_value("cycles", "5")
+            set_value("reconstruction_mode", "Superflip")
+            set_value("modelfile_source", "deblurred_xplor")
+            set_value("damping_factor", "0.3")
+            set_value("exclude_atoms", "none")
+            set_value("run_edma_superflip", "true")
+            set_value("run_sharped", "true")
+            set_value("symmetrize_deblurred_map", "false")
+            set_value("run_edma_deblurred", "true")
+            set_value("run_edma_recycle_final", "false")
+            set_value("sharped_model", "koala 2.0")
+            set_value("perform_algorithm", "CF")
+            set_value("maxcycles", "2000")
+            set_value("repeatmode", "10")
+            set_value("randomseed", "AUTO")
+            set_value("delta", "AUTO")
+            set_value("weakratio", "0.000")
+            set_value("biso", "0.000")
+            set_value("polish", "true")
+            set_value("voxel", "")
+            set_value("bestdensities_count", "1")
+            set_value("bestdensities_metric", "rvalue")
+            set_value("bestdensities_symmetry", "true")
+            set_value("searchsymmetry", "average")
+            set_value("derivesymmetry", "yes")
+            set_value("resolution_d_min", "0.0")
+            set_value("normalize", "atoms")
+            set_value("nresshells", "100")
+            set_value("missing", "bound 0.5 2.5")
+            set_value("electrons", "")
+            set_value("plimit_superflip", "0.5")
+            set_value("plimit_deblur", "0.5")
+            set_value("map_export_format", "xplor")
+        elif "atomic" in name:
             set_value("reflection_data_mode", REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA)
             set_value("modelfile_source", "deblurred_xplor")
             set_value("plimit_superflip", "3.0")
@@ -8291,6 +8399,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("FOM", [r.superflip_fom for r in self.results], True, "#2264b8", "P", "--"),
             ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
             ("Deblur RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
+            ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
         ]
         plotted = 0
         for label, values, higher_is_better, color, marker, linestyle in series:
@@ -8978,8 +9087,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sharped_elements = cfg.sharped_elements.strip() or sharped_elements_from_composition(ref_ctx.composition)
             reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
             if reconstruction_mode != "superflip":
-                variant = "SharpED, random-phase start, no Superflip" if reconstruction_mode == "sharped_recycle_random" else "1st Superflip, then SharpED"
-                self.log(f"Phasing method: {variant} (beta)", level="STEP")
+                variant = "SharpED (experimental), random-phase start, no Superflip" if reconstruction_mode == "sharped_recycle_random" else "1st Superflip, then SharpED (beta)"
+                self.log(f"Phasing method: {variant}", level="STEP")
             requested_modelfile_mode = normalize_modelfile_source(cfg.modelfile_source)
             modelfile_mode = requested_modelfile_mode
             use_xplor_modelfile = modelfile_mode in {"superflip_xplor", "deblurred_xplor"}
@@ -9535,6 +9644,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             composed_map = cycle_dir / f"cycle_{cyc:03d}_fobs_phicalc.xplor"
             compose_fobs_phicalc_map(composed_map, reflections, configured_data_mode, deblur_map, f"cycle_{cyc:03d}_fobs_phicalc", ref_ctx.spacegroup, self.log)
             self.log(f"Composed |Fobs|+phi_calc map: {composed_map}")
+            map_correlation = xplor_map_correlation(composed_map, input_map)
+            if map_correlation is not None:
+                self.log(f"[Cycle {cyc}] Map correlation vs. previous cycle: {map_correlation:.4f}", level="DETAIL")
             state.recycle_map = composed_map
 
             is_final_cycle = cyc == cfg.cycles
@@ -9576,6 +9688,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 superflip_fom=sf_log_metrics.fom,
                 superflip_success_rate=sf_log_metrics.success_rate,
                 superflip_mean_cycles=sf_log_metrics.mean_cycles,
+                recycle_map_correlation=map_correlation,
             )
             all_results.append(result)
             write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)

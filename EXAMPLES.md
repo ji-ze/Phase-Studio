@@ -97,7 +97,7 @@ Use the exact option labels shown by the current GUI.
 ### Procedure
 
 1. Load the Jana `.inflip` project in **Basic → Input**.
-2. Select a dedicated working directory on **Basic → Model**.
+2. Select a dedicated working directory on **Basic → Model and output**.
 3. Verify the active crystallographic metadata.
 4. Click **Validate HKL** and **Analyze completeness**.
 5. Open **Basic → Workflow**.
@@ -109,7 +109,7 @@ Use the exact option labels shown by the current GUI.
 11. Optionally enable Superflip symmetry averaging of the processed map.
 12. Enable EDMA on the processed map if structural peaks are required from that branch.
 13. Open **Advanced → Setup** and confirm the SharpED server URL and API token.
-14. Open **Basic → Model** and refresh the available SharpED model list if required.
+14. Open **Basic → Model and output** and refresh the available SharpED model list if required.
 15. Open **Advanced → SharpED**. Leave **Elements** blank to use automatic composition-derived elements, or enter them explicitly.
 16. Review network and upload settings on the same page.
 17. Run the pipeline.
@@ -168,7 +168,7 @@ Run Phase Studio without a Jana `.inflip` file using external reflection data an
 3. Choose the HKL file.
 4. Select the correct HKL data format.
 5. Select **Reference file** as the metadata source.
-6. Open **Basic → Model** and choose the reference structure.
+6. Open **Basic → Model and output** and choose the reference structure.
 7. Back on **Basic → Input**, verify that the unit cell, space group, and composition were read correctly.
 8. Click **Validate HKL**.
 9. Confirm the reflection interpretation and unique-reflection count.
@@ -247,11 +247,11 @@ Manual metadata must describe the same crystallographic setting as the reflectio
 
 ---
 
-## Example 5 — SharpED phase recycling instead of iterative Superflip (beta)
+## Example 5 — SharpED phase recycling instead of iterative Superflip (beta/experimental)
 
 ### Goal
 
-Use one of the beta SharpED phase-recycling phasing methods: Superflip runs at most once, and later cycles recompose a map from the observed |Fobs| and phases calculated (by FFT, expanded over the full space-group symmetry) from each cycle's SharpED-deblurred map, instead of re-running Superflip every cycle.
+Use one of the SharpED phase-recycling phasing methods: Superflip runs at most once, and later cycles recompose a map from the observed |Fobs| and phases calculated (by FFT, expanded over the full space-group symmetry) from each cycle's SharpED-deblurred map, instead of re-running Superflip every cycle.
 
 ### Use this workflow when
 
@@ -262,25 +262,27 @@ Use one of the beta SharpED phase-recycling phasing methods: Superflip runs at m
 
 | Setting | Example value |
 |---|---|
-| Phasing method | "1st Superflip, then SharpED" (or "SharpED" for the random-phase-start variant) |
-| Cycles | 10–20 to start; "SharpED" (random-phase start) may need hundreds |
+| Show beta and experimental features in settings | Enabled (**Advanced → Setup**) — both methods below are hidden until this is checked |
+| Phasing method | "1st Superflip, then SharpED (beta)" (or "SharpED (experimental)" for the random-phase-start variant) |
+| Cycles | 10–20 to start; "SharpED (experimental)" (random-phase start) may need hundreds |
 | Run EDMA on final map | Enabled, if a peak-picked structure is wanted at the end |
 
 ### Procedure
 
-1. Open **Basic → Workflow**.
-2. Set **Phasing method** to "1st Superflip, then SharpED" to seed cycle 1 with a single Superflip run, or "SharpED" to skip Superflip entirely and start from random phases.
-3. Set **Cycles** to the number of recycling rounds desired.
-4. Enable **Run EDMA on final map** if a peak-picked CIF/XYZ/PDB structure should be exported from the last cycle's map.
-5. Confirm the SharpED server URL and API token on **Advanced → Setup**.
-6. Click **Run phasing**.
-7. Inspect the per-cycle Superflip map (or random-phase start map) and the recomposed |Fobs|+phi_calc map for each cycle in the working directory.
+1. Open **Advanced → Setup** and check **Show beta and experimental features in settings**, otherwise these Phasing methods are not selectable.
+2. Open **Basic → Workflow**.
+3. Set **Phasing method** to "1st Superflip, then SharpED (beta)" to seed cycle 1 with a single Superflip run, or "SharpED (experimental)" to skip Superflip entirely and start from random phases.
+4. Set **Cycles** to the number of recycling rounds desired.
+5. Enable **Run EDMA on final map** if a peak-picked CIF/XYZ/PDB structure should be exported from the last cycle's map.
+6. Confirm the SharpED server URL and API token on **Advanced → Setup**.
+7. Click **Run phasing**.
+8. Inspect the per-cycle Superflip map (or random-phase start map) and the recomposed |Fobs|+phi_calc map for each cycle in the working directory. The convergence graph's **Map correlation** series (correlation between each cycle's recomposed map and the previous one) is the main per-cycle progress signal for these methods.
 
 ### Important check
 
 **Next-cycle model**, **XPLOR damping**, **Symmetrize processed map with Superflip (beta)**, and the per-cycle EDMA checkboxes are ignored by these methods and are disabled in the GUI while one is selected.
 
-Both methods are **beta features**. "SharpED" (random-phase start) in particular can take extremely long to converge, even for simple structures (hundreds of cycles), and convergence is not guaranteed.
+"1st Superflip, then SharpED" is a **beta feature** that does not work well with some models. "SharpED" (random-phase start) is an **experimental feature** that does not work well yet and is intended for development, not production use — it can take extremely long to converge, even for simple structures (hundreds of cycles), and convergence is not guaranteed.
 
 ---
 
