@@ -88,6 +88,9 @@ The left side contains:
   - EDMA
   - SharpED
   - Map feedback
+  - Help
+
+Both **Help** tabs are self-contained in-app reference material: Basic → Help covers the Basic tabs (getting-started guide, Input/Workflow/Output field reference, About); Advanced → Help covers the Advanced tabs (Setup/Superflip/EDMA/SharpED/Map feedback field reference, plus the raw Superflip keyword reference). Each has its own CONTENTS navigation row and does not duplicate the other's sections.
 
 ### 3.2 Run dashboard
 

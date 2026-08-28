@@ -5154,21 +5154,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 label.setToolTip(tooltip)
 
     def _open_help_section(self, anchor: str) -> None:
-        if not all(hasattr(self, name) for name in ("category_tabs", "basic_tabs", "help_scroll")):
+        if not hasattr(self, "category_tabs"):
             return
-        self.category_tabs.setCurrentIndex(0)
+        is_advanced = self.help_section_advanced.get(str(anchor), False)
+        tabs = self.advanced_tabs if is_advanced else self.basic_tabs
+        scroll = getattr(self, "help_scroll_advanced" if is_advanced else "help_scroll_basic", None)
+        if scroll is None:
+            return
+        self.category_tabs.setCurrentIndex(1 if is_advanced else 0)
         help_index = next(
-            (index for index in range(self.basic_tabs.count()) if self.basic_tabs.tabText(index) == "Help"),
+            (index for index in range(tabs.count()) if tabs.tabText(index) == "Help"),
             -1,
         )
         if help_index < 0:
             return
-        self.basic_tabs.setCurrentIndex(help_index)
+        tabs.setCurrentIndex(help_index)
         target = self.help_sections.get(str(anchor))
         if target is None:
-            self.help_scroll.verticalScrollBar().setValue(0)
+            scroll.verticalScrollBar().setValue(0)
             return
-        QTimer.singleShot(0, lambda section=target: self.help_scroll.ensureWidgetVisible(section, 0, 8))
+        QTimer.singleShot(0, lambda section=target, sc=scroll: sc.ensureWidgetVisible(section, 0, 8))
 
     def _context_help_anchor(self) -> Optional[str]:
         if not hasattr(self, "category_tabs"):
@@ -5176,17 +5181,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if self.category_tabs.currentIndex() == 0:
             name = self.basic_tabs.tabText(self.basic_tabs.currentIndex())
             return {
-                "Input": "setup",
-                "Workflow": "setup",
-                "Output": "setup",
+                "Input": "input",
+                "Workflow": "workflow",
+                "Output": "output",
                 "Help": None,
             }.get(name, "setup")
         name = self.advanced_tabs.tabText(self.advanced_tabs.currentIndex())
         return {
+            "Setup": "adv_setup",
             "Superflip": "superflip",
             "EDMA": "edma",
+            "SharpED": "sharped",
             "Map feedback": "map_feedback",
-        }.get(name, "setup")
+            "Help": None,
+        }.get(name, "adv_setup")
 
     def _open_context_help(self) -> None:
         anchor = self._context_help_anchor()
@@ -5295,6 +5303,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.basic_tabs = basic_tabs
         self.advanced_tabs = advanced_tabs
         self.help_sections: Dict[str, QWidget] = {}
+        self.help_section_advanced: Dict[str, bool] = {}
         left_layout.addWidget(category_tabs, 1)
 
         def add_settings_tab(name: str, advanced: bool = False) -> QVBoxLayout:
@@ -5317,9 +5326,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             layout.setSpacing(CONFIG_MAJOR_SECTION_SPACING)
             scroll.setWidget(page)
             (advanced_tabs if advanced else basic_tabs).addTab(scroll, name)
-            if name == "Help" and not advanced:
-                self.help_scroll = scroll
-                self.help_page = page
+            if name == "Help":
+                if advanced:
+                    self.help_scroll_advanced = scroll
+                    self.help_page_advanced = page
+                else:
+                    self.help_scroll_basic = scroll
+                    self.help_page_basic = page
             return layout
 
         def add_form_group(page_layout: QVBoxLayout, title: str, guide_anchor: Optional[str] = None) -> QFormLayout:
@@ -5403,7 +5416,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             section_layout.addWidget(label)
             return section, section_layout
 
-        def add_help_section(page_layout: QVBoxLayout, anchor: str, title: str, body_html: str) -> QVBoxLayout:
+        def add_help_section(page_layout: QVBoxLayout, anchor: str, title: str, body_html: str, *, advanced: bool = False) -> QVBoxLayout:
             box = QGroupBox(title)
             box.setObjectName("helpSection")
             box_layout = QVBoxLayout(box)
@@ -5418,6 +5431,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             box_layout.addWidget(body)
             page_layout.addWidget(box)
             self.help_sections[anchor] = box
+            self.help_section_advanced[anchor] = advanced
             return box_layout
 
         def add_help_callout(section_layout: QVBoxLayout, label: str, text: str) -> None:
@@ -5427,14 +5441,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             callout.setWordWrap(True)
             section_layout.addWidget(callout)
 
-        def add_back_to_contents(section_layout: QVBoxLayout) -> None:
+        def add_back_to_contents(section_layout: QVBoxLayout, *, advanced: bool = False) -> None:
             row = QHBoxLayout()
             row.addStretch(1)
             link = QToolButton()
             link.setObjectName("helpNavLink")
             link.setText("↑ Contents")
             link.setCursor(Qt.PointingHandCursor)
-            link.clicked.connect(lambda: self.help_scroll.verticalScrollBar().setValue(0))
+            scroll_attr = "help_scroll_advanced" if advanced else "help_scroll_basic"
+            link.clicked.connect(lambda: getattr(self, scroll_attr).verticalScrollBar().setValue(0))
             row.addWidget(link)
             section_layout.addLayout(row)
 
@@ -5710,15 +5725,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         output_tab.addStretch(1)
 
         # Basic / Help
-        reference_tab = add_settings_tab("Help")
-        contents_row = QHBoxLayout()
-        contents_row.setSpacing(4)
-        contents_label = QLabel("CONTENTS")
-        contents_label.setObjectName("helpContentsLabel")
-        contents_row.addWidget(contents_label)
+        basic_help_tab = add_settings_tab("Help")
+        basic_contents_row = QHBoxLayout()
+        basic_contents_row.setSpacing(4)
+        basic_contents_label = QLabel("CONTENTS")
+        basic_contents_label.setObjectName("helpContentsLabel")
+        basic_contents_row.addWidget(basic_contents_label)
         for link_text, anchor in (
-            ("Setup", "setup"), ("Superflip", "superflip"), ("EDMA", "edma"),
-            ("SharpED", "sharped"), ("Feedback", "map_feedback"), ("About", "about"),
+            ("Setup", "setup"), ("Input", "input"), ("Workflow", "workflow"),
+            ("Output", "output"), ("About", "about"),
         ):
             link = QToolButton()
             link.setObjectName("helpNavLink")
@@ -5726,10 +5741,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
             link.setCursor(Qt.PointingHandCursor)
             link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
-            contents_row.addWidget(link)
-        contents_row.addStretch(1)
-        reference_tab.addLayout(contents_row)
-        setup_help_layout = add_help_section(reference_tab, "setup", "Systematic setup guide", """
+            basic_contents_row.addWidget(link)
+        basic_contents_row.addStretch(1)
+        basic_help_tab.addLayout(basic_contents_row)
+        setup_help_layout = add_help_section(basic_help_tab, "setup", "Systematic setup guide", """
             <h3>1. Select the input</h3>
             <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
             <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
@@ -5755,84 +5770,57 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         setup_help_layout.insertWidget(1, WorkflowDiagram())
         add_help_callout(setup_help_layout, "Tip", "Validate the reflection interpretation and review the selected preset values before starting a run.")
         add_back_to_contents(setup_help_layout)
-        superflip_help_layout = add_help_section(reference_tab, "superflip", "Superflip guide", """
-            <h3>What Superflip does</h3>
-            <p>Superflip is the density-reconstruction and phase-retrieval stage. Phase Studio prepares reflections, crystallographic metadata and input, executes Superflip, then uses its density map for direct inspection, EDMA peak extraction, SharpED processing and iterative feedback.</p>
-            <h3>1. Verify reflection input</h3>
-            <p>Select the correct HKL format, run <b>Validate HKL</b> and <b>Analyze completeness</b>, and apply an optional d<sub>min</sub> cutoff only when appropriate. Do not compensate for incorrectly parsed input by tuning reconstruction parameters.</p>
-            <h3>2. Choose the algorithm</h3>
-            <p><b>Algorithm</b> maps to Superflip's <code>perform</code> keyword. <b>CF</b> is the normal charge-flipping workflow used by the presets. AAR, lde, general, fourier and symmetry are advanced modes.</p>
-            <h3>3. Control iteration and repeated solutions</h3>
-            <p><b>Maximum iterations</b> limits one Superflip run. <b>Repeat mode</b> controls repeated solution attempts, and <b>Random seed</b> initializes random numbers. Delta, Weak ratio and Biso are advanced parameters normally left at preset/default values. <b>Enable final polish</b> activates the final polishing option when supported.</p>
-            <h3>4. Select the best density</h3>
-            <p><b>Best densities: count</b> controls retained solutions. <b>Best-density metric</b> selects by rvalue, peakiness, symmetry or reference. <b>Use symmetry for best densities</b> adds the symmetry modifier.</p>
-            <h3>5. Reflection handling</h3>
-            <p><b>Minimum value/&sigma;</b> removes weak observations before writing the reflection block. <b>d<sub>min</sub> cutoff</b> is optional; 0 keeps all reflections. Normalization and Resolution shells control optional normalization. Missing-reflection keyword and Electrons expose the corresponding advanced Superflip options.</p>
-            <h3>6. Symmetry</h3>
-            <p><b>Search symmetry</b> maps to <code>searchsymmetry</code>; <b>Derive symmetry</b> maps to <code>derivesymmetry</code>.</p>
-            <h3>7. Output</h3>
-            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Basic &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020. Map format's <b>HKL reflections with phases</b> and <b>ShelX (fcf)</b> options save the observed reflections instead of an extra density map.</p>
-            <h3>8. Advanced keywords</h3>
-            <p><b>Extra Superflip keywords</b> lets expert users append documented keywords without dedicated GUI controls.</p>
+        input_help_layout = add_help_section(basic_help_tab, "input", "Input reference", """
+            <h3>Data input</h3>
+            <p><b>Input mode</b> chooses the reflection source: <b>Jana .inflip</b>, <b>Jana .inflip with overrides</b>, or <b>External HKL</b>. In Jana modes, the .inflip file's fbegin/endf block is the default HKL source and its cell/space-group/composition keywords can provide crystallographic metadata; External mode uses reflection data loaded independently of Jana2020 and requires metadata from another source.</p>
+            <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
+            <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
+            <p><b>HKL format</b> is the exact column order of the reflection data. <code>set from inflip</code> imports the format from Jana; the other modes accept intensity or amplitude followed by sigma, optionally with a phase column in degrees before sigma.</p>
+            <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
+            <h3>Crystal metadata</h3>
+            <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
+            <p>When <b>Manual</b> is selected: <b>a, b, c</b> (&Aring;) and <b>alpha, beta, gamma</b> (&deg;) are the unit-cell parameters; <b>Number</b> (1-230) or <b>Symbol</b> identifies the space group; <b>Composition</b> uses Superflip syntax, for example <code>Ag196 S108 O40 B1000</code>.</p>
+            <h3>Reference and initial model</h3>
+            <p><b>Reference file</b> is an optional external reference: CIF/INS/RES files can supply metadata and atom sites used for comparison metrics; Jana/XPLOR/CCP4 maps can serve as a Superflip reference density (referencefile keyword), which also anchors the reciprocal-space origin from cycle 2 onward when no explicit reference is chosen.</p>
+            <p><b>Initial model (cycle 1)</b> is an optional external density or structure model that seeds the first Superflip cycle. Supported inputs are XPLOR, CCP4 and CIF.</p>
         """)
-        add_help_callout(superflip_help_layout, "Starting point", "CF and the supplied preset values are initial settings only; choose parameters appropriate for the dataset and intended method.")
-        add_back_to_contents(superflip_help_layout)
-        edma_help_layout = add_help_section(reference_tab, "edma", "EDMA guide", """
-            <h3>What EDMA does in Phase Studio</h3>
-            <p>EDMA extracts density maxima from an XPLOR map. Phase Studio uses these maxima to create structural models and exports, independently for the raw Superflip map and the SharpED/deblurred map when enabled.</p>
-            <h3>1. Peak thresholds</h3>
-            <p><b>Superflip threshold</b> and <b>SharpED threshold (&sigma;)</b> are multipliers of the corresponding map sigma. Phase Studio converts each multiplier to EDMA's absolute <code>plimit</code> for that map. A higher threshold is stricter; a lower threshold includes more maxima. There is no universal correct threshold.</p>
-            <h3>2. Maxima selection and atom count</h3>
-            <p><b>Maxima selection = all</b> requests all maxima above plimit. Advanced users may enter more restrictive documented EDMA syntax. <b>Atom-count mode = composition</b> requests counts consistent with chemical composition.</p>
-            <h3>3. Symmetry and peak positions</h3>
-            <p><b>Merge distance</b> is the tolerance used when reducing maxima to one representative per full space-group orbit for the CIF asymmetric unit. <b>Full-cell = no</b> requests symmetry-independent maxima; yes lists the full unit cell. <b>Use center of charge</b> refines positions to the charge center of each density basin.</p>
-            <h3>4. Chemical filtering</h3>
-            <p><b>Charge limit</b> is the minimum integrated charge for exported maxima. <b>Charge-list threshold</b> supplies EDMA's <code>chlimlist</code> setting for atom-count/composition-based export.</p>
-            <h3>5. Additional keywords</h3>
-            <p><b>Extra EDMA keywords</b> appends documented EDMA options not represented by dedicated controls.</p>
+        add_back_to_contents(input_help_layout)
+        workflow_help_layout = add_help_section(basic_help_tab, "workflow", "Workflow reference", """
+            <h3>Reconstruction</h3>
+            <p><b>Starting preset</b> applies a bundle of starting values in one step; every value stays individually editable afterward. <b>Recommended</b> (default) is a general-purpose baseline matching the built-in defaults; the MOF/small-molecule/inorganic presets tune values for a specific sample type; <b>custom</b> applies nothing.</p>
+            <p><b>Cycles</b> is the number of iterative Superflip &rarr; EDMA &rarr; SharpED &rarr; EDMA cycles to run. The effective count is forced to 1 when Next-cycle model is <code>none</code>.</p>
+            <p><b>Phasing method</b> chooses the reconstruction algorithm:</p>
+            <ul>
+                <li><b>Superflip</b> (default) &mdash; the standard charge-flipping cycle: Superflip runs every cycle, seeded by Next-cycle model.</li>
+                <li><b>1st Superflip, then SharpED (beta)</b> &mdash; Superflip runs only once, on cycle 1. Every following cycle deblurs the previous map with SharpED, calculates phases by FFT from that deblurred map for every measured reflection (expanded over the full space-group symmetry), and recomposes a map from |Fobs| with those phases for the next cycle. Does not work well with some models.</li>
+                <li><b>SharpED (experimental)</b> &mdash; the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases. Not production-ready; can take hundreds of cycles to converge, if it converges at all.</li>
+            </ul>
+            <p>Both recycling methods are hidden unless <b>Show beta and experimental features in settings</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize processed map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. The convergence graph adds a <b>Map correlation</b> series for these methods (each cycle's recomposed map compared with the previous cycle's).</p>
+            <p><b>Next-cycle model</b> (Superflip phasing method only) is the authoritative source for cycle 2 onward: <code>none</code> forces a one-cycle run; <code>superflip_xplor</code> cycles without SharpED deblurring; <code>deblurred_xplor</code> uses the SharpED-processed XPLOR map; <code>deblurred_edma_cif</code> uses the EDMA structure extracted from the deblurred map and ignores XPLOR damping.</p>
+            <p><b>XPLOR damping (1/x)</b> (Superflip phasing method, XPLOR next-cycle models only) is the inverse damping factor: 1.0 means no damping, 0.5 is equivalent to the previous factor 2.0, 0.25 to factor 4.0.</p>
+            <p><b>Excluded atoms</b> removes selected atom labels from CIF modelfiles before the next Superflip cycle (comma/semicolon/whitespace-separated); it does not apply to XPLOR-only model paths.</p>
+            <h3>SharpED model</h3>
+            <p><b>Model</b> is the SharpED server model name sent with every deblurring request; <b>Refresh models</b> fetches the current list from the configured server and updates this selector. Server URL and API token are on Advanced &rarr; Setup; elements, output resolution and network/upload settings are on Advanced &rarr; SharpED.</p>
+            <h3>Optional processing</h3>
+            <p>Under <b>Superflip cycle</b> (used when Phasing method is Superflip):</p>
+            <ul>
+                <li><b>Run EDMA on Superflip map</b> &mdash; peak-search the raw Superflip XPLOR map and export CIF/XYZ/PDB.</li>
+                <li><b>Run SharpED deblurring</b> &mdash; process the Superflip map with the SharpED server. If disabled, the "deblurred" map used downstream is just a copy of the Superflip map.</li>
+                <li><b>Symmetrize processed map with Superflip (beta)</b> &mdash; after deblurring, run Superflip in symmetry mode (no charge flipping) with the deblurred map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
+                <li><b>Run EDMA on processed map</b> &mdash; peak-search the deblurred (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
+            </ul>
+            <p>Under <b>Phase-recycling methods</b> (used by the two beta/experimental Phasing methods):</p>
+            <ul><li><b>Run EDMA on final map</b> &mdash; run EDMA once, on the last cycle's recomposed |Fobs|+phi_calc map.</li></ul>
         """)
-        add_help_callout(edma_help_layout, "Important", "Select each EDMA threshold for its map and assess the resulting peaks; there is no universal threshold.")
-        add_back_to_contents(edma_help_layout)
-        sharped_help_layout = add_help_section(reference_tab, "sharped", "SharpED guide", """
-            <h3>What SharpED does</h3>
-            <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
-            <p><b>Model</b> selection is on the Basic &rarr; Workflow page. Server connection, elements, output resolution and upload/network settings are on Advanced &rarr; Setup (server URL/API token) and Advanced &rarr; SharpED (everything else below).</p>
-            <h3>1. Server connection</h3>
-            <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
-            <h3>2. Model and elements</h3>
-            <p><b>Model</b> is sent to the server; <b>Refresh models</b> updates the selector. <code>default</code> uses the server default. <b>Elements</b> are sent to SharpED; when blank, Phase Studio derives unique non-hydrogen elements from the reference composition.</p>
-            <h3>3. Output resolution</h3>
-            <p><b>Output resolution</b> is sent to the server as the <code>outres</code> field.</p>
-            <h3>4. Upload and network</h3>
-            <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check. Confirm the actual limit with the configured service. HTTP timeout covers model queries, upload, status and download. Polling interval sets the delay between status checks. Maximum polls limits those checks; <b>-1</b> means no fixed polling limit.</p>
-            <h3>5. SharpED in iterative workflows</h3>
-            <p><b>Run SharpED deblurring</b> enables server processing. <b>Symmetrize processed map with Superflip</b> performs symmetry averaging, not another charge-flipping reconstruction. <code>deblurred_xplor</code> feeds the processed map into the next cycle; <code>deblurred_edma_cif</code> feeds its EDMA structure.</p>
-            <h3>6. Phase-recycling methods (beta/experimental)</h3>
-            <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features in settings</b> on Advanced &rarr; Setup to select them. Neither is production-ready.</p>
+        add_back_to_contents(workflow_help_layout)
+        output_help_layout = add_help_section(basic_help_tab, "output", "Output reference", """
+            <h3>Output</h3>
+            <p><b>Working directory</b> is where Phase Studio writes generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics. Use a dedicated directory per run when reproducibility matters.</p>
+            <p><b>Map format</b> adds one extra saved output on top of the XPLOR map that is always kept internally for EDMA, SharpED and Superflip: <code>ccp4</code> or <code>jana</code> save an extra CCP4 map or Jana m80/m81 density+reflection files; <b>HKL reflections with phases</b> and <b>ShelX (fcf)</b> instead save the observed reflections (h k l, intensity/F&sup2;, sigma, phase &mdash; phase is 0 unless supplied by the selected HKL mode) as a standardized text file or a ShelX/Jana-compatible .fcf file, in place of an extra density map.</p>
+            <p><b>Structure format</b> adds one extra saved structure format on top of the CIF that is always kept internally for metrics and next-cycle modelfiles: <code>xyz</code> or <code>pdb</code>.</p>
         """)
-        sharped_link_row = QHBoxLayout()
-        sharped_link_row.addWidget(QLabel("SharpED project and API token"))
-        sharped_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
-        sharped_link_row.addStretch(1)
-        sharped_help_layout.addLayout(sharped_link_row)
-        add_help_callout(sharped_help_layout, "Important", "SharpED processing requires a valid API token and network access.")
-        add_back_to_contents(sharped_help_layout)
-        map_feedback_layout = add_help_section(reference_tab, "map_feedback", "Map feedback", """
-            <h3>Missing-reflection completion</h3>
-            <p>Completion starts from the selected completed cycle. <b>Added limit (%)</b> caps generated missing reflections relative to the current reflection count.</p>
-            <h3>Intensity correction</h3>
-            <p>Correction starts from the selected completed cycle. Damping 0 keeps observed values; 1 replaces them with scaled map-derived values. <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections; 0 applies it to all non-zero reflections.</p>
-        """)
-        add_help_callout(map_feedback_layout, "Note", "Cycle 0 disables the corresponding feedback mechanism.")
-        add_back_to_contents(map_feedback_layout)
-        keyword_html = html.escape(SUPERFLIP_KEYWORD_REFERENCE).replace("\n", "<br>")
-        add_help_section(
-            reference_tab,
-            "keyword_reference",
-            "Advanced Superflip keyword reference",
-            f'<p style="font-family: Cascadia Mono, Consolas, monospace; color: #2264b8;">{keyword_html}</p>',
-        )
-        about_layout = add_help_section(reference_tab, "about", "About Phase Studio", """
+        add_back_to_contents(output_help_layout)
+        about_layout = add_help_section(basic_help_tab, "about", "About Phase Studio", """
             <h2>Phase Studio</h2>
             <p>Phase Studio is a crystallographic reconstruction workflow integrating Superflip, SharpED and EDMA with Jana2020-oriented workflows.</p>
             <h3>Developed at</h3>
@@ -5855,7 +5843,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             resource_row.addStretch(1)
             about_layout.addLayout(resource_row)
         add_back_to_contents(about_layout)
-        reference_tab.addStretch(1)
+        basic_help_tab.addStretch(1)
 
         # Advanced / Setup
         setup_tab = add_settings_tab("Setup", advanced=True)
@@ -6006,6 +5994,114 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply below value/σ", 0.0, 0.0, 1000.0, 0.5, 3)
         intensity_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables correction; value/σ = 0 applies to all non-zero reflections."))
         feedback_tab.addStretch(1)
+
+        # Advanced / Help
+        advanced_help_tab = add_settings_tab("Help", advanced=True)
+        advanced_contents_row = QHBoxLayout()
+        advanced_contents_row.setSpacing(4)
+        advanced_contents_label = QLabel("CONTENTS")
+        advanced_contents_label.setObjectName("helpContentsLabel")
+        advanced_contents_row.addWidget(advanced_contents_label)
+        for link_text, anchor in (
+            ("Setup", "adv_setup"), ("Superflip", "superflip"), ("EDMA", "edma"),
+            ("SharpED", "sharped"), ("Feedback", "map_feedback"), ("Keywords", "keyword_reference"),
+        ):
+            link = QToolButton()
+            link.setObjectName("helpNavLink")
+            link.setText(link_text)
+            link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            link.setCursor(Qt.PointingHandCursor)
+            link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
+            advanced_contents_row.addWidget(link)
+        advanced_contents_row.addStretch(1)
+        advanced_help_tab.addLayout(advanced_contents_row)
+        adv_setup_help_layout = add_help_section(advanced_help_tab, "adv_setup", "Setup reference", """
+            <h3>External programs</h3>
+            <p><b>Superflip executable</b> is the absolute path to the original Jana2020 Superflip executable (default <code>C:\\Jana2020\\SUPERFLIP\\superflip_original.exe</code>). Do not select the Phase Studio wrapper named superflip.exe.</p>
+            <p><b>EDMA executable</b> is the absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps (default <code>C:\\Jana2020\\SUPERFLIP\\EDMA.exe</code>).</p>
+            <h3>SharpED API</h3>
+            <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> is sent as <code>Authorization: Bearer</code> during upload/status/download requests and is never written to logs or error messages.</p>
+            <h3>Interface</h3>
+            <p><b>Show beta and experimental features in settings</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize processed map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
+        """, advanced=True)
+        add_back_to_contents(adv_setup_help_layout, advanced=True)
+        superflip_help_layout = add_help_section(advanced_help_tab, "superflip", "Superflip guide", """
+            <h3>What Superflip does</h3>
+            <p>Superflip is the density-reconstruction and phase-retrieval stage. Phase Studio prepares reflections, crystallographic metadata and input, executes Superflip, then uses its density map for direct inspection, EDMA peak extraction, SharpED processing and iterative feedback.</p>
+            <h3>Calculation</h3>
+            <p><b>Algorithm</b> maps to Superflip's <code>perform</code> keyword; common values are <code>CF</code> (normal charge-flipping, used by the presets), <code>lde</code>, <code>general</code>, <code>fourier</code> and <code>symmetry</code>; <code>AAR</code> is kept for executables that support it.</p>
+            <p><b>Maximum iterations</b> limits one Superflip run. <b>Repeat mode</b> controls repeated independent attempts and convergence sampling. <b>Random seed</b> initializes random numbers; use a fixed value for reproducibility or Superflip's automatic syntax. <b>Delta</b> (<code>AUTO</code> lets Superflip estimate the flip threshold), <b>Weak ratio</b> and <b>Biso</b> (overall isotropic B-factor used to sharpen the map; 0.000 disables sharpening) are advanced parameters normally left at preset/default values. <b>Enable final polish</b> adds <code>polish yes</code>, activating Superflip's final polishing stage when supported.</p>
+            <h3>Density / solution selection</h3>
+            <p><b>Voxel grid</b> is the Superflip <code>voxel</code> keyword: blank omits it; three integers set an explicit grid; <code>AUTO</code> computes a 0.2 &Aring; grid from the unit cell.</p>
+            <p><b>Best densities: count</b> and <b>Best-density metric</b> are the two arguments of <code>bestdensities</code> &mdash; how many best density maps Superflip keeps, and whether it selects by rvalue, peakiness, symmetry or reference. <b>Use symmetry for best densities</b> adds the <code>symmetry</code> modifier, biasing selection toward symmetry-consistent solutions.</p>
+            <p><b>Search symmetry</b> maps to <code>searchsymmetry</code> (<code>no</code>, <code>shift</code> or <code>average</code>). <b>Derive symmetry</b> maps to <code>derivesymmetry</code> (commonly <code>yes</code>, <code>no</code> or <code>use</code>, depending on the Superflip version).</p>
+            <h3>Reflection handling</h3>
+            <p><b>Minimum value/&sigma;</b> filters weak observed reflections before writing the Superflip HKL block. <b>d<sub>min</sub> cutoff</b> is an optional resolution cutoff in &Aring;ngstrom; 0 keeps all reflections. <b>Normalization</b> is an optional reflection-normalization keyword (<code>none</code> is the safest default for the Windows executable). <b>Resolution shells</b> is used only when a supported normalization keyword is written. <b>Missing-reflection keyword</b> supplies Superflip's <code>missing</code> line, for example bounds for missing reflections. <b>Electrons</b> is Superflip's <code>electrons</code> keyword; leave blank to omit it.</p>
+            <h3>Reference density</h3>
+            <p>The <code>referencefile</code> keyword is written automatically: from the selected Reference file when one is chosen on Basic &rarr; Input, or from cycle 2 onward when none is selected, using the previous cycle's EDMA CIF (or its XPLOR map if EDMA produced no usable peaks). This keeps Superflip's origin fixed in reciprocal space between cycles. <code>dataitemwidths</code> is unnecessary and not exposed, because Phase Studio always writes whitespace-separated fbegin/endf records.</p>
+            <h3>Additional keywords</h3>
+            <p><b>Extra Superflip keywords</b> lets expert users append documented keyword lines, inserted before <code>fbegin</code>, that are not represented by a dedicated control. <b>Load settings from .inflip</b> reads Superflip keyword settings from an existing .inflip file (reflection data blocks are ignored).</p>
+            <h3>Output</h3>
+            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Basic &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020.</p>
+        """, advanced=True)
+        add_help_callout(superflip_help_layout, "Starting point", "CF and the supplied preset values are initial settings only; choose parameters appropriate for the dataset and intended method.")
+        add_back_to_contents(superflip_help_layout, advanced=True)
+        edma_help_layout = add_help_section(advanced_help_tab, "edma", "EDMA guide", """
+            <h3>What EDMA does in Phase Studio</h3>
+            <p>EDMA extracts density maxima from an XPLOR map. Phase Studio uses these maxima to create structural models and exports, independently for the raw Superflip map and the SharpED/deblurred map when enabled.</p>
+            <h3>Peak extraction</h3>
+            <p><b>Superflip threshold</b> and <b>SharpED threshold (&sigma;)</b> are multipliers of the corresponding map sigma; Phase Studio converts each multiplier to EDMA's absolute <code>plimit</code> for that map. A higher threshold is stricter; a lower threshold includes more maxima &mdash; there is no universal correct value. <b>Maxima selection = all</b> requests all maxima above plimit; advanced users may enter more restrictive documented EDMA syntax. <b>Atom-count mode = composition</b> requests atom counts consistent with the chemical composition.</p>
+            <h3>Symmetry and peak positions</h3>
+            <p><b>Merge distance</b> is the tolerance (&Aring;) used when reducing maxima to one representative per full space-group orbit for the CIF asymmetric unit. <b>Full-cell = no</b> requests symmetry-independent maxima when the supplied symmetry is correct; <code>yes</code> lists the full unit cell. <b>Use center of charge</b> refines peak positions to the center of charge of each density basin before export.</p>
+            <h3>Chemical filtering</h3>
+            <p><b>Charge limit</b> is the minimum integrated charge for exported maxima; useful for suppressing noise peaks in rough or over-sharpened maps. <b>Charge-list threshold</b> supplies EDMA's <code>chlimlist</code> setting, for example <code>0.0057 relative</code>, used together with atom-count/composition-based export.</p>
+            <h3>Additional keywords</h3>
+            <p><b>Extra EDMA keywords</b> appends documented EDMA options not represented by a dedicated control.</p>
+        """, advanced=True)
+        add_help_callout(edma_help_layout, "Important", "Select each EDMA threshold for its map and assess the resulting peaks; there is no universal threshold.")
+        add_back_to_contents(edma_help_layout, advanced=True)
+        sharped_help_layout = add_help_section(advanced_help_tab, "sharped", "SharpED guide", """
+            <h3>What SharpED does</h3>
+            <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
+            <p><b>Model</b> selection is on Basic &rarr; Workflow. Server connection is on Advanced &rarr; Setup (server URL/API token); elements, output resolution and upload/network settings are on Advanced &rarr; SharpED (everything else below).</p>
+            <h3>1. Server connection</h3>
+            <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
+            <h3>2. Model and elements</h3>
+            <p><b>Model</b> (Basic &rarr; Workflow) is sent to the server; <b>Refresh models</b> updates the selector; <code>default</code> uses the server default. <b>Elements</b> are sent to SharpED; when blank, Phase Studio derives unique non-hydrogen elements from the reference composition.</p>
+            <h3>3. Output resolution</h3>
+            <p><b>Output resolution</b> is sent to the server as the <code>outres</code> field.</p>
+            <h3>4. Upload and network</h3>
+            <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check (confirm the actual limit with the configured service). If Voxel grid is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits under this limit. <b>HTTP timeout</b> covers model queries, upload, status and download requests and is enforced at 600 seconds minimum. <b>Polling interval</b> sets the delay between status checks. <b>Maximum polls</b> limits those checks; <b>-1</b> means no fixed polling limit.</p>
+            <h3>5. SharpED in iterative workflows</h3>
+            <p><b>Run SharpED deblurring</b> (Basic &rarr; Workflow &rarr; Optional processing) enables server processing; if disabled, the "deblurred" map used downstream is a copy of the Superflip map. <b>Symmetrize processed map with Superflip (beta)</b> performs symmetry averaging, not another charge-flipping reconstruction. <code>deblurred_xplor</code> (Next-cycle model) feeds the processed map into the next cycle; <code>deblurred_edma_cif</code> feeds its EDMA structure instead.</p>
+            <h3>6. Phase-recycling methods (beta/experimental)</h3>
+            <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features in settings</b> (Advanced &rarr; Setup) to select them. Neither is production-ready.</p>
+        """, advanced=True)
+        sharped_link_row = QHBoxLayout()
+        sharped_link_row.addWidget(QLabel("SharpED project and API token"))
+        sharped_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
+        sharped_link_row.addStretch(1)
+        sharped_help_layout.addLayout(sharped_link_row)
+        add_help_callout(sharped_help_layout, "Important", "SharpED processing requires a valid API token and network access.")
+        add_back_to_contents(sharped_help_layout, advanced=True)
+        map_feedback_layout = add_help_section(advanced_help_tab, "map_feedback", "Map feedback", """
+            <h3>Missing-reflection completion</h3>
+            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle; 0 disables missing-reflection completion. <b>Added limit (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
+            <h3>Intensity correction</h3>
+            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle; 0 disables intensity correction. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
+        """, advanced=True)
+        add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles. Cycle 0 disables the corresponding mechanism.")
+        add_back_to_contents(map_feedback_layout, advanced=True)
+        keyword_html = html.escape(SUPERFLIP_KEYWORD_REFERENCE).replace("\n", "<br>")
+        keyword_help_layout = add_help_section(
+            advanced_help_tab,
+            "keyword_reference",
+            "Advanced Superflip keyword reference",
+            f'<p style="font-family: Cascadia Mono, Consolas, monospace; color: #2264b8;">{keyword_html}</p>',
+            advanced=True,
+        )
+        add_back_to_contents(keyword_help_layout, advanced=True)
+        advanced_help_tab.addStretch(1)
 
         # Persistent actions
         primary_buttons = QHBoxLayout()
