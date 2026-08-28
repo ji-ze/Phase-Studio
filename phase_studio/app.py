@@ -556,7 +556,6 @@ class RunConfig:
     perform_algorithm: str
     map_export_format: str
     structure_export_format: str
-    export_standard_hkl: bool
     referencefile_mode: str
     voxel: str
     bestdensities_count: int
@@ -2242,6 +2241,43 @@ def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Refle
             n += 1
     return n
 
+def write_shelx_fcf(out_fcf: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0, data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None, resolution_d_min: float = 0.0) -> int:
+    """ShelX/Jana-compatible .fcf reflection list (CIF loop, list format 4: h k l
+    F_squared_meas sigma F_squared_calc phase_calc). F_squared_calc is not available
+    before reconstruction, so it is written equal to F_squared_meas as a neutral
+    placeholder; phase is 0 unless supplied by the selected HKL mode -- same
+    convention as the standardized HKL export this is a sibling of."""
+    out_fcf.parent.mkdir(parents=True, exist_ok=True)
+    mode = normalize_reflection_data_mode(data_mode)
+    d_min = max(0.0, float(resolution_d_min or 0.0))
+    n = 0
+    with out_fcf.open("w", encoding="utf-8") as f:
+        f.write(f"# Phase Studio {__version__} ShelX-compatible FCF export (list format 4).\n")
+        f.write("# F_squared_calc is written equal to F_squared_meas as a placeholder (not yet reconstructed);\n")
+        f.write("# phase_calc is 0.0 unless supplied by the selected HKL mode.\n")
+        f.write("loop_\n")
+        for tag in ("_refln_index_h", "_refln_index_k", "_refln_index_l", "_refln_F_squared_meas",
+                    "_refln_F_squared_sigma", "_refln_F_squared_calc", "_refln_phase_calc"):
+            f.write(f"{tag}\n")
+        for r in reflections:
+            if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
+                if float(r.value) / float(r.sigma) < i_over_sigma_min:
+                    continue
+            if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
+                continue
+            value = max(0.0, float(r.value))
+            if not reflection_mode_is_amplitude(mode):
+                intensity = value
+                sigma_i = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
+            else:
+                intensity = value * value
+                sigma_f = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
+                sigma_i = 2.0 * value * sigma_f
+            phase = 0.0 if r.phase is None else float(r.phase)
+            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {intensity:14.7f} {phase:12.6f}\n")
+            n += 1
+    return n
+
 def reflection_value_as_intensity(reflection: Reflection, data_mode: str) -> float:
     value = max(0.0, float(reflection.value))
     if reflection_mode_is_amplitude(data_mode):
@@ -3410,11 +3446,20 @@ def normalize_output_format(value: str) -> str:
 
 def normalize_map_export_format(value: str) -> str:
     """XPLOR is always produced internally for EDMA/SharpED/Superflip; this picks one
-    additional saved map format on top of it."""
+    additional saved output on top of it: an extra density map format (ccp4/jana), or
+    a reflection-file export in place of an extra density map (hkl_phases/shelx_fcf)."""
     fmt = str(value or "xplor").strip().lower()
-    if fmt in {"xplor", "ccp4", "jana"}:
-        return fmt
-    return "xplor"
+    exact = {
+        "xplor": "xplor",
+        "ccp4": "ccp4",
+        "jana": "jana",
+        "hkl_phases": "hkl_phases",
+        "hkl reflections with phases": "hkl_phases",
+        "shelx_fcf": "shelx_fcf",
+        "shelx (fcf)": "shelx_fcf",
+        "fcf": "shelx_fcf",
+    }
+    return exact.get(fmt, "xplor")
 
 def normalize_structure_export_format(value: str) -> str:
     """CIF is always produced internally as the EDMA structure/modelfile; this picks
@@ -4699,9 +4744,8 @@ INPUT_TOOLTIPS = {
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
-    "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files.",
+    "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save the observed reflections as h k l I/F² sigma phase(deg) -- phase is 0 unless supplied by the selected input mode -- in the standardized text format or a ShelX/Jana-compatible .fcf file.",
     "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
-    "export_standard_hkl": "Write a standardized observed-reflection export with h k l I sigma(I) phase(deg). Phase is 0 unless supplied by the selected input mode.",
     "referencefile_mode": "Internal automatic setting derived from External reference file. Phase Studio writes only referencefile and lets Superflip infer jana/xplor/ccp4/cif from the filename.",
     "voxel": "Superflip voxel grid. The default omit/blank skips the keyword. Use three integers, for example 180 80 160, or AUTO to compute a 0.2 A grid from the unit cell.",
     "bestdensities_count": "First argument of bestdensities: how many best density maps Superflip keeps.",
@@ -5033,6 +5077,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
         w.setMinimumContentsLength(18)
         w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        # Editable-but-read-only so every dropdown's popup uses the same, more compact
+        # row height as the SharpED model selector, instead of Qt's taller default for
+        # non-editable combo boxes (was visibly inconsistent from one dropdown to another).
+        w.setEditable(True)
+        w.lineEdit().setReadOnly(True)
+        w.lineEdit().setCursor(Qt.CursorShape.ArrowCursor)
+        w.setInsertPolicy(QComboBox.NoInsert)
         idx = w.findText(default)
         if idx >= 0:
             w.setCurrentIndex(idx)
@@ -5127,7 +5178,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return {
                 "Input": "setup",
                 "Workflow": "setup",
-                "Model and output": "setup",
+                "Output": "setup",
                 "Help": None,
             }.get(name, "setup")
         name = self.advanced_tabs.tabText(self.advanced_tabs.currentIndex())
@@ -5563,6 +5614,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metadata_error_layout.addWidget(self.metadata_error_details_btn, 0, Qt.AlignTop)
         self.metadata_error_panel.setVisible(False)
         metadata_form.addRow("", self.metadata_error_panel)
+
+        reference_form = add_form_group(input_tab, "Reference and initial model")
+        self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
+        self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
+        self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
+        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
         input_tab.addStretch(1)
 
         # Basic / Workflow
@@ -5608,6 +5665,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         workflow_form.addRow("", recycle_note)
 
+        model_form = add_form_group(workflow_tab, "SharpED model", "sharped")
+        self._add_combo(model_form, "sharped_model", "Model", ["koala 2.0"], "koala 2.0")
+        try:
+            self.inputs["sharped_model"].lineEdit().setReadOnly(False)  # type: ignore[attr-defined]
+            self.inputs["sharped_model"].lineEdit().setCursor(Qt.CursorShape.IBeamCursor)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.refresh_models_btn = QPushButton("Refresh models")
+        self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
+        self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
+        model_form.addRow("", self.refresh_models_btn)
+        model_form.addRow("", self._secondary_help(
+            "Server URL and API token are in Advanced → Setup. Elements, output resolution and transfer/network settings are in Advanced → SharpED."
+        ))
+
         optional_form = add_form_group(workflow_tab, "Optional processing")
         self._optional_form = optional_form
         superflip_stages_label = QLabel("Superflip cycle")
@@ -5623,38 +5695,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(optional_form, "run_edma_recycle_final", "Run EDMA on final map", False, align_with_fields=True)
         workflow_tab.addStretch(1)
 
-        # Basic / Model and output
-        model_output_tab = add_settings_tab("Model and output")
-        reference_form = add_form_group(model_output_tab, "Reference and initial model")
-        self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
-        self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
-        self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
-        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
-
-        model_form = add_form_group(model_output_tab, "SharpED model", "sharped")
-        self._add_combo(model_form, "sharped_model", "Model", ["koala 2.0"], "koala 2.0")
-        try:
-            self.inputs["sharped_model"].setEditable(True)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        self.refresh_models_btn = QPushButton("Refresh models")
-        self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
-        self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
-        model_form.addRow("", self.refresh_models_btn)
-        model_form.addRow("", self._secondary_help(
-            "Server URL and API token are in Advanced → Setup. Elements, output resolution and transfer/network settings are in Advanced → SharpED."
-        ))
-
-        output_form = add_form_group(model_output_tab, "Output")
+        # Basic / Output
+        output_tab = add_settings_tab("Output")
+        output_form = add_form_group(output_tab, "Output")
         self._add_path(output_form, "work_dir", "Working directory", str(cwd / "iterative_superflip_qt_run"), "dir")
-        self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana"], "xplor")
+        self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana", "HKL reflections with phases", "ShelX (fcf)"], "xplor")
         self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
-        self._add_checkbox(output_form, "export_standard_hkl", "Save standardized HKL (I/σ/phase)", False, align_with_fields=True)
         output_form.addRow("", self._secondary_help(
-            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles; "
-            "Map/Structure format add one extra saved format on top for external use or Jana2020."
+            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles; ccp4/jana add one "
+            "extra saved density map on top for external use or Jana2020. HKL reflections with phases and ShelX (fcf) "
+            "instead save the observed reflections (phase is 0 unless supplied by the selected HKL mode) in place of "
+            "an extra density map."
         ))
-        model_output_tab.addStretch(1)
+        output_tab.addStretch(1)
 
         # Basic / Help
         reference_tab = add_settings_tab("Help")
@@ -5681,13 +5734,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
             <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
             <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
-            <h3>2. Choose a workflow preset</h3>
-            <p>Use a preset as a starting point, then adjust advanced parameters only when necessary.</p>
-            <ul><li><b>small molecule:</b> settings intended as a starting point for small-molecule data.</li>
+            <h3>2. Choose a starting preset</h3>
+            <p><b>Starting preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
+            <ul><li><b>Recommended</b> (default): a general-purpose baseline that matches the built-in defaults.</li>
+            <li><b>small molecule:</b> settings intended as a starting point for small-molecule data.</li>
             <li><b>inorganic:</b> settings intended as a starting point for inorganic materials.</li>
             <li><b>MOF atomic resolution:</b> settings intended as a starting point for atomic-resolution framework data.</li>
-            <li><b>MOF medium resolution:</b> settings intended as a starting point for medium-resolution framework data.</li></ul>
+            <li><b>MOF medium resolution:</b> settings intended as a starting point for medium-resolution framework data.</li>
+            <li><b>custom:</b> applies nothing; a placeholder for manually configured values.</li></ul>
             <p>Applying a preset changes multiple controls. Review the resulting values and adapt them to the dataset; a preset is not a universal scientific recommendation.</p>
+            <p><b>Phasing method</b> defaults to the standard Superflip cycle. Two SharpED phase-recycling methods, one beta and one experimental, are hidden by default; enable <b>Show beta and experimental features in settings</b> on Advanced &rarr; Setup to make them selectable.</p>
             <h3>3. Configure the iterative workflow</h3>
             <p><b>observed reflections &rarr; Superflip &rarr; XPLOR map &rarr; EDMA and/or SharpED &rarr; deblurred XPLOR &rarr; EDMA &rarr; next-cycle model</b></p>
             <p>The exact branches depend on <b>Basic &rarr; Workflow &rarr; Optional processing</b>. The next-cycle source can be Superflip XPLOR, SharpED/deblurred XPLOR, deblurred EDMA CIF, or <b>none</b>. Selecting none forces a one-cycle run.</p>
@@ -5715,7 +5771,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>6. Symmetry</h3>
             <p><b>Search symmetry</b> maps to <code>searchsymmetry</code>; <b>Derive symmetry</b> maps to <code>derivesymmetry</code>.</p>
             <h3>7. Output</h3>
-            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Model &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020.</p>
+            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Basic &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020. Map format's <b>HKL reflections with phases</b> and <b>ShelX (fcf)</b> options save the observed reflections instead of an extra density map.</p>
             <h3>8. Advanced keywords</h3>
             <p><b>Extra Superflip keywords</b> lets expert users append documented keywords without dedicated GUI controls.</p>
         """)
@@ -5740,7 +5796,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_help_layout = add_help_section(reference_tab, "sharped", "SharpED guide", """
             <h3>What SharpED does</h3>
             <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
-            <p><b>Model</b> selection stays on the Basic &rarr; Model page. Server connection, elements, output resolution and upload/network settings are on Advanced &rarr; Setup (server URL/API token) and Advanced &rarr; SharpED (everything else below).</p>
+            <p><b>Model</b> selection is on the Basic &rarr; Workflow page. Server connection, elements, output resolution and upload/network settings are on Advanced &rarr; Setup (server URL/API token) and Advanced &rarr; SharpED (everything else below).</p>
             <h3>1. Server connection</h3>
             <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
             <h3>2. Model and elements</h3>
@@ -5751,6 +5807,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check. Confirm the actual limit with the configured service. HTTP timeout covers model queries, upload, status and download. Polling interval sets the delay between status checks. Maximum polls limits those checks; <b>-1</b> means no fixed polling limit.</p>
             <h3>5. SharpED in iterative workflows</h3>
             <p><b>Run SharpED deblurring</b> enables server processing. <b>Symmetrize processed map with Superflip</b> performs symmetry averaging, not another charge-flipping reconstruction. <code>deblurred_xplor</code> feeds the processed map into the next cycle; <code>deblurred_edma_cif</code> feeds its EDMA structure.</p>
+            <h3>6. Phase-recycling methods (beta/experimental)</h3>
+            <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features in settings</b> on Advanced &rarr; Setup to select them. Neither is production-ready.</p>
         """)
         sharped_link_row = QHBoxLayout()
         sharped_link_row.addWidget(QLabel("SharpED project and API token"))
@@ -6566,9 +6624,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if self.settings.value("inputs/map_export_format", None) is None:
             legacy_jana = str(self.settings.value("inputs/export_superflip_jana", "")).strip().lower() in {"1", "true", "yes", "on"}
             legacy_ccp4 = str(self.settings.value("inputs/export_superflip_ccp4", "")).strip().lower() in {"1", "true", "yes", "on"}
+            legacy_standard_hkl = str(self.settings.value("inputs/export_standard_hkl", "")).strip().lower() in {"1", "true", "yes", "on"}
             map_format_widget = self.inputs.get("map_export_format")
-            if map_format_widget is not None and (legacy_jana or legacy_ccp4):
-                self._set_widget_value_from_string(map_format_widget, "jana" if legacy_jana else "ccp4")
+            if map_format_widget is not None and (legacy_jana or legacy_ccp4 or legacy_standard_hkl):
+                self._set_widget_value_from_string(
+                    map_format_widget,
+                    "jana" if legacy_jana else ("ccp4" if legacy_ccp4 else "HKL reflections with phases"),
+                )
         legacy_reference_xplor = self.settings.value("inputs/superflip_reference_xplor", None)
         legacy_superflip_referencefile = self.settings.value("inputs/superflip_referencefile", None)
         referencefile_widget = self.inputs.get("reference_cif")
@@ -8816,7 +8878,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             perform_algorithm=self._combo_value("perform_algorithm") or "CF",
             map_export_format=normalize_map_export_format(self._combo_value("map_export_format")),
             structure_export_format=normalize_structure_export_format(self._combo_value("structure_export_format")),
-            export_standard_hkl=self._check_value("export_standard_hkl"),
             referencefile_mode=referencefile_mode,
             voxel=self._line_value("voxel"),
             bestdensities_count=self._spin_value("bestdensities_count"),
@@ -9137,8 +9198,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(
                 "Output formats: "
                 f"map={normalize_map_export_format(cfg.map_export_format)}, "
-                f"structure={normalize_structure_export_format(cfg.structure_export_format)}, "
-                f"standard HKL={'yes' if cfg.export_standard_hkl else 'no'}"
+                f"structure={normalize_structure_export_format(cfg.structure_export_format)}"
             )
             self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, Superflip symmetry/deblurred={'yes' if cfg.symmetrize_deblurred_map else 'no'}, EDMA/deblurred={'yes' if cfg.run_edma_deblurred else 'no'}")
             if cfg.first_cycle_modelfile is not None:
@@ -9196,10 +9256,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 n_written = write_observed_reflections(observed_hkl, refl, cfg.i_over_sigma_min, data_mode=data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 observed_hkls[data_mode] = observed_hkl
                 self.log(f"Prepared HKL for {data_mode}: {observed_hkl} ({n_written} reflections)")
-            if cfg.export_standard_hkl:
+            export_fmt = normalize_map_export_format(cfg.map_export_format)
+            if export_fmt == "hkl_phases":
                 standard_hkl = cfg.work_dir / "observed_unique_standardized_I_sigma_phase.hkl"
                 n_standard = write_standardized_hkl_with_phase(standard_hkl, refl, cfg.i_over_sigma_min, configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 self.log(f"Standardized HKL export: {standard_hkl} ({n_standard} reflections)")
+            elif export_fmt == "shelx_fcf":
+                standard_fcf = cfg.work_dir / "observed_unique.fcf"
+                n_standard = write_shelx_fcf(standard_fcf, refl, cfg.i_over_sigma_min, configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
+                self.log(f"ShelX FCF export: {standard_fcf} ({n_standard} reflections)")
             state = PipelineState(
                 cfg=cfg,
                 ref_ctx=ref_ctx,

@@ -97,7 +97,7 @@ Use the exact option labels shown by the current GUI.
 ### Procedure
 
 1. Load the Jana `.inflip` project in **Basic → Input**.
-2. Select a dedicated working directory on **Basic → Model and output**.
+2. Select a dedicated working directory on **Basic → Output**.
 3. Verify the active crystallographic metadata.
 4. Click **Validate HKL** and **Analyze completeness**.
 5. Open **Basic → Workflow**.
@@ -109,7 +109,7 @@ Use the exact option labels shown by the current GUI.
 11. Optionally enable Superflip symmetry averaging of the processed map.
 12. Enable EDMA on the processed map if structural peaks are required from that branch.
 13. Open **Advanced → Setup** and confirm the SharpED server URL and API token.
-14. Open **Basic → Model and output** and refresh the available SharpED model list if required.
+14. Open **Basic → Workflow** and refresh the available SharpED model list if required.
 15. Open **Advanced → SharpED**. Leave **Elements** blank to use automatic composition-derived elements, or enter them explicitly.
 16. Review network and upload settings on the same page.
 17. Run the pipeline.
@@ -168,8 +168,8 @@ Run Phase Studio without a Jana `.inflip` file using external reflection data an
 3. Choose the HKL file.
 4. Select the correct HKL data format.
 5. Select **Reference file** as the metadata source.
-6. Open **Basic → Model and output** and choose the reference structure.
-7. Back on **Basic → Input**, verify that the unit cell, space group, and composition were read correctly.
+6. Choose the reference structure under **Reference and initial model** on the same **Basic → Input** page.
+7. Verify that the unit cell, space group, and composition were read correctly.
 8. Click **Validate HKL**.
 9. Confirm the reflection interpretation and unique-reflection count.
 10. Click **Analyze completeness**.
