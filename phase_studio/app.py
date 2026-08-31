@@ -6804,10 +6804,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         jana_enabled = mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} or self._metadata_source_value() == METADATA_SOURCE_INFLIP
         override_enabled = mode == INPUT_MODE_INFLIP_OVERRIDES
         external_enabled = mode == INPUT_MODE_EXTERNAL
+        reflection_data_mode_enabled = mode != INPUT_MODE_INFLIP
         for key, enabled in (
             ("jana_inflip", jana_enabled),
             ("hkl", override_enabled or external_enabled),
             ("reference_cif", True),
+            ("reflection_data_mode", reflection_data_mode_enabled),
         ):
             widget = self.inputs.get(key)
             if hasattr(widget, "setEnabled"):
@@ -6815,6 +6817,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             label = self.input_labels.get(key)
             if label is not None:
                 label.setEnabled(bool(enabled))
+        reflection_data_mode_widget = self.inputs.get("reflection_data_mode")
+        if hasattr(reflection_data_mode_widget, "setToolTip"):
+            reflection_data_mode_widget.setToolTip(  # type: ignore[attr-defined]
+                "Ignored: the dataformat keyword is read directly from the Jana .inflip file."
+                if not reflection_data_mode_enabled else INPUT_TOOLTIPS.get("reflection_data_mode", "")
+            )
         self._sync_metadata_source_widgets()
 
     def _set_configuration_locked(self, locked: bool) -> None:
