@@ -4894,7 +4894,7 @@ INPUT_TOOLTIPS = {
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
-    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip (omit+rfree) and Deblurred (omit+rfree) convergence tabs' omit-map correlation series (full map vs. omit map). Roughly doubles Superflip/SharpED time per cycle.",
+    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip (omit+rfree) and SharpED (omit+rfree) convergence tabs' omit-map correlation series (full map vs. omit map). Roughly doubles Superflip/SharpED time per cycle.",
     "compute_omit_rfree": "Also compute R_free from the excluded 5% of reflections: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Requires 'Compute omit maps'.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
     "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save, for each cycle's Superflip map, the observed |Fobs|/intensity together with phases (and, for ShelX, calculated F squared) read by FFT from that map, in a standardized text file or a ShelX/Jana-compatible .fcf file.",
@@ -5969,7 +5969,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 <li><b>Run SharpED deblurring</b> &mdash; process the Superflip map with the SharpED server. If disabled, the "deblurred" map used downstream is just a copy of the Superflip map.</li>
                 <li><b>Symmetrize processed map with Superflip (beta)</b> &mdash; after deblurring, run Superflip in symmetry mode (no charge flipping) with the deblurred map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
                 <li><b>Run EDMA on processed map</b> &mdash; peak-search the deblurred (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
-                <li><b>Compute omit maps (exclude 5% of reflections)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip (omit+rfree)</b> and <b>Deblurred (omit+rfree)</b> convergence tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
+                <li><b>Compute omit maps (exclude 5% of reflections)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip (omit+rfree)</b> and <b>SharpED (omit+rfree)</b> convergence tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
                 <li><b>Compute R_free from excluded 5%</b> &mdash; requires the option above; also computes R_free (the crystallographic R-factor between the excluded reflections' observed |F| and |F| calculated by FFT from the omit map) for both the omit-map series.</li>
             </ul>
             <p>Under <b>Phase-recycling methods</b> (used by the two beta/experimental Phasing methods):</p>
@@ -6384,15 +6384,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "appear when one is provided."
             ),
             "deblur": (
-                "Deblur RMSD compares directly against a supplied reference structure, so it only appears when one "
-                "is provided."
+                "SharpED RMSD compares directly against a supplied reference structure, so it only appears when one "
+                "is provided. Map correlation only appears for the SharpED phase-recycling phasing methods."
             ),
         }
         for key, title in (
             ("superflip", "Superflip"),
-            ("deblur", "Deblurred"),
+            ("deblur", "SharpED"),
             ("superflip_omit", "Superflip (omit+rfree)"),
-            ("deblur_omit", "Deblurred (omit+rfree)"),
+            ("deblur_omit", "SharpED (omit+rfree)"),
         ):
             page = QWidget()
             page_layout = QVBoxLayout(page)
@@ -8852,7 +8852,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
         ])
         self._render_metrics_tab("deblur", [
-            ("Deblur RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
+            ("SharpED RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
             ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
         ])
         self._render_metrics_tab("superflip_omit", [

@@ -555,9 +555,9 @@ Phase Studio does not need to fabricate time-based percentages when no reliable 
 The convergence panel has four tabs, each scaled and colored independently:
 
 - **Superflip** — metrics tied to the raw Superflip map: Reference match, Superflip RMSD. Both compare directly against a supplied reference structure, so this tab is empty when none is provided. (Superflip's own internal R/Peaks/FOM/Symmetry indicators were removed from this graph: cycle 1 normally runs ab initio while cycle 2 onward is seeded by the selected next-cycle model, so they are not a like-for-like series across that transition, and `bestdensities`/`repeatmode` selects the best of several stochastic attempts each cycle, adding further cycle-to-cycle fluctuation unrelated to genuine quality change. They remain in `metrics.csv` and the execution log.)
-- **Deblurred** — metrics tied to the SharpED-processed map: Deblur RMSD (also reference-dependent), and Map correlation (SharpED phase-recycling methods only, correlating each cycle's recomposed map with the previous cycle's).
-- **Superflip (omit+rfree)** — only populated when **Compute omit maps** is enabled: Omit map correlation (the raw Superflip map compared with the same cycle's omit map) and, if **Compute R_free from excluded 5%** is also enabled, R_free for the raw Superflip map.
-- **Deblurred (omit+rfree)** — the same two metrics for the SharpED-processed map and its omit-map counterpart.
+- **SharpED** (formerly labeled "Deblurred") — metrics tied to the SharpED-processed map: SharpED RMSD (also reference-dependent), and Map correlation (SharpED phase-recycling methods only, correlating each cycle's recomposed map with the previous cycle's — always empty for the standard Superflip phasing method).
+- **Superflip (omit+rfree)** — only populated when **Compute omit maps** is enabled: Omit map correlation (the raw Superflip map compared with the same cycle's omit map) and, if **Compute R_free from excluded 5%** is also enabled, R_free for the raw Superflip map. Needs no reference structure.
+- **SharpED (omit+rfree)** — the same two metrics for the SharpED-processed map and its omit-map counterpart. Needs no reference structure.
 
 Every series is normalized per tab to a 0 (worst) to 1 (best) scale for comparison; the underlying values are in `metrics.csv`.
 
