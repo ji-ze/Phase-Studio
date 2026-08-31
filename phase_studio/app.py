@@ -2801,9 +2801,64 @@ def assign_powder_overlap_groups(
             groups[key] = group_id
     return groups
 
+def write_powder_repartitioning_log(
+    log_path: Path, cell: gemmi.UnitCell, by_group: Dict[int, List[Reflection]],
+    before: Sequence[Reflection], after: Sequence[Reflection], wavelength: float, separation_factor: float,
+    mix: float, fallback_groups: int, feedback_map: Path,
+) -> None:
+    """Write a human-readable per-cycle log of powder overlap repartitioning:
+    how many groups were considered, their average size, and the observed
+    (before) vs. redistributed (after) values for the first 3 groups sorted by
+    d-spacing, largest d (lowest 2theta) first."""
+    before_by_key = {(int(r.h), int(r.k), int(r.l)): r for r in before}
+    after_by_key = {(int(r.h), int(r.k), int(r.l)): r for r in after}
+    group_count = len(by_group)
+    total_members = sum(len(members) for members in by_group.values())
+    avg_size = total_members / group_count if group_count else 0.0
+
+    def group_d(members: List[Reflection]) -> float:
+        ds = [reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) for r in members]
+        ds = [d for d in ds if d and math.isfinite(d)]
+        return sum(ds) / len(ds) if ds else 0.0
+
+    ordered_groups = sorted(by_group.items(), key=lambda item: group_d(item[1]), reverse=True)
+    lines: List[str] = [
+        "Powder overlap repartitioning",
+        f"feedback map: {feedback_map}",
+        f"wavelength={wavelength:g} A  separation_factor={separation_factor:g}  mix={mix:g}",
+        f"groups considered: {group_count}",
+        f"average group size: {avg_size:.2f} reflections/group ({total_members} reflections total in groups)",
+        f"map-fallback groups (no usable map signal): {fallback_groups}",
+        "",
+        f"First {min(3, len(ordered_groups))} groups by d-spacing (largest d / lowest 2theta first):",
+    ]
+    for gid, members in ordered_groups[:3]:
+        d_avg = group_d(members)
+        lines.append(f"\nGroup {gid}  (avg d = {d_avg:.4f} A, {len(members)} reflections):")
+        lines.append(f"  {'h':>4} {'k':>4} {'l':>4} {'d (A)':>9} {'FWHM':>9} {'before':>14} {'after':>14}")
+        sorted_members = sorted(
+            members, key=lambda r: reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)), reverse=True
+        )
+        for r in sorted_members:
+            key = (int(r.h), int(r.k), int(r.l))
+            d_value = reflection_d_spacing(cell, *key)
+            before_r = before_by_key.get(key)
+            after_r = after_by_key.get(key)
+            fwhm_text = f"{before_r.sigma:.4f}" if before_r is not None and before_r.sigma is not None else "n/a"
+            before_value = before_r.value if before_r is not None else float("nan")
+            after_value = after_r.value if after_r is not None else float("nan")
+            lines.append(
+                f"  {r.h:>4} {r.k:>4} {r.l:>4} {d_value:>9.4f} {fwhm_text:>9} {before_value:>14.4f} {after_value:>14.4f}"
+            )
+    try:
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
 def redistribute_overlap_reflections(
     reflections: Sequence[Reflection], data_mode: str, feedback_map: Path, cell: gemmi.UnitCell,
     wavelength: float, separation_factor: float, mix: float, log: Callable[[str], None],
+    log_path: Optional[Path] = None,
 ) -> List[Reflection]:
     """Powder overlap repartitioning: within each 2theta/FWHM overlap group (see
     assign_powder_overlap_groups), keep the observed group-total intensity fixed
@@ -2812,12 +2867,27 @@ def redistribute_overlap_reflections(
     (mix=0 keeps the observed split, mix=1 uses the map split entirely) --
     the same technique used to deblur overlapping reflections in Le Bail powder
     extractions before phase retrieval. Groups where the map has no usable
-    signal for any member fall back to the observed split unchanged."""
+    signal for any member fall back to the observed split unchanged.
+
+    When log_path is given, a detailed per-cycle log is written there: how many
+    groups were considered, their average size, and the observed (before) vs.
+    redistributed (after) values for the first 3 groups sorted by d-spacing."""
     mode = normalize_reflection_data_mode(data_mode)
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     groups = assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
     if not groups:
         log("Overlap repartitioning: no overlap groups found (need at least two reflections with FWHM and accessible 2theta).")
+        if log_path is not None:
+            try:
+                log_path.write_text(
+                    "Powder overlap repartitioning\n"
+                    f"feedback map: {feedback_map}\n"
+                    f"wavelength={wavelength:g} A  separation_factor={separation_factor:g}  mix={mix:g}\n"
+                    "No overlap groups found (need at least two reflections with FWHM and accessible 2theta).\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
         return current
     by_group: Dict[int, List[Reflection]] = {}
     for r in current:
@@ -2856,6 +2926,11 @@ def redistribute_overlap_reflections(
         f"map_fallback_groups={fallback_groups}, mix={mix:g}, wavelength={wavelength:g} A, "
         f"separation_factor={separation_factor:g}"
     )
+    if log_path is not None:
+        write_powder_repartitioning_log(
+            log_path, cell, by_group, current, updated, wavelength, separation_factor, mix, fallback_groups, feedback_map,
+        )
+        log(f"Overlap repartitioning: detailed log written to {log_path}")
     return updated
 
 def wants_xplor_modelfile(value: str) -> bool:
@@ -6261,7 +6336,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Intensity correction</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
             <h3>Powder overlap repartitioning</h3>
-            <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose final map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2theta) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's processed map, blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2theta; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it.</p>
+            <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose final map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2theta) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's processed map (the SharpED-deblurred map when SharpED deblurring is enabled, otherwise a copy of the raw Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2theta; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing.</p>
         """)
         add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.")
         add_back_to_contents(map_feedback_layout)
@@ -10364,6 +10439,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                             cfg.powder_separation_factor,
                             cfg.powder_redistribution_mix,
                             self.log,
+                            log_path=cycle_dir / f"cycle_{cyc:03d}_powder_repartitioning.log",
                         )
                     feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
                     n_feedback = write_observed_reflections(

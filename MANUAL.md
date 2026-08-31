@@ -523,7 +523,7 @@ A value/σ threshold of `0` applies the correction to all non-zero reflections w
 
 Enabled via its own checkbox on this page; applies only to reflections carrying an FWHM value (the `hkl I fwhm`/`hkl F fwhm` HKL formats).
 
-Each cycle from its start-after-cycle threshold onward, reflections whose Bragg peaks overlap — `delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2`, Superflip's own `fwhmseparation` convention — are grouped, and their combined observed intensity is redistributed between them using intensities calculated by FFT from that cycle's processed map. The group total is always conserved.
+Each cycle from its start-after-cycle threshold onward, reflections whose Bragg peaks overlap — `delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2`, Superflip's own `fwhmseparation` convention — are grouped, and their combined observed intensity is redistributed between them using intensities calculated by FFT from that cycle's **processed map** (i.e. the SharpED-deblurred map when **Run SharpED deblurring** is enabled, otherwise a plain copy of the raw Superflip map — the same map used by intensity correction and missing-reflection completion). The group total is always conserved.
 
 Controls include:
 
@@ -532,6 +532,8 @@ Controls include:
 - **Wavelength (Å)** — required to compute 2theta. If left at `0`, it is auto-detected first from the loaded `.inflip` file's `lambda`/`wavelength` line, then from the reference file's `_diffrn_radiation_wavelength` CIF tag; enter it manually if neither source has it. A manually entered nonzero value always takes priority over auto-detection.
 - **Separation factor** — the multiplier in the overlap criterion above (default `0.2`).
 - **Map ratio mix** — `0` keeps each reflection's observed share of its group; `1` (default) replaces it entirely with the map-derived share. A group where the map has no usable signal for any member falls back to the observed split unchanged.
+
+Each time repartitioning runs, it writes `cycle_NNN_powder_repartitioning.log` in that cycle's working directory: how many overlap groups were considered, their average size, and the observed ("before") vs. redistributed ("after") intensity for every reflection in the 3 groups with the largest d-spacing (lowest 2theta).
 
 ---
 
