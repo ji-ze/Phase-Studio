@@ -485,6 +485,12 @@ class CycleResult:
     omit_superflip_rfree: Optional[float] = None
     omit_deblur_correlation: Optional[float] = None
     omit_deblur_rfree: Optional[float] = None
+    superflip_recall: Optional[float] = None
+    superflip_precision: Optional[float] = None
+    superflip_heavy_atom_count: Optional[float] = None
+    deblur_recall: Optional[float] = None
+    deblur_precision: Optional[float] = None
+    deblur_heavy_atom_count: Optional[float] = None
 
 
 INPUT_MODE_INFLIP = "jana_inflip"
@@ -1407,6 +1413,60 @@ def nearest_metric_to_reference(model_cif: Optional[Path], ref_ctx: ReferenceCon
     if len(all_d) == 0:
         return None
     return float(math.sqrt(np.mean(np.square(all_d))))
+
+def atom_recall_precision(
+    model_cif: Optional[Path], ref_ctx: ReferenceContext, merge_distance: float, same_element: bool = True,
+) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    """Recall/precision of EDMA-found atoms against the reference: each atom is
+    matched to its nearest same-element counterpart within merge_distance
+    (independent nearest-neighbor lookup per atom, not a global bipartite
+    assignment -- a lightweight per-cycle indicator, not a publication-grade
+    validation metric). Hydrogen and helium are excluded from both sides before
+    matching, since electron-density charge-flipping cannot resolve them (too
+    few electrons); counting them would systematically and misleadingly depress
+    recall for any hydrogen-containing structure regardless of reconstruction
+    quality. Unlike nearest_metric_to_reference's RMSD, a reference atom with no
+    same-element candidate within range counts as unmatched (no any-element
+    fallback), since miscounting a wrong-element peak as "found" would
+    misrepresent recall/precision. Returns None only when there are no heavy
+    reference atoms to compare against; with a reference but an empty/missing
+    model, returns (0.0, None) -- recall is 0, precision has no denominator
+    (nothing was found to be right or wrong about)."""
+    def heavy(atoms: Sequence[AtomSite]) -> List[AtomSite]:
+        return [a for a in atoms if clean_element_symbol(a.element) not in {"H", "He"}]
+    if not ref_ctx.atoms:
+        return None
+    ref_full = heavy(expanded_unique_atoms(heavy(ref_ctx.atoms), ref_ctx.cell, ref_ctx.spacegroup))
+    if not ref_full:
+        return None
+    model_atoms = heavy(parse_cif_atoms(Path(model_cif))) if model_cif is not None and Path(model_cif).is_file() else []
+    if not model_atoms:
+        return (0.0, None)
+    _, model_sg, _ = parse_cif_cell_and_sg(Path(model_cif))
+    model_full = heavy(expanded_unique_atoms(model_atoms, ref_ctx.cell, model_sg))
+    if not model_full:
+        return (0.0, None)
+    def nearest_distance(a: AtomSite, candidates: Sequence[AtomSite]) -> Optional[float]:
+        same = [b for b in candidates if not same_element or clean_element_symbol(a.element) == clean_element_symbol(b.element)]
+        if not same:
+            return None
+        return min(frac_distance_angstrom(ref_ctx.cell, a.frac, b.frac) for b in same)
+    matched_ref = sum(1 for a in ref_full if (d := nearest_distance(a, model_full)) is not None and d <= merge_distance)
+    matched_model = sum(1 for a in model_full if (d := nearest_distance(a, ref_full)) is not None and d <= merge_distance)
+    recall = matched_ref / len(ref_full)
+    precision = matched_model / len(model_full)
+    return (recall, precision)
+
+def count_heavy_atoms(model_cif: Optional[Path]) -> Optional[float]:
+    """Number of non-hydrogen, non-helium atoms in an EDMA structure export --
+    a reference-free fallback progress indicator (does the found atom count
+    stabilize across cycles) for when no reference structure is available."""
+    if model_cif is None or not Path(model_cif).is_file():
+        return None
+    atoms = parse_cif_atoms(Path(model_cif))
+    if not atoms:
+        return None
+    return float(sum(1 for a in atoms if clean_element_symbol(a.element) not in {"H", "He"}))
 
 # -----------------------------------------------------------------------------
 # HKL / Superflip / SharpED / EDMA
@@ -4718,6 +4778,12 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
             "omit_superflip_rfree",
             "omit_deblur_correlation",
             "omit_deblur_rfree",
+            "superflip_recall",
+            "superflip_precision",
+            "superflip_heavy_atom_count",
+            "deblur_recall",
+            "deblur_precision",
+            "deblur_heavy_atom_count",
         ])
         for r in results:
             w.writerow([
@@ -4745,6 +4811,12 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
                 "" if r.omit_superflip_rfree is None else r.omit_superflip_rfree,
                 "" if r.omit_deblur_correlation is None else r.omit_deblur_correlation,
                 "" if r.omit_deblur_rfree is None else r.omit_deblur_rfree,
+                "" if r.superflip_recall is None else r.superflip_recall,
+                "" if r.superflip_precision is None else r.superflip_precision,
+                "" if r.superflip_heavy_atom_count is None else r.superflip_heavy_atom_count,
+                "" if r.deblur_recall is None else r.deblur_recall,
+                "" if r.deblur_precision is None else r.deblur_precision,
+                "" if r.deblur_heavy_atom_count is None else r.deblur_heavy_atom_count,
             ])
 
 
@@ -6380,12 +6452,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.metrics_canvases: Dict[str, FigureCanvas] = {}
         metrics_tab_tooltips = {
             "superflip": (
-                "Reference match and SF RMSD compare directly against a supplied reference structure, so they only "
-                "appear when one is provided."
+                "Reference match, SF RMSD, Recall and Precision compare directly against a supplied reference "
+                "structure (Recall/Precision: heavy, i.e. non-H/He, atoms matched within EDMA's Merge distance), so "
+                "they only appear when one is provided. Without a reference, Heavy atoms found (a simple count) "
+                "appears instead as a fallback progress indicator."
             ),
             "deblur": (
-                "SharpED RMSD compares directly against a supplied reference structure, so it only appears when one "
-                "is provided. Map correlation only appears for the SharpED phase-recycling phasing methods."
+                "SharpED RMSD, Recall and Precision compare directly against a supplied reference structure (Recall/"
+                "Precision: heavy, i.e. non-H/He, atoms matched within EDMA's Merge distance), so they only appear "
+                "when one is provided. Without a reference, Heavy atoms found appears instead as a fallback progress "
+                "indicator. Map correlation only appears for the SharpED phase-recycling phasing methods."
             ),
         }
         for key, title in (
@@ -8850,10 +8926,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._render_metrics_tab("superflip", [
             ("Reference match", [r.superflip_ref_match for r in self.results], False, "#001170", "D", ":"),
             ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
+            ("Recall", [r.superflip_recall for r in self.results], True, "#2264b8", "^", "-"),
+            ("Precision", [r.superflip_precision for r in self.results], True, "#082a8a", "P", "--"),
+            ("Heavy atoms found", [r.superflip_heavy_atom_count for r in self.results], True, "#7183a6", "h", ":"),
         ])
         self._render_metrics_tab("deblur", [
             ("SharpED RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
             ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
+            ("Recall", [r.deblur_recall for r in self.results], True, "#44b7ff", "^", "-"),
+            ("Precision", [r.deblur_precision for r in self.results], True, "#082a8a", "P", "--"),
+            ("Heavy atoms found", [r.deblur_heavy_atom_count for r in self.results], True, "#7183a6", "h", ":"),
         ])
         self._render_metrics_tab("superflip_omit", [
             ("Omit map correlation", [r.omit_superflip_correlation for r in self.results], True, "#2264b8", "*", "-"),
@@ -9820,6 +9902,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log("EDMA after Superflip disabled; empty placeholder CIF/XYZ/PDB written.")
             sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
             sf_metric_text = "n/a" if sf_metric is None else f"{float(sf_metric):.3f}"
+            sf_recall: Optional[float] = None
+            sf_precision: Optional[float] = None
+            sf_heavy_atoms: Optional[float] = None
+            if cfg.run_edma_superflip:
+                sf_recall_precision = atom_recall_precision(sf_edma_cif, ref_ctx, cfg.merge_distance)
+                if sf_recall_precision is not None:
+                    sf_recall, sf_precision = sf_recall_precision
+                else:
+                    sf_heavy_atoms = count_heavy_atoms(sf_edma_cif)
             self.log(
                 f"[EDMA] Completed · Superflip map · RMSD={sf_metric_text} Å\n"
                 f"  output: {sf_edma_cif}",
@@ -9933,6 +10024,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log("EDMA after deblurred map disabled; empty placeholder CIF/XYZ/PDB written.")
             deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
             deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
+            deblur_recall: Optional[float] = None
+            deblur_precision: Optional[float] = None
+            deblur_heavy_atoms: Optional[float] = None
+            if cfg.run_edma_deblurred:
+                deblur_recall_precision = atom_recall_precision(deblur_edma_cif, ref_ctx, cfg.merge_distance)
+                if deblur_recall_precision is not None:
+                    deblur_recall, deblur_precision = deblur_recall_precision
+                else:
+                    deblur_heavy_atoms = count_heavy_atoms(deblur_edma_cif)
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
             self.log(
                 f"[EDMA] Completed · Deblurred map · RMSD={deblur_metric_text} Å\n"
@@ -9964,6 +10064,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 omit_superflip_rfree=omit_sf_rfree,
                 omit_deblur_correlation=omit_deblur_correlation,
                 omit_deblur_rfree=omit_deblur_rfree,
+                superflip_recall=sf_recall,
+                superflip_precision=sf_precision,
+                superflip_heavy_atom_count=sf_heavy_atoms,
+                deblur_recall=deblur_recall,
+                deblur_precision=deblur_precision,
+                deblur_heavy_atom_count=deblur_heavy_atoms,
             )
             all_results.append(result)
             write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
