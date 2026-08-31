@@ -1,6 +1,6 @@
 # Phase Studio User Manual
 
-**Version 1.0.6**
+**Version 1.0.7**
 
 ## 1. Introduction
 
@@ -321,7 +321,11 @@ The Workflow page groups these under two headings. Under "Superflip cycle" (used
 - EDMA after the raw Superflip map,
 - SharpED deblurring,
 - Superflip symmetry averaging of the processed map (beta),
-- EDMA after the processed map.
+- EDMA after the processed map,
+- compute omit maps (exclude 5% of reflections),
+- compute R_free from the excluded 5% (requires the omit-maps option above).
+
+Enabling omit maps additionally runs Superflip (and, if enabled, SharpED) each cycle on a fixed random 5% of reflections excluded from the input, purely for cross-validation; roughly doubles Superflip/SharpED time per cycle. See [11.6 Superflip Convergence](#116-superflip-convergence) for where the results are displayed.
 
 Under "Phase-recycling methods" (used by the two beta Phasing methods):
 
@@ -538,15 +542,14 @@ Phase Studio does not need to fabricate time-based percentages when no reliable 
 
 ### 11.6 Superflip Convergence
 
-The convergence panel can display metrics such as:
+The convergence panel has four tabs, each scaled and colored independently:
 
-- R,
-- Peaks,
-- Symmetry,
-- Reference match,
-- FOM,
-- Superflip RMSD,
-- deblurred-map RMSD.
+- **Superflip** — metrics tied to the raw Superflip map: R, Peaks, Symmetry, Reference match, FOM, Superflip RMSD.
+- **Deblurred** — metrics tied to the SharpED-processed map: deblurred-map RMSD, and Map correlation (SharpED phase-recycling methods only, correlating each cycle's recomposed map with the previous cycle's).
+- **Superflip (omit)** — only populated when **Compute omit maps** is enabled: Omit map correlation (the raw Superflip map compared with the same cycle's omit map) and, if **Compute R_free from excluded 5%** is also enabled, R_free for the raw Superflip map.
+- **Deblurred (omit)** — the same two metrics for the SharpED-processed map and its omit-map counterpart.
+
+Every series is normalized per tab to a 0 (worst) to 1 (best) scale for comparison; the underlying values are in `metrics.csv`.
 
 Unavailable series can be omitted in partial or cancelled runs.
 

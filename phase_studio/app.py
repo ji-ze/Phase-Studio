@@ -46,7 +46,7 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -479,6 +479,10 @@ class CycleResult:
     superflip_success_rate: Optional[float] = None
     superflip_mean_cycles: Optional[float] = None
     recycle_map_correlation: Optional[float] = None
+    omit_superflip_correlation: Optional[float] = None
+    omit_superflip_rfree: Optional[float] = None
+    omit_deblur_correlation: Optional[float] = None
+    omit_deblur_rfree: Optional[float] = None
 
 
 INPUT_MODE_INFLIP = "jana_inflip"
@@ -589,6 +593,8 @@ class RunConfig:
     symmetrize_deblurred_map: bool
     run_edma_superflip: bool
     run_edma_deblurred: bool
+    compute_omit_maps: bool
+    compute_omit_rfree: bool
     sharped_base_url: str
     sharped_api_token: str
     sharped_model: str
@@ -630,6 +636,7 @@ class PipelineState:
     auto_reference_cif: Optional[Path] = None
     auto_reference_xplor: Optional[Path] = None
     recycle_map: Optional[Path] = None
+    omit_test_hkls: FrozenSet[Tuple[int, int, int]] = field(default_factory=frozenset)
 
 
 @dataclass(frozen=True)
@@ -2485,6 +2492,51 @@ def xplor_map_correlation(map_a: Path, map_b: Path) -> Optional[float]:
         return float(np.corrcoef(a, b)[0, 1])
     except Exception:
         return None
+
+def select_omit_test_set(reflections: Sequence[Reflection], seed_text: str, fraction: float = 0.05) -> FrozenSet[Tuple[int, int, int]]:
+    """Pick a fixed random subset of hkl (default 5%) to exclude from omit-map
+    Superflip/SharpED runs and to evaluate R_free against. Seeded from Superflip's
+    own Random seed when it is a plain integer, otherwise from a fixed constant, so
+    the same test set is reused for every cycle of a run (comparable cycle to cycle)
+    regardless of how many times it is (re)selected."""
+    hkls = sorted({(int(r.h), int(r.k), int(r.l)) for r in reflections})
+    if not hkls:
+        return frozenset()
+    seed_text = str(seed_text or "").strip()
+    seed = int(seed_text) if seed_text.isdigit() else 987654321
+    rng = np.random.default_rng(seed)
+    count = max(1, round(len(hkls) * max(0.0, min(1.0, fraction))))
+    chosen = rng.choice(len(hkls), size=min(count, len(hkls)), replace=False)
+    return frozenset(hkls[i] for i in chosen.tolist())
+
+def compute_rfree(reflections: Sequence[Reflection], test_hkls: FrozenSet[Tuple[int, int, int]], data_mode: str, predictions: Dict[Tuple[int, int, int], Tuple[float, float]]) -> Optional[float]:
+    """Crystallographic R_free: sum(|Fobs - k*Fcalc|) / sum(|Fobs|) over only the
+    excluded test-set reflections, with k the least-squares scale factor between
+    them. Fcalc/phase_calc come from `predictions` (see xplor_fft_predictions),
+    read from a map that never saw the test set during reconstruction."""
+    fobs: List[float] = []
+    fcalc: List[float] = []
+    for r in reflections:
+        hkl = (int(r.h), int(r.k), int(r.l))
+        if hkl not in test_hkls:
+            continue
+        prediction = predictions.get(hkl)
+        if prediction is None:
+            continue
+        fobs.append(math.sqrt(reflection_value_as_intensity(r, data_mode)))
+        fcalc.append(math.sqrt(max(0.0, prediction[0])))
+    if len(fobs) < 3:
+        return None
+    fobs_arr = np.asarray(fobs, dtype=np.float64)
+    fcalc_arr = np.asarray(fcalc, dtype=np.float64)
+    denom = float(np.sum(fcalc_arr * fcalc_arr))
+    if denom <= 1e-12:
+        return None
+    k = float(np.sum(fobs_arr * fcalc_arr)) / denom
+    fobs_sum = float(np.sum(fobs_arr))
+    if fobs_sum <= 1e-12:
+        return None
+    return float(np.sum(np.abs(fobs_arr - k * fcalc_arr)) / fobs_sum)
 
 def candidate_missing_hkls_from_bounds(reflections: Sequence[Reflection], cell: gemmi.UnitCell, resolution_d_min: float) -> List[Tuple[int, int, int]]:
     if not reflections:
@@ -4612,6 +4664,10 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
             "superflip_success_rate_percent",
             "superflip_mean_cycles",
             "recycle_map_correlation",
+            "omit_superflip_correlation",
+            "omit_superflip_rfree",
+            "omit_deblur_correlation",
+            "omit_deblur_rfree",
         ])
         for r in results:
             w.writerow([
@@ -4635,6 +4691,10 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
                 "" if r.superflip_success_rate is None else r.superflip_success_rate,
                 "" if r.superflip_mean_cycles is None else r.superflip_mean_cycles,
                 "" if r.recycle_map_correlation is None else r.recycle_map_correlation,
+                "" if r.omit_superflip_correlation is None else r.omit_superflip_correlation,
+                "" if r.omit_superflip_rfree is None else r.omit_superflip_rfree,
+                "" if r.omit_deblur_correlation is None else r.omit_deblur_correlation,
+                "" if r.omit_deblur_rfree is None else r.omit_deblur_rfree,
             ])
 
 
@@ -4784,6 +4844,8 @@ INPUT_TOOLTIPS = {
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
+    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip (omit) and Deblurred (omit) convergence tabs' omit-map correlation series (full map vs. omit map). Roughly doubles Superflip/SharpED time per cycle.",
+    "compute_omit_rfree": "Also compute R_free from the excluded 5% of reflections: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Requires 'Compute omit maps'.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
     "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save, for each cycle's Superflip map, the observed |Fobs|/intensity together with phases (and, for ShelX, calculated F squared) read by FFT from that map, in a standardized text file or a ShelX/Jana-compatible .fcf file.",
     "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
@@ -5745,6 +5807,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True, align_with_fields=True)
         self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize processed map with Superflip (beta)", False, align_with_fields=True)
         self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on processed map", True, align_with_fields=True)
+        self._add_checkbox(optional_form, "compute_omit_maps", "Compute omit maps (exclude 5% of reflections)", False, align_with_fields=True)
+        self._add_checkbox(optional_form, "compute_omit_rfree", "Compute R_free from excluded 5%", False, align_with_fields=True)
+        try:
+            self.inputs["compute_omit_maps"].toggled.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
         recycle_stages_label = QLabel("Phase-recycling methods")
         recycle_stages_label.setObjectName("inlineGroupTitle")
         optional_form.addRow(recycle_stages_label)
@@ -5849,6 +5917,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 <li><b>Run SharpED deblurring</b> &mdash; process the Superflip map with the SharpED server. If disabled, the "deblurred" map used downstream is just a copy of the Superflip map.</li>
                 <li><b>Symmetrize processed map with Superflip (beta)</b> &mdash; after deblurring, run Superflip in symmetry mode (no charge flipping) with the deblurred map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
                 <li><b>Run EDMA on processed map</b> &mdash; peak-search the deblurred (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
+                <li><b>Compute omit maps (exclude 5% of reflections)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip (omit)</b> and <b>Deblurred (omit)</b> convergence tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
+                <li><b>Compute R_free from excluded 5%</b> &mdash; requires the option above; also computes R_free (the crystallographic R-factor between the excluded reflections' observed |F| and |F| calculated by FFT from the omit map) for both the omit-map series.</li>
             </ul>
             <p>Under <b>Phase-recycling methods</b> (used by the two beta/experimental Phasing methods):</p>
             <ul><li><b>Run EDMA on final map</b> &mdash; run EDMA once, on the last cycle's recomposed |Fobs|+phi_calc map.</li></ul>
@@ -6251,15 +6321,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         right_layout.addWidget(self.result_splitter, 1)
 
         metrics_section, metrics_layout = make_result_section("SUPERFLIP CONVERGENCE")
-        self.figure = Figure(figsize=(7.5, 3.5), dpi=100)
-        self.ax = self.figure.add_subplot(111)
-        self.canvas = FigureCanvas(self.figure)
-        self.canvas.setObjectName("metricsCanvas")
-        self.canvas.setMinimumHeight(140)
-        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.canvas.mpl_connect("resize_event", lambda _event: self._layout_metrics_figure())
-        self.canvas.setToolTip("")
-        metrics_layout.addWidget(self.canvas, 1)
+        self.metrics_tabs = QTabWidget()
+        self.metrics_tabs.setObjectName("metricsTabs")
+        self.metrics_figures: Dict[str, Figure] = {}
+        self.metrics_axes: Dict[str, object] = {}
+        self.metrics_canvases: Dict[str, FigureCanvas] = {}
+        for key, title in (
+            ("superflip", "Superflip"),
+            ("deblur", "Deblurred"),
+            ("superflip_omit", "Superflip (omit)"),
+            ("deblur_omit", "Deblurred (omit)"),
+        ):
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            figure = Figure(figsize=(7.5, 3.5), dpi=100)
+            canvas = FigureCanvas(figure)
+            canvas.setObjectName("metricsCanvas")
+            canvas.setMinimumHeight(140)
+            canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            canvas.mpl_connect("resize_event", lambda _event, k=key: self._layout_metrics_figure(k))
+            canvas.setToolTip("")
+            page_layout.addWidget(canvas, 1)
+            self.metrics_tabs.addTab(page, title)
+            self.metrics_figures[key] = figure
+            self.metrics_axes[key] = figure.add_subplot(111)
+            self.metrics_canvases[key] = canvas
+        metrics_layout.addWidget(self.metrics_tabs, 1)
         self.result_splitter.addWidget(metrics_section)
 
         structure_section, structure_layout = make_result_section("STRUCTURE COMPARISON")
@@ -6553,6 +6641,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("run_edma_superflip", "Ignored: EDMA after the Superflip map is not part of the selected Phasing method."),
             ("run_sharped", "Ignored: the selected Phasing method always deblurs with SharpED every cycle."),
             ("run_edma_deblurred", "Ignored: EDMA after the deblurred map is not part of the selected Phasing method; use Run EDMA on final map instead."),
+            ("compute_omit_maps", "Ignored: omit maps are only computed for the standard Superflip cycle."),
         ):
             widget = self.inputs.get(key)
             if hasattr(widget, "setEnabled"):
@@ -6562,6 +6651,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 label.setEnabled(not is_recycling)
             if hasattr(widget, "setToolTip"):
                 widget.setToolTip(tooltip_when_disabled if is_recycling else INPUT_TOOLTIPS.get(key, ""))  # type: ignore[attr-defined]
+        omit_rfree_widget = self.inputs.get("compute_omit_rfree")
+        omit_maps_enabled = not is_recycling and self._check_value("compute_omit_maps")
+        if isinstance(omit_rfree_widget, QCheckBox):
+            omit_rfree_widget.setEnabled(omit_maps_enabled)
+            omit_rfree_widget.setToolTip(
+                INPUT_TOOLTIPS.get("compute_omit_rfree", "") if omit_maps_enabled
+                else "Ignored: requires 'Compute omit maps' to be enabled."
+            )
+            if not omit_maps_enabled and omit_rfree_widget.isChecked():
+                omit_rfree_widget.setChecked(False)
         recycle_final_widget = self.inputs.get("run_edma_recycle_final")
         if hasattr(recycle_final_widget, "setEnabled"):
             recycle_final_widget.setEnabled(is_recycling)  # type: ignore[attr-defined]
@@ -8015,6 +8114,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("symmetrize_deblurred_map", "false")
             set_value("run_edma_deblurred", "true")
             set_value("run_edma_recycle_final", "false")
+            set_value("compute_omit_maps", "false")
+            set_value("compute_omit_rfree", "false")
             set_value("sharped_model", "koala 2.0")
             set_value("perform_algorithm", "CF")
             set_value("maxcycles", "2000")
@@ -8488,9 +8589,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _layout_metrics_figure(self) -> None:
-        width = max(1.0, float(self.canvas.width()))
-        height = max(1.0, float(self.canvas.height()))
+    def _layout_metrics_figure(self, key: str) -> None:
+        figure = self.metrics_figures[key]
+        canvas = self.metrics_canvases[key]
+        width = max(1.0, float(canvas.width()))
+        height = max(1.0, float(canvas.height()))
         has_data = bool(self.results)
         left_pixels = 86.0 if has_data else 70.0
         left = min(0.18, max(0.07, left_pixels / width))
@@ -8510,20 +8613,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         else:
             right = 1.0 - min(0.04, max(0.02, 18.0 / width))
             top = 1.0 - min(0.16, max(0.07, 22.0 / height))
-        self.figure.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
-        if has_data and self.figure.legends:
+        figure.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
+        if has_data and figure.legends:
             legend_left = right + (legend_gap_pixels / width)
             legend_center_y = (bottom + top) / 2.0
-            self.figure.legends[0].set_bbox_to_anchor(
+            figure.legends[0].set_bbox_to_anchor(
                 (legend_left, legend_center_y),
-                transform=self.figure.transFigure,
+                transform=figure.transFigure,
             )
 
-    def _update_plot(self) -> None:
-        self.figure.clear()
-        self.ax = self.figure.add_subplot(111)
-        self.figure.patch.set_facecolor("#ffffff")
-        self.ax.set_facecolor("#ffffff")
+    def _render_metrics_tab(self, key: str, series: List[Tuple[str, List[Optional[float]], bool, str, str, str]]) -> None:
+        figure = self.metrics_figures[key]
+        canvas = self.metrics_canvases[key]
+        figure.clear()
+        ax = figure.add_subplot(111)
+        self.metrics_axes[key] = ax
+        figure.patch.set_facecolor("#ffffff")
+        ax.set_facecolor("#ffffff")
         cycles = [r.cycle for r in self.results]
         if not cycles:
             status = str(getattr(self, "_run_status", "READY")).upper()
@@ -8533,8 +8639,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 empty_message = "No convergence metrics available."
             else:
                 empty_message = "Run the pipeline to display convergence metrics."
-            self.ax.set_axis_off()
-            self.ax.text(
+            ax.set_axis_off()
+            ax.text(
                 0.5,
                 0.50,
                 empty_message,
@@ -8542,38 +8648,38 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 va="center",
                 color="#7183a6",
                 fontsize=8.5,
-                transform=self.ax.transAxes,
+                transform=ax.transAxes,
             )
-            self._layout_metrics_figure()
-            self.canvas.draw_idle()
+            self._layout_metrics_figure(key)
+            canvas.draw_idle()
             return
 
-        self.ax.set_title("")
-        self.ax.set_xlabel("")
-        self.figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#14204a", fontsize=8.5)
-        self.ax.set_ylim(-0.04, 1.04)
-        self.ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
-        self.ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
+        ax.set_title("")
+        ax.set_xlabel("")
+        figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#14204a", fontsize=8.5)
+        ax.set_ylim(-0.04, 1.04)
+        ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+        ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
         try:
             cycles_to_run = max(1, self._spin_value("cycles"))
         except Exception:
             cycles_to_run = max(cycles) if cycles else 1
         x_max = max([cycles_to_run] + cycles) if cycles else cycles_to_run
-        self.ax.set_xlim(0.75, float(x_max) + 0.25)
+        ax.set_xlim(0.75, float(x_max) + 0.25)
         if x_max <= 30:
-            self.ax.set_xticks(list(range(1, x_max + 1)))
+            ax.set_xticks(list(range(1, x_max + 1)))
         else:
-            self.ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12, min_n_ticks=2))
-        self.ax.grid(True, axis="y", color="#cbd7ea", linewidth=0.6, alpha=0.64)
-        self.ax.grid(True, axis="x", color="#cbd7ea", linewidth=0.5, alpha=0.42)
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12, min_n_ticks=2))
+        ax.grid(True, axis="y", color="#cbd7ea", linewidth=0.6, alpha=0.64)
+        ax.grid(True, axis="x", color="#cbd7ea", linewidth=0.5, alpha=0.42)
         for spine in ("top", "right"):
-            self.ax.spines[spine].set_visible(False)
-        self.ax.spines["left"].set_color("#001170")
-        self.ax.spines["bottom"].set_color("#001170")
-        self.ax.tick_params(colors="#001170")
-        self.ax.title.set_color("#001170")
-        self.ax.xaxis.label.set_color("#001170")
-        self.ax.yaxis.label.set_color("#001170")
+            ax.spines[spine].set_visible(False)
+        ax.spines["left"].set_color("#001170")
+        ax.spines["bottom"].set_color("#001170")
+        ax.tick_params(colors="#001170")
+        ax.title.set_color("#001170")
+        ax.xaxis.label.set_color("#001170")
+        ax.yaxis.label.set_color("#001170")
 
         def best_score(values: Sequence[Optional[float]], higher_is_better: bool) -> List[float]:
             arr = np.asarray([np.nan if v is None else float(v) for v in values], dtype=float)
@@ -8590,23 +8696,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 out[finite] = scaled if higher_is_better else 1.0 - scaled
             return out.tolist()
 
-        series = [
-            ("R", [r.superflip_rvalue for r in self.results], False, "#001170", "o", "-"),
-            ("Peaks", [r.superflip_peaks for r in self.results], True, "#2264b8", "s", "-"),
-            ("Symmetry", [r.superflip_symm for r in self.results], False, "#44b7ff", "^", "-"),
-            ("Reference match", [r.superflip_ref_match for r in self.results], False, "#001170", "D", ":"),
-            ("FOM", [r.superflip_fom for r in self.results], True, "#2264b8", "P", "--"),
-            ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
-            ("Deblur RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
-            ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
-        ]
         plotted = 0
         for label, values, higher_is_better, color, marker, linestyle in series:
             y = best_score(values, higher_is_better)
             if not np.any(np.isfinite(np.asarray(y, dtype=float))):
                 continue
             plotted += 1
-            self.ax.plot(
+            ax.plot(
                 cycles,
                 y,
                 color=color,
@@ -8619,8 +8715,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 label=label,
             )
         if plotted:
-            handles, labels = self.ax.get_legend_handles_labels()
-            self.figure.legend(
+            handles, labels = ax.get_legend_handles_labels()
+            figure.legend(
                 handles,
                 labels,
                 loc="center left",
@@ -8634,17 +8730,39 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 borderaxespad=0.0,
             )
         else:
-            self.ax.text(
+            ax.text(
                 0.5,
                 0.5,
                 "No finite metrics yet",
                 ha="center",
                 va="center",
                 color="#7183a6",
-                transform=self.ax.transAxes,
+                transform=ax.transAxes,
             )
-        self._layout_metrics_figure()
-        self.canvas.draw_idle()
+        self._layout_metrics_figure(key)
+        canvas.draw_idle()
+
+    def _update_plot(self) -> None:
+        self._render_metrics_tab("superflip", [
+            ("R", [r.superflip_rvalue for r in self.results], False, "#001170", "o", "-"),
+            ("Peaks", [r.superflip_peaks for r in self.results], True, "#2264b8", "s", "-"),
+            ("Symmetry", [r.superflip_symm for r in self.results], False, "#44b7ff", "^", "-"),
+            ("Reference match", [r.superflip_ref_match for r in self.results], False, "#001170", "D", ":"),
+            ("FOM", [r.superflip_fom for r in self.results], True, "#2264b8", "P", "--"),
+            ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
+        ])
+        self._render_metrics_tab("deblur", [
+            ("Deblur RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
+            ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
+        ])
+        self._render_metrics_tab("superflip_omit", [
+            ("Omit map correlation", [r.omit_superflip_correlation for r in self.results], True, "#2264b8", "*", "-"),
+            ("R_free", [r.omit_superflip_rfree for r in self.results], False, "#001170", "o", "-"),
+        ])
+        self._render_metrics_tab("deblur_omit", [
+            ("Omit map correlation", [r.omit_deblur_correlation for r in self.results], True, "#2264b8", "*", "-"),
+            ("R_free", [r.omit_deblur_rfree for r in self.results], False, "#001170", "o", "-"),
+        ])
 
     def _element_color(self, element: str) -> str:
         # This extended blue scale is intentionally exclusive to structure atoms.
@@ -9048,6 +9166,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             symmetrize_deblurred_map=self._check_value("symmetrize_deblurred_map") and modelfile_source_value != "superflip_xplor",
             run_edma_superflip=self._check_value("run_edma_superflip"),
             run_edma_deblurred=self._check_value("run_edma_deblurred"),
+            compute_omit_maps=self._check_value("compute_omit_maps"),
+            compute_omit_rfree=self._check_value("compute_omit_maps") and self._check_value("compute_omit_rfree"),
             sharped_base_url=self._line_value("sharped_base_url") or "https://jana.fzu.cz",
             sharped_api_token=self._line_value("sharped_api_token") or os.environ.get("SHARPED_API_TOKEN", ""),
             sharped_model=self._combo_value("sharped_model") or "default",
@@ -9393,6 +9513,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 n_written = write_observed_reflections(observed_hkl, refl, cfg.i_over_sigma_min, data_mode=data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 observed_hkls[data_mode] = observed_hkl
                 self.log(f"Prepared HKL for {data_mode}: {observed_hkl} ({n_written} reflections)")
+            omit_test_hkls: FrozenSet[Tuple[int, int, int]] = frozenset()
+            if cfg.compute_omit_maps and reconstruction_mode == "superflip":
+                omit_test_hkls = select_omit_test_set(refl, cfg.randomseed)
+                self.log(f"Omit maps: excluding {len(omit_test_hkls)}/{len(refl)} reflections (fixed for this run) for cross-validation.", level="DETAIL")
             state = PipelineState(
                 cfg=cfg,
                 ref_ctx=ref_ctx,
@@ -9408,6 +9532,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 exclude_labels=parse_atom_label_list(cfg.exclude_atoms),
                 progress_stages=cycle_progress_stages(cfg),
                 current_reflections=current_reflections,
+                omit_test_hkls=omit_test_hkls,
             )
             self._resume_state = state
             if reconstruction_mode == "superflip":
@@ -9536,6 +9661,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 cfg.map_export_format, cycle_dir / sf_prefix, sf_map, state.current_reflections,
                 cfg.i_over_sigma_min, configured_data_mode, ref_ctx.cell, cfg.resolution_d_min, self.log,
             )
+            omit_sf_map: Optional[Path] = None
+            omit_sf_correlation: Optional[float] = None
+            omit_sf_rfree: Optional[float] = None
+            if cfg.compute_omit_maps and state.omit_test_hkls:
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Superflip", detail="omit map · running", busy=True)
+                omit_reflections = [r for r in state.current_reflections if (int(r.h), int(r.k), int(r.l)) not in state.omit_test_hkls]
+                omit_hkl = cycle_dir / f"{sf_prefix}_omit_input.hkl"
+                write_observed_reflections(omit_hkl, omit_reflections, cfg.i_over_sigma_min, data_mode=configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
+                omit_prefix = f"{sf_prefix}_omit"
+                omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
+                self.log(f"Omit Superflip map ({len(state.omit_test_hkls)} reflections excluded): {omit_sf_map}")
+                omit_sf_correlation = xplor_map_correlation(sf_map, omit_sf_map)
+                if cfg.compute_omit_rfree:
+                    predictions = xplor_fft_predictions(omit_sf_map, list(state.omit_test_hkls))
+                    omit_sf_rfree = compute_rfree(state.current_reflections, state.omit_test_hkls, configured_data_mode, predictions)
+                self.log(
+                    f"[Omit] Superflip map correlation={('n/a' if omit_sf_correlation is None else f'{omit_sf_correlation:.4f}')}"
+                    f" · R_free={('n/a' if omit_sf_rfree is None else f'{omit_sf_rfree:.4f}')}",
+                    subsystem="Superflip",
+                )
             sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
             self._emit_cycle_progress(
                 cyc,
@@ -9616,6 +9761,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 else:
                     self.log("SharpED disabled; deblurred map is a copy of the Superflip map.")
             self.log(f"Deblurred map: {deblur_map}")
+            omit_deblur_correlation: Optional[float] = None
+            omit_deblur_rfree: Optional[float] = None
+            if cfg.compute_omit_maps and state.omit_test_hkls and omit_sf_map is not None and cfg.run_sharped and not use_superflip_xplor_modelfile:
+                if self.stop_now.is_set():
+                    raise RuntimeError("Immediate stop requested.")
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="omit map · preparing upload", busy=True)
+                omit_deblur_map = cycle_dir / f"{sf_prefix}_omit_deblurred.xplor"
+                run_sharped_deblur(
+                    omit_sf_map, omit_deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model,
+                    sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds,
+                    cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log, self.stop_now,
+                    progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
+                        cycle, cfg.cycles, progress_stages, "SharpED", detail=f"omit map · {detail}", busy=detail != "completed",
+                    ),
+                )
+                self.log(f"Omit deblurred map: {omit_deblur_map}")
+                omit_deblur_correlation = xplor_map_correlation(deblur_map, omit_deblur_map)
+                if cfg.compute_omit_rfree:
+                    predictions = xplor_fft_predictions(omit_deblur_map, list(state.omit_test_hkls))
+                    omit_deblur_rfree = compute_rfree(state.current_reflections, state.omit_test_hkls, configured_data_mode, predictions)
+                self.log(
+                    f"[Omit] Deblurred map correlation={('n/a' if omit_deblur_correlation is None else f'{omit_deblur_correlation:.4f}')}"
+                    f" · R_free={('n/a' if omit_deblur_rfree is None else f'{omit_deblur_rfree:.4f}')}",
+                    subsystem="SharpED",
+                )
             if cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
@@ -9690,6 +9860,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 superflip_fom=sf_log_metrics.fom,
                 superflip_success_rate=sf_log_metrics.success_rate,
                 superflip_mean_cycles=sf_log_metrics.mean_cycles,
+                omit_superflip_correlation=omit_sf_correlation,
+                omit_superflip_rfree=omit_sf_rfree,
+                omit_deblur_correlation=omit_deblur_correlation,
+                omit_deblur_rfree=omit_deblur_rfree,
             )
             all_results.append(result)
             write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
