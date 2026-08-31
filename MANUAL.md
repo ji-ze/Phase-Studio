@@ -554,16 +554,14 @@ Phase Studio does not need to fabricate time-based percentages when no reliable 
 
 The convergence panel has four tabs, each scaled and colored independently:
 
-- **Superflip** — metrics tied to the raw Superflip map: R, Peaks, Symmetry, Reference match, FOM, Superflip RMSD.
-- **Deblurred** — metrics tied to the SharpED-processed map: deblurred-map RMSD, and Map correlation (SharpED phase-recycling methods only, correlating each cycle's recomposed map with the previous cycle's).
-- **Superflip (omit)** — only populated when **Compute omit maps** is enabled: Omit map correlation (the raw Superflip map compared with the same cycle's omit map) and, if **Compute R_free from excluded 5%** is also enabled, R_free for the raw Superflip map.
-- **Deblurred (omit)** — the same two metrics for the SharpED-processed map and its omit-map counterpart.
+- **Superflip** — metrics tied to the raw Superflip map: Reference match, Superflip RMSD. Both compare directly against a supplied reference structure, so this tab is empty when none is provided. (Superflip's own internal R/Peaks/FOM/Symmetry indicators were removed from this graph: cycle 1 normally runs ab initio while cycle 2 onward is seeded by the selected next-cycle model, so they are not a like-for-like series across that transition, and `bestdensities`/`repeatmode` selects the best of several stochastic attempts each cycle, adding further cycle-to-cycle fluctuation unrelated to genuine quality change. They remain in `metrics.csv` and the execution log.)
+- **Deblurred** — metrics tied to the SharpED-processed map: Deblur RMSD (also reference-dependent), and Map correlation (SharpED phase-recycling methods only, correlating each cycle's recomposed map with the previous cycle's).
+- **Superflip (omit+rfree)** — only populated when **Compute omit maps** is enabled: Omit map correlation (the raw Superflip map compared with the same cycle's omit map) and, if **Compute R_free from excluded 5%** is also enabled, R_free for the raw Superflip map.
+- **Deblurred (omit+rfree)** — the same two metrics for the SharpED-processed map and its omit-map counterpart.
 
 Every series is normalized per tab to a 0 (worst) to 1 (best) scale for comparison; the underlying values are in `metrics.csv`.
 
 Unavailable series can be omitted in partial or cancelled runs.
-
-**Which Superflip metrics are safe to compare across cycles:** R, Peaks, FOM and Symmetry are Superflip's own internal convergence metrics from that cycle's charge-flipping run alone. Cycle 1 normally runs ab initio while cycle 2 onward is seeded by the selected next-cycle model, so these are not a like-for-like series across that transition, and `bestdensities`/`repeatmode` selects the best of several stochastic attempts each cycle, so some cycle-to-cycle fluctuation is expected even without a genuine quality change. **Reference match** and **Superflip RMSD** compare directly against a supplied reference structure and are the most reliable indicators of real improvement across cycles — but they only appear when a reference structure is provided; for a genuinely unknown structure, only the less reliable metrics above are available.
 
 ### 11.7 Structure Comparison
 
