@@ -332,13 +332,12 @@ The Workflow page groups these under two headings. Under "Superflip cycle" (used
 - SharpED deblurring,
 - Superflip symmetry averaging of the processed map (beta),
 - EDMA after the processed map,
-- redistribute overlapping powder reflections (FWHM data),
 - compute omit maps (exclude 5% of reflections),
 - compute R_free from the excluded 5% (requires the omit-maps option above).
 
 Enabling omit maps additionally runs Superflip (and, if enabled, SharpED) each cycle on a fixed random 5% of reflections excluded from the input, purely for cross-validation; roughly doubles Superflip/SharpED time per cycle. See [11.6 Superflip Convergence](#116-superflip-convergence) for where the results are displayed.
 
-Redistribute overlapping powder reflections is configured on [10.3 Powder overlap repartitioning](#103-powder-overlap-repartitioning) (Basic → Map feedback) and only affects reflections carrying an FWHM value.
+The three map-feedback mechanisms (missing-reflection completion, intensity correction, powder overlap repartitioning) each have their own enable checkbox and settings on [10. Map feedback](#10-map-feedback) (Basic → Map feedback), not here.
 
 Under "Phase-recycling methods" (used by the two beta Phasing methods):
 
@@ -495,22 +494,24 @@ A maximum-polls value of `-1` represents no fixed polling limit where supported 
 
 The **Basic → Map feedback** page controls optional feedback from a completed map into later cycles.
 
-All three mechanisms rewrite the observed HKL data used by subsequent cycles, not just the model; the page carries a warning to this effect.
+All three mechanisms rewrite the observed HKL data used by subsequent cycles, not just the model; the page carries a warning to this effect. Each mechanism has its own **Enable** checkbox at the top of its group; unchecking it grays out (disables) the rest of that group's controls and skips the mechanism entirely, regardless of what its other fields are set to.
+
+Each group's **Start after cycle** control ranges from `1` to the current **Cycles** value (Basic → Workflow) and its maximum tracks Cycles automatically — lowering Cycles below a group's current start cycle clamps it down.
 
 ### 10.1 Missing-reflection completion
 
 Controls include:
 
-- start-after-cycle threshold,
+- enable checkbox,
+- start-after-cycle threshold (1 to Cycles),
 - maximum percentage of added reflections.
-
-A start cycle of `0` disables the operation where this remains the current GUI semantics.
 
 ### 10.2 Intensity correction
 
 Controls include:
 
-- start-after-cycle threshold,
+- enable checkbox,
+- start-after-cycle threshold (1 to Cycles),
 - damping,
 - value/σ limit.
 
@@ -520,13 +521,15 @@ A value/σ threshold of `0` applies the correction to all non-zero reflections w
 
 ### 10.3 Powder overlap repartitioning
 
-Enabled via **Basic → Workflow → Optional processing → Redistribute overlapping powder reflections (FWHM data)**; applies only to reflections carrying an FWHM value (the `hkl I fwhm`/`hkl F fwhm` HKL formats).
+Enabled via its own checkbox on this page; applies only to reflections carrying an FWHM value (the `hkl I fwhm`/`hkl F fwhm` HKL formats).
 
-Each cycle, reflections whose Bragg peaks overlap — `delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2`, Superflip's own `fwhmseparation` convention — are grouped, and their combined observed intensity is redistributed between them using intensities calculated by FFT from that cycle's processed map. The group total is always conserved.
+Each cycle from its start-after-cycle threshold onward, reflections whose Bragg peaks overlap — `delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2`, Superflip's own `fwhmseparation` convention — are grouped, and their combined observed intensity is redistributed between them using intensities calculated by FFT from that cycle's processed map. The group total is always conserved.
 
 Controls include:
 
-- **Wavelength (Å)** — required; 0 disables repartitioning even if the checkbox is checked. Not detected automatically except via **Advanced → Superflip → Load settings from .inflip**, which reads a `lambda`/`wavelength` line if present.
+- enable checkbox,
+- start-after-cycle threshold (1 to Cycles),
+- **Wavelength (Å)** — required to compute 2theta. If left at `0`, it is auto-detected first from the loaded `.inflip` file's `lambda`/`wavelength` line, then from the reference file's `_diffrn_radiation_wavelength` CIF tag; enter it manually if neither source has it. A manually entered nonzero value always takes priority over auto-detection.
 - **Separation factor** — the multiplier in the overlap criterion above (default `0.2`).
 - **Map ratio mix** — `0` keeps each reflection's observed share of its group; `1` (default) replaces it entirely with the map-derived share. A group where the map has no usable signal for any member falls back to the observed split unchanged.
 
