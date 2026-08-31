@@ -2214,14 +2214,23 @@ def write_observed_reflections(out_hkl: Path, reflections: Sequence[Reflection],
             n += 1
     return n
 
-def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0, data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None, resolution_d_min: float = 0.0) -> int:
+def write_standardized_hkl_with_phase(
+    out_hkl: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0,
+    data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None,
+    resolution_d_min: float = 0.0, calc_by_hkl: Optional[Dict[Tuple[int, int, int], Tuple[float, float]]] = None,
+) -> int:
+    """calc_by_hkl, when given, maps (h, k, l) -> (F_squared_calc, phase_calc_deg) read by
+    FFT from a reconstructed XPLOR map (see xplor_fft_predictions); its phase is written
+    instead of the reflection's own phase field, which is only ever the value supplied by
+    the selected HKL mode (0.0 for most modes) and never reflects the reconstruction."""
     out_hkl.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
     d_min = max(0.0, float(resolution_d_min or 0.0))
     n = 0
     with out_hkl.open("w", encoding="utf-8") as f:
         f.write("# h k l I sigma(I) phase(deg)\n")
-        f.write(f"# Phase Studio {__version__} standardized HKL export; phase is 0.0 unless supplied by the selected HKL mode.\n")
+        phase_note = "phase is calculated by FFT from the reconstructed map" if calc_by_hkl else "phase is 0.0 unless supplied by the selected HKL mode"
+        f.write(f"# Phase Studio {__version__} standardized HKL export; {phase_note}.\n")
         for r in reflections:
             if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
                 if float(r.value) / float(r.sigma) < i_over_sigma_min:
@@ -2236,25 +2245,32 @@ def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Refle
                 intensity = value * value
                 sigma_f = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
                 sigma_i = 2.0 * value * sigma_f
-            phase = 0.0 if r.phase is None else float(r.phase)
+            calc = calc_by_hkl.get((int(r.h), int(r.k), int(r.l))) if calc_by_hkl else None
+            phase = float(calc[1]) if calc is not None else (0.0 if r.phase is None else float(r.phase))
             f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {phase:12.6f}\n")
             n += 1
     return n
 
-def write_shelx_fcf(out_fcf: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0, data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None, resolution_d_min: float = 0.0) -> int:
+def write_shelx_fcf(
+    out_fcf: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0,
+    data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None,
+    resolution_d_min: float = 0.0, calc_by_hkl: Optional[Dict[Tuple[int, int, int], Tuple[float, float]]] = None,
+) -> int:
     """ShelX/Jana-compatible .fcf reflection list (CIF loop, list format 4: h k l
-    F_squared_meas sigma F_squared_calc phase_calc). F_squared_calc is not available
-    before reconstruction, so it is written equal to F_squared_meas as a neutral
-    placeholder; phase is 0 unless supplied by the selected HKL mode -- same
-    convention as the standardized HKL export this is a sibling of."""
+    F_squared_meas sigma F_squared_calc phase_calc). calc_by_hkl, when given, maps
+    (h, k, l) -> (F_squared_calc, phase_calc_deg) read by FFT from a reconstructed XPLOR
+    map (see xplor_fft_predictions); without it, F_squared_calc is written equal to
+    F_squared_meas and phase_calc to 0 as neutral placeholders (no reconstruction available)."""
     out_fcf.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
     d_min = max(0.0, float(resolution_d_min or 0.0))
     n = 0
     with out_fcf.open("w", encoding="utf-8") as f:
         f.write(f"# Phase Studio {__version__} ShelX-compatible FCF export (list format 4).\n")
-        f.write("# F_squared_calc is written equal to F_squared_meas as a placeholder (not yet reconstructed);\n")
-        f.write("# phase_calc is 0.0 unless supplied by the selected HKL mode.\n")
+        if calc_by_hkl:
+            f.write("# F_squared_calc and phase_calc are read by FFT from the reconstructed map.\n")
+        else:
+            f.write("# F_squared_calc is written equal to F_squared_meas and phase_calc to 0.0 as placeholders (no reconstruction available).\n")
         f.write("loop_\n")
         for tag in ("_refln_index_h", "_refln_index_k", "_refln_index_l", "_refln_F_squared_meas",
                     "_refln_F_squared_sigma", "_refln_F_squared_calc", "_refln_phase_calc"):
@@ -2273,10 +2289,35 @@ def write_shelx_fcf(out_fcf: Path, reflections: Sequence[Reflection], i_over_sig
                 intensity = value * value
                 sigma_f = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
                 sigma_i = 2.0 * value * sigma_f
-            phase = 0.0 if r.phase is None else float(r.phase)
-            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {intensity:14.7f} {phase:12.6f}\n")
+            calc = calc_by_hkl.get((int(r.h), int(r.k), int(r.l))) if calc_by_hkl else None
+            intensity_calc = float(calc[0]) if calc is not None else intensity
+            phase = float(calc[1]) if calc is not None else 0.0
+            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {intensity_calc:14.7f} {phase:12.6f}\n")
             n += 1
     return n
+
+def export_phased_reflections_from_map(
+    map_export_format: str, out_path_base: Path, xplor_map: Path, reflections: Sequence[Reflection],
+    i_over_sigma_min: float, data_mode: str, cell: gemmi.UnitCell, resolution_d_min: float,
+    log: Callable[[str], None],
+) -> Optional[Path]:
+    """Map format's 'HKL reflections with phases' / 'ShelX (fcf)' options: read F_calc and
+    phase_calc for every observed hkl by FFT from a just-reconstructed XPLOR map (the same
+    technique the SharpED phase-recycling methods use), then write them alongside |Fobs|.
+    Called once per Superflip map, exactly like the ccp4/jana extra-format options."""
+    fmt = normalize_map_export_format(map_export_format)
+    if fmt not in {"hkl_phases", "shelx_fcf"}:
+        return None
+    calc_by_hkl = xplor_fft_predictions(xplor_map, [(int(r.h), int(r.k), int(r.l)) for r in reflections])
+    if fmt == "hkl_phases":
+        out_path = out_path_base.with_name(out_path_base.name + "_phased.hkl")
+        n = write_standardized_hkl_with_phase(out_path, reflections, i_over_sigma_min, data_mode, cell=cell, resolution_d_min=resolution_d_min, calc_by_hkl=calc_by_hkl)
+        log(f"Phased HKL export (phases from {xplor_map.name}): {out_path} ({n} reflections)")
+    else:
+        out_path = out_path_base.with_name(out_path_base.name + ".fcf")
+        n = write_shelx_fcf(out_path, reflections, i_over_sigma_min, data_mode, cell=cell, resolution_d_min=resolution_d_min, calc_by_hkl=calc_by_hkl)
+        log(f"ShelX FCF export (phases from {xplor_map.name}): {out_path} ({n} reflections)")
+    return out_path
 
 def reflection_value_as_intensity(reflection: Reflection, data_mode: str) -> float:
     value = max(0.0, float(reflection.value))
@@ -4744,7 +4785,7 @@ INPUT_TOOLTIPS = {
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
-    "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save the observed reflections as h k l I/F² sigma phase(deg) -- phase is 0 unless supplied by the selected input mode -- in the standardized text format or a ShelX/Jana-compatible .fcf file.",
+    "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save, for each cycle's Superflip map, the observed |Fobs|/intensity together with phases (and, for ShelX, calculated F squared) read by FFT from that map, in a standardized text file or a ShelX/Jana-compatible .fcf file.",
     "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
     "referencefile_mode": "Internal automatic setting derived from External reference file. Phase Studio writes only referencefile and lets Superflip infer jana/xplor/ccp4/cif from the filename.",
     "voxel": "Superflip voxel grid. The default omit/blank skips the keyword. Use three integers, for example 180 80 160, or AUTO to compute a 0.2 A grid from the unit cell.",
@@ -5719,8 +5760,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         output_form.addRow("", self._secondary_help(
             "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles; ccp4/jana add one "
             "extra saved density map on top for external use or Jana2020. HKL reflections with phases and ShelX (fcf) "
-            "instead save the observed reflections (phase is 0 unless supplied by the selected HKL mode) in place of "
-            "an extra density map."
+            "instead save, for each cycle's Superflip map, the observed reflections together with phases read by FFT "
+            "from that map, in place of an extra density map."
         ))
         output_tab.addStretch(1)
 
@@ -5816,7 +5857,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         output_help_layout = add_help_section(basic_help_tab, "output", "Output reference", """
             <h3>Output</h3>
             <p><b>Working directory</b> is where Phase Studio writes generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics. Use a dedicated directory per run when reproducibility matters.</p>
-            <p><b>Map format</b> adds one extra saved output on top of the XPLOR map that is always kept internally for EDMA, SharpED and Superflip: <code>ccp4</code> or <code>jana</code> save an extra CCP4 map or Jana m80/m81 density+reflection files; <b>HKL reflections with phases</b> and <b>ShelX (fcf)</b> instead save the observed reflections (h k l, intensity/F&sup2;, sigma, phase &mdash; phase is 0 unless supplied by the selected HKL mode) as a standardized text file or a ShelX/Jana-compatible .fcf file, in place of an extra density map.</p>
+            <p><b>Map format</b> adds one extra saved output on top of the XPLOR map that is always kept internally for EDMA, SharpED and Superflip: <code>ccp4</code> or <code>jana</code> save an extra CCP4 map or Jana m80/m81 density+reflection files; <b>HKL reflections with phases</b> and <b>ShelX (fcf)</b> instead save, for each cycle's Superflip map, the observed reflections (h k l, intensity/F&sup2;, sigma) together with phases &mdash; and, for ShelX, calculated F&sup2; &mdash; read by FFT from that map, as a standardized text file or a ShelX/Jana-compatible .fcf file, in place of an extra density map.</p>
             <p><b>Structure format</b> adds one extra saved structure format on top of the CIF that is always kept internally for metrics and next-cycle modelfiles: <code>xyz</code> or <code>pdb</code>.</p>
         """)
         add_back_to_contents(output_help_layout)
@@ -9352,15 +9393,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 n_written = write_observed_reflections(observed_hkl, refl, cfg.i_over_sigma_min, data_mode=data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 observed_hkls[data_mode] = observed_hkl
                 self.log(f"Prepared HKL for {data_mode}: {observed_hkl} ({n_written} reflections)")
-            export_fmt = normalize_map_export_format(cfg.map_export_format)
-            if export_fmt == "hkl_phases":
-                standard_hkl = cfg.work_dir / "observed_unique_standardized_I_sigma_phase.hkl"
-                n_standard = write_standardized_hkl_with_phase(standard_hkl, refl, cfg.i_over_sigma_min, configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
-                self.log(f"Standardized HKL export: {standard_hkl} ({n_standard} reflections)")
-            elif export_fmt == "shelx_fcf":
-                standard_fcf = cfg.work_dir / "observed_unique.fcf"
-                n_standard = write_shelx_fcf(standard_fcf, refl, cfg.i_over_sigma_min, configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
-                self.log(f"ShelX FCF export: {standard_fcf} ({n_standard} reflections)")
             state = PipelineState(
                 cfg=cfg,
                 ref_ctx=ref_ctx,
@@ -9500,6 +9532,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"Superflip map: {sf_map}")
             if self.stop_now.is_set():
                 raise RuntimeError("Immediate stop requested.")
+            export_phased_reflections_from_map(
+                cfg.map_export_format, cycle_dir / sf_prefix, sf_map, state.current_reflections,
+                cfg.i_over_sigma_min, configured_data_mode, ref_ctx.cell, cfg.resolution_d_min, self.log,
+            )
             sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
             self._emit_cycle_progress(
                 cyc,
@@ -9781,6 +9817,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log(f"[Cycle 1] Superflip map: {input_map}")
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
+                    export_phased_reflections_from_map(
+                        cfg.map_export_format, cycle_dir / sf_prefix, input_map, reflections,
+                        cfg.i_over_sigma_min, configured_data_mode, ref_ctx.cell, cfg.resolution_d_min, self.log,
+                    )
                     sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
             else:
                 input_map = state.recycle_map
