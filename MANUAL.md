@@ -1,6 +1,6 @@
 # Phase Studio User Manual
 
-**Version 1.0.5**
+**Version 1.0.6**
 
 ## 1. Introduction
 
@@ -80,7 +80,7 @@ The left side contains:
 - **Basic**
   - Input
   - Workflow
-  - Model
+  - Output
   - Help
 - **Advanced**
   - Setup
@@ -88,6 +88,9 @@ The left side contains:
   - EDMA
   - SharpED
   - Map feedback
+  - Help
+
+Both **Help** tabs are self-contained in-app reference material: Basic → Help covers the Basic tabs (getting-started guide, Input/Workflow/Output field reference, About); Advanced → Help covers the Advanced tabs (Setup/Superflip/EDMA/SharpED/Map feedback field reference, plus the raw Superflip keyword reference). Each has its own CONTENTS navigation row and does not duplicate the other's sections.
 
 ### 3.2 Run dashboard
 
@@ -252,9 +255,9 @@ The dialog can also provide copy/export actions when available in the current bu
 
 ## 6. Reconstruction workflow
 
-### 6.1 Workflow preset
+### 6.1 Starting preset
 
-The workflow preset provides a high-level starting configuration for common reconstruction strategies.
+**Starting preset** applies a bundle of starting values in one step; every value stays individually editable afterward, and re-selecting a preset re-applies its values. **Recommended** is the default: a general-purpose baseline (cycles 5, Phasing method Superflip, next-cycle model deblurred_xplor, XPLOR damping 0.3, all optional processing enabled except symmetry averaging, SharpED model koala 2.0) that matches the built-in defaults, so a fresh install and a fresh selection of **Recommended** produce the same configuration. The other presets (MOF atomic resolution, MOF medium resolution, small molecule, inorganic) tune a handful of settings for a specific sample type. **custom** applies nothing and is only a placeholder for "I've configured this by hand" — selecting it does not change or reset any current value.
 
 Treat presets as starting points rather than universal scientific recommendations.
 
@@ -266,15 +269,17 @@ The effective number of cycles can also depend on the selected next-cycle model 
 
 ### 6.3 Phasing method
 
-**Phasing method** chooses between the standard iterative Superflip cycle and two beta SharpED phase-recycling methods:
+**Phasing method** chooses between the standard iterative Superflip cycle and two SharpED phase-recycling methods, one beta and one experimental:
 
 - **Superflip** (default) — the standard charge-flipping cycle described in the rest of this section: Superflip runs every cycle, seeded by the next-cycle model.
-- **1st Superflip, then SharpED** *(beta)* — Superflip runs only once (cycle 1). From then on, every cycle deblurs the previous cycle's map with SharpED, calculates phi_calc by FFT from that deblurred map for every measured hkl (expanded over the full space-group symmetry, not just the measured asymmetric-unit hkl), and recomposes a map from the observed |Fobs| and phi_calc. That recomposed map is what SharpED deblurs in the next cycle.
-- **SharpED (beta)** — the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases per reflection. This can take extremely long to converge, even for simple structures (hundreds of cycles), and convergence is not guaranteed.
+- **1st Superflip, then SharpED (beta)** — Superflip runs only once (cycle 1). From then on, every cycle deblurs the previous cycle's map with SharpED, calculates phi_calc by FFT from that deblurred map for every measured hkl (expanded over the full space-group symmetry, not just the measured asymmetric-unit hkl), and recomposes a map from the observed |Fobs| and phi_calc. That recomposed map is what SharpED deblurs in the next cycle. This does not work well with some models.
+- **SharpED (experimental)** — the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases per reflection. This does not work well yet and is intended for development, not production use. It can take extremely long to converge, even for simple structures (hundreds of cycles), and convergence is not guaranteed.
 
-When either beta method is selected, **Next-cycle model**, **XPLOR damping**, **Symmetrize processed map with Superflip (beta)**, and the per-cycle EDMA checkboxes below are ignored (they are disabled in the GUI); the selected method defines its own next-cycle map and its own optional EDMA step (**Run EDMA on final map**, in Optional processing) instead.
+When either method is selected, **Next-cycle model**, **XPLOR damping**, **Symmetrize processed map with Superflip (beta)**, and the per-cycle EDMA checkboxes below are ignored (they are disabled in the GUI); the selected method defines its own next-cycle map and its own optional EDMA step (**Run EDMA on final map**, in Optional processing) instead. The convergence graph shows an additional **Map correlation** series for these methods (correlation between each cycle's recomposed map and the previous cycle's), since the Superflip-derived metrics used for Superflip cycling are only available for cycle 1 (or never, for **SharpED (experimental)**).
 
-Only the SharpED server and the observed reflections are required for **SharpED (beta)**; Superflip is never invoked in that mode.
+Only the SharpED server and the observed reflections are required for **SharpED (experimental)**; Superflip is never invoked in that mode.
+
+Both **1st Superflip, then SharpED (beta)** and **SharpED (experimental)**, along with **Symmetrize processed map with Superflip (beta)**, are hidden from the GUI by default. Check **Show beta and experimental features in settings** on **Advanced → Setup** to make them selectable.
 
 ### 6.4 Next-cycle model
 
@@ -366,7 +371,7 @@ These settings affect the Superflip input generated by Phase Studio and should b
 
 ### 7.4 Output
 
-Output format is configured on **Basic → Model → Output**, not on this page: a single **Map format** choice (XPLOR, XPLOR + CCP4, or XPLOR + Jana m80/m81), a single **Structure format** choice for the EDMA-exported structure (CIF, CIF + XYZ, or CIF + PDB), and an optional standardized HKL export.
+Output format is configured on **Basic → Output**, not on this page: a single **Map format** choice (XPLOR, XPLOR + CCP4, XPLOR + Jana m80/m81, HKL reflections with phases, or ShelX (fcf)) and a single **Structure format** choice for the EDMA-exported structure (CIF, CIF + XYZ, or CIF + PDB). The last two Map format options save the observed reflections instead of an extra density map.
 
 XPLOR and CIF are always produced internally regardless of these choices, because SharpED, EDMA and later-cycle modelfiles depend on them; the Map/Structure format choice only adds one extra saved format on top.
 
@@ -416,7 +421,7 @@ These settings affect which EDMA maxima are exported.
 
 ## 9. SharpED configuration
 
-The **Basic → Model** page selects the SharpED model, alongside the reference/initial model and output settings. Server connection lives on **Advanced → Setup**; elements, output resolution and transfer/network settings live on **Advanced → SharpED**.
+The SharpED model selector is on the **Basic → Workflow** page. Server connection lives on **Advanced → Setup**; elements, output resolution and transfer/network settings live on **Advanced → SharpED**.
 
 ### 9.1 Server connection
 
@@ -433,6 +438,10 @@ https://jana.fzu.cz/
 The token is used for authenticated SharpED requests.
 
 Phase Studio must never expose the token in normal logs or error messages.
+
+#### Show beta and experimental features in settings
+
+**Advanced → Setup** also has an **Interface** group with this checkbox, unchecked by default. When unchecked, beta and experimental Phasing methods (and the settings that only apply to them) are removed from the Basic tabs entirely, not just disabled. Check it to make them selectable again; see [6.3 Phasing method](#63-phasing-method).
 
 ### 9.2 Model
 
@@ -593,8 +602,7 @@ After hand-off, detailed model completion and final refinement should be perform
 Depending on the selected workflow, Phase Studio can generate:
 
 - Superflip `.inflip` files,
-- Superflip XPLOR maps (always) plus the selected extra Map format (CCP4 or Jana m80/m81),
-- standardized HKL exports (optional),
+- Superflip XPLOR maps (always) plus the selected extra Map format output (CCP4 or Jana m80/m81 density map, or a standardized HKL / ShelX .fcf reflection export),
 - Superflip logs,
 - EDMA CIF outputs (always) plus the selected extra Structure format (XYZ or PDB),
 - SharpED-processed XPLOR maps,
