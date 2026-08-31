@@ -251,6 +251,16 @@ The **Resolution Bins** table provides shell-wise statistics.
 
 The dialog can also provide copy/export actions when available in the current build.
 
+### 5.3 FWHM-format data
+
+**HKL format** (Basic → Input) includes two additional modes, `hkl I fwhm` and `hkl F fwhm`, for reflection data whose second column is a peak-shape full width at half maximum — for example intensities extracted from a Le Bail powder-pattern fit — rather than a genuine measurement uncertainty. Selecting `set from inflip` also recognizes a Jana `.inflip` `dataformat ... fwhm` line automatically.
+
+Because FWHM is not comparable in scale or meaning to σ, an `I/FWHM` ratio is not a signal-to-noise ratio. When FWHM data is detected:
+
+- Validate HKL and Analyze completeness relabel every σ-based column and statistic (`sigma(Iobs)`/`sigma(Fobs)` becomes `FWHM(Iobs)`/`FWHM(Fobs)`, `I/σ(I)` becomes `I/FWHM`), and the "Derived I/σ" conversion column (which applies an F→I error-propagation factor that assumes a genuine σ) is left blank.
+- The `I/σ(I) = 3` significance threshold and the resolution where mean `I/σ(I)` falls below it are not computed or shown, since that convention does not apply to FWHM data; the completeness dialog displays an explanatory note instead.
+- The Superflip input still receives the correct `dataformat ... fwhm` keyword (not `dummy` or a plain `sigma` assumption), so Superflip itself is told the true nature of the column.
+
 ---
 
 ## 6. Reconstruction workflow
@@ -552,6 +562,8 @@ The convergence panel has four tabs, each scaled and colored independently:
 Every series is normalized per tab to a 0 (worst) to 1 (best) scale for comparison; the underlying values are in `metrics.csv`.
 
 Unavailable series can be omitted in partial or cancelled runs.
+
+**Which Superflip metrics are safe to compare across cycles:** R, Peaks, FOM and Symmetry are Superflip's own internal convergence metrics from that cycle's charge-flipping run alone. Cycle 1 normally runs ab initio while cycle 2 onward is seeded by the selected next-cycle model, so these are not a like-for-like series across that transition, and `bestdensities`/`repeatmode` selects the best of several stochastic attempts each cycle, so some cycle-to-cycle fluctuation is expected even without a genuine quality change. **Reference match** and **Superflip RMSD** compare directly against a supplied reference structure and are the most reliable indicators of real improvement across cycles — but they only appear when a reference structure is provided; for a genuinely unknown structure, only the less reliable metrics above are available.
 
 ### 11.7 Structure Comparison
 

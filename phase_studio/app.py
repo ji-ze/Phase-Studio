@@ -148,6 +148,8 @@ REFLECTION_DATA_MODE_INTENSITY = "hkl I sigma"
 REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA = "hkl F sigma"
 REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA = "hkl I phase sigma"
 REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA = "hkl F phase sigma"
+REFLECTION_DATA_MODE_INTENSITY_FWHM = "hkl I fwhm"
+REFLECTION_DATA_MODE_AMPLITUDE_FWHM = "hkl F fwhm"
 # Compatibility name used by older settings and internal call sites.
 REFLECTION_DATA_MODE_AUTO = REFLECTION_DATA_MODE_SET_FROM_INFLIP
 ATOMIC_NUMBER_HINTS = {
@@ -1437,6 +1439,13 @@ def normalize_reflection_data_mode(value: str) -> str:
         "fobs_zero_phase_sigma": REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
         "intensity_phase_sigma": REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
         "i_phase_sigma": REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+        "hkl_i_fwhm": REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        "hkl_f_fwhm": REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+        "i_fwhm": REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        "intensity_fwhm": REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        "f_fwhm": REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+        "fobs_fwhm": REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+        "amplitude_fwhm": REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
     }
     mode = aliases.get(mode, mode)
     if mode == REFLECTION_DATA_MODE_AUTO:
@@ -1445,6 +1454,8 @@ def normalize_reflection_data_mode(value: str) -> str:
         REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
         REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
         REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+        REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
     }:
         return mode
     return REFLECTION_DATA_MODE_INTENSITY
@@ -1454,6 +1465,7 @@ def reflection_mode_is_amplitude(data_mode: str) -> bool:
     return normalize_reflection_data_mode(data_mode) in {
         REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
         REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+        REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
     }
 
 
@@ -1464,9 +1476,26 @@ def reflection_mode_has_phase(data_mode: str) -> bool:
     }
 
 
+def reflection_mode_has_fwhm(data_mode: str) -> bool:
+    """True when the reflection file's second data column is a peak-shape FWHM
+    (full width at half maximum, e.g. from a Le Bail powder extraction), not a
+    genuine measurement uncertainty. FWHM is typically on a completely
+    different scale than the intensity/amplitude it is paired with, so an
+    I/FWHM or F/FWHM ratio is not a signal-to-noise ratio the way I/sigma(I)
+    is, and must not be labeled or interpreted as one."""
+    return normalize_reflection_data_mode(data_mode) in {
+        REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+    }
+
+
 def superflip_dataformat_for_mode(data_mode: str) -> str:
     quantity = "amplitude" if reflection_mode_is_amplitude(data_mode) else "intensity"
-    return f"{quantity} phase dummy" if reflection_mode_has_phase(data_mode) else f"{quantity} dummy"
+    if reflection_mode_has_phase(data_mode):
+        return f"{quantity} phase dummy"
+    if reflection_mode_has_fwhm(data_mode):
+        return f"{quantity} fwhm"
+    return f"{quantity} dummy"
 
 def detect_reflection_data_mode_from_hkl(hkl_path: Path) -> str:
     name = hkl_path.name.lower()
@@ -1484,6 +1513,10 @@ def detect_reflection_data_mode_from_hkl(hkl_path: Path) -> str:
                     return REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA
                 if "fobs" in low and "phase" in low:
                     return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+                if "intensity" in low and "fwhm" in low:
+                    return REFLECTION_DATA_MODE_INTENSITY_FWHM
+                if ("fobs" in low or "amplitude" in low) and "fwhm" in low:
+                    return REFLECTION_DATA_MODE_AMPLITUDE_FWHM
                 if "fobs" in low and "sigma" in low:
                     return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
                 if "intensity" in low:
@@ -1864,6 +1897,11 @@ def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]
         amplitude = abs(value)
         if amplitude <= 0:
             return 0.0
+        if reflection_mode_has_fwhm(data_mode):
+            # The factor of 2 below propagates a genuine sigma(F) into an
+            # intensity-domain uncertainty (I=F^2 => dI=2F.dF); FWHM is not an
+            # uncertainty, so that propagation does not apply -- use F/FWHM directly.
+            return amplitude / sigma
         return amplitude / (2.0 * sigma)
     return value / sigma
 
@@ -1882,11 +1920,15 @@ def reflection_value_label(data_mode: str) -> str:
     return "Iobs"
 
 def reflection_sigma_label(data_mode: str) -> str:
+    if reflection_mode_has_fwhm(data_mode):
+        return "FWHM(Fobs)" if reflection_mode_is_amplitude(data_mode) else "FWHM(Iobs)"
     if reflection_mode_is_amplitude(data_mode):
         return "sigma(Fobs)"
     return "sigma(Iobs)"
 
 def reflection_primary_snr_label(data_mode: str) -> str:
+    if reflection_mode_has_fwhm(data_mode):
+        return "I/FWHM"
     return "I/sigma(I)"
 
 def reflection_primary_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
@@ -3224,6 +3266,7 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
     saw_dataformat_amplitude = False
     saw_dataformat_intensity = False
     saw_dataformat_phase = False
+    saw_dataformat_fwhm = False
     sample_widths: List[int] = []
     in_block = False
     try:
@@ -3237,6 +3280,7 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
                 saw_dataformat_intensity = "intensity" in items
                 saw_dataformat_amplitude = "amplitude" in items
                 saw_dataformat_phase = "phase" in items
+                saw_dataformat_fwhm = "fwhm" in items
             if key == "fbegin":
                 in_block = True
                 continue
@@ -3254,6 +3298,8 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
         return REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA if saw_dataformat_intensity else REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
     if saw_dataitemwidths and sample_widths and max(sample_widths) >= 6:
         return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+    if saw_dataformat_fwhm:
+        return REFLECTION_DATA_MODE_INTENSITY_FWHM if saw_dataformat_intensity else REFLECTION_DATA_MODE_AMPLITUDE_FWHM
     if saw_dataformat_intensity:
         return REFLECTION_DATA_MODE_INTENSITY
     if saw_dataformat_amplitude:
@@ -3490,6 +3536,10 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
                 settings["reflection_data_mode"] = REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA
             elif "amplitude" in items and "phase" in items:
                 settings["reflection_data_mode"] = REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+            elif "intensity" in items and "fwhm" in items:
+                settings["reflection_data_mode"] = REFLECTION_DATA_MODE_INTENSITY_FWHM
+            elif "amplitude" in items and "fwhm" in items:
+                settings["reflection_data_mode"] = REFLECTION_DATA_MODE_AMPLITUDE_FWHM
             elif "intensity" in items:
                 settings["reflection_data_mode"] = REFLECTION_DATA_MODE_INTENSITY
             elif "amplitude" in items and "dummy" in items:
@@ -4861,7 +4911,7 @@ INPUT_TOOLTIPS = {
     "delta": "Superflip delta keyword. AUTO lets Superflip estimate the flip threshold.",
     "weakratio": "Superflip weakratio keyword.",
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
-    "reflection_data_mode": "Exact HKL column order. 'set from inflip' imports dataformat from Jana; the four HKL modes accept I or F followed by sigma, optionally with phase in degrees before sigma. Phase Studio converts phase to Superflip turns and retains sigma for diagnostics.",
+    "reflection_data_mode": "Exact HKL column order. 'set from inflip' imports dataformat from Jana. hkl I sigma/hkl F sigma/hkl I phase sigma/hkl F phase sigma accept I or F followed by a genuine sigma, optionally with phase in degrees before sigma; Phase Studio converts phase to Superflip turns and retains sigma for diagnostics. hkl I fwhm/hkl F fwhm are for data whose second column is a peak-shape FWHM (e.g. Le Bail powder extraction), not a measurement uncertainty -- I/sigma(I)-style statistics are hidden or relabeled I/FWHM for these, since an I/FWHM ratio is not a signal-to-noise ratio.",
     "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle model instead.",
     "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
@@ -5589,6 +5639,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
                 REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
                 REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+                REFLECTION_DATA_MODE_INTENSITY_FWHM,
+                REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
             ],
             REFLECTION_DATA_MODE_SET_FROM_INFLIP,
         )
@@ -5884,7 +5936,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Input mode</b> chooses the reflection source: <b>Jana .inflip</b>, <b>Jana .inflip with overrides</b>, or <b>External HKL</b>. In Jana modes, the .inflip file's fbegin/endf block is the default HKL source and its cell/space-group/composition keywords can provide crystallographic metadata; External mode uses reflection data loaded independently of Jana2020 and requires metadata from another source.</p>
             <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
             <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
-            <p><b>HKL format</b> is the exact column order of the reflection data. <code>set from inflip</code> imports the format from Jana; the other modes accept intensity or amplitude followed by sigma, optionally with a phase column in degrees before sigma.</p>
+            <p><b>HKL format</b> is the exact column order of the reflection data. <code>set from inflip</code> imports the format from Jana, including a <code>dataformat ... fwhm</code> line; the other modes accept intensity or amplitude followed by sigma, optionally with a phase column in degrees before sigma. <b>hkl I fwhm</b> and <b>hkl F fwhm</b> are for data whose second column is a peak-shape FWHM (e.g. from a Le Bail powder extraction) rather than a genuine uncertainty -- Validate HKL and Analyze completeness relabel sigma-based columns and statistics accordingly (I/FWHM instead of I/&sigma;(I)) and hide the I/&sigma;(I)=3 significance threshold, which does not apply to FWHM data.</p>
             <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
             <h3>Crystal metadata</h3>
             <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
@@ -6326,6 +6378,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.metrics_figures: Dict[str, Figure] = {}
         self.metrics_axes: Dict[str, object] = {}
         self.metrics_canvases: Dict[str, FigureCanvas] = {}
+        metrics_tab_tooltips = {
+            "superflip": (
+                "R, Peaks, FOM and Symmetry are Superflip's own internal convergence metrics. Cycle 1 runs ab initio "
+                "while cycle 2+ is normally seeded by the next-cycle model, so these are not a like-for-like series across "
+                "that transition, and bestdensities/repeatmode selects the best of several stochastic attempts each "
+                "cycle -- some fluctuation is expected. Reference match and SF RMSD compare directly against a supplied "
+                "reference structure and are the most reliable indicators of genuine improvement, but only appear when "
+                "one is provided."
+            ),
+        }
         for key, title in (
             ("superflip", "Superflip"),
             ("deblur", "Deblurred"),
@@ -6343,7 +6405,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             canvas.mpl_connect("resize_event", lambda _event, k=key: self._layout_metrics_figure(k))
             canvas.setToolTip("")
             page_layout.addWidget(canvas, 1)
-            self.metrics_tabs.addTab(page, title)
+            tab_index = self.metrics_tabs.addTab(page, title)
+            if key in metrics_tab_tooltips:
+                self.metrics_tabs.setTabToolTip(tab_index, metrics_tab_tooltips[key])
             self.metrics_figures[key] = figure
             self.metrics_axes[key] = figure.add_subplot(111)
             self.metrics_canvases[key] = canvas
@@ -7255,6 +7319,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         value_label = reflection_value_label(data_mode)
         sigma_label = reflection_sigma_label(data_mode)
         snr_label = reflection_primary_snr_label(data_mode)
+        is_fwhm_mode = reflection_mode_has_fwhm(data_mode)
+        derived_ios_label = "Derived I/FWHM" if is_fwhm_mode else "Derived I/σ"
 
         dialog = QDialog(self)
         dialog.setObjectName("hklValidationDialog")
@@ -7291,7 +7357,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sample_header.addWidget(sample_count)
         layout.addLayout(sample_header)
 
-        headers = ["h", "k", "l", value_label, sigma_label, "Phase (°)", snr_label, "Derived I/σ", "d (Å)", "sinθ/λ"]
+        headers = ["h", "k", "l", value_label, sigma_label, "Phase (°)", snr_label, derived_ios_label, "d (Å)", "sinθ/λ"]
         table = QTableWidget(rows, len(headers))
         self._configure_diagnostic_table(table)
         table.setHorizontalHeaderLabels(headers)
@@ -7303,7 +7369,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             d_spacing = reflection_d_spacing(cell, int(reflection.h), int(reflection.k), int(reflection.l))
             stl = reflection_sintheta_over_lambda(cell, int(reflection.h), int(reflection.k), int(reflection.l))
             primary_snr = reflection_primary_signal_to_noise(reflection, data_mode)
-            derived_ios = reflection_signal_to_noise(reflection, data_mode)
+            # The F->I error-propagation factor (dI = 2F.dF) is only meaningful for a
+            # genuine sigma; skip it for FWHM data rather than show a number dressed
+            # up as a derived uncertainty.
+            derived_ios = None if is_fwhm_mode else reflection_signal_to_noise(reflection, data_mode)
             values = [
                 str(int(reflection.h)), str(int(reflection.k)), str(int(reflection.l)),
                 f"{float(reflection.value):.7g}",
@@ -7376,6 +7445,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         d_full = format_resolution_d(analysis.d_full_98)
         sigma_label = reflection_sigma_label(analysis.data_mode)
         signal_label = reflection_primary_snr_label(analysis.data_mode)
+        is_fwhm_mode = reflection_mode_has_fwhm(analysis.data_mode)
         raw_sigma_count = sum(1 for r in analysis.reflections_raw if r.sigma is not None)
         unique_sigma_count = sum(1 for r in analysis.reflections_unique if r.sigma is not None)
         phase_count = sum(1 for r in analysis.reflections_raw if r.phase is not None)
@@ -7390,22 +7460,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             for b in analysis.bins
             if math.isfinite(float(b["center"])) and math.isfinite(float(b["mean_signal_to_noise"]))
         ]
-        for idx, (stl, signal) in enumerate(signal_points):
-            if signal >= signal_threshold:
-                continue
-            if idx > 0:
-                prev_stl, prev_signal = signal_points[idx - 1]
-                if prev_signal >= signal_threshold and stl > prev_stl and not math.isclose(signal, prev_signal):
-                    fraction = (signal_threshold - prev_signal) / (signal - prev_signal)
-                    threshold_stl = prev_stl + fraction * (stl - prev_stl)
+        # The I/sigma(I) = 3 significance convention does not apply to FWHM data:
+        # FWHM is a peak-shape parameter (e.g. from a Le Bail powder extraction),
+        # not a measurement uncertainty, so an I/FWHM ratio is not comparable in
+        # scale or meaning to a genuine signal-to-noise ratio. Skip the threshold
+        # entirely rather than presenting a number that looks like one but isn't.
+        if not is_fwhm_mode:
+            for idx, (stl, signal) in enumerate(signal_points):
+                if signal >= signal_threshold:
+                    continue
+                if idx > 0:
+                    prev_stl, prev_signal = signal_points[idx - 1]
+                    if prev_signal >= signal_threshold and stl > prev_stl and not math.isclose(signal, prev_signal):
+                        fraction = (signal_threshold - prev_signal) / (signal - prev_signal)
+                        threshold_stl = prev_stl + fraction * (stl - prev_stl)
+                    else:
+                        threshold_stl = stl
                 else:
                     threshold_stl = stl
-            else:
-                threshold_stl = stl
-            break
-        if threshold_stl is not None and threshold_stl > 0:
-            threshold_d = 1.0 / (2.0 * threshold_stl)
-        threshold_d_text = format_resolution_d(threshold_d)
+                break
+            if threshold_stl is not None and threshold_stl > 0:
+                threshold_d = 1.0 / (2.0 * threshold_stl)
+        threshold_d_text = "n/a (not meaningful for FWHM)" if is_fwhm_mode else format_resolution_d(threshold_d)
         input_summary = self._diagnostic_input_summary(
             analysis.hkl_path,
             analysis.data_mode,
@@ -7415,6 +7491,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             compact=True,
         )
         layout.addWidget(input_summary)
+        if is_fwhm_mode:
+            fwhm_note = QLabel(
+                "<b>FWHM data</b><br>The second data column is a peak-shape FWHM (e.g. from a Le Bail powder "
+                "extraction), not a measurement uncertainty. I/FWHM is shown for reference but is not a "
+                "signal-to-noise ratio; the usual I/&sigma;(I) = 3 significance threshold does not apply and is omitted below."
+            )
+            fwhm_note.setObjectName("helpCallout")
+            fwhm_note.setTextFormat(Qt.RichText)
+            fwhm_note.setWordWrap(True)
+            layout.addWidget(fwhm_note)
         metrics_panel = self._diagnostic_metric_grid((
             (f"{len(analysis.reflections_unique):,}", "Unique reflections"),
             (d_min_text, "d_min"),
@@ -7505,9 +7591,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         mean_signal = [float(b["mean_signal_to_noise"]) if math.isfinite(float(b["mean_signal_to_noise"])) else np.nan for b in analysis.bins]
         signal_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
         signal_values = [float(v) for v in signal_values if v is not None and math.isfinite(float(v))]
-        signal_math_label = r"$I/\sigma(I)$"
-        mean_signal_math_label = r"Mean $I/\sigma(I)$"
-        threshold_math_label = rf"$I/\sigma(I) = {signal_threshold:.1f}$"
+        if is_fwhm_mode:
+            signal_math_label = r"$I/\mathrm{FWHM}$"
+            mean_signal_math_label = r"Mean $I/\mathrm{FWHM}$"
+            threshold_math_label = None
+        else:
+            signal_math_label = r"$I/\sigma(I)$"
+            mean_signal_math_label = r"Mean $I/\sigma(I)$"
+            threshold_math_label = rf"$I/\sigma(I) = {signal_threshold:.1f}$"
         resolution_math_label = r"$\sin\theta/\lambda$"
         d_min_stl = 1.0 / (2.0 * analysis.d_min) if analysis.d_min > 0 else None
         d_full_stl = 1.0 / (2.0 * analysis.d_full_98) if analysis.d_full_98 is not None and analysis.d_full_98 > 0 else None
@@ -7568,14 +7659,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             zorder=3,
             label=mean_signal_math_label,
         )
-        threshold_artist = ax_signal.axhline(
-            signal_threshold,
-            color="#2264b8",
-            linewidth=1.0,
-            linestyle="--",
-            zorder=2,
-            label=threshold_math_label,
-        )
+        threshold_artist = None
+        if not is_fwhm_mode:
+            threshold_artist = ax_signal.axhline(
+                signal_threshold,
+                color="#2264b8",
+                linewidth=1.0,
+                linestyle="--",
+                zorder=2,
+                label=threshold_math_label,
+            )
         ax_signal.set_ylabel(mean_signal_math_label, labelpad=8, fontsize=9)
         ax_signal.yaxis.set_label_coords(shared_ylabel_x, 0.5)
         ax_signal.set_xlabel(resolution_math_label, labelpad=2)
@@ -7615,8 +7708,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 bbox={"boxstyle": "square,pad=0.16", "facecolor": "#ffffff", "edgecolor": "none", "alpha": 0.88},
                 annotation_clip=False,
             )
-        legend_handles = [completeness_artist, mean_artist, threshold_artist]
-        legend_labels = ["Completeness", mean_signal_math_label, threshold_math_label]
+        legend_handles = [completeness_artist, mean_artist]
+        legend_labels = ["Completeness", mean_signal_math_label]
+        if threshold_artist is not None:
+            legend_handles.append(threshold_artist)
+            legend_labels.append(threshold_math_label)
         if d_full_artist is not None:
             legend_handles.append(d_full_artist)
             legend_labels.append("d at 98%")
