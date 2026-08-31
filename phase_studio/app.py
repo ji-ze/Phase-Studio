@@ -597,6 +597,10 @@ class RunConfig:
     map_feedback_intensity_from_cycle: int
     map_feedback_intensity_damping: float
     map_feedback_intensity_max_i_over_sigma: float
+    redistribute_overlaps: bool
+    powder_wavelength: float
+    powder_separation_factor: float
+    powder_redistribution_mix: float
     run_sharped: bool
     symmetrize_deblurred_map: bool
     run_edma_superflip: bool
@@ -2741,6 +2745,116 @@ def apply_map_feedback_to_reflections(
     )
     return current
 
+def bragg_two_theta_deg(d_value: float, wavelength: float) -> Optional[float]:
+    """Bragg angle 2theta in degrees; None (not raised) for a reflection that is
+    geometrically inaccessible at this wavelength, so one bad hkl does not abort
+    overlap grouping for the rest of the data set."""
+    if wavelength <= 0 or not math.isfinite(wavelength) or d_value <= 0 or not math.isfinite(d_value):
+        return None
+    argument = wavelength / (2.0 * d_value)
+    if argument > 1.0 + 1e-9:
+        return None
+    return float(math.degrees(2.0 * math.asin(min(1.0, argument))))
+
+def assign_powder_overlap_groups(
+    reflections: Sequence[Reflection], cell: gemmi.UnitCell, wavelength: float, separation_factor: float,
+) -> Dict[Tuple[int, int, int], int]:
+    """Group reflections whose Bragg peaks overlap in a powder pattern: sorted by
+    2theta, neighbors are joined transitively into the same group while
+    delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2, matching Superflip's
+    own fwhmseparation convention. FWHM is read from each reflection's sigma
+    field (that is where the 'hkl I/F fwhm' data modes store it). A reflection
+    with no FWHM value or an inaccessible 2theta is left ungrouped (group 0).
+    Returns hkl -> group id, 0 meaning "not part of any overlap group"."""
+    entries: List[Tuple[Tuple[int, int, int], float, float]] = []
+    for r in reflections:
+        if r.sigma is None:
+            continue
+        d_value = reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l))
+        angle = bragg_two_theta_deg(d_value, wavelength)
+        if angle is None:
+            continue
+        entries.append(((int(r.h), int(r.k), int(r.l)), angle, max(0.0, float(r.sigma))))
+    groups: Dict[Tuple[int, int, int], int] = {}
+    if len(entries) < 2:
+        return groups
+    entries.sort(key=lambda item: item[1])
+    group_id = 0
+    current_component: List[Tuple[Tuple[int, int, int], float, float]] = [entries[0]]
+    for previous, current in zip(entries, entries[1:]):
+        delta = current[1] - previous[1]
+        threshold = separation_factor * (previous[2] + current[2]) / 2.0
+        if delta < threshold:
+            current_component.append(current)
+        else:
+            if len(current_component) > 1:
+                group_id += 1
+                for key, _angle, _fwhm in current_component:
+                    groups[key] = group_id
+            current_component = [current]
+    if len(current_component) > 1:
+        group_id += 1
+        for key, _angle, _fwhm in current_component:
+            groups[key] = group_id
+    return groups
+
+def redistribute_overlap_reflections(
+    reflections: Sequence[Reflection], data_mode: str, feedback_map: Path, cell: gemmi.UnitCell,
+    wavelength: float, separation_factor: float, mix: float, log: Callable[[str], None],
+) -> List[Reflection]:
+    """Powder overlap repartitioning: within each 2theta/FWHM overlap group (see
+    assign_powder_overlap_groups), keep the observed group-total intensity fixed
+    but replace each member's share of it with a blend of its own observed ratio
+    and the ratio implied by intensities calculated by FFT from feedback_map
+    (mix=0 keeps the observed split, mix=1 uses the map split entirely) --
+    the same technique used to deblur overlapping reflections in Le Bail powder
+    extractions before phase retrieval. Groups where the map has no usable
+    signal for any member fall back to the observed split unchanged."""
+    mode = normalize_reflection_data_mode(data_mode)
+    current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
+    groups = assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
+    if not groups:
+        log("Overlap repartitioning: no overlap groups found (need at least two reflections with FWHM and accessible 2theta).")
+        return current
+    by_group: Dict[int, List[Reflection]] = {}
+    for r in current:
+        gid = groups.get((int(r.h), int(r.k), int(r.l)), 0)
+        if gid:
+            by_group.setdefault(gid, []).append(r)
+    all_keys = [(int(r.h), int(r.k), int(r.l)) for group in by_group.values() for r in group]
+    predictions = xplor_fft_predictions(feedback_map, all_keys)
+    mix = max(0.0, min(1.0, float(mix)))
+    redistributed: Dict[Tuple[int, int, int], float] = {}
+    fallback_groups = 0
+    for members in by_group.values():
+        observed = [reflection_value_as_intensity(r, mode) for r in members]
+        target = float(sum(observed))
+        map_intensities = [max(0.0, predictions.get((int(r.h), int(r.k), int(r.l)), (0.0, 0.0))[0]) for r in members]
+        map_sum = float(sum(map_intensities))
+        observed_ratios = [(value / target if target > 0 else 1.0 / len(members)) for value in observed]
+        if map_sum <= 1e-30:
+            fallback_groups += 1
+            ratios = observed_ratios
+        else:
+            map_ratios = [value / map_sum for value in map_intensities]
+            ratios = [(1.0 - mix) * o + mix * m for o, m in zip(observed_ratios, map_ratios)]
+        for r, ratio in zip(members, ratios):
+            redistributed[(int(r.h), int(r.k), int(r.l))] = target * ratio
+    updated: List[Reflection] = []
+    for r in current:
+        key = (int(r.h), int(r.k), int(r.l))
+        if key in redistributed:
+            updated.append(Reflection(r.h, r.k, r.l, value_from_intensity(redistributed[key], mode), r.sigma, r.phase))
+        else:
+            updated.append(r)
+    log(
+        "Overlap repartitioning: "
+        f"groups={len(by_group)}, reflections_redistributed={len(redistributed)}, "
+        f"map_fallback_groups={fallback_groups}, mix={mix:g}, wavelength={wavelength:g} A, "
+        f"separation_factor={separation_factor:g}"
+    )
+    return updated
+
 def wants_xplor_modelfile(value: str) -> bool:
     return "xplor" in str(value or "").strip().lower()
 
@@ -3549,6 +3663,9 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
         "derivesymmetry": "derivesymmetry",
         "electrons": "electrons",
         "dataitemwidths": "dataitemwidths",
+        "lambda": "powder_wavelength",
+        "wavelength": "powder_wavelength",
+        "fwhmseparation": "powder_separation_factor",
     }
     text = Path(inflip_path).read_text(encoding="utf-8", errors="replace")
     for raw in text.splitlines():
@@ -5000,6 +5117,10 @@ INPUT_TOOLTIPS = {
     "map_feedback_intensity_from_cycle": "First completed cycle whose final map is used to damp observed intensities for the next cycle. Use 0 to disable intensity correction.",
     "map_feedback_intensity_damping": "Damping factor for map-based intensity correction. 0 keeps observed data; 1 replaces them by scaled map-derived intensities.",
     "map_feedback_intensity_max_i_over_sigma": "Apply map-based intensity correction only to non-zero reflections with value/sigma below this limit. Use 0 to correct all non-zero reflections.",
+    "redistribute_overlaps": "Each cycle, redistribute the combined observed intensity of overlapping-reflection groups (hkl I/F fwhm data only) between their members, using intensities calculated by FFT from that cycle's processed map. Settings are on Basic -> Map feedback -> Powder overlap repartitioning.",
+    "powder_wavelength": "Radiation wavelength in angstrom, required to compute 2theta for powder overlap repartitioning. Not auto-detected except via Advanced -> Superflip -> Load settings from .inflip, which reads a lambda/wavelength line if present. 0 disables repartitioning even if the checkbox is on.",
+    "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2theta-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
+    "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
     "sharped_base_url": "SharpED inference server base URL. The C++ reference client uses https://jana.fzu.cz.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
     "show_beta_features": "When off (default), beta and experimental Phasing methods and the settings that only apply to them are hidden entirely from the Basic tabs, not just disabled. Enable to make them selectable.",
@@ -5409,6 +5530,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "Input": "input",
                 "Workflow": "workflow",
                 "Output": "output",
+                "Map feedback": "map_feedback",
                 "Help": None,
             }.get(name, "setup")
         name = self.advanced_tabs.tabText(self.advanced_tabs.currentIndex())
@@ -5417,7 +5539,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "Superflip": "superflip",
             "EDMA": "edma",
             "SharpED": "sharped",
-            "Map feedback": "map_feedback",
             "Help": None,
         }.get(name, "adv_setup")
 
@@ -5931,6 +6052,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True, align_with_fields=True)
         self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize processed map with Superflip (beta)", False, align_with_fields=True)
         self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on processed map", True, align_with_fields=True)
+        self._add_checkbox(optional_form, "redistribute_overlaps", "Redistribute overlapping powder reflections (FWHM data)", False, align_with_fields=True)
         self._add_checkbox(optional_form, "compute_omit_maps", "Compute omit maps (exclude 5% of reflections)", False, align_with_fields=True)
         self._add_checkbox(optional_form, "compute_omit_rfree", "Compute R_free from excluded 5%", False, align_with_fields=True)
         try:
@@ -5957,6 +6079,40 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ))
         output_tab.addStretch(1)
 
+        # Basic / Map feedback
+        feedback_tab = add_settings_tab("Map feedback")
+        feedback_tab.addWidget(settings_callout(
+            "Warning",
+            "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later "
+            "cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.",
+        ))
+        missing_feedback_form = add_form_group(feedback_tab, "Missing-reflection completion", "map_feedback")
+        self._add_spin(missing_feedback_form, "map_feedback_missing_from_cycle", "Start after cycle", 0, 0, 999, 1)
+        self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Added limit (%)", 0.0, 0.0, 100.0, 1.0, 3)
+        missing_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables missing-reflection completion."))
+
+        intensity_feedback_form = add_form_group(feedback_tab, "Intensity correction")
+        self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 0, 0, 999, 1)
+        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
+        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply below value/σ", 0.0, 0.0, 1000.0, 0.5, 3)
+        intensity_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables correction; value/σ = 0 applies to all non-zero reflections."))
+
+        powder_feedback_form = add_form_group(feedback_tab, "Powder overlap repartitioning")
+        self._add_dspin(powder_feedback_form, "powder_wavelength", "Wavelength (Å)", 0.0, 0.0, 10.0, 0.01, 5)
+        self._add_dspin(powder_feedback_form, "powder_separation_factor", "Separation factor", 0.2, 0.001, 100.0, 0.05, 3)
+        self._add_dspin(powder_feedback_form, "powder_redistribution_mix", "Map ratio mix", 1.0, 0.0, 1.0, 0.05, 3)
+        powder_feedback_form.addRow("", settings_callout(
+            "Note",
+            "Used only when Workflow → Optional processing → Redistribute overlapping powder reflections is "
+            "enabled, and only for reflections with an FWHM value (hkl I/F fwhm data). Wavelength is required and "
+            "not auto-detected except via Advanced → Superflip → Load settings from .inflip (dataformat's own "
+            "lambda/wavelength line). Reflections whose Bragg peaks overlap -- delta(2theta) below Separation "
+            "factor times the mean of their FWHM -- have their combined observed intensity redistributed between "
+            "them using intensities calculated by FFT from that cycle's processed map, blended by Map ratio mix "
+            "(0 keeps the observed split, 1 uses the map split fully); the group total is always conserved.",
+        ))
+        feedback_tab.addStretch(1)
+
         # Basic / Help
         basic_help_tab = add_settings_tab("Help")
         basic_contents_row = QHBoxLayout()
@@ -5966,7 +6122,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         basic_contents_row.addWidget(basic_contents_label)
         for link_text, anchor in (
             ("Setup", "setup"), ("Input", "input"), ("Workflow", "workflow"),
-            ("Output", "output"), ("About", "about"),
+            ("Output", "output"), ("Feedback", "map_feedback"), ("About", "about"),
         ):
             link = QToolButton()
             link.setObjectName("helpNavLink")
@@ -6041,6 +6197,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 <li><b>Run SharpED deblurring</b> &mdash; process the Superflip map with the SharpED server. If disabled, the "deblurred" map used downstream is just a copy of the Superflip map.</li>
                 <li><b>Symmetrize processed map with Superflip (beta)</b> &mdash; after deblurring, run Superflip in symmetry mode (no charge flipping) with the deblurred map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
                 <li><b>Run EDMA on processed map</b> &mdash; peak-search the deblurred (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
+                <li><b>Redistribute overlapping powder reflections (FWHM data)</b> &mdash; for <code>hkl I/F fwhm</code> data, redistribute each cycle's overlapping-reflection groups using the processed map; settings are on Basic &rarr; Map feedback &rarr; Powder overlap repartitioning.</li>
                 <li><b>Compute omit maps (exclude 5% of reflections)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip (omit+rfree)</b> and <b>SharpED (omit+rfree)</b> convergence tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
                 <li><b>Compute R_free from excluded 5%</b> &mdash; requires the option above; also computes R_free (the crystallographic R-factor between the excluded reflections' observed |F| and |F| calculated by FFT from the omit map) for both the omit-map series.</li>
             </ul>
@@ -6055,6 +6212,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Structure format</b> adds one extra saved structure format on top of the CIF that is always kept internally for metrics and next-cycle modelfiles: <code>xyz</code> or <code>pdb</code>.</p>
         """)
         add_back_to_contents(output_help_layout)
+        map_feedback_layout = add_help_section(basic_help_tab, "map_feedback", "Map feedback reference", """
+            <h3>Missing-reflection completion</h3>
+            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle; 0 disables missing-reflection completion. <b>Added limit (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
+            <h3>Intensity correction</h3>
+            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle; 0 disables intensity correction. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
+            <h3>Powder overlap repartitioning</h3>
+            <p>Used only when Basic &rarr; Workflow &rarr; Optional processing &rarr; <b>Redistribute overlapping powder reflections (FWHM data)</b> is enabled, and only for reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). Reflections whose Bragg peaks overlap in a powder pattern -- delta(2theta) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's processed map, blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2theta and is not detected automatically except via Advanced &rarr; Superflip &rarr; <b>Load settings from .inflip</b>, which reads a <code>lambda</code>/<code>wavelength</code> line if present.</p>
+        """)
+        add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles. Cycle 0 disables the corresponding mechanism.")
+        add_back_to_contents(map_feedback_layout)
         about_layout = add_help_section(basic_help_tab, "about", "About Phase Studio", """
             <h2>Phase Studio</h2>
             <p>Phase Studio is a crystallographic reconstruction workflow integrating Superflip, SharpED and EDMA with Jana2020-oriented workflows.</p>
@@ -6211,25 +6378,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         network_form.addRow("", self._secondary_help("Use -1 for no fixed polling limit."))
         sharped_advanced_tab.addStretch(1)
 
-        # Advanced / Map feedback
-        feedback_tab = add_settings_tab("Map feedback", advanced=True)
-        feedback_tab.addWidget(settings_callout(
-            "Warning",
-            "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later "
-            "cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.",
-        ))
-        missing_feedback_form = add_form_group(feedback_tab, "Missing-reflection completion", "map_feedback")
-        self._add_spin(missing_feedback_form, "map_feedback_missing_from_cycle", "Start after cycle", 0, 0, 999, 1)
-        self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Added limit (%)", 0.0, 0.0, 100.0, 1.0, 3)
-        missing_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables missing-reflection completion."))
-
-        intensity_feedback_form = add_form_group(feedback_tab, "Intensity correction")
-        self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 0, 0, 999, 1)
-        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
-        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply below value/σ", 0.0, 0.0, 1000.0, 0.5, 3)
-        intensity_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables correction; value/σ = 0 applies to all non-zero reflections."))
-        feedback_tab.addStretch(1)
-
         # Advanced / Help
         advanced_help_tab = add_settings_tab("Help", advanced=True)
         advanced_contents_row = QHBoxLayout()
@@ -6239,7 +6387,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         advanced_contents_row.addWidget(advanced_contents_label)
         for link_text, anchor in (
             ("Setup", "adv_setup"), ("Superflip", "superflip"), ("EDMA", "edma"),
-            ("SharpED", "sharped"), ("Feedback", "map_feedback"), ("Keywords", "keyword_reference"),
+            ("SharpED", "sharped"), ("Keywords", "keyword_reference"),
         ):
             link = QToolButton()
             link.setObjectName("helpNavLink")
@@ -6319,14 +6467,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_help_layout.addLayout(sharped_link_row)
         add_help_callout(sharped_help_layout, "Important", "SharpED processing requires a valid API token and network access.")
         add_back_to_contents(sharped_help_layout, advanced=True)
-        map_feedback_layout = add_help_section(advanced_help_tab, "map_feedback", "Map feedback", """
-            <h3>Missing-reflection completion</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle; 0 disables missing-reflection completion. <b>Added limit (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
-            <h3>Intensity correction</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle; 0 disables intensity correction. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
-        """, advanced=True)
-        add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles. Cycle 0 disables the corresponding mechanism.")
-        add_back_to_contents(map_feedback_layout, advanced=True)
         keyword_html = html.escape(SUPERFLIP_KEYWORD_REFERENCE).replace("\n", "<br>")
         keyword_help_layout = add_help_section(
             advanced_help_tab,
@@ -8296,6 +8436,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("run_edma_recycle_final", "false")
             set_value("compute_omit_maps", "false")
             set_value("compute_omit_rfree", "false")
+            set_value("redistribute_overlaps", "false")
+            set_value("powder_wavelength", "0.0")
+            set_value("powder_separation_factor", "0.2")
+            set_value("powder_redistribution_mix", "1.0")
             set_value("sharped_model", "koala 2.0")
             set_value("perform_algorithm", "CF")
             set_value("maxcycles", "2000")
@@ -9344,6 +9488,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             map_feedback_intensity_from_cycle=self._spin_value("map_feedback_intensity_from_cycle"),
             map_feedback_intensity_damping=self._dspin_value("map_feedback_intensity_damping"),
             map_feedback_intensity_max_i_over_sigma=self._dspin_value("map_feedback_intensity_max_i_over_sigma"),
+            redistribute_overlaps=self._check_value("redistribute_overlaps"),
+            powder_wavelength=self._dspin_value("powder_wavelength"),
+            powder_separation_factor=self._dspin_value("powder_separation_factor"),
+            powder_redistribution_mix=self._dspin_value("powder_redistribution_mix"),
             run_sharped=self._check_value("run_sharped") and modelfile_source_value != "superflip_xplor",
             symmetrize_deblurred_map=self._check_value("symmetrize_deblurred_map") and modelfile_source_value != "superflip_xplor",
             run_edma_superflip=self._check_value("run_edma_superflip"),
@@ -9392,6 +9540,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif ref_suffix not in REFERENCE_FILE_SUFFIXES:
                 issues.append("The external reference format is not supported.")
                 details.append(f"Reference suffix: {ref_suffix or '(none)'}")
+        if cfg.redistribute_overlaps and cfg.powder_wavelength <= 0:
+            issues.append("Redistribute overlapping powder reflections is enabled, but Wavelength (Å) is 0.")
+            details.append("Wavelength (Å): Basic → Map feedback → Powder overlap repartitioning")
         reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
         is_recycling = reconstruction_mode != "superflip"
         if (cfg.run_sharped or is_recycling) and not cfg.sharped_api_token.strip():
@@ -10077,20 +10228,35 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if cyc < cfg.cycles:
                 add_missing = cfg.map_feedback_missing_from_cycle > 0 and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
                 correct_intensities = cfg.map_feedback_intensity_from_cycle > 0 and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
-                if add_missing or correct_intensities:
-                    state.current_reflections = apply_map_feedback_to_reflections(
-                        state.current_reflections,
-                        configured_data_mode,
-                        deblur_map,
-                        ref_ctx.cell,
-                        cfg.resolution_d_min,
-                        add_missing,
-                        cfg.map_feedback_missing_percent_limit,
-                        correct_intensities,
-                        cfg.map_feedback_intensity_damping,
-                        cfg.map_feedback_intensity_max_i_over_sigma,
-                        self.log,
-                    )
+                redistribute = cfg.redistribute_overlaps and cfg.powder_wavelength > 0
+                if cfg.redistribute_overlaps and cfg.powder_wavelength <= 0:
+                    self.log("Overlap repartitioning enabled but Wavelength is 0; skipping for this cycle.", level="WARNING")
+                if add_missing or correct_intensities or redistribute:
+                    if add_missing or correct_intensities:
+                        state.current_reflections = apply_map_feedback_to_reflections(
+                            state.current_reflections,
+                            configured_data_mode,
+                            deblur_map,
+                            ref_ctx.cell,
+                            cfg.resolution_d_min,
+                            add_missing,
+                            cfg.map_feedback_missing_percent_limit,
+                            correct_intensities,
+                            cfg.map_feedback_intensity_damping,
+                            cfg.map_feedback_intensity_max_i_over_sigma,
+                            self.log,
+                        )
+                    if redistribute:
+                        state.current_reflections = redistribute_overlap_reflections(
+                            state.current_reflections,
+                            configured_data_mode,
+                            deblur_map,
+                            ref_ctx.cell,
+                            cfg.powder_wavelength,
+                            cfg.powder_separation_factor,
+                            cfg.powder_redistribution_mix,
+                            self.log,
+                        )
                     feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
                     n_feedback = write_observed_reflections(
                         feedback_hkl,
