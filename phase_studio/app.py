@@ -491,6 +491,7 @@ class CycleResult:
     deblur_recall: Optional[float] = None
     deblur_precision: Optional[float] = None
     deblur_heavy_atom_count: Optional[float] = None
+    powder_repartition_avg_change_percent: Optional[float] = None
 
 
 INPUT_MODE_INFLIP = "jana_inflip"
@@ -652,6 +653,7 @@ class PipelineState:
     auto_reference_xplor: Optional[Path] = None
     recycle_map: Optional[Path] = None
     omit_test_hkls: FrozenSet[Tuple[int, int, int]] = field(default_factory=frozenset)
+    pending_powder_repartition_change_percent: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -2802,14 +2804,16 @@ def assign_powder_overlap_groups(
     return groups
 
 def write_powder_repartitioning_log(
-    log_path: Path, cell: gemmi.UnitCell, by_group: Dict[int, List[Reflection]],
+    log_path: Path, cell: gemmi.UnitCell, mode: str, by_group: Dict[int, List[Reflection]],
     before: Sequence[Reflection], after: Sequence[Reflection], wavelength: float, separation_factor: float,
-    mix: float, fallback_groups: int, feedback_map: Path,
+    mix: float, fallback_groups: int, feedback_map: Path, group_avg_change_percent: Dict[int, float],
+    avg_change_percent: Optional[float],
 ) -> None:
     """Write a human-readable per-cycle log of powder overlap repartitioning:
-    how many groups were considered, their average size, and the observed
-    (before) vs. redistributed (after) values for the first 3 groups sorted by
-    d-spacing, largest d (lowest 2theta) first."""
+    how many groups were considered, their average size, the average per-group
+    intensity change, and the observed (before) vs. redistributed (after)
+    values for the first 3 groups sorted by d-spacing, largest d (lowest
+    2theta) first."""
     before_by_key = {(int(r.h), int(r.k), int(r.l)): r for r in before}
     after_by_key = {(int(r.h), int(r.k), int(r.l)): r for r in after}
     group_count = len(by_group)
@@ -2822,20 +2826,24 @@ def write_powder_repartitioning_log(
         return sum(ds) / len(ds) if ds else 0.0
 
     ordered_groups = sorted(by_group.items(), key=lambda item: group_d(item[1]), reverse=True)
+    avg_change_text = "n/a" if avg_change_percent is None else f"{avg_change_percent:.2f}%"
     lines: List[str] = [
         "Powder overlap repartitioning",
         f"feedback map: {feedback_map}",
         f"wavelength={wavelength:g} A  separation_factor={separation_factor:g}  mix={mix:g}",
         f"groups considered: {group_count}",
         f"average group size: {avg_size:.2f} reflections/group ({total_members} reflections total in groups)",
+        f"average intensity change per group: {avg_change_text}",
         f"map-fallback groups (no usable map signal): {fallback_groups}",
         "",
         f"First {min(3, len(ordered_groups))} groups by d-spacing (largest d / lowest 2theta first):",
     ]
     for gid, members in ordered_groups[:3]:
         d_avg = group_d(members)
-        lines.append(f"\nGroup {gid}  (avg d = {d_avg:.4f} A, {len(members)} reflections):")
-        lines.append(f"  {'h':>4} {'k':>4} {'l':>4} {'d (A)':>9} {'FWHM':>9} {'before':>14} {'after':>14}")
+        change = group_avg_change_percent.get(gid)
+        change_text = "n/a" if change is None else f"{change:.2f}%"
+        lines.append(f"\nGroup {gid}  (avg d = {d_avg:.4f} A, {len(members)} reflections, avg intensity change = {change_text}):")
+        lines.append(f"  {'h':>4} {'k':>4} {'l':>4} {'d (A)':>9} {'FWHM':>9} {'before':>14} {'after':>14} {'change':>9}")
         sorted_members = sorted(
             members, key=lambda r: reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)), reverse=True
         )
@@ -2847,8 +2855,14 @@ def write_powder_repartitioning_log(
             fwhm_text = f"{before_r.sigma:.4f}" if before_r is not None and before_r.sigma is not None else "n/a"
             before_value = before_r.value if before_r is not None else float("nan")
             after_value = after_r.value if after_r is not None else float("nan")
+            before_intensity = reflection_value_as_intensity(before_r, mode) if before_r is not None else 0.0
+            after_intensity = reflection_value_as_intensity(after_r, mode) if after_r is not None else 0.0
+            member_change_text = (
+                f"{(after_intensity - before_intensity) / before_intensity * 100.0:.2f}%"
+                if before_intensity > 1e-12 else "n/a"
+            )
             lines.append(
-                f"  {r.h:>4} {r.k:>4} {r.l:>4} {d_value:>9.4f} {fwhm_text:>9} {before_value:>14.4f} {after_value:>14.4f}"
+                f"  {r.h:>4} {r.k:>4} {r.l:>4} {d_value:>9.4f} {fwhm_text:>9} {before_value:>14.4f} {after_value:>14.4f} {member_change_text:>9}"
             )
     try:
         log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -2859,7 +2873,7 @@ def redistribute_overlap_reflections(
     reflections: Sequence[Reflection], data_mode: str, feedback_map: Path, cell: gemmi.UnitCell,
     wavelength: float, separation_factor: float, mix: float, log: Callable[[str], None],
     log_path: Optional[Path] = None,
-) -> List[Reflection]:
+) -> Tuple[List[Reflection], Optional[float]]:
     """Powder overlap repartitioning: within each 2theta/FWHM overlap group (see
     assign_powder_overlap_groups), keep the observed group-total intensity fixed
     but replace each member's share of it with a blend of its own observed ratio
@@ -2871,7 +2885,13 @@ def redistribute_overlap_reflections(
 
     When log_path is given, a detailed per-cycle log is written there: how many
     groups were considered, their average size, and the observed (before) vs.
-    redistributed (after) values for the first 3 groups sorted by d-spacing."""
+    redistributed (after) values for the first 3 groups sorted by d-spacing.
+
+    Returns (updated_reflections, avg_change_percent), where avg_change_percent
+    is the mean, across groups, of each group's average member-wise absolute
+    intensity change |after - before| / before * 100 -- i.e. the average
+    percent change in intensity per overlap group -- or None if there were no
+    overlap groups to redistribute."""
     mode = normalize_reflection_data_mode(data_mode)
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     groups = assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
@@ -2888,7 +2908,7 @@ def redistribute_overlap_reflections(
                 )
             except OSError:
                 pass
-        return current
+        return current, None
     by_group: Dict[int, List[Reflection]] = {}
     for r in current:
         gid = groups.get((int(r.h), int(r.k), int(r.l)), 0)
@@ -2899,7 +2919,8 @@ def redistribute_overlap_reflections(
     mix = max(0.0, min(1.0, float(mix)))
     redistributed: Dict[Tuple[int, int, int], float] = {}
     fallback_groups = 0
-    for members in by_group.values():
+    group_avg_change_percent: Dict[int, float] = {}
+    for gid, members in by_group.items():
         observed = [reflection_value_as_intensity(r, mode) for r in members]
         target = float(sum(observed))
         map_intensities = [max(0.0, predictions.get((int(r.h), int(r.k), int(r.l)), (0.0, 0.0))[0]) for r in members]
@@ -2911,8 +2932,17 @@ def redistribute_overlap_reflections(
         else:
             map_ratios = [value / map_sum for value in map_intensities]
             ratios = [(1.0 - mix) * o + mix * m for o, m in zip(observed_ratios, map_ratios)]
-        for r, ratio in zip(members, ratios):
-            redistributed[(int(r.h), int(r.k), int(r.l))] = target * ratio
+        member_changes: List[float] = []
+        for r, ratio, before_intensity in zip(members, ratios, observed):
+            new_intensity = target * ratio
+            redistributed[(int(r.h), int(r.k), int(r.l))] = new_intensity
+            if before_intensity > 1e-12:
+                member_changes.append(abs(new_intensity - before_intensity) / before_intensity * 100.0)
+        if member_changes:
+            group_avg_change_percent[gid] = sum(member_changes) / len(member_changes)
+    avg_change_percent = (
+        sum(group_avg_change_percent.values()) / len(group_avg_change_percent) if group_avg_change_percent else None
+    )
     updated: List[Reflection] = []
     for r in current:
         key = (int(r.h), int(r.k), int(r.l))
@@ -2924,14 +2954,16 @@ def redistribute_overlap_reflections(
         "Overlap repartitioning: "
         f"groups={len(by_group)}, reflections_redistributed={len(redistributed)}, "
         f"map_fallback_groups={fallback_groups}, mix={mix:g}, wavelength={wavelength:g} A, "
-        f"separation_factor={separation_factor:g}"
+        f"separation_factor={separation_factor:g}, "
+        f"avg_intensity_change_per_group={'n/a' if avg_change_percent is None else f'{avg_change_percent:.2f}%'}"
     )
     if log_path is not None:
         write_powder_repartitioning_log(
-            log_path, cell, by_group, current, updated, wavelength, separation_factor, mix, fallback_groups, feedback_map,
+            log_path, cell, mode, by_group, current, updated, wavelength, separation_factor, mix, fallback_groups,
+            feedback_map, group_avg_change_percent, avg_change_percent,
         )
         log(f"Overlap repartitioning: detailed log written to {log_path}")
-    return updated
+    return updated, avg_change_percent
 
 def wants_xplor_modelfile(value: str) -> bool:
     return "xplor" in str(value or "").strip().lower()
@@ -5008,6 +5040,7 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
             "deblur_recall",
             "deblur_precision",
             "deblur_heavy_atom_count",
+            "powder_repartition_avg_change_percent",
         ])
         for r in results:
             w.writerow([
@@ -5041,6 +5074,7 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
                 "" if r.deblur_recall is None else r.deblur_recall,
                 "" if r.deblur_precision is None else r.deblur_precision,
                 "" if r.deblur_heavy_atom_count is None else r.deblur_heavy_atom_count,
+                "" if r.powder_repartition_avg_change_percent is None else r.powder_repartition_avg_change_percent,
             ])
 
 
@@ -6336,7 +6370,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Intensity correction</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
             <h3>Powder overlap repartitioning</h3>
-            <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose final map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2theta) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's processed map (the SharpED-deblurred map when SharpED deblurring is enabled, otherwise a copy of the raw Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2theta; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing.</p>
+            <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose final map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2theta) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's processed map (the SharpED-deblurred map when SharpED deblurring is enabled, otherwise a copy of the raw Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2theta; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
         add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.")
         add_back_to_contents(map_feedback_layout)
@@ -6721,12 +6755,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "when one is provided. Without a reference, Heavy atoms found appears instead as a fallback progress "
                 "indicator. Map correlation only appears for the SharpED phase-recycling phasing methods."
             ),
+            "powder_repartition": (
+                "Average, across overlap groups, of each group's mean member-wise intensity change caused by that "
+                "cycle's powder overlap repartitioning (Basic -> Map feedback). Only appears when repartitioning is "
+                "enabled; lower is better, since it should shrink toward 0% as the map increasingly agrees with the "
+                "observed data. Each cycle's point reflects the repartitioning that fed its input, so it lags one "
+                "cycle behind the repartitioning run itself."
+            ),
         }
         for key, title in (
             ("superflip", "Superflip"),
             ("deblur", "SharpED"),
             ("superflip_omit", "Superflip (omit+rfree)"),
             ("deblur_omit", "SharpED (omit+rfree)"),
+            ("powder_repartition", "Powder repartitioning"),
         ):
             page = QWidget()
             page_layout = QVBoxLayout(page)
@@ -9255,6 +9297,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("Omit map correlation", [r.omit_deblur_correlation for r in self.results], True, "#2264b8", "*", "-"),
             ("R_free", [r.omit_deblur_rfree for r in self.results], False, "#001170", "o", "-"),
         ])
+        self._render_metrics_tab("powder_repartition", [
+            ("Avg intensity change/group (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
+        ])
 
     def _element_color(self, element: str) -> str:
         # This extended blue scale is intentionally exclusive to structure atoms.
@@ -10404,7 +10449,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_recall=deblur_recall,
                 deblur_precision=deblur_precision,
                 deblur_heavy_atom_count=deblur_heavy_atoms,
+                powder_repartition_avg_change_percent=state.pending_powder_repartition_change_percent,
             )
+            state.pending_powder_repartition_change_percent = None
             all_results.append(result)
             write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
             self.msg_queue.put(("result", result))
@@ -10430,7 +10477,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                             self.log,
                         )
                     if redistribute:
-                        state.current_reflections = redistribute_overlap_reflections(
+                        state.current_reflections, state.pending_powder_repartition_change_percent = redistribute_overlap_reflections(
                             state.current_reflections,
                             configured_data_mode,
                             deblur_map,
