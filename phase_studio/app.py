@@ -9369,9 +9369,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def open_jana_wizard_result_selector(self) -> None:
         """Post-phase-recycling result selector for a Jana2020-Wizard-initiated
-        run: a source-specific (Superflip vs SharpED) metrics table plus a
-        two-pane selected-result/reference structure preview. The map source
-        itself was already chosen in the Wizard and is not re-asked here.
+        run: a source-specific (Superflip vs SharpED) metrics table, ranked by
+        a UI-only Selection score, plus a two-pane selected-result/reference
+        structure preview. The map source itself was already chosen in the
+        Wizard and is not re-asked here.
 
         This consumes only the existing CycleResult objects the full pipeline
         already produced (no metric is recomputed) and hands off through the
@@ -9430,9 +9431,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ("Recall", lambda r: r.superflip_recall, fmt),
                 ("Precision", lambda r: r.superflip_precision, fmt),
                 ("Heavy atoms", lambda r: r.superflip_heavy_atom_count, fmt),
-                ("OMIT correlation", lambda r: r.omit_superflip_correlation, fmt),
-                ("R_free", lambda r: r.omit_superflip_rfree, fmt),
             ]
+            rfree_getter = lambda r: r.omit_superflip_rfree
+            omit_getter = lambda r: r.omit_superflip_correlation
+            rmsd_getter = lambda r: r.superflip_metric
         else:
             # Deliberately excludes Superflip-only fields (R value, Peakiness,
             # Symmetry, Derived SG) -- they describe the raw Superflip map, not
@@ -9442,11 +9444,81 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ("Precision", lambda r: r.deblur_precision, fmt),
                 ("Heavy atoms", lambda r: r.deblur_heavy_atom_count, fmt),
                 ("Map correlation", lambda r: r.recycle_map_correlation, fmt),
-                ("OMIT correlation", lambda r: r.omit_deblur_correlation, fmt),
-                ("R_free", lambda r: r.omit_deblur_rfree, fmt),
             ]
+            rfree_getter = lambda r: r.omit_deblur_rfree
+            omit_getter = lambda r: r.omit_deblur_correlation
+            rmsd_getter = lambda r: r.deblur_metric
+
+        # --- Selection score: rank-based normalization of whichever of R_free
+        # (lower better), OMIT correlation (higher better) and RMSD (lower
+        # better) are actually populated for this run. UI sorting aid only --
+        # never written back into any CycleResult, metrics.csv or hand-off.
+        def rank_normalize(values: List[Optional[float]], higher_is_better: bool) -> List[Optional[float]]:
+            pairs = [(i, float(v)) for i, v in enumerate(values) if v is not None and np.isfinite(float(v))]
+            normalized: List[Optional[float]] = [None] * len(values)
+            if not pairs:
+                return normalized
+            if len(pairs) == 1:
+                normalized[pairs[0][0]] = 0.0
+                return normalized
+            ordered = sorted(pairs, key=lambda p: p[1], reverse=higher_is_better)
+            n = len(ordered)
+            i = 0
+            while i < n:
+                j = i
+                while j + 1 < n and ordered[j + 1][1] == ordered[i][1]:
+                    j += 1
+                average_rank = (i + j) / 2.0
+                for k in range(i, j + 1):
+                    normalized[ordered[k][0]] = average_rank / (n - 1)
+                i = j + 1
+            return normalized
+
+        rfree_values = [rfree_getter(r) for r in self.results]
+        omit_values = [omit_getter(r) for r in self.results]
+        rmsd_values = [rmsd_getter(r) for r in self.results]
+        rfree_available = any(v is not None for v in rfree_values)
+        omit_available = any(v is not None for v in omit_values)
+        rmsd_available = any(v is not None for v in rmsd_values)
+
+        ranking_columns = []
+        normalized_dims: List[Tuple[str, List[Optional[float]]]] = []
+        if rfree_available:
+            ranking_columns.append(("R_free", rfree_getter, fmt))
+            normalized_dims.append(("R_free", rank_normalize(rfree_values, higher_is_better=False)))
+        if omit_available:
+            ranking_columns.append(("OMIT correlation", omit_getter, fmt))
+            normalized_dims.append(("OMIT correlation", rank_normalize(omit_values, higher_is_better=True)))
+        if rmsd_available:
+            ranking_columns.append(("RMSD (Å)", rmsd_getter, fmt))
+            normalized_dims.append(("RMSD", rank_normalize(rmsd_values, higher_is_better=False)))
+
+        scores: List[Optional[float]] = []
+        for idx in range(len(self.results)):
+            valid = [normalized[idx] for _name, normalized in normalized_dims if normalized[idx] is not None]
+            scores.append(sum(valid) / len(valid) if valid else None)
+        ranking_active = any(s is not None for s in scores)
+
+        if ranking_active:
+            order = sorted(
+                range(len(self.results)),
+                key=lambda i: (scores[i] is None, scores[i] if scores[i] is not None else 0.0, i),
+            )
+            rank_numbers: dict = {}
+            next_rank = 1
+            for i in order:
+                if scores[i] is not None:
+                    rank_numbers[i] = next_rank
+                    next_rank += 1
+        else:
+            order = list(range(len(self.results)))
+            rank_numbers = {}
+
         columns = [(h, g, f) for (h, g, f) in candidate_columns if col_available(g)]
-        headers = ["Cycle"] + [h for h, _g, _f in columns]
+        headers: List[str] = (["Rank", "Cycle", "Selection score"] if ranking_active else ["Cycle"])
+        headers += [h for h, _g, _f in ranking_columns]
+        headers += [h for h, _g, _f in columns]
+        cycle_col_index = headers.index("Cycle")
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Jana2020 result selection")
@@ -9458,6 +9530,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         source_font.setBold(True)
         source_label.setFont(source_font)
         layout.addWidget(source_label)
+
+        if normalized_dims:
+            ranking_text = "Ranking: " + " + ".join(name for name, _values in normalized_dims)
+        else:
+            ranking_text = "Ranking: cycle order (no validation metrics available)"
+        header_lines = [ranking_text, f"Completed cycles: {len(self.results)}"]
+        if not rmsd_available and (rfree_available or omit_available):
+            header_lines.append("Reference RMSD unavailable")
+        header_label = QLabel("\n".join(header_lines))
+        header_label.setWordWrap(True)
+        header_label.setStyleSheet("color: #52658b;")
+        layout.addWidget(header_label)
 
         info = QLabel(
             "Phase recycling finished. Select the cycle to hand back to Jana2020 -- the "
@@ -9477,19 +9561,74 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         table.horizontalHeader().setStretchLastSection(False)
 
-        recommended = self._recommended_handoff_index()
-        for row, result in enumerate(self.results):
-            cycle_item = QTableWidgetItem(f"{int(result.cycle):03d}")
+        class _NumericTableWidgetItem(QTableWidgetItem):
+            """Sorts by an explicit numeric/string key instead of Qt's default
+            lexicographic text compare, so header-click sorting (spec section
+            39/55: "true numeric sorting") is correct for this table."""
+
+            def __init__(self, text: str, sort_value: object) -> None:
+                super().__init__(text)
+                self._sort_value = sort_value
+
+            def __lt__(self, other: object) -> bool:  # noqa: N802 - Qt override
+                other_value = getattr(other, "_sort_value", None)
+                if self._sort_value is None:
+                    return False
+                if other_value is None:
+                    return True
+                try:
+                    return float(self._sort_value) < float(other_value)
+                except (TypeError, ValueError):
+                    return str(self._sort_value) < str(other_value)
+
+        def add_cell(display_row: int, col: int, text: str, sort_value: object, left_align: bool = False) -> "_NumericTableWidgetItem":
+            item = _NumericTableWidgetItem(text, sort_value)
+            item.setTextAlignment((Qt.AlignLeft if left_align else Qt.AlignRight) | Qt.AlignVCenter)
+            table.setItem(display_row, col, item)
+            return item
+
+        initial_result_idx = order[0] if ranking_active else self._recommended_handoff_index()
+        if not (0 <= initial_result_idx < len(self.results)):
+            initial_result_idx = order[0] if order else 0
+
+        for display_row, result_idx in enumerate(order):
+            result = self.results[result_idx]
+            col = 0
+            if ranking_active:
+                rank = rank_numbers.get(result_idx)
+                add_cell(display_row, col, "n/a" if rank is None else str(rank), rank)
+                col += 1
+            cycle_item = add_cell(display_row, col, f"{int(result.cycle):03d}", int(result.cycle))
             cycle_item.setData(Qt.UserRole, int(result.cycle))
-            cycle_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-            if row == recommended:
-                cycle_item.setToolTip("Recommended cycle (Phase Studio's existing hand-off heuristic).")
-            table.setItem(row, 0, cycle_item)
-            for col, (header, getter, formatter) in enumerate(columns, start=1):
-                item = QTableWidgetItem(formatter(getter(result)))
-                alignment = Qt.AlignLeft | Qt.AlignVCenter if header == "Derived SG" else Qt.AlignRight | Qt.AlignVCenter
-                item.setTextAlignment(alignment)
-                table.setItem(row, col, item)
+            if result_idx == initial_result_idx:
+                cycle_item.setToolTip(
+                    "Best-ranked cycle (lowest Selection score)." if ranking_active
+                    else "Recommended cycle (Phase Studio's existing hand-off heuristic)."
+                )
+            col += 1
+            if ranking_active:
+                score = scores[result_idx]
+                add_cell(display_row, col, fmt(score), score)
+                col += 1
+            for _header, getter, formatter in ranking_columns:
+                value = getter(result)
+                add_cell(display_row, col, formatter(value), value)
+                col += 1
+            for header, getter, formatter in columns:
+                value = getter(result)
+                add_cell(display_row, col, formatter(value), value, left_align=(header == "Derived SG"))
+                col += 1
+
+        def result_for_table_row(row: int) -> Optional[CycleResult]:
+            if row < 0:
+                return None
+            item = table.item(row, cycle_col_index)
+            if item is None:
+                return None
+            cycle_id = item.data(Qt.UserRole)
+            if cycle_id is None:
+                return None
+            return next((r for r in self.results if int(r.cycle) == int(cycle_id)), None)
 
         preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
         preview_canvas = FigureCanvas(preview_figure)
@@ -9569,12 +9708,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_rotation)
 
         def on_selection_changed() -> None:
-            row = table.currentRow()
-            if 0 <= row < len(self.results):
-                render_preview(self.results[row])
+            result = result_for_table_row(table.currentRow())
+            if result is not None:
+                render_preview(result)
 
         table.itemSelectionChanged.connect(on_selection_changed)
-        table.selectRow(recommended if 0 <= recommended < len(self.results) else 0)
+        # Populate rows first, THEN enable sorting -- enabling it before
+        # setItem() calls would let each insertion re-sort mid-population.
+        # Cycle identity is resolved via Qt.UserRole (result_for_table_row),
+        # never the visible row index, so header-click sorting stays correct.
+        table.setSortingEnabled(True)
+        # setSortingEnabled(True) itself immediately re-sorts existing rows
+        # (descending, by column 0, by default) -- force a deterministic
+        # ascending sort by column 0 (Rank when ranked, else Cycle) so the
+        # already-built `order` sequence (best-first / chronological) is what
+        # actually ends up on screen, not an arbitrary Qt default.
+        table.sortItems(0, Qt.AscendingOrder)
+        table.selectRow(order.index(initial_result_idx) if initial_result_idx in order else 0)
 
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(table)
@@ -9586,11 +9736,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         splitter.setSizes([720, 540])
         layout.addWidget(splitter, 1)
 
-        note = QLabel(
-            "The initially selected cycle uses Phase Studio's existing Superflip-based "
-            "recommendation (best symmetry agreement, or reference match if unavailable) "
-            "regardless of the map source shown above. You can override it manually."
-        )
+        if ranking_active:
+            note_text = (
+                "Selection score is a relative ranking of completed cycles using the "
+                "available R_free, OMIT-map correlation and RMSD values -- lower is "
+                "better. It is a sorting aid only: it is not fed back into "
+                "reconstruction and does not change any map or metric. The "
+                "best-ranked cycle is selected initially; you can override it manually."
+            )
+        else:
+            note_text = (
+                "No cross-validation metrics are available to rank cycles by, so the "
+                "initially selected cycle uses Phase Studio's existing Superflip-based "
+                "recommendation (best symmetry agreement, or reference match if "
+                "unavailable) regardless of the map source shown above. You can "
+                "override it manually."
+            )
+        note = QLabel(note_text)
         note.setWordWrap(True)
         layout.addWidget(note)
 
@@ -9610,10 +9772,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             # selector (see the redirect at the top of open_jana_handoff_dialog).
             return
 
-        selected_row = table.currentRow()
-        if not (0 <= selected_row < len(self.results)):
+        selected_result = result_for_table_row(table.currentRow())
+        if selected_result is None:
             return
-        selected_result = self.results[selected_row]
 
         self.handoff_btn.setEnabled(False)
         self._append_execution_log(
