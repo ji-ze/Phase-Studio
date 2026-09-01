@@ -5202,7 +5202,7 @@ INPUT_TOOLTIPS = {
     "work_dir": "Output directory for generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics.",
     "superflip_exe": "Absolute path to the original Jana2020 Superflip executable. Default: C:\\Jana2020\\SUPERFLIP\\superflip_original.exe. Do not select the Phase Studio wrapper named superflip.exe.",
     "edma_exe": "Absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps. Default: C:\\Jana2020\\SUPERFLIP\\EDMA.exe.",
-    "workflow_preset": "Applies a bundle of starting values for a common crystallographic workflow. 'Recommended' is a general-purpose baseline (matches the built-in defaults); the others tune settings for a specific sample type. All values remain individually editable afterward, and 'custom' leaves everything untouched.",
+    "workflow_preset": "Applies a bundle of starting values for a common crystallographic workflow. 'Recommended' is a general-purpose baseline (matches the built-in defaults); the others tune settings for a specific sample type. All values remain individually editable afterward, and 'Custom' leaves everything untouched.",
     "cycles": "Number of iterative Superflip -> EDMA -> SharpED -> EDMA cycles to run.",
     "composition_override": "Optional Superflip composition string. Leave blank to derive composition from the reference CIF formula or atom list.",
     "plimit_superflip": "Peak threshold as a multiplier of the XPLOR map sigma. Phase Studio converts it to EDMA's absolute 'plimit <value>'.",
@@ -5224,16 +5224,15 @@ INPUT_TOOLTIPS = {
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
-    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip (omit+rfree) and SharpED (omit+rfree) convergence tabs' omit-map correlation series (full map vs. omit map). Roughly doubles Superflip/SharpED time per cycle.",
-    "compute_omit_rfree": "Also compute R_free from the excluded 5% of reflections: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Requires 'Compute omit maps'.",
+    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip validation and SharpED validation tabs' omit-map correlation series (full map vs. omit map). Roughly doubles Superflip/SharpED time per cycle.",
+    "compute_omit_rfree": "Also compute R_free from the excluded 5% holdout: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Requires 'Compute OMIT validation maps'.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
     "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save, for each cycle's Superflip map, the observed |Fobs|/intensity together with phases (and, for ShelX, calculated F squared) read by FFT from that map, in a standardized text file or a ShelX/Jana-compatible .fcf file.",
     "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
     "referencefile_mode": "Internal automatic setting derived from External reference file. Phase Studio writes only referencefile and lets Superflip infer jana/xplor/ccp4/cif from the filename.",
     "voxel": "Superflip voxel grid. The default omit/blank skips the keyword. Use three integers, for example 180 80 160, or AUTO to compute a 0.2 A grid from the unit cell.",
     "bestdensities_count": "First argument of bestdensities: how many best density maps Superflip keeps.",
-    "bestdensities_metric": "Second argument of bestdensities: rvalue, peakiness, symmetry or reference.",
-    "bestdensities_symmetry": "Adds the 'symmetry' modifier to 'bestdensities 1', biasing saved-density selection toward symmetry-consistent solutions.",
+    "bestdensities_metric": "Second argument of bestdensities: rvalue, peakiness, symmetry or reference. 'symmetry' biases saved-density selection toward symmetry-consistent solutions.",
     "polish": "Adds 'polish yes' to the Superflip input, enabling Superflip's final polishing/refinement stage when supported by the executable.",
     "maxcycles": "Maximum number of Superflip iterations per run.",
     "repeatmode": "Superflip repeatmode parameter controlling repeated independent attempts and convergence sampling.",
@@ -6012,11 +6011,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metadata_summary_layout = self._configure_form(QFormLayout(self.metadata_summary_panel))
         self.metadata_cell_summary = QLabel("No metadata loaded.")
         self.metadata_cell_summary.setWordWrap(True)
+        self.metadata_cell_angles_summary = QLabel("")
+        self.metadata_cell_angles_summary.setWordWrap(True)
         self.metadata_spacegroup_summary = QLabel("")
         self.metadata_spacegroup_summary.setWordWrap(True)
         self.metadata_composition_summary = QLabel("")
         self.metadata_composition_summary.setWordWrap(True)
-        metadata_summary_layout.addRow("Cell", self.metadata_cell_summary)
+        metadata_summary_layout.addRow("Cell lengths", self.metadata_cell_summary)
+        metadata_summary_layout.addRow("Cell angles", self.metadata_cell_angles_summary)
         metadata_summary_layout.addRow("Space group", self.metadata_spacegroup_summary)
         metadata_summary_layout.addRow("Composition", self.metadata_composition_summary)
         metadata_form.addRow("", self.metadata_summary_panel)
@@ -6133,7 +6135,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         workflow_tab = add_settings_tab("Workflow")
         workflow_form = add_form_group(workflow_tab, "Reconstruction", "setup")
         self._workflow_form = workflow_form
-        self._add_combo(workflow_form, "workflow_preset", "Starting preset", ["Recommended", "custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "Recommended")
+        self._add_combo(workflow_form, "workflow_preset", "Reconstruction preset", ["Recommended", "Custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "Recommended")
         try:
             self.inputs["workflow_preset"].currentTextChanged.connect(self._apply_workflow_preset)  # type: ignore[attr-defined]
         except Exception:
@@ -6158,9 +6160,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_text(workflow_form, "exclude_atoms", "Excluded atoms", "none")
         workflow_note = settings_callout(
             "Note",
-            "Next-cycle model is authoritative: 'none' forces a one-cycle run. "
-            "superflip_xplor cycles without SharpED deblurring; XPLOR damping is active for XPLOR modes only. "
-            "Both are ignored when Phasing method is not Superflip: the methods below define their own next-cycle map."
+            "Next-cycle model controls how subsequent reconstruction cycles are initialized. Selecting None "
+            "limits the workflow to a single cycle. XPLOR damping applies only to XPLOR-based recycling. "
+            "Method-specific recycling settings take precedence when Phasing method is not Superflip."
         )
         workflow_form.addRow("", workflow_note)
         recycle_note = settings_callout(
@@ -6185,7 +6187,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
         model_form.addRow("", self.refresh_models_btn)
         model_form.addRow("", self._secondary_help(
-            "Server URL and API token are in Advanced → Setup. Elements, output resolution and transfer/network settings are in Advanced → SharpED."
+            "Connection: Advanced → Setup\nInference and transfer: Advanced → SharpED"
         ))
 
         optional_form = add_form_group(workflow_tab, "Optional processing")
@@ -6197,8 +6199,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True, align_with_fields=True)
         self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize processed map with Superflip (beta)", False, align_with_fields=True)
         self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on processed map", True, align_with_fields=True)
-        self._add_checkbox(optional_form, "compute_omit_maps", "Compute omit maps (exclude 5% of reflections)", False, align_with_fields=True)
-        self._add_checkbox(optional_form, "compute_omit_rfree", "Compute R_free from excluded 5%", False, align_with_fields=True)
+        self._add_checkbox(optional_form, "compute_omit_maps", "Compute OMIT validation maps (5% holdout)", False, align_with_fields=True)
+        self._add_checkbox(optional_form, "compute_omit_rfree", "Calculate R_free on the 5% holdout", False, align_with_fields=True)
         try:
             self.inputs["compute_omit_maps"].toggled.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
@@ -6227,19 +6229,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         feedback_tab = add_settings_tab("Map feedback")
         feedback_tab.addWidget(settings_callout(
             "Warning",
-            "All three mechanisms below rewrite the observed HKL data fed into later cycles, not just the model. "
-            "Review the reconstruction carefully before trusting downstream cycles.",
+            "The operations on this page modify the reflection data supplied to subsequent cycles. "
+            "Results from these cycles should therefore be validated against the original measured data.",
         ))
         missing_feedback_form = add_form_group(feedback_tab, "Missing-reflection completion", "map_feedback")
         self._add_checkbox(missing_feedback_form, "map_feedback_missing_enabled", "Enable missing-reflection completion", False, align_with_fields=True)
         self._add_spin(missing_feedback_form, "map_feedback_missing_from_cycle", "Start after cycle", 1, 1, 999, 1)
-        self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Added limit (%)", 0.0, 0.0, 100.0, 1.0, 3)
+        self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Maximum added reflections (%)", 0.0, 0.0, 100.0, 1.0, 3)
 
         intensity_feedback_form = add_form_group(feedback_tab, "Intensity correction")
         self._add_checkbox(intensity_feedback_form, "map_feedback_intensity_enabled", "Enable intensity correction", False, align_with_fields=True)
         self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 1, 1, 999, 1)
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
-        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply below value/σ", 0.0, 0.0, 1000.0, 0.5, 3)
+        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply when value/σ <", 0.0, 0.0, 1000.0, 0.5, 3)
         intensity_feedback_form.addRow("", settings_callout("Note", "Value/σ = 0 applies correction to all non-zero reflections."))
 
         powder_feedback_form = add_form_group(feedback_tab, "Powder overlap repartitioning")
@@ -6290,16 +6292,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
             <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
             <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
-            <h3>2. Choose a starting preset</h3>
-            <p><b>Starting preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
+            <h3>2. Choose a reconstruction preset</h3>
+            <p><b>Reconstruction preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
             <ul><li><b>Recommended</b> (default): a general-purpose baseline that matches the built-in defaults.</li>
             <li><b>small molecule:</b> settings intended as a starting point for small-molecule data.</li>
             <li><b>inorganic:</b> settings intended as a starting point for inorganic materials.</li>
             <li><b>MOF atomic resolution:</b> settings intended as a starting point for atomic-resolution framework data.</li>
             <li><b>MOF medium resolution:</b> settings intended as a starting point for medium-resolution framework data.</li>
-            <li><b>custom:</b> applies nothing; a placeholder for manually configured values.</li></ul>
+            <li><b>Custom:</b> applies nothing; a placeholder for manually configured values.</li></ul>
             <p>Applying a preset changes multiple controls. Review the resulting values and adapt them to the dataset; a preset is not a universal scientific recommendation.</p>
-            <p><b>Phasing method</b> defaults to the standard Superflip cycle. Two SharpED phase-recycling methods, one beta and one experimental, are hidden by default; enable <b>Show beta and experimental features in settings</b> on Advanced &rarr; Setup to make them selectable.</p>
+            <p><b>Phasing method</b> defaults to the standard Superflip cycle. Two SharpED phase-recycling methods, one beta and one experimental, are hidden by default; enable <b>Show beta and experimental features</b> on Advanced &rarr; Setup to make them selectable.</p>
             <h3>3. Configure the iterative workflow</h3>
             <p><b>observed reflections &rarr; Superflip &rarr; XPLOR map &rarr; EDMA and/or SharpED &rarr; deblurred XPLOR &rarr; EDMA &rarr; next-cycle model</b></p>
             <p>The exact branches depend on <b>Basic &rarr; Workflow &rarr; Optional processing</b>. The next-cycle source can be Superflip XPLOR, SharpED/deblurred XPLOR, deblurred EDMA CIF, or <b>none</b>. Selecting none forces a one-cycle run.</p>
@@ -6328,7 +6330,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         add_back_to_contents(input_help_layout)
         workflow_help_layout = add_help_section(basic_help_tab, "workflow", "Workflow reference", """
             <h3>Reconstruction</h3>
-            <p><b>Starting preset</b> applies a bundle of starting values in one step; every value stays individually editable afterward. <b>Recommended</b> (default) is a general-purpose baseline matching the built-in defaults; the MOF/small-molecule/inorganic presets tune values for a specific sample type; <b>custom</b> applies nothing.</p>
+            <p><b>Reconstruction preset</b> applies a bundle of starting values in one step; every value stays individually editable afterward. <b>Recommended</b> (default) is a general-purpose baseline matching the built-in defaults; the MOF/small-molecule/inorganic presets tune values for a specific sample type; <b>Custom</b> applies nothing.</p>
             <p><b>Cycles</b> is the number of iterative Superflip &rarr; EDMA &rarr; SharpED &rarr; EDMA cycles to run. The effective count is forced to 1 when Next-cycle model is <code>none</code>.</p>
             <p><b>Phasing method</b> chooses the reconstruction algorithm:</p>
             <ul>
@@ -6336,7 +6338,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 <li><b>1st Superflip, then SharpED (beta)</b> &mdash; Superflip runs only once, on cycle 1. Every following cycle deblurs the previous map with SharpED, calculates phases by FFT from that deblurred map for every measured reflection (expanded over the full space-group symmetry), and recomposes a map from |Fobs| with those phases for the next cycle. Does not work well with some models.</li>
                 <li><b>SharpED (experimental)</b> &mdash; the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases. Not production-ready; can take hundreds of cycles to converge, if it converges at all.</li>
             </ul>
-            <p>Both recycling methods are hidden unless <b>Show beta and experimental features in settings</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize processed map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. The convergence graph adds a <b>Map correlation</b> series for these methods (each cycle's recomposed map compared with the previous cycle's).</p>
+            <p>Both recycling methods are hidden unless <b>Show beta and experimental features</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize processed map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. The convergence graph adds a <b>Map correlation</b> series for these methods (each cycle's recomposed map compared with the previous cycle's).</p>
             <p><b>Next-cycle model</b> (Superflip phasing method only) is the authoritative source for cycle 2 onward: <code>none</code> forces a one-cycle run; <code>superflip_xplor</code> cycles without SharpED deblurring; <code>deblurred_xplor</code> uses the SharpED-processed XPLOR map; <code>deblurred_edma_cif</code> uses the EDMA structure extracted from the deblurred map and ignores XPLOR damping.</p>
             <p><b>XPLOR damping (1/x)</b> (Superflip phasing method, XPLOR next-cycle models only) is the inverse damping factor: 1.0 means no damping, 0.5 is equivalent to the previous factor 2.0, 0.25 to factor 4.0.</p>
             <p><b>Excluded atoms</b> removes selected atom labels from CIF modelfiles before the next Superflip cycle (comma/semicolon/whitespace-separated); it does not apply to XPLOR-only model paths.</p>
@@ -6349,8 +6351,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 <li><b>Run SharpED deblurring</b> &mdash; process the Superflip map with the SharpED server. If disabled, the "deblurred" map used downstream is just a copy of the Superflip map.</li>
                 <li><b>Symmetrize processed map with Superflip (beta)</b> &mdash; after deblurring, run Superflip in symmetry mode (no charge flipping) with the deblurred map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
                 <li><b>Run EDMA on processed map</b> &mdash; peak-search the deblurred (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
-                <li><b>Compute omit maps (exclude 5% of reflections)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip (omit+rfree)</b> and <b>SharpED (omit+rfree)</b> convergence tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
-                <li><b>Compute R_free from excluded 5%</b> &mdash; requires the option above; also computes R_free (the crystallographic R-factor between the excluded reflections' observed |F| and |F| calculated by FFT from the omit map) for both the omit-map series.</li>
+                <li><b>Compute OMIT validation maps (5% holdout)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip validation</b> and <b>SharpED validation</b> tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
+                <li><b>Calculate R_free on the 5% holdout</b> &mdash; requires the option above; also computes R_free (the crystallographic R-factor between the excluded reflections' observed |F| and |F| calculated by FFT from the omit map) for both the omit-map series.</li>
             </ul>
             <p>Under <b>Phase-recycling methods</b> (used by the two beta/experimental Phasing methods):</p>
             <ul><li><b>Run EDMA on final map</b> &mdash; run EDMA once, on the last cycle's recomposed |Fobs|+phi_calc map.</li></ul>
@@ -6366,9 +6368,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         map_feedback_layout = add_help_section(basic_help_tab, "map_feedback", "Map feedback reference", """
             <p>Each of the three mechanisms below has its own <b>Enable</b> checkbox at the top of its group; unchecking it grays out the rest of that group and skips the mechanism entirely. <b>Start after cycle</b> ranges from 1 to the current <b>Cycles</b> value (Basic &rarr; Workflow) and is kept in sync automatically as Cycles changes.</p>
             <h3>Missing-reflection completion</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle. <b>Added limit (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
+            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
             <h3>Intensity correction</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
+            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
             <h3>Powder overlap repartitioning</h3>
             <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose final map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2theta) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's processed map (the SharpED-deblurred map when SharpED deblurring is enabled, otherwise a copy of the raw Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2theta; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
@@ -6431,14 +6433,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_api_form.addRow("", token_link_row)
 
         interface_form = add_form_group(setup_tab, "Interface")
-        self._add_checkbox(interface_form, "show_beta_features", "Show beta and experimental features in settings", False, align_with_fields=True)
+        self._add_checkbox(interface_form, "show_beta_features", "Show beta and experimental features", False, align_with_fields=True)
         try:
             self.inputs["show_beta_features"].toggled.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
             pass
         interface_form.addRow("", self._secondary_help(
-            "Off by default: beta and experimental Phasing methods (and settings that only apply to them) are hidden "
-            "entirely, not just disabled. Enable this to make them selectable again."
+            "Off by default. Enable this option to expose experimental phasing methods and their "
+            "method-specific settings, hidden entirely rather than just disabled while it is off."
         ))
         setup_tab.addStretch(1)
 
@@ -6459,21 +6461,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         density_form = add_form_group(superflip_tab, "Density / solution selection")
         self._add_text(density_form, "voxel", "Voxel grid", "")
-        self._add_spin(density_form, "bestdensities_count", "Best densities: count", 1, 1, 100, 1)
-        self._add_combo(density_form, "bestdensities_metric", "Best-density metric", ["rvalue", "peakiness", "symmetry", "reference"], "rvalue")
-        self._add_checkbox(density_form, "bestdensities_symmetry", "Use symmetry for best densities", True, align_with_fields=True)
-        self.inputs["bestdensities_symmetry"].setToolTip(
-            INPUT_TOOLTIPS["bestdensities_symmetry"]
-        )  # type: ignore[attr-defined]
+        self._add_spin(density_form, "bestdensities_count", "Stored best densities", 1, 1, 100, 1)
+        self._add_combo(density_form, "bestdensities_metric", "Density selection metric", ["rvalue", "peakiness", "symmetry", "reference"], "symmetry")
         self._add_combo(density_form, "searchsymmetry", "Search symmetry", ["average", "shift", "no"], "average")
         self._add_text(density_form, "derivesymmetry", "Derive symmetry", "yes")
 
         reflection_form = add_form_group(superflip_tab, "Reflection handling")
-        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum value/σ", 2.0, 0.0, 100.0, 0.5, 3)
-        self._add_dspin(reflection_form, "resolution_d_min", "d_min cutoff (Å)", 0.0, 0.0, 20.0, 0.1, 3)
+        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum observed value/σ", 2.0, 0.0, 100.0, 0.5, 3)
+        self._add_dspin(reflection_form, "resolution_d_min", "High-resolution cutoff dmin (Å)", 0.0, 0.0, 20.0, 0.1, 3)
         self._add_combo(reflection_form, "normalize", "Normalization", ["none", "local", "atoms", "wilson"], "atoms")
+        try:
+            self.inputs["normalize"].currentTextChanged.connect(self._sync_normalization_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
         self._add_spin(reflection_form, "nresshells", "Resolution shells", 100, 0, 100000, 10)
-        self._add_text(reflection_form, "missing", "Missing-reflection keyword", "bound 0.5 2.5")
+        self._add_text(reflection_form, "missing", "Missing reflections", "bound 0.5 2.5")
         self._add_text(reflection_form, "electrons", "Electrons", "")
 
         reference_density_form = add_form_group(superflip_tab, "Reference density")
@@ -6557,7 +6559,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>SharpED API</h3>
             <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> is sent as <code>Authorization: Bearer</code> during upload/status/download requests and is never written to logs or error messages.</p>
             <h3>Interface</h3>
-            <p><b>Show beta and experimental features in settings</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize processed map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
+            <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize processed map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
         """, advanced=True)
         add_back_to_contents(adv_setup_help_layout, advanced=True)
         superflip_help_layout = add_help_section(advanced_help_tab, "superflip", "Superflip guide", """
@@ -6568,10 +6570,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Maximum iterations</b> limits one Superflip run. <b>Repeat mode</b> controls repeated independent attempts and convergence sampling. <b>Random seed</b> initializes random numbers; use a fixed value for reproducibility or Superflip's automatic syntax. <b>Delta</b> (<code>AUTO</code> lets Superflip estimate the flip threshold), <b>Weak ratio</b> and <b>Biso</b> (overall isotropic B-factor used to sharpen the map; 0.000 disables sharpening) are advanced parameters normally left at preset/default values. <b>Enable final polish</b> adds <code>polish yes</code>, activating Superflip's final polishing stage when supported.</p>
             <h3>Density / solution selection</h3>
             <p><b>Voxel grid</b> is the Superflip <code>voxel</code> keyword: blank omits it; three integers set an explicit grid; <code>AUTO</code> computes a 0.2 &Aring; grid from the unit cell.</p>
-            <p><b>Best densities: count</b> and <b>Best-density metric</b> are the two arguments of <code>bestdensities</code> &mdash; how many best density maps Superflip keeps, and whether it selects by rvalue, peakiness, symmetry or reference. <b>Use symmetry for best densities</b> adds the <code>symmetry</code> modifier, biasing selection toward symmetry-consistent solutions.</p>
+            <p><b>Stored best densities</b> and <b>Density selection metric</b> are the two arguments of <code>bestdensities</code> &mdash; how many best density maps Superflip keeps, and whether it selects by rvalue, peakiness, symmetry or reference agreement. Selecting <b>symmetry</b> biases selection toward symmetry-consistent solutions.</p>
             <p><b>Search symmetry</b> maps to <code>searchsymmetry</code> (<code>no</code>, <code>shift</code> or <code>average</code>). <b>Derive symmetry</b> maps to <code>derivesymmetry</code> (commonly <code>yes</code>, <code>no</code> or <code>use</code>, depending on the Superflip version).</p>
             <h3>Reflection handling</h3>
-            <p><b>Minimum value/&sigma;</b> filters weak observed reflections before writing the Superflip HKL block. <b>d<sub>min</sub> cutoff</b> is an optional resolution cutoff in &Aring;ngstrom; 0 keeps all reflections. <b>Normalization</b> is an optional reflection-normalization keyword (<code>none</code> is the safest default for the Windows executable). <b>Resolution shells</b> is used only when a supported normalization keyword is written. <b>Missing-reflection keyword</b> supplies Superflip's <code>missing</code> line, for example bounds for missing reflections. <b>Electrons</b> is Superflip's <code>electrons</code> keyword; leave blank to omit it.</p>
+            <p><b>Minimum observed value/&sigma;</b> filters weak observed reflections before writing the Superflip HKL block. <b>High-resolution cutoff d<sub>min</sub> (&Aring;)</b> is an optional resolution cutoff; 0 keeps all reflections. <b>Normalization</b> is an optional reflection-normalization keyword (<code>none</code> is the safest default for the Windows executable). <b>Resolution shells</b> is used only when a supported normalization keyword is written. <b>Missing reflections</b> supplies Superflip's <code>missing</code> line, for example bounds for missing reflections. <b>Electrons</b> is Superflip's <code>electrons</code> keyword; leave blank to omit it.</p>
             <h3>Reference density</h3>
             <p>The <code>referencefile</code> keyword is written automatically: from the selected Reference file when one is chosen on Basic &rarr; Input, or from cycle 2 onward when none is selected, using the previous cycle's EDMA CIF (or its XPLOR map if EDMA produced no usable peaks). This keeps Superflip's origin fixed in reciprocal space between cycles. <code>dataitemwidths</code> is unnecessary and not exposed, because Phase Studio always writes whitespace-separated fbegin/endf records.</p>
             <h3>Additional keywords</h3>
@@ -6610,7 +6612,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>5. SharpED in iterative workflows</h3>
             <p><b>Run SharpED deblurring</b> (Basic &rarr; Workflow &rarr; Optional processing) enables server processing; if disabled, the "deblurred" map used downstream is a copy of the Superflip map. <b>Symmetrize processed map with Superflip (beta)</b> performs symmetry averaging, not another charge-flipping reconstruction. <code>deblurred_xplor</code> (Next-cycle model) feeds the processed map into the next cycle; <code>deblurred_edma_cif</code> feeds its EDMA structure instead.</p>
             <h3>6. Phase-recycling methods (beta/experimental)</h3>
-            <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features in settings</b> (Advanced &rarr; Setup) to select them. Neither is production-ready.</p>
+            <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features</b> (Advanced &rarr; Setup) to select them. Neither is production-ready.</p>
         """, advanced=True)
         sharped_link_row = QHBoxLayout()
         sharped_link_row.addWidget(QLabel("SharpED project and API token"))
@@ -6636,7 +6638,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         secondary_buttons = QHBoxLayout()
         secondary_buttons.setSpacing(8)
         self.run_btn = QPushButton("Run phasing")
-        self.continue_btn = QPushButton("Continue")
+        self.continue_btn = QPushButton("Continue run")
         self.stop_btn = QPushButton("Stop after current cycle")
         self.stop_now_btn = QPushButton("Stop immediately")
         self.clear_btn = QPushButton("Clear results")
@@ -6736,7 +6738,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.result_splitter.setChildrenCollapsible(False)
         right_layout.addWidget(self.result_splitter, 1)
 
-        metrics_section, metrics_layout = make_result_section("SUPERFLIP CONVERGENCE")
+        metrics_section, metrics_layout = make_result_section("RECONSTRUCTION METRICS")
         self.metrics_tabs = QTabWidget()
         self.metrics_tabs.setObjectName("metricsTabs")
         self.metrics_figures: Dict[str, Figure] = {}
@@ -6762,12 +6764,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "observed data. Each cycle's point reflects the repartitioning that fed its input, so it lags one "
                 "cycle behind the repartitioning run itself."
             ),
+            "superflip_omit": "OMIT maps + R_free cross-validation for the Superflip map.",
+            "deblur_omit": "OMIT maps + R_free cross-validation for the SharpED map.",
         }
         for key, title in (
             ("superflip", "Superflip"),
             ("deblur", "SharpED"),
-            ("superflip_omit", "Superflip (omit+rfree)"),
-            ("deblur_omit", "SharpED (omit+rfree)"),
+            ("superflip_omit", "Superflip validation"),
+            ("deblur_omit", "SharpED validation"),
             ("powder_repartition", "Powder repartitioning"),
         ):
             page = QWidget()
@@ -6791,7 +6795,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.result_splitter.addWidget(metrics_section)
 
         structure_section, structure_layout = make_result_section("STRUCTURE COMPARISON")
-        self.structure_rotation_hint = QLabel("Drag to rotate all views · H hidden")
+        self.structure_rotation_hint = QLabel("Drag to rotate all views · Hydrogen and helium atoms hidden")
         self.structure_rotation_hint.setObjectName("structureRotationHint")
         self.structure_rotation_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.structure_rotation_hint.setVisible(False)
@@ -6834,6 +6838,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._sync_input_source_mode_widgets()
         self._sync_workflow_widgets()
         self._sync_map_feedback_widgets()
+        self._sync_normalization_widgets()
 
     def _metadata_source_value(self) -> str:
         return normalize_metadata_source(
@@ -6969,14 +6974,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
 
     @staticmethod
-    def _metadata_summary_values(metadata: CrystalMetadata) -> Tuple[str, str, str]:
+    def _metadata_summary_values(metadata: CrystalMetadata) -> Tuple[str, str, str, str]:
         cell = metadata.cell
-        cell_text = (
-            f"{cell.a:.5f} × {cell.b:.5f} × {cell.c:.5f} Å · "
-            f"{cell.alpha:.3f}°, {cell.beta:.3f}°, {cell.gamma:.3f}°"
-        )
+        # Lengths and angles are split into their own rows (rather than one long
+        # line) so the summary does not wrap awkwardly at typical panel widths.
+        lengths_text = f"{cell.a:.5f} × {cell.b:.5f} × {cell.c:.5f} Å"
+        angles_text = f"α {cell.alpha:.3f}° × β {cell.beta:.3f}° × γ {cell.gamma:.3f}°"
         group_text = f"{compact_spacegroup_symbol(metadata.spacegroup)} (#{metadata.spacegroup.number})"
-        return cell_text, group_text, metadata.composition
+        return lengths_text, angles_text, group_text, metadata.composition
 
     def _manual_metadata_value_changed(self, *_args) -> None:
         if self._syncing_metadata_controls or self._metadata_source_value() != METADATA_SOURCE_MANUAL:
@@ -7027,14 +7032,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         try:
             metadata = self._resolve_crystal_metadata_from_inputs()
-            cell_text, group_text, composition = self._metadata_summary_values(metadata)
-            self.metadata_cell_summary.setText(cell_text)
+            lengths_text, angles_text, group_text, composition = self._metadata_summary_values(metadata)
+            self.metadata_cell_summary.setText(lengths_text)
+            self.metadata_cell_angles_summary.setText(angles_text)
             self.metadata_spacegroup_summary.setText(group_text)
             self.metadata_composition_summary.setText(composition)
             self.metadata_summary_panel.setVisible(True)
             self._clear_metadata_error()
         except Exception as exc:
             self.metadata_cell_summary.setText("")
+            self.metadata_cell_angles_summary.setText("")
             self.metadata_spacegroup_summary.setText("")
             self.metadata_composition_summary.setText("")
             self.metadata_summary_panel.setVisible(False)
@@ -7068,6 +7075,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 symmetrize_widget.setVisible(show_beta)
             if not show_beta and symmetrize_widget.isChecked():
                 symmetrize_widget.setChecked(False)
+
+    def _sync_normalization_widgets(self, *_args) -> None:
+        # nresshells (Resolution shells) is only meaningful for "local" normalization.
+        mode = str(self._combo_value("normalize") if "normalize" in self.inputs else "").strip().lower()
+        is_local = mode == "local"
+        widget = self.inputs.get("nresshells")
+        if hasattr(widget, "setEnabled"):
+            widget.setEnabled(is_local)  # type: ignore[attr-defined]
+        if hasattr(widget, "setToolTip"):
+            widget.setToolTip(  # type: ignore[attr-defined]
+                INPUT_TOOLTIPS.get("nresshells", "") if is_local
+                else "Ignored: Resolution shells is used only when Normalization is 'local'."
+            )
+        label = self.input_labels.get("nresshells")
+        if label is not None:
+            label.setEnabled(is_local)
 
     def _sync_workflow_widgets(self) -> None:
         if self._configuration_locked:
@@ -7296,6 +7319,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 widget.setPlainText(value)
             elif isinstance(widget, QComboBox):
                 idx = widget.findText(value)
+                if idx < 0:
+                    # Case-insensitive fallback so a saved value survives a
+                    # display-only capitalization change to a combo item
+                    # (e.g. an old "custom" setting still matches "Custom").
+                    idx = widget.findText(value, Qt.MatchFixedString)
                 if idx >= 0:
                     widget.setCurrentIndex(idx)
                 elif hasattr(widget, "setCurrentText"):
@@ -7336,6 +7364,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             current = self._widget_value_as_string(widget).strip()
             if current.lower() in generic_values[key]:
                 self._set_widget_value_from_string(widget, default_path)
+        # Backward compatibility with older GUI versions that had a separate
+        # "Use symmetry for best densities" checkbox instead of "symmetry"
+        # being a normal Density selection metric option.
+        legacy_bestdensities_symmetry = str(self.settings.value("inputs/bestdensities_symmetry", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if legacy_bestdensities_symmetry and "bestdensities_metric" in self.inputs:
+            self._set_widget_value_from_string(self.inputs["bestdensities_metric"], "symmetry")
         # Backward compatibility with older GUI versions that had one common
         # EDMA plimit field named "plimit".
         old_plimit = self.settings.value("inputs/plimit", None)
@@ -7919,23 +7953,32 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         layout.addWidget(input_summary)
         if is_fwhm_mode:
             fwhm_note = QLabel(
-                "<b>FWHM data</b><br>The second data column is a peak-shape FWHM (e.g. from a Le Bail powder "
-                "extraction), not a measurement uncertainty. I/FWHM is shown for reference but is not a "
-                "signal-to-noise ratio; the usual I/&sigma;(I) = 3 significance threshold does not apply and is omitted below."
+                "<b>FWHM data</b><br>FWHM is a peak-shape parameter, not a measurement uncertainty. "
+                "I/FWHM is shown only as a descriptive intensity-to-width measure; I/&sigma;(I)-based "
+                "significance thresholds do not apply and are omitted below."
             )
             fwhm_note.setObjectName("helpCallout")
             fwhm_note.setTextFormat(Qt.RichText)
             fwhm_note.setWordWrap(True)
             layout.addWidget(fwhm_note)
-        metrics_panel = self._diagnostic_metric_grid((
+        metric_cards = [
             (f"{len(analysis.reflections_unique):,}", "Unique reflections"),
             (d_min_text, "d_min"),
             (d_full, "d at 98% cumulative completeness"),
             (median_signal, f"Median {signal_label}"),
-            (threshold_d_text, f"d where mean {signal_label} < {signal_threshold:.1f}"),
+        ]
+        if not is_fwhm_mode:
+            # A significance threshold on I/FWHM would misrepresent it as a
+            # conventional I/sigma(I)-style signal-to-noise ratio; omit the
+            # card entirely rather than show a prose fallback as a metric value.
+            metric_cards.append((threshold_d_text, f"d where mean {signal_label} < {signal_threshold:.1f}"))
+        metric_cards.extend([
             (f"{phase_count:,} / {len(analysis.reflections_raw):,}", "Phase-value coverage"),
             (f"{raw_sigma_count:,} / {len(analysis.reflections_raw):,}", f"{sigma_label} coverage"),
-        ), compact=True, row_columns=(7,))
+        ])
+        metrics_panel = self._diagnostic_metric_grid(
+            metric_cards, compact=True, row_columns=(len(metric_cards),)
+        )
         layout.addWidget(metrics_panel)
 
         content_splitter = QSplitter(Qt.Vertical)
@@ -8208,11 +8251,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         table.setHorizontalHeaderLabels(headers)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for row, item in enumerate(analysis.bins):
+            theory_count = int(item["theory"])
             values = [
                 f"{float(item['lo']):.4g} - {float(item['hi']):.4g}",
                 str(int(item["observed"])),
-                str(int(item["theory"])),
-                f"{float(item['completeness']):.2f}",
+                str(theory_count),
+                # Completeness is undefined with no theoretical reflections in the shell.
+                "—" if theory_count == 0 else f"{float(item['completeness']):.2f}",
                 "n/a" if not math.isfinite(float(item["mean_signal_to_noise"])) else f"{float(item['mean_signal_to_noise']):.3g}",
             ]
             for column, text_value in enumerate(values):
@@ -8551,6 +8596,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "COMPLETED": "COMPLETE",
             "FAILED": "ERROR",
             "CANCELED": "CANCELLED",
+            # The pipeline is still RUNNING for button-enablement purposes while a
+            # stop is pending; the "stopping" badge is shown separately via
+            # _show_stopping_badge() without changing the stored _run_status.
             "STOPPING": "RUNNING",
         }.get(normalized, normalized)
         self._run_status = normalized
@@ -8584,10 +8632,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if active and hasattr(self, "handoff_btn"):
             self.handoff_btn.setEnabled(False)
 
+    def _show_stopping_badge(self) -> None:
+        # Cosmetic only: the pipeline is still RUNNING for _update_action_states()
+        # purposes (stop/stop-now button enablement, configuration lock) until the
+        # worker actually exits, but the visible status badge should reflect that a
+        # stop was requested rather than sitting on "RUNNING" with no feedback.
+        if hasattr(self, "status_badge"):
+            self.status_badge.setText("STOPPING")
+            self.status_badge.setProperty("runState", "stopping")
+            self.status_badge.style().unpolish(self.status_badge)
+            self.status_badge.style().polish(self.status_badge)
+
     def request_stop_after_cycle(self) -> None:
         self.stop_after_cycle.set()
         self._annotate_cycle_progress("Stopping after current cycle...")
         self._update_action_states()
+        self._show_stopping_badge()
         self.log("Stop after current cycle requested.", level="DETAIL")
 
     def request_immediate_stop(self) -> None:
@@ -8595,6 +8655,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_now.set()
         self._annotate_cycle_progress("Stopping immediately...")
         self._update_action_states()
+        self._show_stopping_badge()
         self.log("Immediate stop requested.", level="DETAIL")
 
     def refresh_sharped_models(self) -> None:
@@ -8658,8 +8719,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("polish", "true")
             set_value("voxel", "")
             set_value("bestdensities_count", "1")
-            set_value("bestdensities_metric", "rvalue")
-            set_value("bestdensities_symmetry", "true")
+            set_value("bestdensities_metric", "symmetry")
             set_value("searchsymmetry", "average")
             set_value("derivesymmetry", "yes")
             set_value("resolution_d_min", "0.0")
@@ -8676,7 +8736,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("plimit_superflip", "3.0")
             set_value("plimit_deblur", "3.0")
             set_value("resolution_d_min", "0.9")
-            set_value("bestdensities_symmetry", "true")
+            set_value("bestdensities_metric", "symmetry")
             set_value("map_export_format", "jana")
         elif "medium" in name:
             set_value("reflection_data_mode", REFLECTION_DATA_MODE_AUTO)
@@ -8695,9 +8755,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("modelfile_source", "deblurred_edma_cif")
             set_value("plimit_superflip", "1.0")
             set_value("plimit_deblur", "1.0")
-            set_value("bestdensities_symmetry", "true")
+            set_value("bestdensities_metric", "symmetry")
         self._sync_workflow_widgets()
         self._sync_map_feedback_widgets()
+        self._sync_normalization_widgets()
 
     def _open_configuration_page(self, name: str, *, advanced: bool = False) -> None:
         self.category_tabs.setCurrentIndex(1 if advanced else 0)
@@ -9192,6 +9253,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ax.set_ylim(-0.04, 1.04)
         ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
         ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
+        ax.set_ylabel("Normalized score", fontsize=7.5, color="#001170")
         try:
             cycles_to_run = max(1, self._spin_value("cycles"))
         except Exception:
@@ -9298,7 +9360,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("R_free", [r.omit_deblur_rfree for r in self.results], False, "#001170", "o", "-"),
         ])
         self._render_metrics_tab("powder_repartition", [
-            ("Avg intensity change/group (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
+            ("Mean intensity change (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
         ])
 
     def _element_color(self, element: str) -> str:
@@ -9679,7 +9741,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             voxel=self._line_value("voxel"),
             bestdensities_count=self._spin_value("bestdensities_count"),
             bestdensities_metric=normalize_bestdensities_metric(self._combo_value("bestdensities_metric")),
-            bestdensities_symmetry=self._check_value("bestdensities_symmetry"),
+            bestdensities_symmetry=normalize_bestdensities_metric(self._combo_value("bestdensities_metric")) == "symmetry",
             polish=self._check_value("polish"),
             maxcycles=self._spin_value("maxcycles"),
             repeatmode=self._spin_value("repeatmode"),

@@ -132,18 +132,15 @@ The exact packaging requirements depend on the build environment. If the project
 
 ## 5. Linux desktop integration and icon
 
-A Linux ELF executable does not use a Windows `.ico` file in the same way as a Windows PE executable. Use one of the square cross-platform assets included in the repository:
+A Linux ELF executable does not use a Windows `.ico` file in the same way as a Windows PE executable, and the repository does not currently ship a standalone SVG/PNG icon asset — only the Windows multi-size `phase_studio/assets/phase_studio.ico`. The in-app logo mark itself is drawn at runtime (`create_phase_studio_logo_pixmap` in `phase_studio/app.py`) rather than loaded from an image file.
 
-```text
-phase_studio/assets/phase_studio_icon.svg
-phase_studio/assets/phase_studio_icon.png
+For desktop integration, extract a PNG from the `.ico` first, for example with ImageMagick:
+
+```bash
+convert phase_studio/assets/phase_studio.ico -resize 256x256 phase_studio_icon.png
 ```
 
-The full-width brand mark is also available as `phase_studio_logo.svg` and `phase_studio_logo.png`.
-
-For desktop integration, install an application icon and a `.desktop` entry.
-
-Example:
+Then install an application icon and a `.desktop` entry:
 
 ```ini
 [Desktop Entry]
@@ -155,7 +152,7 @@ Terminal=false
 Categories=Science;Education;
 ```
 
-Copy the selected icon asset beside the executable or install it in the appropriate system icon directory, then set `Icon` to that installed path or icon name.
+Copy the generated icon beside the executable or install it in the appropriate system icon directory, then set `Icon` to that installed path or icon name. If the project later adds a dedicated cross-platform SVG/PNG asset, prefer that over an extracted `.ico` frame.
 
 ---
 

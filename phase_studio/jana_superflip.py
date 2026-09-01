@@ -799,6 +799,7 @@ def _qt_imports():
             QDoubleSpinBox,
             QFileDialog,
             QFormLayout,
+            QFrame,
             QGroupBox,
             QHBoxLayout,
             QHeaderView,
@@ -834,6 +835,7 @@ def _qt_imports():
         "QDoubleSpinBox": QDoubleSpinBox,
         "QFileDialog": QFileDialog,
         "QFormLayout": QFormLayout,
+        "QFrame": QFrame,
         "QGroupBox": QGroupBox,
         "QHBoxLayout": QHBoxLayout,
         "QHeaderView": QHeaderView,
@@ -894,6 +896,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     QDoubleSpinBox = qt["QDoubleSpinBox"]
     QFileDialog = qt["QFileDialog"]
     QFormLayout = qt["QFormLayout"]
+    QFrame = qt["QFrame"]
     QGroupBox = qt["QGroupBox"]
     QHBoxLayout = qt["QHBoxLayout"]
     QLabel = qt["QLabel"]
@@ -915,14 +918,68 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     apply_phase_studio_style(app)
 
     settings = QSettings("PhaseStudio", "JanaSuperflipWrapper")
+    # SharpED connection credentials (server URL, API token) are shared with the
+    # full Phase Studio application's own QSettings store, not kept as a second,
+    # independent copy here -- otherwise whichever one launched last silently
+    # overwrites the other's token the next time either app saves its settings.
+    shared_settings = QSettings("PhaseStudio", "PhaseStudio")
+
+    def shared_or_legacy_value(shared_key: str, legacy_key: str, fallback: str) -> str:
+        shared_value = str(shared_settings.value(f"inputs/{shared_key}", "") or "").strip()
+        if shared_value:
+            return shared_value
+        legacy_value = str(settings.value(legacy_key, "") or "").strip()
+        return legacy_value or fallback
+
     saved_workflow = str(settings.value("workflow", WORKFLOW_SUPERFLIP_ONLY))
     if saved_workflow not in WORKFLOW_LABELS:
         saved_workflow = WORKFLOW_SUPERFLIP_ONLY
+    workflow_state = {"key": saved_workflow}
+
+    class _WorkflowCard(QFrame):
+        """A selectable workflow row: bold title, one description line, no
+        execution on click -- selecting a workflow only updates which card is
+        highlighted; the dialog's own "Run phasing" / "Next" action decides
+        whether and when anything actually runs."""
+
+        def __init__(self, key: str, title: str, description: str, on_click) -> None:
+            super().__init__()
+            self._key = key
+            self._on_click = on_click
+            self.setObjectName("workflowCard")
+            self.setFrameShape(QFrame.NoFrame)
+            self.setCursor(Qt.PointingHandCursor)
+            layout = QVBoxLayout(self)
+            layout.setContentsMargins(12, 8, 12, 8)
+            layout.setSpacing(2)
+            title_label = QLabel(title)
+            title_font = title_label.font()
+            title_font.setBold(True)
+            title_label.setFont(title_font)
+            desc_label = QLabel(description)
+            desc_label.setWordWrap(True)
+            desc_label.setStyleSheet("color: #52658b;")
+            layout.addWidget(title_label)
+            layout.addWidget(desc_label)
+            self.set_selected(False)
+
+        def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+            super().mousePressEvent(event)
+            self._on_click(self._key)
+
+        def set_selected(self, selected: bool) -> None:
+            if selected:
+                self.setStyleSheet(
+                    "QFrame#workflowCard { background-color: #edf3fa; border: 1px solid #2264b8; }"
+                )
+            else:
+                self.setStyleSheet(
+                    "QFrame#workflowCard { background-color: #ffffff; border: 1px solid #cbd7ea; }"
+                )
 
     dialog = QDialog()
     dialog.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
     dialog.setMinimumWidth(640)
-    dialog.resize(680, 560)
 
     root = QVBoxLayout(dialog)
     root.setContentsMargins(14, 14, 14, 14)
@@ -936,7 +993,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     root.addWidget(title)
 
     inflip_info = QLabel(
-        f"Incoming Jana2020 file: {inflip_path.name}" if inflip_path else "No .inflip argument was detected."
+        f"Jana2020 input: {inflip_path.name}" if inflip_path else "No .inflip argument was detected."
     )
     inflip_info.setToolTip(str(inflip_path) if inflip_path else "")
     root.addWidget(inflip_info)
@@ -988,9 +1045,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         return str(found) if found is not None else ""
 
     reference_file = add_file_row(
-        "Reference file",
+        "Reference file (optional)",
         "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)",
-        "Optional reference CIF structure or XPLOR density map, used together with the "
+        "Reference CIF structure or XPLOR density map, used together with the "
         "incoming Jana .inflip without replacing its embedded reflections or metadata. "
         "When supplied, Superflip also reports how well each cycle matches this reference, "
         "which is used to recommend the best map for the Jana2020 hand-off. Pre-filled from "
@@ -999,9 +1056,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         _inflip_keyword_default("referencefile"),
     )
     model_file = add_file_row(
-        "Model file",
+        "Initial model (optional)",
         "Model/map files (*.xplor *.ccp4 *.cif);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4);;CIF structures (*.cif);;All files (*)",
-        "Optional model or density map to seed the first Superflip cycle. If supplied, "
+        "Model or density map to seed the first Superflip cycle. If supplied, "
         "cycle 1 is model-seeded: repeatmode is forced to 1 and randomseed is omitted. "
         "Pre-filled from the incoming .inflip's own modelfile keyword, if it declares one.",
         "No first-cycle modelfile",
@@ -1009,17 +1066,19 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     )
     page1_layout.addWidget(files_group)
 
+    def workflow_card_clicked(key: str) -> None:
+        workflow_state["key"] = key
+        workflow_changed()
+
     workflow_group = QGroupBox("Workflow")
     workflow_group_layout = QVBoxLayout(workflow_group)
-    workflow_group_layout.setSpacing(8)
-    workflow_buttons: dict[str, QPushButton] = {}
+    workflow_group_layout.setSpacing(6)
+    workflow_cards: dict[str, "_WorkflowCard"] = {}
     for key in (WORKFLOW_SUPERFLIP_ONLY, WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING):
-        workflow_button = QPushButton(WORKFLOW_LABELS[key])
-        workflow_button.setObjectName("primaryButton")
-        workflow_button.setToolTip(WORKFLOW_DESCRIPTIONS[key])
-        workflow_button.setMinimumHeight(38)
-        workflow_group_layout.addWidget(workflow_button)
-        workflow_buttons[key] = workflow_button
+        card = _WorkflowCard(key, WORKFLOW_LABELS[key], WORKFLOW_DESCRIPTIONS[key], workflow_card_clicked)
+        card.setToolTip("Select this workflow, then use Run phasing / Next below to proceed.")
+        workflow_group_layout.addWidget(card)
+        workflow_cards[key] = card
     page1_layout.addWidget(workflow_group)
     page1_layout.addStretch(1)
     stack.addWidget(page1)
@@ -1036,7 +1095,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     page2_title.setFont(page2_title_font)
     page2_layout.addWidget(page2_title)
 
-    map_group = QGroupBox("Map used for phase recycling and hand-off")
+    map_group = QGroupBox("Map used for Jana2020 hand-off")
     map_group_layout = QVBoxLayout(map_group)
     map_buttons = QButtonGroup(dialog)
     sharped_map_radio = QRadioButton("SharpED map (deblurred)")
@@ -1064,8 +1123,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     cycles = QSpinBox()
     cycles.setRange(1, 999)
     cycles.setValue(int(settings.value("cycles", 1)) or 1)
-    cycles.setToolTip("Total number of Superflip/SharpED cycles.")
-    processing_form.addRow("Processing cycles", cycles)
+    cycles.setToolTip("Number of Superflip/SharpED phase-recycling iterations.")
+    processing_form.addRow("Phase-recycling cycles", cycles)
+    cycles_label = processing_form.labelForField(cycles)
 
     cycles_user_edited = {"value": False}
 
@@ -1096,7 +1156,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         "Query the SharpED /sharp-ed/models endpoint and repopulate the model selector "
         "with the currently available server models."
     )
-    model_status = QLabel("Model list has not been queried in this session.")
+    model_status = QLabel("Available models have not been loaded yet.")
     model_status.setWordWrap(True)
     model_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
     refresh_layout.addWidget(refresh_models_button)
@@ -1106,7 +1166,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     sharped_group = QGroupBox()
     sharped_outer = QVBoxLayout(sharped_group)
     sharped_toggle = QToolButton()
-    sharped_toggle.setText("Setup API")
+    sharped_toggle.setText("SharpED settings")
     sharped_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
     sharped_toggle.setArrowType(Qt.RightArrow)
     sharped_toggle.setCheckable(True)
@@ -1118,19 +1178,24 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     sharped_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
     sharped_form.setContentsMargins(18, 4, 0, 0)
 
-    server_url = QLineEdit(str(settings.value("server_url", DEFAULT_SERVER_URL)))
+    server_url = QLineEdit(shared_or_legacy_value("sharped_base_url", "server_url", DEFAULT_SERVER_URL))
     server_url.setPlaceholderText(DEFAULT_SERVER_URL)
-    server_url.setToolTip("Base URL of the SharpED service used for model discovery and map processing.")
+    server_url.setToolTip(
+        "Base URL of the SharpED service used for model discovery and map processing. "
+        "Shared with the full Phase Studio application's own Advanced -> Setup value."
+    )
     sharped_form.addRow("Server URL", server_url)
 
     api_token = QLineEdit(
-        str(settings.value("api_token", os.environ.get("SHARPED_API_TOKEN", "")))
+        shared_or_legacy_value("sharped_api_token", "api_token", os.environ.get("SHARPED_API_TOKEN", ""))
     )
     api_token.setEchoMode(QLineEdit.Password)
     api_token.setPlaceholderText("Enter API token")
     api_token.setToolTip(
         "Bearer token used to authorize SharpED processing. The token is masked in "
-        "the interface and may alternatively be supplied through SHARPED_API_TOKEN."
+        "the interface, may alternatively be supplied through SHARPED_API_TOKEN, and "
+        "is shared with the full Phase Studio application's own API token -- saving it "
+        "here also updates that copy, and vice versa."
     )
     sharped_form.addRow("API token", api_token)
 
@@ -1157,6 +1222,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     def sync_sharped_disclosure(opened: bool) -> None:
         sharped_body.setVisible(bool(opened))
         sharped_toggle.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
+        dialog.adjustSize()
 
     sharped_toggle.toggled.connect(sync_sharped_disclosure)
     page2_layout.addWidget(sharped_group)
@@ -1232,10 +1298,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     warning_icon.setAlignment(Qt.AlignTop)
     validation_layout.addWidget(warning_icon, 0, Qt.AlignTop)
     warning_text = QLabel(
-        "SharpED output is generated by a neural-network model and may contain "
-        "artifacts or chemically implausible features. Use it as an interpretation "
-        "aid and validate every resulting structure against the measured diffraction "
-        "data and an independent crystallographic refinement."
+        "SharpED is a neural-network density-processing method. Its output may "
+        "contain artifacts and should be validated against the measured "
+        "diffraction data and an independent crystallographic refinement."
     )
     warning_text.setWordWrap(True)
     validation_layout.addWidget(warning_text, 1)
@@ -1245,6 +1310,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
     def sync_map_choice() -> None:
         validation_group.setVisible(sharped_map_radio.isChecked())
+        dialog.adjustSize()
 
     sharped_map_radio.toggled.connect(lambda _checked=False: sync_map_choice())
     sync_map_choice()
@@ -1256,13 +1322,13 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     back_button.setToolTip("Return to the workflow selection.")
     cancel_button = QPushButton("Cancel")
     cancel_button.setToolTip("Close the launcher without starting or modifying the Jana2020 job.")
-    edit_button = QPushButton("Open full Phase Studio configuration")
+    edit_button = QPushButton("Open full configuration")
     edit_button.setToolTip(
         "Open the complete Phase Studio workspace with parameters imported from the "
         "Jana2020 .inflip file. Embedded reflections are exported to a working HKL file "
         "unless an external HKL override is selected there."
     )
-    primary_button = QPushButton("Run Jana2020 calculation")
+    primary_button = QPushButton("Run phasing")
     primary_button.setObjectName("primaryButton")
     primary_button.setDefault(True)
     button_row.addWidget(back_button)
@@ -1271,8 +1337,6 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     button_row.addWidget(edit_button)
     button_row.addWidget(primary_button)
     root.addLayout(button_row)
-
-    workflow_state = {"key": saved_workflow}
 
     def current_workflow() -> str:
         return workflow_state["key"]
@@ -1292,28 +1356,55 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         finally:
             cycles.blockSignals(False)
 
+    def sync_primary_button_for_page1() -> None:
+        # Selecting a workflow card never runs or navigates by itself; the
+        # bottom-right button is the one clear place that either advances to the
+        # workflow's extra settings or, for Superflip only, runs it directly.
+        if current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
+            primary_button.setText("Run phasing")
+            primary_button.setToolTip(
+                "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper."
+            )
+        else:
+            primary_button.setText("Next ›")
+            primary_button.setToolTip("Continue to the SharpED and cycle settings.")
+
     def workflow_changed() -> None:
         key = current_workflow()
+        for card_key, card in workflow_cards.items():
+            card.set_selected(card_key == key)
         page2_title.setText(WORKFLOW_LABELS[key])
+        cycles_visible = key == WORKFLOW_PHASE_RECYCLING
+        cycles.setVisible(cycles_visible)
+        if cycles_label is not None:
+            cycles_label.setVisible(cycles_visible)
         if key != WORKFLOW_SUPERFLIP_ONLY:
             apply_workflow_cycle_default(key)
+            map_group.setTitle(
+                "Map used for phase recycling and Jana2020 hand-off"
+                if key == WORKFLOW_PHASE_RECYCLING
+                else "Map used for Jana2020 hand-off"
+            )
+        if stack.currentWidget() is page1:
+            sync_primary_button_for_page1()
 
     workflow_changed()
 
     def go_to_page1() -> None:
         stack.setCurrentWidget(page1)
         back_button.setVisible(False)
-        primary_button.setVisible(False)
+        sync_primary_button_for_page1()
+        dialog.adjustSize()
 
     def go_to_page2() -> None:
         stack.setCurrentWidget(page2)
         back_button.setVisible(True)
-        primary_button.setVisible(True)
-        primary_button.setText("Run Jana2020 calculation")
+        primary_button.setText("Run phasing")
         primary_button.setToolTip(
             "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
             "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
         )
+        dialog.adjustSize()
 
     back_button.clicked.connect(go_to_page1)
     go_to_page1()
@@ -1334,8 +1425,13 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         settings.setValue("cycles", effective_cycles())
         settings.setValue("next_cycle_modelfile", next_cycle_mode)
         settings.setValue("use_deblurred_map", next_cycle_mode == "deblurred_xplor")
-        settings.setValue("server_url", server_url.text())
-        settings.setValue("api_token", api_token.text())
+        # SharpED server URL / API token are the shared credentials also used by
+        # the full Phase Studio application; write them there, not to a second,
+        # independent copy under this wrapper's own settings (see shared_settings
+        # above for why: two copies drift and silently overwrite one another).
+        shared_settings.setValue("inputs/sharped_base_url", server_url.text())
+        shared_settings.setValue("inputs/sharped_api_token", api_token.text())
+        shared_settings.sync()
         settings.setValue("model", model.currentText())
         settings.setValue("elements", elements.text())
         settings.setValue("outres", outres.value())
@@ -1364,6 +1460,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         )
 
     def attempt_run() -> None:
+        if stack.currentWidget() is page1 and current_workflow() != WORKFLOW_SUPERFLIP_ONLY:
+            go_to_page2()
+            return
         token = api_token.text().strip() or os.environ.get("SHARPED_API_TOKEN", "").strip()
         if effective_next_cycle_mode() == "deblurred_xplor" and not token:
             if stack.currentWidget() is not page2:
@@ -1380,17 +1479,6 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         save_values()
         result["action"] = "edit"
         dialog.accept()
-
-    def workflow_button_clicked(key: str) -> None:
-        workflow_state["key"] = key
-        workflow_changed()
-        if key == WORKFLOW_SUPERFLIP_ONLY:
-            attempt_run()
-        else:
-            go_to_page2()
-
-    for _key, _button in workflow_buttons.items():
-        _button.clicked.connect(lambda _checked=False, _k=_key: workflow_button_clicked(_k))
 
     primary_button.clicked.connect(attempt_run)
     edit_button.clicked.connect(edit_clicked)

@@ -145,7 +145,7 @@ The dashboard also includes:
 - **[Example Workflows](EXAMPLES.md)** — practical configurations and workflows
 - **[Building Phase Studio](BUILDING.md)** — source installation, packaging, and wrapper deployment
 
-Reusable branding assets are stored in `phase_studio/assets/`: the Windows multi-size `phase_studio.ico`, square cross-platform `phase_studio_icon.svg/.png`, and full `phase_studio_logo.svg/.png`.
+The Windows multi-size application icon is stored at `phase_studio/assets/phase_studio.ico`. The in-app logo mark is drawn at runtime (`create_phase_studio_logo_pixmap` in `phase_studio/app.py`) rather than loaded from a separate SVG/PNG asset.
 
 ## Project information
 
