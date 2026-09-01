@@ -9215,7 +9215,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 transform=figure.transFigure,
             )
 
-    def _render_metrics_tab(self, key: str, series: List[Tuple[str, List[Optional[float]], bool, str, str, str]]) -> None:
+    def _render_metrics_tab(
+        self,
+        key: str,
+        series: List[Tuple[str, List[Optional[float]], bool, str, str, str]],
+        *,
+        raw: bool = False,
+        raw_ylabel: str = "",
+    ) -> None:
+        """Render one convergence tab. By default, each series is rescaled to a
+        shared 0-1 "Best/Worst" score so metrics with unrelated units (RMSD,
+        recall, reference match, ...) can be compared on one axis. Pass raw=True
+        for a tab with a single metric already in one meaningful unit (for
+        example a percentage), where that rescaling would hide whether the
+        actual value is trending down/up and should instead be plotted as-is."""
         figure = self.metrics_figures[key]
         canvas = self.metrics_canvases[key]
         figure.clear()
@@ -9250,10 +9263,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ax.set_title("")
         ax.set_xlabel("")
         figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#14204a", fontsize=8.5)
-        ax.set_ylim(-0.04, 1.04)
-        ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
-        ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
-        ax.set_ylabel("Normalized score", fontsize=7.5, color="#001170")
+        if raw:
+            all_finite = [
+                float(v)
+                for _label, values, *_rest in series
+                for v in values
+                if v is not None and np.isfinite(float(v))
+            ]
+            if all_finite:
+                lo = min(0.0, min(all_finite))
+                hi = max(all_finite)
+                pad = max(1e-9, (hi - lo) * 0.08)
+                ax.set_ylim(lo - pad, hi + pad)
+            ax.set_ylabel(raw_ylabel, fontsize=7.5, color="#001170")
+        else:
+            ax.set_ylim(-0.04, 1.04)
+            ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+            ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
+            ax.set_ylabel("Normalized score", fontsize=7.5, color="#001170")
         try:
             cycles_to_run = max(1, self._spin_value("cycles"))
         except Exception:
@@ -9292,7 +9319,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         plotted = 0
         for label, values, higher_is_better, color, marker, linestyle in series:
-            y = best_score(values, higher_is_better)
+            if raw:
+                y = [np.nan if v is None else float(v) for v in values]
+            else:
+                y = best_score(values, higher_is_better)
             if not np.any(np.isfinite(np.asarray(y, dtype=float))):
                 continue
             plotted += 1
@@ -9359,9 +9389,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("Omit map correlation", [r.omit_deblur_correlation for r in self.results], True, "#2264b8", "*", "-"),
             ("R_free", [r.omit_deblur_rfree for r in self.results], False, "#001170", "o", "-"),
         ])
-        self._render_metrics_tab("powder_repartition", [
-            ("Mean intensity change (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
-        ])
+        self._render_metrics_tab(
+            "powder_repartition",
+            [
+                ("Mean intensity change (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
+            ],
+            raw=True,
+            raw_ylabel="Mean intensity change (%)",
+        )
 
     def _element_color(self, element: str) -> str:
         # This extended blue scale is intentionally exclusive to structure atoms.
