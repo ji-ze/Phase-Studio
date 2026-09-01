@@ -88,6 +88,12 @@ class JanaRunOptions:
     reference_override: str = ""
     superflip_referencefile: str = ""
     first_cycle_modelfile: str = ""
+    # Phase-recycling-only cross-validation controls (Wizard section "Cross-
+    # validation"); both default off and are never shown/settable for either
+    # single-pass workflow. Map 1:1 onto the existing full-pipeline
+    # compute_omit_maps / compute_omit_rfree settings -- no new calculation.
+    compute_omit_maps: bool = False
+    compute_omit_rfree: bool = False
 
 
 @dataclass
@@ -158,6 +164,8 @@ def build_jana_handoff_import(
         # always produced regardless; "jana" additionally saves Jana m80/m81 for hand-off).
         "map_export_format": "jana",
         "hkl": explicit_hkl,
+        "compute_omit_maps": "true" if options.compute_omit_maps else "false",
+        "compute_omit_rfree": "true" if (options.compute_omit_maps and options.compute_omit_rfree) else "false",
     }
     if explicit_first_model:
         handoff_values["first_cycle_modelfile"] = explicit_first_model
@@ -902,6 +910,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     QLabel = qt["QLabel"]
     QLineEdit = qt["QLineEdit"]
     QPushButton = qt["QPushButton"]
+    QCheckBox = qt["QCheckBox"]
     QRadioButton = qt["QRadioButton"]
     QSettings = qt["QSettings"]
     QSizePolicy = qt["QSizePolicy"]
@@ -1435,6 +1444,47 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     warning_text.setWordWrap(True)
     validation_layout.addWidget(warning_text, 1)
     page2_layout.addWidget(validation_group)
+
+    # Phase recycling only: maps directly onto the existing full-pipeline
+    # compute_omit_maps / compute_omit_rfree settings (see build_jana_handoff_import).
+    # Not shown for either single-pass workflow, which never reaches that pipeline.
+    cross_validation_group = QGroupBox("Cross-validation")
+    cross_validation_layout = QVBoxLayout(cross_validation_group)
+    omit_checkbox = QCheckBox("Compute OMIT validation maps")
+    omit_checkbox.setToolTip(
+        "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed "
+        "random 5% holdout of reflections excluded from the input, for cross-validation. "
+        "Roughly doubles Superflip/SharpED time per cycle."
+    )
+    rfree_checkbox = QCheckBox("Calculate R_free")
+    rfree_checkbox.setToolTip(
+        "Compute R_free (the crystallographic R-factor between the excluded holdout "
+        "reflections' observed |F| and |F| calculated by FFT from the omit map) for each "
+        "cycle. Requires 'Compute OMIT validation maps'."
+    )
+    cross_validation_layout.addWidget(omit_checkbox)
+    cross_validation_layout.addWidget(rfree_checkbox)
+    cross_validation_help = QLabel(
+        "Optional. Cross-validation adds validation calculations for each cycle and can "
+        "be used to rank candidate maps after reconstruction."
+    )
+    cross_validation_help.setWordWrap(True)
+    cross_validation_help.setStyleSheet("color: #52658b;")
+    cross_validation_layout.addWidget(cross_validation_help)
+    page2_layout.addWidget(cross_validation_group)
+
+    omit_checkbox.setChecked(bool(settings.value("compute_omit_maps", False, type=bool)))
+    rfree_checkbox.setChecked(bool(settings.value("compute_omit_rfree", False, type=bool)))
+
+    def sync_rfree_dependency(_checked: bool = False) -> None:
+        omit_enabled = omit_checkbox.isChecked()
+        rfree_checkbox.setEnabled(omit_enabled)
+        if not omit_enabled and rfree_checkbox.isChecked():
+            rfree_checkbox.setChecked(False)
+
+    omit_checkbox.toggled.connect(sync_rfree_dependency)
+    sync_rfree_dependency()
+
     page2_layout.addStretch(1)
     stack.addWidget(page2)
 
@@ -1515,6 +1565,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
                 if key == WORKFLOW_PHASE_RECYCLING
                 else "Map used for Jana2020 hand-off"
             )
+        cross_validation_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
         if stack.currentWidget() is page1:
             sync_primary_button_for_page1()
 
@@ -1549,12 +1600,23 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     def effective_cycles() -> int:
         return 1 if current_workflow() == WORKFLOW_SUPERFLIP_ONLY else cycles.value()
 
+    def effective_compute_omit_maps() -> bool:
+        # Cross-validation is Phase-recycling-only; the checkboxes are hidden
+        # (never even shown) for either single-pass workflow, and their value
+        # must not leak through in that case regardless of prior state.
+        return current_workflow() == WORKFLOW_PHASE_RECYCLING and omit_checkbox.isChecked()
+
+    def effective_compute_omit_rfree() -> bool:
+        return effective_compute_omit_maps() and rfree_checkbox.isChecked()
+
     def save_values() -> None:
         next_cycle_mode = effective_next_cycle_mode()
         settings.setValue("workflow", current_workflow())
         settings.setValue("cycles", effective_cycles())
         settings.setValue("next_cycle_modelfile", next_cycle_mode)
         settings.setValue("use_deblurred_map", next_cycle_mode == "deblurred_xplor")
+        settings.setValue("compute_omit_maps", omit_checkbox.isChecked())
+        settings.setValue("compute_omit_rfree", rfree_checkbox.isChecked())
         # SharpED server URL / API token are the shared credentials also used by
         # the full Phase Studio application; write them there, not to a second,
         # independent copy under this wrapper's own settings (see shared_settings
@@ -1587,6 +1649,8 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             reference_override="",
             superflip_referencefile=reference_file.text().strip(),
             first_cycle_modelfile=model_file.text().strip(),
+            compute_omit_maps=effective_compute_omit_maps(),
+            compute_omit_rfree=effective_compute_omit_rfree(),
         )
 
     def attempt_run() -> None:
@@ -1602,18 +1666,11 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             _show_missing_token_warning(dialog, qt)
             return
         save_values()
-        workflow = current_workflow()
-        if workflow == WORKFLOW_PHASE_RECYCLING:
-            result["action"] = "recycle"
-        elif workflow == WORKFLOW_SUPERFLIP_SHARPED:
-            # Hosted in the main Phase Studio window (as the execution/progress
-            # display only -- still the same single-pass run_jana_superflip()
-            # call, not the full iterative pipeline). "Superflip only" is
-            # deliberately excluded: it keeps using the lightweight, windowless
-            # path below unchanged.
-            result["action"] = "host_single_pass"
-        else:
-            result["action"] = "run"
+        # Only Phase recycling opens the full Phase Studio main window. Both
+        # single-pass workflows (Superflip only, Superflip + SharpED) keep the
+        # original lightweight console/wrapper path below -- run_jana_superflip()
+        # called directly from main(), no main window at all.
+        result["action"] = "recycle" if current_workflow() == WORKFLOW_PHASE_RECYCLING else "run"
         dialog.accept()
 
     def edit_clicked() -> None:
@@ -1633,11 +1690,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
 
 def launch_phase_studio_from_jana(
-    inflip_path: Optional[Path],
-    options: JanaRunOptions,
-    auto_start: bool = False,
-    host_single_pass: bool = False,
-    single_pass_args: Optional[Sequence[str]] = None,
+    inflip_path: Optional[Path], options: JanaRunOptions, auto_start: bool = False
 ) -> int:
     # Load PySide6 before importing app.py, which initializes Matplotlib QtAgg.
     qt = _qt_imports()
@@ -1665,12 +1718,6 @@ def launch_phase_studio_from_jana(
 
     def build_window() -> IterativeSuperflipPipelineQtGUI:
         win = IterativeSuperflipPipelineQtGUI()
-        if host_single_pass:
-            # Single-pass workflows call run_jana_superflip() directly, which
-            # only ever reads options/the .inflip -- never any of this window's
-            # own Superflip/EDMA settings -- so no "recommended" preset is
-            # applied here. This window is a presentation shell only.
-            win.jana_wizard_context.launched_from_jana_wizard = True
         if auto_start:
             # Phase recycling still runs the ordinary full pipeline (start_run()
             # below); these flags only annotate that run as Wizard-initiated so
@@ -1706,15 +1753,7 @@ def launch_phase_studio_from_jana(
             win._sync_workflow_widgets()
             for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
                 win._append_execution_log(line, subsystem="Jana2020")
-            if host_single_pass:
-                win._append_execution_log(
-                    "Superflip + SharpED was requested from the Jana2020 launcher; running now. "
-                    "Phase Studio will close automatically and hand the result back to Jana2020 "
-                    "when it finishes.",
-                    level="DETAIL",
-                    subsystem="Jana2020",
-                )
-            elif auto_start:
+            if auto_start:
                 win._append_execution_log(
                     "Phase recycling was requested from the Jana2020 launcher; the pipeline "
                     "will start automatically. Use 'Send to Jana2020' once it finishes.",
@@ -1733,9 +1772,7 @@ def launch_phase_studio_from_jana(
     win = initialize_main_window(app, splash, build_window)
     if win is None:
         return 1
-    if host_single_pass:
-        win.run_jana_single_pass(list(single_pass_args or []), options)
-    elif auto_start:
+    if auto_start:
         win.start_run()
     return int(app.exec())
 
@@ -1768,11 +1805,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if options.action == "recycle":
             logger("Phase recycling requested; running it through the full Phase Studio pipeline.")
             return launch_phase_studio_from_jana(inflip_path, options, auto_start=True)
-        if options.action == "host_single_pass":
-            logger("Superflip + SharpED requested; hosting the single-pass run in the main Phase Studio window.")
-            return launch_phase_studio_from_jana(
-                inflip_path, options, host_single_pass=True, single_pass_args=args
-            )
+        # Both single-pass workflows ("run": Superflip only and Superflip +
+        # SharpED) use the original lightweight console/wrapper path -- no main
+        # window. Only Phase recycling (above) opens the full Phase Studio GUI.
         code = run_jana_superflip(args, options, logger)
         logger("Wrapper finished")
         return int(code)

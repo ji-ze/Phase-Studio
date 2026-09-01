@@ -327,20 +327,19 @@ class ReferenceContext:
 @dataclass
 class JanaWizardContext:
     """Distinguishes a normal standalone Phase Studio launch from one hosting a
-    calculation started by the Jana2020 Wizard, and (for the single-pass
-    "Superflip + SharpED" workflow only) carries what that context needs.
+    Jana2020-Wizard-initiated Phase recycling run -- the only Wizard workflow
+    that opens this window at all. Both single-pass workflows (Superflip only,
+    Superflip + SharpED) run through the original lightweight console/wrapper
+    path and never construct this window or this context.
 
     The all-False/empty default is a normal standalone launch: no field here
-    may change behavior unless launched_from_jana_wizard is True. Phase
-    recycling launched from the Wizard already has its own auto_start-based
-    handling in launch_phase_studio_from_jana() and does not use this flag."""
+    may change behavior unless launched_from_jana_wizard is True."""
 
     launched_from_jana_wizard: bool = False
-    single_pass_running: bool = False
-    # Phase recycling still runs through the normal full pipeline (start_run());
-    # these two fields only annotate that run as Wizard-initiated so its
-    # completion can open the source-specific result selector below instead of
-    # (or in addition to) the ordinary "Send to Jana2020" hand-off dialog.
+    # Phase recycling runs through the normal full pipeline (start_run()); these
+    # two fields only annotate that run as Wizard-initiated so its completion
+    # opens the source-specific result selector instead of (or in addition to)
+    # the ordinary "Send to Jana2020" hand-off dialog.
     phase_recycling_active: bool = False
     wizard_map_source: str = ""  # "superflip" or "deblurred"; only meaningful when phase_recycling_active
 
@@ -8791,14 +8790,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.run_btn.setEnabled(not active and bool(getattr(self, "_metadata_valid", False)))
         if hasattr(self, "continue_btn"):
             self.continue_btn.setEnabled(not active and getattr(self, "_resume_state", None) is not None)
-        # The Jana2020 single-pass runner (Superflip + SharpED) is one external
-        # process call with no cycle boundary to stop at; Stop/Stop now would be
-        # visible but silently do nothing, so they stay disabled for it.
-        can_stop = status == "RUNNING" and not self.jana_wizard_context.single_pass_running
         if hasattr(self, "stop_btn"):
-            self.stop_btn.setEnabled(can_stop and not self.stop_after_cycle.is_set())
+            self.stop_btn.setEnabled(status == "RUNNING" and not self.stop_after_cycle.is_set())
         if hasattr(self, "stop_now_btn"):
-            self.stop_now_btn.setEnabled(can_stop and not self.stop_now.is_set())
+            self.stop_now_btn.setEnabled(status == "RUNNING" and not self.stop_now.is_set())
         if hasattr(self, "clear_btn"):
             has_results = bool(getattr(self, "results", []))
             has_log = bool(hasattr(self, "log_text") and self.log_text.toPlainText().strip())
@@ -9090,29 +9085,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self._active_hkl_task_id = None
                         self.hkl_task_worker = None
                     self._set_hkl_task_running(False)
-                elif kind == "jana_single_pass_done":
-                    # Only ever sent by run_jana_single_pass(), which only runs
-                    # when this window was opened by the Jana2020 Wizard for the
-                    # "Superflip + SharpED" workflow -- never during a normal run.
-                    self.worker = None
-                    self.jana_wizard_context.single_pass_running = False
-                    success, code, error_report = payload  # type: ignore[misc]
-                    if success:
-                        self._set_run_status("Transferred")
-                        self._append_execution_log(
-                            "Jana2020 hand-off completed. Phase Studio will close automatically.",
-                            level="SUCCESS",
-                            subsystem="Jana2020",
-                        )
-                        self._update_action_states()
-                        QTimer.singleShot(400, QApplication.instance().quit)
-                    else:
-                        report = error_report if isinstance(error_report, ErrorReport) else build_error_report(
-                            RuntimeError(f"Jana2020 single-pass run failed (exit code {code})."),
-                            subsystem="Jana2020",
-                            operation="Run Jana2020 calculation",
-                        )
-                        self._handle_pipeline_error(report)
                 elif kind == "handoff_done":
                     self._set_run_status("Transferred")
                     self._append_execution_log(
@@ -10361,46 +10333,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 issues.append(f"The {label} executable was not found.")
                 details.append(f"{label} executable: {exe or '(not selected)'}")
         return list(dict.fromkeys(issues)), sanitize_error_details("\n".join(details))
-
-    def run_jana_single_pass(self, args, options) -> None:
-        """Host the Jana2020 Wizard's existing single-pass runner (Superflip +
-        SharpED only -- "Superflip only" never reaches this method) in this
-        window. This calls the same, scientifically-unmodified
-        jana_superflip.run_jana_superflip() used by the lightweight wrapper;
-        only the log/status/completion routing is different."""
-        if self.worker and self.worker.is_alive():
-            self._append_execution_log("Pipeline is already running.", level="WARNING", subsystem="Pipeline")
-            return
-        self.jana_wizard_context.single_pass_running = True
-        self.stop_after_cycle.clear()
-        self.stop_now.clear()
-        self.progress_bar.setRange(0, 0)
-        self.progress_bar.setValue(0)
-        self._set_overall_progress_text("Running")
-        self._cycle_progress_state = None
-        self.current_cycle_progress.setRange(0, 0)
-        self.current_cycle_detail.setText("Running Superflip + SharpED...")
-        self.current_cycle_stage_counter.setText("Preparing")
-        self._set_run_status("Running")
-        self._update_action_states()
-        QApplication.processEvents()
-
-        def worker() -> None:
-            try:
-                from phase_studio.jana_superflip import run_jana_superflip
-                code = run_jana_superflip(args, options, self.log)
-                self.msg_queue.put(("jana_single_pass_done", (code == 0, code, None)))
-            except Exception as exc:
-                report = build_error_report(
-                    exc,
-                    subsystem="Jana2020",
-                    operation="Run Jana2020 calculation",
-                    extra_details=traceback.format_exc(),
-                )
-                self.msg_queue.put(("jana_single_pass_done", (False, 1, report)))
-
-        self.worker = threading.Thread(target=worker, daemon=True)
-        self.worker.start()
 
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
