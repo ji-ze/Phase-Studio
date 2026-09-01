@@ -1530,6 +1530,25 @@ def normalize_reflection_data_mode(value: str) -> str:
     return REFLECTION_DATA_MODE_INTENSITY
 
 
+REFLECTION_DATA_MODE_DISPLAY_LABELS = {
+    REFLECTION_DATA_MODE_SET_FROM_INFLIP: "Set from .inflip",
+    REFLECTION_DATA_MODE_INTENSITY: "h k l · I · σ(I)",
+    REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA: "h k l · F · σ(F)",
+    REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA: "h k l · I · phase · σ(I)",
+    REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA: "h k l · F · phase · σ(F)",
+    REFLECTION_DATA_MODE_INTENSITY_FWHM: "h k l · I · FWHM",
+    REFLECTION_DATA_MODE_AMPLITUDE_FWHM: "h k l · F · FWHM",
+}
+
+
+def format_reflection_data_mode(value: str) -> str:
+    """Human-readable column layout for a reflection-data-mode token, for
+    read-only summaries and log lines. Never changes parser mode/columns --
+    display only."""
+    mode = normalize_reflection_data_mode(value)
+    return REFLECTION_DATA_MODE_DISPLAY_LABELS.get(mode, str(value or ""))
+
+
 def reflection_mode_is_amplitude(data_mode: str) -> bool:
     return normalize_reflection_data_mode(data_mode) in {
         REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
@@ -1990,15 +2009,13 @@ def reflection_value_label(data_mode: str) -> str:
 
 def reflection_sigma_label(data_mode: str) -> str:
     if reflection_mode_has_fwhm(data_mode):
-        return "FWHM(Fobs)" if reflection_mode_is_amplitude(data_mode) else "FWHM(Iobs)"
-    if reflection_mode_is_amplitude(data_mode):
-        return "sigma(Fobs)"
-    return "sigma(Iobs)"
+        return "FWHM"
+    return "σ(F)" if reflection_mode_is_amplitude(data_mode) else "σ(I)"
 
 def reflection_primary_snr_label(data_mode: str) -> str:
     if reflection_mode_has_fwhm(data_mode):
         return "I/FWHM"
-    return "I/sigma(I)"
+    return "I/σ(I)"
 
 def reflection_primary_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
     return reflection_signal_to_noise(r, data_mode)
@@ -5269,7 +5286,7 @@ INPUT_TOOLTIPS = {
     "show_beta_features": "When off (default), beta and experimental Phasing methods and the settings that only apply to them are hidden entirely from the Basic tabs, not just disabled. Enable to make them selectable.",
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
     "sharped_elements": "Chemical elements sent to the SharpED server. Leave blank to derive unique non-H elements from the reference composition.",
-    "sharped_outres": "Output resolution sent as the outres multipart field.",
+    "sharped_outres": "Requested output sampling/resolution of the SharpED density map.",
     "sharped_max_upload_mb": "Maximum XPLOR map size uploaded to the SharpED server in megabytes. Use 100 MB for the current public server limit. If voxel is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits. Set 0 to disable this check.",
     "sharped_timeout_seconds": "HTTP timeout in seconds for SharpED model query, upload, status and download requests. Phase Studio enforces at least 600 seconds for large XPLOR uploads.",
     "sharped_poll_seconds": "Seconds between status polling requests.",
@@ -6419,7 +6436,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             program_links.addLayout(program_row)
         programs_form.addRow("Downloads", program_links)
 
-        sharped_api_form = add_form_group(setup_tab, "SharpED API")
+        sharped_api_form = add_form_group(setup_tab, "SharpED connection")
         self._add_text(sharped_api_form, "sharped_base_url", "Server URL", "https://jana.fzu.cz")
         self._add_text(sharped_api_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
         try:
@@ -6522,14 +6539,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         inference_form = add_form_group(sharped_advanced_tab, "Inference")
         self._add_text(inference_form, "sharped_elements", "Elements", "")
         self.inputs["sharped_elements"].setPlaceholderText("Auto from composition")  # type: ignore[attr-defined]
-        self._add_dspin(inference_form, "sharped_outres", "Output resolution", 0.2, 0.001, 10.0, 0.05, 4)
+        self._add_dspin(inference_form, "sharped_outres", "Output resolution (Å)", 0.2, 0.001, 10.0, 0.05, 4)
 
         network_form = add_form_group(sharped_advanced_tab, "Transfer and network")
         self._add_dspin(network_form, "sharped_max_upload_mb", "Upload limit (MB)", 100.0, 0.0, 100000.0, 10.0, 1)
         self._add_spin(network_form, "sharped_timeout_seconds", "HTTP timeout (s)", 600, 600, 7200, 60)
         self._add_spin(network_form, "sharped_poll_seconds", "Polling interval (s)", 2, 1, 3600, 1)
         self._add_spin(network_form, "sharped_max_polls", "Maximum polls", -1, -1, 1000000, 1)
-        network_form.addRow("", self._secondary_help("Use -1 for no fixed polling limit."))
+        max_polls_widget = self.inputs.get("sharped_max_polls")
+        if isinstance(max_polls_widget, QSpinBox):
+            max_polls_widget.setSpecialValueText("Unlimited")
         sharped_advanced_tab.addStretch(1)
 
         # Advanced / Help
@@ -6556,8 +6575,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>External programs</h3>
             <p><b>Superflip executable</b> is the absolute path to the original Jana2020 Superflip executable (default <code>C:\\Jana2020\\SUPERFLIP\\superflip_original.exe</code>). Do not select the Phase Studio wrapper named superflip.exe.</p>
             <p><b>EDMA executable</b> is the absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps (default <code>C:\\Jana2020\\SUPERFLIP\\EDMA.exe</code>).</p>
-            <h3>SharpED API</h3>
-            <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> is sent as <code>Authorization: Bearer</code> during upload/status/download requests and is never written to logs or error messages.</p>
+            <h3>SharpED connection</h3>
+            <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
             <h3>Interface</h3>
             <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize processed map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
         """, advanced=True)
@@ -6606,7 +6625,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>2. Model and elements</h3>
             <p><b>Model</b> (Basic &rarr; Workflow) is sent to the server; <b>Refresh models</b> updates the selector; <code>default</code> uses the server default. <b>Elements</b> are sent to SharpED; when blank, Phase Studio derives unique non-hydrogen elements from the reference composition.</p>
             <h3>3. Output resolution</h3>
-            <p><b>Output resolution</b> is sent to the server as the <code>outres</code> field.</p>
+            <p><b>Output resolution (&Aring;)</b> is the requested sampling/resolution of the SharpED density map.</p>
             <h3>4. Upload and network</h3>
             <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check (confirm the actual limit with the configured service). If Voxel grid is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits under this limit. <b>HTTP timeout</b> covers model queries, upload, status and download requests and is enforced at 600 seconds minimum. <b>Polling interval</b> sets the delay between status checks. <b>Maximum polls</b> limits those checks; <b>-1</b> means no fixed polling limit.</p>
             <h3>5. SharpED in iterative workflows</h3>
@@ -6827,11 +6846,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.result_splitter.setStretchFactor(2, 2)
         self.result_splitter.setSizes([155, 425, 120])
         self._last_log_record: Optional[ExecutionLogRecord] = None
-        self._append_execution_log("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL input mode.")
-        self._append_execution_log(
-            "Defaults: later-cycle Superflip modelfiles can use raw Superflip XPLOR, deblurred XPLOR, or EDMA CIF.",
-            level="DETAIL",
-        )
+        self._append_execution_log("Ready. Select an input to begin.")
         self._update_action_states()
         self._update_plot()
         self._update_structure_views()
@@ -7639,8 +7654,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
             values = (
                 ("Source", source_row),
-                ("Format", QLabel(data_mode)),
-                ("Unit cell", QLabel(f"{cell.a:.5g}  {cell.b:.5g}  {cell.c:.5g}  {cell.alpha:.4g}  {cell.beta:.4g}  {cell.gamma:.4g}")),
+                ("Format", QLabel(format_reflection_data_mode(data_mode))),
+                ("Unit cell", QLabel(
+                    f"{cell.a:.5g} × {cell.b:.5g} × {cell.c:.5g} Å · "
+                    f"{cell.alpha:.4g}° × {cell.beta:.4g}° × {cell.gamma:.4g}°"
+                )),
                 ("Space group", QLabel(spacegroup_hm)),
             )
             for index, (label_text, value_widget) in enumerate(values):
@@ -7682,8 +7700,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         form.addRow("Source", source_row)
 
         rows = [
-            ("Format", data_mode),
-            ("Unit cell", f"{cell.a:.5g}  {cell.b:.5g}  {cell.c:.5g}  {cell.alpha:.4g}  {cell.beta:.4g}  {cell.gamma:.4g}"),
+            ("Format", format_reflection_data_mode(data_mode)),
+            ("Unit cell", f"{cell.a:.5g} × {cell.b:.5g} × {cell.c:.5g} Å · {cell.alpha:.4g}° × {cell.beta:.4g}° × {cell.gamma:.4g}°"),
             ("Space group", spacegroup_hm),
         ]
         rows.extend(extra_rows)
@@ -7791,19 +7809,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(9)
         layout.addWidget(self._diagnostic_header("HKL VALIDATION", "Reflection parsing and input diagnostics", "VALID"))
+        column_summary = (
+            f"{value_label} column: {value_col} · {sigma_label} column: "
+            f"{sigma_col if sigma_col is not None else 'none'} · "
+            f"(0 0 0) {'included' if include_000 else 'excluded'}"
+        )
         layout.addWidget(self._diagnostic_input_summary(
             hkl_path,
             data_mode,
             cell,
             hm,
             source_note,
-            (("Columns", f"value {value_col}  ·  sigma {sigma_col if sigma_col is not None else 'none'}  ·  include 000 {'yes' if include_000 else 'no'}"),),
+            (("Columns", column_summary),),
         ))
         layout.addWidget(self._diagnostic_metric_grid((
             (f"{len(reflections):,}", "Parsed"),
             (f"{len(unique):,}", "Unique"),
-            (f"{sigma_count:,} / {len(reflections):,}", sigma_label),
-            (f"{phase_count:,} / {len(reflections):,}", "Phase values"),
+            (f"{sigma_count:,} / {len(reflections):,}", f"{sigma_label} coverage"),
+            (f"{phase_count:,} / {len(reflections):,}", "Phase coverage"),
         )))
 
         sample_header = QHBoxLayout()
@@ -7817,44 +7840,87 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sample_header.addWidget(sample_count)
         layout.addLayout(sample_header)
 
-        headers = ["h", "k", "l", value_label, sigma_label, "Phase (°)", snr_label, derived_ios_label, "d (Å)", "sinθ/λ"]
+        # "Derived I/sigma" is categorically not applicable to FWHM data (every
+        # row would read n/a, since FWHM is not a genuine sigma to propagate
+        # error from) -- hide the column entirely rather than fill it with dashes.
+        headers = ["h", "k", "l", value_label, sigma_label, "Phase (°)", snr_label]
+        if not is_fwhm_mode:
+            headers.append(derived_ios_label)
+        headers.extend(["d (Å)", "sinθ/λ"])
+        sigma_column_index = headers.index(sigma_label)
         table = QTableWidget(rows, len(headers))
         self._configure_diagnostic_table(table)
         table.setHorizontalHeaderLabels(headers)
+        if not is_fwhm_mode:
+            sigma_header_item = table.horizontalHeaderItem(sigma_column_index)
+            if sigma_header_item is not None:
+                sigma_header_item.setToolTip(
+                    "~value marks a theoretical estimate (Poisson counting statistics, "
+                    "σ ≈ √value) shown only because no measured uncertainty was parsed "
+                    "for that reflection; it is not measured data."
+                )
         for column in range(3):
             table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
         for column in range(3, len(headers)):
             table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
+        estimated_sigma_color = QColor("#7183a6")
         for row, reflection in enumerate(reflections[:rows]):
             d_spacing = reflection_d_spacing(cell, int(reflection.h), int(reflection.k), int(reflection.l))
             stl = reflection_sintheta_over_lambda(cell, int(reflection.h), int(reflection.k), int(reflection.l))
             primary_snr = reflection_primary_signal_to_noise(reflection, data_mode)
-            # The F->I error-propagation factor (dI = 2F.dF) is only meaningful for a
-            # genuine sigma; skip it for FWHM data rather than show a number dressed
-            # up as a derived uncertainty.
-            derived_ios = None if is_fwhm_mode else reflection_signal_to_noise(reflection, data_mode)
-            values = [
-                str(int(reflection.h)), str(int(reflection.k)), str(int(reflection.l)),
-                f"{float(reflection.value):.7g}",
-                "n/a" if reflection.sigma is None else f"{float(reflection.sigma):.7g}",
-                "n/a" if reflection.phase is None else f"{float(reflection.phase):.7g}",
-                "n/a" if primary_snr is None else f"{float(primary_snr):.7g}",
-                "n/a" if derived_ios is None else f"{float(derived_ios):.7g}",
-                "n/a" if not math.isfinite(d_spacing) else f"{d_spacing:.5g}",
-                f"{stl:.5g}",
+
+            sigma_is_estimated = False
+            if reflection.sigma is not None:
+                sigma_text = f"{float(reflection.sigma):.7g}"
+            elif is_fwhm_mode:
+                sigma_text = "—"
+            else:
+                # No measured uncertainty was parsed for this reflection: show a
+                # theoretical Poisson counting-statistics estimate (sigma ~= sqrt
+                # of the observed intensity/amplitude) instead of leaving it blank,
+                # clearly marked with "~" so it is never mistaken for measured data.
+                theoretical_sigma = math.sqrt(abs(float(reflection.value)))
+                sigma_text = f"~{theoretical_sigma:.7g}"
+                sigma_is_estimated = True
+
+            row_values: List[Tuple[str, bool]] = [
+                (str(int(reflection.h)), False),
+                (str(int(reflection.k)), False),
+                (str(int(reflection.l)), False),
+                (f"{float(reflection.value):.7g}", False),
+                (sigma_text, sigma_is_estimated),
+                ("—" if reflection.phase is None else f"{float(reflection.phase):.7g}", False),
+                ("—" if primary_snr is None else f"{float(primary_snr):.7g}", False),
             ]
-            for column, text_value in enumerate(values):
+            if not is_fwhm_mode:
+                derived_ios = reflection_signal_to_noise(reflection, data_mode)
+                row_values.append(("—" if derived_ios is None else f"{float(derived_ios):.7g}", False))
+            row_values.append(("—" if not math.isfinite(d_spacing) else f"{d_spacing:.5g}", False))
+            row_values.append((f"{stl:.5g}", False))
+
+            for column, (text_value, is_estimate) in enumerate(row_values):
                 item = QTableWidgetItem(text_value)
                 item.setTextAlignment(Qt.AlignCenter if column < 3 else Qt.AlignRight | Qt.AlignVCenter)
+                if is_estimate:
+                    font = item.font()
+                    font.setItalic(True)
+                    item.setFont(font)
+                    item.setForeground(estimated_sigma_color)
+                    item.setToolTip(
+                        "Theoretical estimate (σ ≈ √value, Poisson counting statistics) -- "
+                        "no measured uncertainty was parsed for this reflection."
+                    )
                 table.setItem(row, column, item)
         layout.addWidget(table, 1)
 
         summary_text = (
             "HKL VALIDATION\n"
-            f"Source: {hkl_path}\nFormat: {data_mode}\n"
-            f"Unit cell: {cell.a:.5g} {cell.b:.5g} {cell.c:.5g} {cell.alpha:.4g} {cell.beta:.4g} {cell.gamma:.4g}\n"
+            f"Source: {hkl_path}\nFormat: {format_reflection_data_mode(data_mode)}\n"
+            f"Unit cell: {cell.a:.5g} × {cell.b:.5g} × {cell.c:.5g} Å · "
+            f"{cell.alpha:.4g}° × {cell.beta:.4g}° × {cell.gamma:.4g}°\n"
             f"Space group: {hm}\nParsed: {len(reflections):,}\nUnique: {len(unique):,}\n"
-            f"{sigma_label}: {sigma_count:,}/{len(reflections):,}\nPhase values: {phase_count:,}/{len(reflections):,}"
+            f"{sigma_label} coverage: {sigma_count:,}/{len(reflections):,}\n"
+            f"Phase coverage: {phase_count:,}/{len(reflections):,}"
         )
         footer = QHBoxLayout()
         copy_summary = QPushButton("Copy summary")
@@ -8012,6 +8078,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             top=0.942,
         )
 
+        resize_hooks: Dict[str, Callable[[], None]] = {}
+
         def adjust_plot_bottom_margin(event) -> None:
             # Preserve a readable, unclipped histogram xlabel when the splitter
             # compresses the canvas: Matplotlib margins are fractional, while
@@ -8043,6 +8111,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         transform=figure.transFigure,
                     )
                 canvas.draw_idle()
+            # Re-evaluate d_min/d_98 label placement for the new canvas size:
+            # their screen-space separation (not their scientific values)
+            # determines whether the labels can be shown side by side.
+            relayout_guides = resize_hooks.get("relayout_guides")
+            if relayout_guides is not None:
+                relayout_guides()
 
         layout_resize_cid = canvas.mpl_connect("resize_event", adjust_plot_bottom_margin)
         resolution_grid = plot_grid[0, 0].subgridspec(
@@ -8096,21 +8170,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             zorder=3,
         )
         ax_completeness.axhline(98.0, color="#001170", linewidth=1.0, linestyle="--", zorder=3)
-        reference_labels: List[Tuple[float, str]] = []
+        d_min_label = r"$d_{\mathrm{min}}$"
+        d_98_label = r"$d_{98}$"
         d_min_artist = None
         d_full_artist = None
         if d_min_stl is not None:
             d_min_artist = ax_completeness.axvline(
-                d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label=r"$d_{\mathrm{min}}$"
+                d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label=d_min_label
             )
             ax_signal.axvline(d_min_stl, color="#001170", linewidth=1.1, linestyle="-")
-            reference_labels.append((d_min_stl, r"$d_{\mathrm{min}}$" + "\n" + d_min_plot_text))
         if d_full_stl is not None:
             d_full_artist = ax_completeness.axvline(
-                d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label="d at 98%"
+                d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label=d_98_label
             )
             ax_signal.axvline(d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":")
-            reference_labels.append((d_full_stl, f"98%\n{d_full_plot_text}"))
         ax_completeness.set_ylabel("Completeness (%)", labelpad=8, fontsize=9)
         shared_ylabel_x = -0.075
         ax_completeness.yaxis.set_label_coords(shared_ylabel_x, 0.5)
@@ -8162,21 +8235,90 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 color="#52658b",
                 fontsize=7.0,
             )
-        ordered_labels = sorted(reference_labels, key=lambda item: item[0])
-        for x_position, label_text in ordered_labels:
-            ax_completeness.annotate(
-                label_text,
-                xy=(x_position, 0.99),
-                xycoords=ax_completeness.get_xaxis_transform(),
-                xytext=(0, -1.0),
-                textcoords="offset points",
-                ha="center",
-                va="top",
-                color="#14204a",
-                fontsize=7.2,
-                bbox={"boxstyle": "square,pad=0.16", "facecolor": "#ffffff", "edgecolor": "none", "alpha": 0.88},
-                annotation_clip=False,
-            )
+        guide_annotation_artists: List[object] = []
+
+        def place_resolution_guide_annotations() -> None:
+            """Place the d_min/d_98 labels, avoiding overlap regardless of the
+            current canvas size. The scientific values (d_min_plot_text,
+            d_full_plot_text) are never altered here -- only where and how the
+            two labels are drawn depends on their current screen-space gap."""
+            for artist in guide_annotation_artists:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+            guide_annotation_artists.clear()
+
+            entries: List[Tuple[float, str, str]] = []
+            if d_min_stl is not None:
+                entries.append((d_min_stl, d_min_label, d_min_plot_text))
+            if d_full_stl is not None:
+                entries.append((d_full_stl, d_98_label, d_full_plot_text))
+            if not entries:
+                return
+
+            def annotate_one(x: float, text: str, ha: str, dx: float) -> None:
+                guide_annotation_artists.append(
+                    ax_completeness.annotate(
+                        text,
+                        xy=(x, 0.99),
+                        xycoords=ax_completeness.get_xaxis_transform(),
+                        xytext=(dx, -1.0),
+                        textcoords="offset points",
+                        ha=ha,
+                        va="top",
+                        color="#14204a",
+                        fontsize=7.2,
+                        bbox={"boxstyle": "square,pad=0.16", "facecolor": "#ffffff", "edgecolor": "none", "alpha": 0.88},
+                        annotation_clip=False,
+                    )
+                )
+
+            if len(entries) == 1:
+                x, short_label, value_text = entries[0]
+                annotate_one(x, f"{short_label}\n{value_text}", "center", 0.0)
+                return
+
+            entries.sort(key=lambda item: item[0])
+            (x_left, label_left, text_left), (x_right, label_right, text_right) = entries
+            # A real draw is needed so transData reflects the canvas size the
+            # labels will actually be rendered at (including after a resize).
+            try:
+                figure.canvas.draw()
+            except Exception:
+                pass
+            px_left = ax_completeness.transData.transform((x_left, 0.0))[0]
+            px_right = ax_completeness.transData.transform((x_right, 0.0))[0]
+            pixel_gap = abs(px_right - px_left)
+            merge_threshold_px = 10.0
+            collision_threshold_px = 62.0
+            if pixel_gap < merge_threshold_px:
+                # Case C: the two guide positions are visually indistinguishable
+                # at this plot width. Report both scientific values together in
+                # one box rather than drawing two illegibly close labels; the
+                # values themselves are unchanged and still shown independently
+                # in the summary cards and CSV export.
+                x_mid = (x_left + x_right) / 2.0
+                annotate_one(
+                    x_mid,
+                    f"{label_left} = {text_left}\n{label_right} = {text_right}",
+                    "center",
+                    0.0,
+                )
+            elif pixel_gap < collision_threshold_px:
+                # Case B: close but distinguishable -- push the two labels apart
+                # so their boxes clear each other while each stays visually
+                # anchored (via the small xytext offset) to its own guide line.
+                annotate_one(x_left, f"{label_left}\n{text_left}", "right", -8.0)
+                annotate_one(x_right, f"{label_right}\n{text_right}", "left", 8.0)
+            else:
+                # Case A: well separated -- centered placement, as before.
+                for x, label, text in entries:
+                    annotate_one(x, f"{label}\n{text}", "center", 0.0)
+
+        place_resolution_guide_annotations()
+        resize_hooks["relayout_guides"] = place_resolution_guide_annotations
+
         legend_handles = [completeness_artist, mean_artist]
         legend_labels = ["Completeness", mean_signal_math_label]
         if threshold_artist is not None:
@@ -8184,10 +8326,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             legend_labels.append(threshold_math_label)
         if d_full_artist is not None:
             legend_handles.append(d_full_artist)
-            legend_labels.append("d at 98%")
+            legend_labels.append(d_98_label)
         if d_min_artist is not None:
             legend_handles.append(d_min_artist)
-            legend_labels.append(r"$d_{\mathrm{min}}$")
+            legend_labels.append(d_min_label)
         legend_column = plot_grid[0, 1].get_position(figure)
         legend_anchor = (
             legend_column.x0 + 0.008,
@@ -8448,7 +8590,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             record.subsystem.lower() == "sharped"
             and re.search(r"(?:server status:|\]\s*(?:processing|completed|uploading|downloading))", record.text, re.IGNORECASE)
         )
-        if repeatable_status and self._last_log_record == record:
+        # Consecutive, byte-identical INFO/SUCCESS/DETAIL lines are almost always
+        # presentation noise (e.g. a settings-loading step logged from more than
+        # one code path with the same summary), not new information. WARNING,
+        # ERROR and STEP lines are never suppressed this way, even if repeated,
+        # since a recurring warning is meaningful on every cycle it appears.
+        duplicate_informational = record.level.upper() in {"INFO", "SUCCESS", "DETAIL"}
+        if (repeatable_status or duplicate_informational) and self._last_log_record == record:
             return False
 
         scroll_bar = self.log_text.verticalScrollBar()
@@ -8790,13 +8938,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             row = self.inputs.get("work_dir")
             return [ErrorAction("Choose folder…", row.browse, True)] if isinstance(row, PathRow) else []
         if category == "sharped_authentication":
-            return [ErrorAction("Open SharpED API settings", lambda: self._open_configuration_page("Setup", advanced=True), True)]
+            return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("Setup", advanced=True), True)]
         if category.startswith("sharped_"):
             return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED", advanced=True), True)]
         if category == "input_validation":
             actions = [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
             if "SharpED" in report.summary:
-                actions.append(ErrorAction("Open SharpED API settings", lambda: self._open_configuration_page("Setup", advanced=True)))
+                actions.append(ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("Setup", advanced=True)))
             return actions
         if category in {"hkl_invalid", "metadata", "unit_cell", "space_group", "composition", "inflip"}:
             return [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
@@ -8804,8 +8952,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _show_error_report(self, report: ErrorReport, *, write_log: bool = True) -> str:
         if write_log and hasattr(self, "log_text"):
+            # The concise line is enough for the normal workflow log; the full
+            # diagnostic (including any traceback) is not duplicated here -- it
+            # stays fully available via the error dialog's "Show details".
             self._append_execution_log(report.title + ".", level="ERROR", subsystem=report.subsystem)
-            self._append_execution_log(report.diagnostic_block(), level="DETAIL", subsystem=report.subsystem)
         return show_phase_studio_error(self, report, self._error_actions(report))
 
     def _handle_pipeline_error(self, report: ErrorReport) -> None:
@@ -10145,7 +10295,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log("Superflip referencefile keyword: no", level="DETAIL")
             self.log(f"Superflip bestdensities: {cfg.bestdensities_count} {'symmetry' if cfg.bestdensities_symmetry else cfg.bestdensities_metric}")
             self.log(f"Superflip polish: {'yes' if cfg.polish else 'no'}")
-            self.log(f"Superflip HKL data mode: {configured_data_mode}")
+            self.log(f"Superflip HKL data mode: {format_reflection_data_mode(configured_data_mode)}")
             if cfg.resolution_d_min > 0:
                 self.log(f"Superflip resolution cutoff: d >= {cfg.resolution_d_min:g} A")
             if cfg.map_feedback_missing_enabled or cfg.map_feedback_intensity_enabled:
