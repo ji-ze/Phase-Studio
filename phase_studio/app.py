@@ -337,6 +337,12 @@ class JanaWizardContext:
 
     launched_from_jana_wizard: bool = False
     single_pass_running: bool = False
+    # Phase recycling still runs through the normal full pipeline (start_run());
+    # these two fields only annotate that run as Wizard-initiated so its
+    # completion can open the source-specific result selector below instead of
+    # (or in addition to) the ordinary "Send to Jana2020" hand-off dialog.
+    phase_recycling_active: bool = False
+    wizard_map_source: str = ""  # "superflip" or "deblurred"; only meaningful when phase_recycling_active
 
 
 @dataclass(frozen=True)
@@ -9161,10 +9167,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     can_handoff = bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None)
                     self.handoff_btn.setEnabled(can_handoff)
                     if can_handoff:
-                        self._append_execution_log(
-                            "Jana2020 hand-off is ready. Use 'Send to Jana2020' to select the cycle and map source.",
-                            subsystem="Jana2020",
-                        )
+                        if self.jana_wizard_context.phase_recycling_active:
+                            self._append_execution_log(
+                                "Phase recycling complete. Opening the Jana2020 result selector automatically.",
+                                subsystem="Jana2020",
+                            )
+                            self.open_jana_wizard_result_selector()
+                        else:
+                            self._append_execution_log(
+                                "Jana2020 hand-off is ready. Use 'Send to Jana2020' to select the cycle and map source.",
+                                subsystem="Jana2020",
+                            )
         except queue.Empty:
             pass
 
@@ -9189,6 +9202,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return len(self.results) - 1
 
     def open_jana_handoff_dialog(self) -> None:
+        if self.jana_wizard_context.phase_recycling_active:
+            # A Wizard-initiated phase-recycling run uses the source-specific
+            # result selector instead of this dialog, both for the automatic
+            # post-run open and for a manual "Send to Jana2020" retry. Normal,
+            # non-Wizard use (the default) never takes this branch.
+            self.open_jana_wizard_result_selector()
+            return
         cfg = self.last_run_config
         if cfg is None or cfg.jana_inflip is None:
             self._show_error_report(
@@ -9361,6 +9381,278 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         def worker() -> None:
             try:
                 perform_jana_handoff(cfg, selected_result, selected_map, log=self.log)
+                self.msg_queue.put(("handoff_done", None))
+            except Exception as exc:
+                self.msg_queue.put((
+                    "handoff_error",
+                    build_error_report(
+                        exc,
+                        subsystem="Jana2020",
+                        operation="Jana2020 hand-off",
+                        extra_details=traceback.format_exc(),
+                    ),
+                ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def open_jana_wizard_result_selector(self) -> None:
+        """Post-phase-recycling result selector for a Jana2020-Wizard-initiated
+        run: a source-specific (Superflip vs SharpED) metrics table plus a
+        two-pane selected-result/reference structure preview. The map source
+        itself was already chosen in the Wizard and is not re-asked here.
+
+        This consumes only the existing CycleResult objects the full pipeline
+        already produced (no metric is recomputed) and hands off through the
+        exact same perform_jana_handoff() used by open_jana_handoff_dialog();
+        the only new thing here is presentation."""
+        cfg = self.last_run_config
+        if cfg is None or cfg.jana_inflip is None:
+            self._show_error_report(
+                build_error_report(
+                    RuntimeError("Jana2020 hand-off requires a run started from a Jana .inflip file."),
+                    subsystem="Jana2020",
+                    operation="Jana2020 hand-off",
+                    severity="warning",
+                )
+            )
+            return
+        if not self.results:
+            self._show_error_report(
+                build_error_report(
+                    RuntimeError("No completed cycle is available for Jana2020 hand-off."),
+                    subsystem="Jana2020",
+                    operation="Jana2020 hand-off",
+                    severity="warning",
+                )
+            )
+            return
+
+        map_source = self.jana_wizard_context.wizard_map_source or "deblurred"
+        source_title = "Superflip" if map_source == "superflip" else "SharpED"
+
+        def fmt(value: object) -> str:
+            if value is None:
+                return "n/a"
+            try:
+                value_f = float(value)
+                if not np.isfinite(value_f):
+                    return "n/a"
+                return f"{value_f:.3f}"
+            except Exception:
+                return str(value) if str(value) else "n/a"
+
+        def col_available(getter) -> bool:
+            return any(getter(r) not in (None, "") for r in self.results)
+
+        if map_source == "superflip":
+            candidate_columns = [
+                ("Saved run", lambda r: r.superflip_saved_run, lambda v: "n/a" if v is None else str(int(v))),
+                ("R value", lambda r: r.superflip_rvalue, fmt),
+                ("Peakiness", lambda r: r.superflip_peaks, fmt),
+                ("Symmetry", lambda r: r.superflip_symm, fmt),
+                ("Derived SG", lambda r: (r.superflip_derived_sg or None), lambda v: v or "n/a"),
+                ("Ref. match", lambda r: r.superflip_ref_match, fmt),
+                ("FoM / Score", lambda r: r.superflip_fom, fmt),
+                ("Success rate %", lambda r: r.superflip_success_rate, fmt),
+                ("Mean cycles", lambda r: r.superflip_mean_cycles, fmt),
+                ("Recall", lambda r: r.superflip_recall, fmt),
+                ("Precision", lambda r: r.superflip_precision, fmt),
+                ("Heavy atoms", lambda r: r.superflip_heavy_atom_count, fmt),
+                ("OMIT correlation", lambda r: r.omit_superflip_correlation, fmt),
+                ("R_free", lambda r: r.omit_superflip_rfree, fmt),
+            ]
+        else:
+            # Deliberately excludes Superflip-only fields (R value, Peakiness,
+            # Symmetry, Derived SG) -- they describe the raw Superflip map, not
+            # the SharpED-processed one this table represents (spec section 21).
+            candidate_columns = [
+                ("Recall", lambda r: r.deblur_recall, fmt),
+                ("Precision", lambda r: r.deblur_precision, fmt),
+                ("Heavy atoms", lambda r: r.deblur_heavy_atom_count, fmt),
+                ("Map correlation", lambda r: r.recycle_map_correlation, fmt),
+                ("OMIT correlation", lambda r: r.omit_deblur_correlation, fmt),
+                ("R_free", lambda r: r.omit_deblur_rfree, fmt),
+            ]
+        columns = [(h, g, f) for (h, g, f) in candidate_columns if col_available(g)]
+        headers = ["Cycle"] + [h for h, _g, _f in columns]
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Jana2020 result selection")
+        dialog.resize(1300, 720)
+        layout = QVBoxLayout(dialog)
+
+        source_label = QLabel(f"Result source: {'SharpED map' if map_source == 'deblurred' else 'Superflip map'}")
+        source_font = source_label.font()
+        source_font.setBold(True)
+        source_label.setFont(source_font)
+        layout.addWidget(source_label)
+
+        info = QLabel(
+            "Phase recycling finished. Select the cycle to hand back to Jana2020 -- the "
+            "table and structure preview reflect the map source already chosen in the "
+            "Jana2020 Wizard."
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        table = QTableWidget(len(self.results), len(headers))
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        table.horizontalHeader().setStretchLastSection(False)
+
+        recommended = self._recommended_handoff_index()
+        for row, result in enumerate(self.results):
+            cycle_item = QTableWidgetItem(f"{int(result.cycle):03d}")
+            cycle_item.setData(Qt.UserRole, int(result.cycle))
+            cycle_item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if row == recommended:
+                cycle_item.setToolTip("Recommended cycle (Phase Studio's existing hand-off heuristic).")
+            table.setItem(row, 0, cycle_item)
+            for col, (header, getter, formatter) in enumerate(columns, start=1):
+                item = QTableWidgetItem(formatter(getter(result)))
+                alignment = Qt.AlignLeft | Qt.AlignVCenter if header == "Derived SG" else Qt.AlignRight | Qt.AlignVCenter
+                item.setTextAlignment(alignment)
+                table.setItem(row, col, item)
+
+        preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
+        preview_canvas = FigureCanvas(preview_figure)
+        preview_canvas.setObjectName("janaResultPreviewCanvas")
+        preview_canvas.setMinimumHeight(260)
+        preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        preview_canvas.setToolTip("")
+
+        class _PreviewHost:
+            """Reuses IterativeSuperflipPipelineQtGUI's own atom/cell/depth-cue
+            rendering and rotation-drag methods -- unchanged, on a disposable
+            object -- so this two-pane preview looks and behaves exactly like
+            the main Structure Comparison view without ever touching the main
+            window's own rendering state (self.structure_axes,
+            self._structure_depth_artists, ...)."""
+
+            _structure_cartesian_geometry = IterativeSuperflipPipelineQtGUI._structure_cartesian_geometry
+            _element_color = IterativeSuperflipPipelineQtGUI._element_color
+            _plot_structure_atoms = IterativeSuperflipPipelineQtGUI._plot_structure_atoms
+            _update_structure_depth_artist = IterativeSuperflipPipelineQtGUI._update_structure_depth_artist
+            _update_structure_depth_cue = IterativeSuperflipPipelineQtGUI._update_structure_depth_cue
+            _begin_structure_rotation = IterativeSuperflipPipelineQtGUI._begin_structure_rotation
+            _apply_structure_rotation = IterativeSuperflipPipelineQtGUI._apply_structure_rotation
+            _sync_structure_view_from_event = IterativeSuperflipPipelineQtGUI._sync_structure_view_from_event
+            _finish_structure_rotation = IterativeSuperflipPipelineQtGUI._finish_structure_rotation
+
+            def __init__(self, cell, elev: float, azim: float) -> None:
+                self.structure_cell = cell
+                self.structure_elev = elev
+                self.structure_azim = azim
+                self._structure_depth_artists: List[StructureDepthArtists] = []
+                self.structure_axes: List[object] = []
+                self._structure_rotation_source = None
+                self.structure_canvas = None
+
+        preview_host = _PreviewHost(self.structure_cell, self.structure_elev, self.structure_azim)
+        preview_host.structure_canvas = preview_canvas
+
+        def preview_atoms_for(result: CycleResult) -> List[AtomSite]:
+            path = result.superflip_edma_cif if map_source == "superflip" else result.deblur_edma_cif
+            return self._safe_parse_structure(path)
+
+        def render_preview(result: CycleResult) -> None:
+            preview_figure.clear()
+            preview_figure.patch.set_facecolor("#ffffff")
+            preview_host.structure_axes = []
+            preview_host._structure_depth_artists = []
+            panels = [
+                (
+                    f"{source_title} · Cycle {int(result.cycle):03d}",
+                    preview_atoms_for(result),
+                    "Structure preview unavailable for this cycle",
+                ),
+                ("Reference", self.reference_atoms_for_plot, "Reference structure unavailable"),
+            ]
+            metadata = []
+            for idx, (_title, atoms, empty_text) in enumerate(panels, start=1):
+                ax = preview_figure.add_subplot(1, 2, idx, projection="3d")
+                preview_host.structure_axes.append(ax)
+                metadata.append(preview_host._plot_structure_atoms(ax, atoms, empty_text))
+            for x_position, (title, _atoms, _empty_text) in zip((0.25, 0.75), panels):
+                preview_figure.text(
+                    x_position, 0.96, title, ha="center", va="center",
+                    fontsize=10, fontweight="bold", color="#001170",
+                )
+            for x_position, meta in zip((0.25, 0.75), metadata):
+                preview_figure.text(x_position, 0.03, meta, ha="center", va="center", fontsize=7.5, color="#52658b")
+            preview_figure.add_artist(Line2D(
+                [0.5, 0.5], [0.08, 0.90], transform=preview_figure.transFigure,
+                color="#cbd7ea", linewidth=0.45, alpha=0.62,
+            ))
+            preview_figure.subplots_adjust(left=0.01, right=0.99, bottom=0.09, top=0.90, wspace=0.04)
+            preview_canvas.draw_idle()
+
+        preview_canvas.mpl_connect("button_press_event", preview_host._begin_structure_rotation)
+        preview_canvas.mpl_connect("motion_notify_event", preview_host._sync_structure_view_from_event)
+        preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_rotation)
+
+        def on_selection_changed() -> None:
+            row = table.currentRow()
+            if 0 <= row < len(self.results):
+                render_preview(self.results[row])
+
+        table.itemSelectionChanged.connect(on_selection_changed)
+        table.selectRow(recommended if 0 <= recommended < len(self.results) else 0)
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(table)
+        preview_container = QWidget()
+        preview_container_layout = QVBoxLayout(preview_container)
+        preview_container_layout.setContentsMargins(0, 0, 0, 0)
+        preview_container_layout.addWidget(preview_canvas, 1)
+        splitter.addWidget(preview_container)
+        splitter.setSizes([720, 540])
+        layout.addWidget(splitter, 1)
+
+        note = QLabel(
+            "The initially selected cycle uses Phase Studio's existing Superflip-based "
+            "recommendation (best symmetry agreement, or reference match if unavailable) "
+            "regardless of the map source shown above. You can override it manually."
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        button_row = QHBoxLayout()
+        close_btn = QPushButton("Close / Return to Phase Studio")
+        send_btn = QPushButton("Send to Jana2020")
+        button_row.addWidget(close_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(send_btn)
+        layout.addLayout(button_row)
+        close_btn.clicked.connect(dialog.reject)
+        send_btn.clicked.connect(dialog.accept)
+
+        if dialog.exec() != QDialog.Accepted:
+            # Closing without sending keeps the main window and its completed
+            # results exactly as they are; "Send to Jana2020" reopens this same
+            # selector (see the redirect at the top of open_jana_handoff_dialog).
+            return
+
+        selected_row = table.currentRow()
+        if not (0 <= selected_row < len(self.results)):
+            return
+        selected_result = self.results[selected_row]
+
+        self.handoff_btn.setEnabled(False)
+        self._append_execution_log(
+            f"Starting Jana2020 hand-off from cycle {int(selected_result.cycle):03d} ({map_source}).",
+            level="STEP",
+            subsystem="Jana2020",
+        )
+
+        def worker() -> None:
+            try:
+                perform_jana_handoff(cfg, selected_result, map_source, log=self.log)
                 self.msg_queue.put(("handoff_done", None))
             except Exception as exc:
                 self.msg_queue.put((

@@ -1672,6 +1672,18 @@ def launch_phase_studio_from_jana(
             # applied here. This window is a presentation shell only.
             win.jana_wizard_context.launched_from_jana_wizard = True
         if auto_start:
+            # Phase recycling still runs the ordinary full pipeline (start_run()
+            # below); these flags only annotate that run as Wizard-initiated so
+            # its completion opens the source-specific result selector instead
+            # of the ordinary "Send to Jana2020" dialog. The map source was
+            # already chosen on the Wizard's second page (superflip_xplor /
+            # deblurred_xplor are the only two values that reach this launch
+            # path -- see effective_next_cycle_mode() in show_jana_dialog()).
+            win.jana_wizard_context.launched_from_jana_wizard = True
+            win.jana_wizard_context.phase_recycling_active = True
+            win.jana_wizard_context.wizard_map_source = (
+                "superflip" if options.next_cycle_modelfile == "superflip_xplor" else "deblurred"
+            )
             # Fill every EDMA/Superflip setting the dialog and the .inflip don't
             # cover with Phase Studio's own "recommended" preset first, so the
             # values applied below (this Jana2020 run's explicit choices) win.
