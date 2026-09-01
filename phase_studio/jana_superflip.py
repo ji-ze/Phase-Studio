@@ -1001,11 +1001,130 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     stack = QStackedWidget()
     root.addWidget(stack, 1)
 
-    # ----- Page 1: reference/model files, then the 3 primary workflow actions -----
+    # ----- Page 1: input summary, reference/model files, then the 3 primary workflow actions -----
     page1 = QWidget()
     page1_layout = QVBoxLayout(page1)
     page1_layout.setContentsMargins(0, 0, 0, 0)
     page1_layout.setSpacing(10)
+
+    # A hidden, never-shown full Phase Studio window used purely as a dialog
+    # factory: it reuses the exact same HKL parsing/validation/completeness
+    # implementation (and diagnostic dialog styling) as the main application,
+    # seeded from THIS incoming .inflip via the same hand-off mechanism used
+    # for "Open full Phase Studio" / "Phase recycling" -- not from whatever a
+    # previous, unrelated Phase Studio session had saved. Built lazily so the
+    # wizard's first page still appears immediately.
+    backing_window_holder: dict = {"win": None}
+
+    def get_backing_window():
+        win = backing_window_holder.get("win")
+        if win is not None:
+            return win
+        from phase_studio.app import IterativeSuperflipPipelineQtGUI, parse_inflip_settings
+
+        win = IterativeSuperflipPipelineQtGUI()
+        if inflip_path is not None:
+            try:
+                parsed = parse_inflip_settings(inflip_path)
+                handoff_import = build_jana_handoff_import(inflip_path, JanaRunOptions(action="edit"), parsed)
+                for key, value in handoff_import.values.items():
+                    widget = win.inputs.get(key)
+                    if widget is not None:
+                        win._set_widget_value_from_string(widget, value)
+                win._input_mode_user_changed()
+                win._sync_input_source_mode_widgets()
+            except Exception:
+                pass
+        backing_window_holder["win"] = win
+        return win
+
+    input_summary_group = QGroupBox("Input summary")
+    input_summary_layout = QFormLayout(input_summary_group)
+    input_summary_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    reflections_value = QLabel("Not available")
+    format_value = QLabel("Not available")
+    cell_value = QLabel("Not available")
+    spacegroup_value = QLabel("Not available")
+    composition_value = QLabel("Not available")
+    for summary_label in (reflections_value, format_value, cell_value, spacegroup_value, composition_value):
+        summary_label.setWordWrap(True)
+    input_summary_layout.addRow("Reflections", reflections_value)
+    input_summary_layout.addRow("Format", format_value)
+    input_summary_layout.addRow("Cell", cell_value)
+    input_summary_layout.addRow("Space group", spacegroup_value)
+    input_summary_layout.addRow("Composition", composition_value)
+
+    hkl_buttons_row = QHBoxLayout()
+    validate_hkl_button = QPushButton("Validate HKL")
+    analyze_completeness_button = QPushButton("Analyze completeness")
+    hkl_buttons_row.addWidget(validate_hkl_button)
+    hkl_buttons_row.addWidget(analyze_completeness_button)
+    hkl_buttons_row.addStretch(1)
+    input_summary_layout.addRow("", hkl_buttons_row)
+    page1_layout.addWidget(input_summary_group)
+
+    def refresh_input_summary() -> None:
+        no_inflip_tip = "No incoming Jana2020 .inflip was supplied."
+        if inflip_path is None:
+            validate_hkl_button.setEnabled(False)
+            analyze_completeness_button.setEnabled(False)
+            validate_hkl_button.setToolTip(no_inflip_tip)
+            analyze_completeness_button.setToolTip(no_inflip_tip)
+            return
+        try:
+            win = get_backing_window()
+            from phase_studio.app import format_reflection_data_mode
+            request = win._collect_hkl_analysis_request()
+            result = win._build_hkl_load_result(request)
+        except Exception:
+            # Per spec: never show a raw exception in this summary. The
+            # existing structured error dialog still covers Validate HKL /
+            # Analyze completeness themselves if the reflection block truly
+            # cannot be analyzed.
+            return
+        reflections_value.setText(f"{len(result.reflections):,} parsed · {len(result.unique_reflections):,} unique")
+        format_value.setText(format_reflection_data_mode(result.data_mode))
+        rcell = result.cell
+        cell_value.setText(
+            f"{rcell.a:.5g} × {rcell.b:.5g} × {rcell.c:.5g} Å\n"
+            f"{rcell.alpha:.4g}° × {rcell.beta:.4g}° × {rcell.gamma:.4g}°"
+        )
+        spacegroup_value.setText(f"{result.spacegroup_hm} (#{result.spacegroup.number})")
+        metadata = request.metadata
+        composition_value.setText(metadata.composition if metadata is not None and metadata.composition else "—")
+        validate_hkl_button.setEnabled(True)
+        analyze_completeness_button.setEnabled(True)
+        validate_hkl_button.setToolTip(
+            "Parse the incoming Jana2020 .inflip reflection block and show which h, k, l, "
+            "value, sigma and phase fields were read. Uses the same parser as Basic → Input."
+        )
+        analyze_completeness_button.setToolTip(
+            "Open completeness and data-statistics plots for the incoming Jana2020 .inflip "
+            "reflection data. Uses the same analysis as Basic → Input."
+        )
+
+    def validate_hkl_clicked() -> None:
+        try:
+            get_backing_window().test_hkl_load_dialog()
+        except Exception as exc:
+            report = build_error_report(exc, subsystem="HKL", operation="HKL validation")
+            show_phase_studio_error(dialog, report)
+
+    def analyze_completeness_clicked() -> None:
+        try:
+            get_backing_window().open_hkl_completeness_dialog()
+        except Exception as exc:
+            report = build_error_report(exc, subsystem="HKL", operation="HKL completeness")
+            show_phase_studio_error(dialog, report)
+
+    validate_hkl_button.setEnabled(False)
+    analyze_completeness_button.setEnabled(False)
+    validate_hkl_button.clicked.connect(validate_hkl_clicked)
+    analyze_completeness_button.clicked.connect(analyze_completeness_clicked)
+    # Deferred so the wizard's first page paints immediately; the summary
+    # (and the one-time backing-window construction it triggers) fills in
+    # right after, once the dialog's event loop actually starts.
+    QTimer.singleShot(0, refresh_input_summary)
 
     files_group = QGroupBox("Reference and model files")
     files_form = QFormLayout(files_group)
@@ -1016,18 +1135,29 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         row_layout = QHBoxLayout(row_widget)
         row_layout.setContentsMargins(0, 0, 0, 0)
         edit = QLineEdit(initial)
+        from_inflip = bool(initial)
         edit.setPlaceholderText(placeholder)
-        edit.setToolTip(tooltip)
+        edit.setToolTip(
+            (tooltip + "\n\nCurrently set from the incoming .inflip.") if from_inflip else tooltip
+        )
         browse = QPushButton("Browse…")
         browse.setToolTip(f"Select {label_text.lower()}.")
+
+        source_note = QLabel("From .inflip")
+        source_note.setStyleSheet("color: #7183a6; font-style: italic;")
+        source_note.setVisible(from_inflip)
 
         def browse_file() -> None:
             selected = QFileDialog.getOpenFileName(dialog, f"Select {label_text}", edit.text(), file_filter)[0]
             if selected:
                 edit.setText(selected)
+                # A manual replacement is no longer "from the .inflip".
+                source_note.setVisible(False)
+                edit.setToolTip(tooltip)
 
         browse.clicked.connect(browse_file)
         row_layout.addWidget(edit, 1)
+        row_layout.addWidget(source_note)
         row_layout.addWidget(browse)
         files_form.addRow(label_text, row_widget)
         return edit
@@ -1472,7 +1602,18 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             _show_missing_token_warning(dialog, qt)
             return
         save_values()
-        result["action"] = "recycle" if current_workflow() == WORKFLOW_PHASE_RECYCLING else "run"
+        workflow = current_workflow()
+        if workflow == WORKFLOW_PHASE_RECYCLING:
+            result["action"] = "recycle"
+        elif workflow == WORKFLOW_SUPERFLIP_SHARPED:
+            # Hosted in the main Phase Studio window (as the execution/progress
+            # display only -- still the same single-pass run_jana_superflip()
+            # call, not the full iterative pipeline). "Superflip only" is
+            # deliberately excluded: it keeps using the lightweight, windowless
+            # path below unchanged.
+            result["action"] = "host_single_pass"
+        else:
+            result["action"] = "run"
         dialog.accept()
 
     def edit_clicked() -> None:
@@ -1492,7 +1633,11 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
 
 def launch_phase_studio_from_jana(
-    inflip_path: Optional[Path], options: JanaRunOptions, auto_start: bool = False
+    inflip_path: Optional[Path],
+    options: JanaRunOptions,
+    auto_start: bool = False,
+    host_single_pass: bool = False,
+    single_pass_args: Optional[Sequence[str]] = None,
 ) -> int:
     # Load PySide6 before importing app.py, which initializes Matplotlib QtAgg.
     qt = _qt_imports()
@@ -1520,6 +1665,12 @@ def launch_phase_studio_from_jana(
 
     def build_window() -> IterativeSuperflipPipelineQtGUI:
         win = IterativeSuperflipPipelineQtGUI()
+        if host_single_pass:
+            # Single-pass workflows call run_jana_superflip() directly, which
+            # only ever reads options/the .inflip -- never any of this window's
+            # own Superflip/EDMA settings -- so no "recommended" preset is
+            # applied here. This window is a presentation shell only.
+            win.jana_wizard_context.launched_from_jana_wizard = True
         if auto_start:
             # Fill every EDMA/Superflip setting the dialog and the .inflip don't
             # cover with Phase Studio's own "recommended" preset first, so the
@@ -1543,7 +1694,15 @@ def launch_phase_studio_from_jana(
             win._sync_workflow_widgets()
             for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
                 win._append_execution_log(line, subsystem="Jana2020")
-            if auto_start:
+            if host_single_pass:
+                win._append_execution_log(
+                    "Superflip + SharpED was requested from the Jana2020 launcher; running now. "
+                    "Phase Studio will close automatically and hand the result back to Jana2020 "
+                    "when it finishes.",
+                    level="DETAIL",
+                    subsystem="Jana2020",
+                )
+            elif auto_start:
                 win._append_execution_log(
                     "Phase recycling was requested from the Jana2020 launcher; the pipeline "
                     "will start automatically. Use 'Send to Jana2020' once it finishes.",
@@ -1562,7 +1721,9 @@ def launch_phase_studio_from_jana(
     win = initialize_main_window(app, splash, build_window)
     if win is None:
         return 1
-    if auto_start:
+    if host_single_pass:
+        win.run_jana_single_pass(list(single_pass_args or []), options)
+    elif auto_start:
         win.start_run()
     return int(app.exec())
 
@@ -1595,6 +1756,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if options.action == "recycle":
             logger("Phase recycling requested; running it through the full Phase Studio pipeline.")
             return launch_phase_studio_from_jana(inflip_path, options, auto_start=True)
+        if options.action == "host_single_pass":
+            logger("Superflip + SharpED requested; hosting the single-pass run in the main Phase Studio window.")
+            return launch_phase_studio_from_jana(
+                inflip_path, options, host_single_pass=True, single_pass_args=args
+            )
         code = run_jana_superflip(args, options, logger)
         logger("Wrapper finished")
         return int(code)
