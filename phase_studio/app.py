@@ -519,8 +519,8 @@ INPUT_MODE_INFLIP_OVERRIDES = "jana_inflip_overrides"
 INPUT_MODE_EXTERNAL = "external_hkl_cif"
 
 INPUT_MODE_LABELS = {
-    INPUT_MODE_INFLIP: "Jana .inflip",
-    INPUT_MODE_INFLIP_OVERRIDES: "Jana .inflip with external HKL/reference overrides",
+    INPUT_MODE_INFLIP: "Jana2020 .inflip",
+    INPUT_MODE_INFLIP_OVERRIDES: "Jana2020 .inflip with external HKL/reference overrides",
     INPUT_MODE_EXTERNAL: "External HKL + CIF reference",
 }
 
@@ -529,8 +529,8 @@ METADATA_SOURCE_REFERENCE = "reference_file"
 METADATA_SOURCE_MANUAL = "manual"
 
 METADATA_SOURCE_LABELS = {
-    METADATA_SOURCE_INFLIP: "Jana .inflip",
-    METADATA_SOURCE_REFERENCE: "Reference file",
+    METADATA_SOURCE_INFLIP: "Jana2020 .inflip",
+    METADATA_SOURCE_REFERENCE: "Reference structure",
     METADATA_SOURCE_MANUAL: "Manual",
 }
 
@@ -690,9 +690,11 @@ class CycleProgressState:
     complete: bool = False
 
     def display_text(self) -> str:
-        parts = [f"Cycle {self.cycle_index} / {self.cycle_total}", self.stage_name]
-        if self.sub_index is not None and self.sub_total is not None:
-            parts.append(f"repeat {self.sub_index} / {self.sub_total}")
+        # sub_index/sub_total (Superflip's internal repeat-pass counter) is
+        # deliberately not shown here: it reads as developer/internal detail
+        # in the compact primary status line and is already visible in the
+        # pipeline's own settings-summary log lines.
+        parts = [f"Cycle {self.cycle_index} of {self.cycle_total}", self.stage_name]
         if self.detail:
             parts.append(self.detail)
         return " · ".join(part for part in parts if part)
@@ -5418,6 +5420,69 @@ def create_phase_studio_app_icon(size: int = 64) -> QIcon:
     return QIcon(target)
 
 
+def create_phase_studio_brand_header() -> QWidget:
+    """The "PHASE STUDIO" branded header (logo, title, version badge,
+    subtitle) -- shared by the main window and any other Phase Studio
+    surface (the Jana2020 Wizard, its result selector, ...) that should
+    visually read as the same application rather than a generic dialog."""
+    brand_header = QWidget()
+    brand_header.setObjectName("brandHeader")
+    brand_layout = QHBoxLayout(brand_header)
+    brand_layout.setContentsMargins(12, 6, 12, 7)
+    brand_layout.setSpacing(10)
+    brand_logo = QLabel()
+    brand_logo.setObjectName("brandLogo")
+    brand_logo_pixmap = create_phase_studio_logo_pixmap(58)
+    brand_logo.setPixmap(brand_logo_pixmap)
+    brand_logo.setFixedSize(brand_logo_pixmap.size())
+    brand_logo.setToolTip("Phase Studio")
+    brand_text_layout = QVBoxLayout()
+    brand_text_layout.setContentsMargins(0, 0, 0, 0)
+    brand_text_layout.setSpacing(1)
+    brand_title_row = QHBoxLayout()
+    brand_title_row.setSpacing(8)
+    brand_title = QLabel("PHASE STUDIO")
+    brand_title.setObjectName("brandTitle")
+    version_badge = QLabel(__version__)
+    version_badge.setObjectName("versionBadge")
+    version_badge.setAlignment(Qt.AlignCenter)
+    brand_title_row.addWidget(brand_title, 1)
+    brand_title_row.addWidget(version_badge)
+    brand_subtitle = QLabel("Superflip · SharpED · EDMA workflow")
+    brand_subtitle.setObjectName("brandSubtitle")
+    brand_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    brand_text_layout.addLayout(brand_title_row)
+    brand_text_layout.addWidget(brand_subtitle)
+    brand_layout.addWidget(brand_logo, 0, Qt.AlignVCenter)
+    brand_layout.addLayout(brand_text_layout, 1)
+    return brand_header
+
+
+def create_phase_studio_context_banner(title: str, subtitle: str, badge: Optional[QWidget] = None) -> QWidget:
+    """A compact navy context banner using the same visual language as the
+    main window's "RUN OVERVIEW" banner (#dashboardHeader/#dashboardTitle/
+    #dashboardSubtitle in ui_style.py), reused for Jana2020 Wizard page
+    context and the Jana2020 result selector so both read as the same
+    application as the main window rather than an unrelated dialog."""
+    banner = QWidget()
+    banner.setObjectName("dashboardHeader")
+    banner_layout = QHBoxLayout(banner)
+    banner_layout.setContentsMargins(12, 5, 12, 5)
+    banner_text = QVBoxLayout()
+    banner_text.setSpacing(0)
+    banner_title = QLabel(title)
+    banner_title.setObjectName("dashboardTitle")
+    banner_subtitle = QLabel(subtitle)
+    banner_subtitle.setObjectName("dashboardSubtitle")
+    banner_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    banner_text.addWidget(banner_title)
+    banner_text.addWidget(banner_subtitle)
+    banner_layout.addLayout(banner_text, 1)
+    if badge is not None:
+        banner_layout.addWidget(badge)
+    return banner
+
+
 class WorkflowDiagram(QWidget):
     """Compact native-Qt overview of the optional reconstruction branches."""
 
@@ -5786,37 +5851,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         left_layout.setSpacing(8)
         self.main_splitter.addWidget(left)
 
-        brand_header = QWidget()
-        brand_header.setObjectName("brandHeader")
-        brand_layout = QHBoxLayout(brand_header)
-        brand_layout.setContentsMargins(12, 6, 12, 7)
-        brand_layout.setSpacing(10)
-        brand_logo = QLabel()
-        brand_logo.setObjectName("brandLogo")
-        brand_logo_pixmap = create_phase_studio_logo_pixmap(58)
-        brand_logo.setPixmap(brand_logo_pixmap)
-        brand_logo.setFixedSize(brand_logo_pixmap.size())
-        brand_logo.setToolTip("Phase Studio")
-        brand_text_layout = QVBoxLayout()
-        brand_text_layout.setContentsMargins(0, 0, 0, 0)
-        brand_text_layout.setSpacing(1)
-        brand_title_row = QHBoxLayout()
-        brand_title_row.setSpacing(8)
-        brand_title = QLabel("PHASE STUDIO")
-        brand_title.setObjectName("brandTitle")
-        version_badge = QLabel(__version__)
-        version_badge.setObjectName("versionBadge")
-        version_badge.setAlignment(Qt.AlignCenter)
-        brand_title_row.addWidget(brand_title, 1)
-        brand_title_row.addWidget(version_badge)
-        brand_subtitle = QLabel("Superflip · SharpED · EDMA workflow")
-        brand_subtitle.setObjectName("brandSubtitle")
-        brand_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        brand_text_layout.addLayout(brand_title_row)
-        brand_text_layout.addWidget(brand_subtitle)
-        brand_layout.addWidget(brand_logo, 0, Qt.AlignVCenter)
-        brand_layout.addLayout(brand_text_layout, 1)
-        left_layout.addWidget(brand_header)
+        left_layout.addWidget(create_phase_studio_brand_header())
 
         category_tabs = QTabWidget()
         category_tabs.setObjectName("categoryTabs")
@@ -5912,25 +5947,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.main_splitter.setStretchFactor(1, 7)
         self.main_splitter.setSizes([520, 900])
 
-        dashboard_header = QWidget()
-        dashboard_header.setObjectName("dashboardHeader")
-        dashboard_layout = QHBoxLayout(dashboard_header)
-        dashboard_layout.setContentsMargins(12, 5, 12, 5)
-        dashboard_text = QVBoxLayout()
-        dashboard_text.setSpacing(0)
-        dashboard_title = QLabel("RUN OVERVIEW")
-        dashboard_title.setObjectName("dashboardTitle")
-        dashboard_subtitle = QLabel("Reconstruction progress and results")
-        dashboard_subtitle.setObjectName("dashboardSubtitle")
-        dashboard_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        dashboard_text.addWidget(dashboard_title)
-        dashboard_text.addWidget(dashboard_subtitle)
         self.status_badge = QLabel("READY")
         self.status_badge.setObjectName("statusBadge")
         self.status_badge.setAlignment(Qt.AlignCenter)
-        dashboard_layout.addLayout(dashboard_text, 1)
-        dashboard_layout.addWidget(self.status_badge)
-        right_layout.addWidget(dashboard_header)
+        right_layout.addWidget(create_phase_studio_context_banner(
+            "RUN OVERVIEW", "Reconstruction progress and results", badge=self.status_badge
+        ))
 
         def make_result_section(title: str) -> Tuple[QWidget, QVBoxLayout]:
             section = QWidget()
@@ -6163,7 +6185,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metadata_form.addRow("", self.metadata_error_panel)
 
         reference_form = add_form_group(input_tab, "Reference and initial model")
-        self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
+        self._add_path(reference_form, "reference_cif", "Reference structure", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
         self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
         self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
         self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
@@ -6764,7 +6786,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_progress.setTextVisible(False)
         self.current_cycle_progress.setToolTip("Stage-based progress for the active cycle; this is not an elapsed-time estimate.")
         run_status_layout.addWidget(self.current_cycle_progress)
-        self.configuration_lock_hint = QLabel("Configuration locked while the pipeline is running.")
+        self.configuration_lock_hint = QLabel("Configuration locked while the calculation is running.")
         self.configuration_lock_hint.setObjectName("configurationLockHint")
         self.configuration_lock_hint.setVisible(False)
         run_status_layout.addWidget(self.configuration_lock_hint)
@@ -8708,7 +8730,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             display_text = f"{display_text} · {stop_detail}"
         self.current_cycle_detail.setText(display_text)
         self.current_cycle_stage_counter.setText(
-            "Completed" if state.complete else f"Stage {state.stage_index} / {stage_total}"
+            "Completed" if state.complete else f"Stage {state.stage_index} of {stage_total}"
         )
 
     def _annotate_cycle_progress(self, detail: str) -> None:
@@ -8733,10 +8755,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         stage_index = max(1, min(stage_total, int(state.stage_index)))
         self.current_cycle_progress.setRange(0, stage_total)
         self.current_cycle_progress.setValue(max(self.current_cycle_progress.value(), stage_index))
-        self.current_cycle_stage_counter.setText(f"{terminal} at stage {stage_index} / {stage_total}")
-        parts = [f"Cycle {state.cycle_index} / {state.cycle_total}", state.stage_name]
-        if terminal != "Stopped" and state.sub_index is not None and state.sub_total is not None:
-            parts.append(f"repeat {state.sub_index} / {state.sub_total}")
+        self.current_cycle_stage_counter.setText(f"{terminal} at stage {stage_index} of {stage_total}")
+        parts = [f"Cycle {state.cycle_index} of {state.cycle_total}", state.stage_name]
         parts.append("stopped by user" if terminal == "Stopped" else terminal.lower())
         self.current_cycle_detail.setText(" · ".join(parts))
 
@@ -9106,7 +9126,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.progress_bar.setValue(0)
                     self._set_overall_progress_text("Running")
                     self.current_cycle_progress.setRange(0, 0)
-                    self.current_cycle_detail.setText(f"Cycle 1 / {total} · Preparing cycle")
+                    self.current_cycle_detail.setText(f"Cycle 1 of {total} · Preparing cycle")
                     self.current_cycle_stage_counter.setText("Preparing")
                 elif kind == "cycle_progress":
                     self._apply_cycle_progress_state(payload)  # type: ignore[arg-type]
@@ -9523,7 +9543,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Jana2020 result selection")
         dialog.resize(1300, 720)
-        layout = QVBoxLayout(dialog)
+        outer_layout = QVBoxLayout(dialog)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Same branded header + navy context banner as the main window and the
+        # Jana2020 Wizard, so this reads as the same application rather than a
+        # generic Qt dialog.
+        outer_layout.addWidget(create_phase_studio_brand_header())
+        outer_layout.addWidget(create_phase_studio_context_banner(
+            "JANA2020 RESULT SELECTION", "Compare completed cycles and select a map for hand-off"
+        ))
+
+        content = QWidget()
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(14, 10, 14, 14)
+        layout.setSpacing(10)
+        outer_layout.addWidget(content, 1)
 
         source_label = QLabel(f"Result source: {'SharpED map' if map_source == 'deblurred' else 'Superflip map'}")
         source_font = source_label.font()
@@ -9858,11 +9894,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if not cycles:
             status = str(getattr(self, "_run_status", "READY")).upper()
             if status in {"RUNNING", "STOPPING"}:
-                empty_message = "Waiting for the first convergence metrics…"
+                empty_message = "Waiting for reconstruction metrics…"
             elif status in {"ERROR", "CANCELLED"}:
-                empty_message = "No convergence metrics available."
+                empty_message = "No reconstruction metrics available."
             else:
-                empty_message = "Run the pipeline to display convergence metrics."
+                empty_message = "Run phasing to display reconstruction metrics."
             ax.set_axis_off()
             ax.text(
                 0.5,
@@ -10266,7 +10302,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         waiting = status in {"RUNNING", "STOPPING"}
         failed = status in {"ERROR", "CANCELLED"}
         panels = [
-            ("Reference", self.reference_atoms_for_plot, "No structure available"),
+            ("Reference", self.reference_atoms_for_plot, "No reference structure"),
             (
                 "Superflip",
                 self.superflip_atoms_for_plot,
@@ -10588,7 +10624,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if resume_state is not None:
             try:
                 self.log(
-                    f"=== Pipeline resumed at cycle {resume_state.completed_cycles + 1} / {resume_state.cfg.cycles} ===",
+                    f"=== Pipeline resumed at cycle {resume_state.completed_cycles + 1} of {resume_state.cfg.cycles} ===",
                     level="STEP",
                 )
                 self.msg_queue.put(("progress_setup", resume_state.cfg.cycles))
@@ -10852,7 +10888,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 detail="preparing model and reflections",
             )
             cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"=== Cycle {cyc} / {cfg.cycles} ===", level="STEP")
+            self.log(f"=== Cycle {cyc} of {cfg.cycles} ===", level="STEP")
             model_for_sf: Optional[Path] = None
             model_source = "none"
             model_metric = state.current_model_metric
@@ -10916,12 +10952,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     busy=True,
                 )
             else:
+                # effective_repeat (Superflip's own repeatmode setting) is
+                # internal/developer-oriented and stays out of the compact
+                # primary status line; it is already visible in the pipeline's
+                # own settings-summary log lines at cycle/run start.
                 self._emit_cycle_progress(
                     cyc,
                     cfg.cycles,
                     progress_stages,
                     "Superflip",
-                    detail=f"repeat mode {effective_repeat} · running",
+                    detail="running",
                     busy=True,
                 )
             # XPLOR is always requested (mandatory internal working map for EDMA/SharpED);
@@ -11278,7 +11318,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 return
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Preparing cycle", detail="preparing input map")
             cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"=== Cycle {cyc} / {cfg.cycles} (SharpED phase recycling) ===", level="STEP")
+            self.log(f"=== Cycle {cyc} of {cfg.cycles} (SharpED phase recycling) ===", level="STEP")
 
             sf_log_metrics = SuperflipLogMetrics()
             if state.recycle_map is None:

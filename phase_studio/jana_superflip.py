@@ -135,9 +135,13 @@ def build_jana_handoff_import(
         inflip_values[key] = mapped_value
 
     input_mode = normalize_dialog_input_mode(options.input_mode)
+    # These values are applied onto the main window's own "input_source_mode"
+    # combo by display text (see _set_widget_value_from_string), so they must
+    # stay identical to app.py's INPUT_MODE_LABELS -- not a second, independently
+    # worded copy of the same three labels.
     app_input_label = {
-        INPUT_MODE_INFLIP: "Jana .inflip",
-        INPUT_MODE_INFLIP_OVERRIDES: "Jana .inflip with external HKL/reference overrides",
+        INPUT_MODE_INFLIP: "Jana2020 .inflip",
+        INPUT_MODE_INFLIP_OVERRIDES: "Jana2020 .inflip with external HKL/reference overrides",
         INPUT_MODE_EXTERNAL: "External HKL + CIF reference",
     }[input_mode]
     allow_external_sources = input_mode in {INPUT_MODE_INFLIP_OVERRIDES, INPUT_MODE_EXTERNAL}
@@ -209,20 +213,22 @@ def build_jana_handoff_import(
 
 def jana_handoff_log_lines(handoff: JanaHandoffImport, inflip_path: Path, applied_keys: Sequence[str]) -> list[str]:
     """Return concise provenance only; sensitive hand-off values are excluded."""
+    from phase_studio.app import format_reflection_data_mode
+
     applied = set(applied_keys)
     imported_inflip_keys = [key for key in handoff.inflip_keys if key in applied]
     lines = [
-        "Jana2020 hand-off detected.",
-        f"Primary input: {Path(inflip_path).name}",
-        f"Working directory: {handoff.values.get('work_dir', '')}",
-        f"Input data mode: {handoff.input_mode}",
-        f"Reflection source: {handoff.reflection_source}",
-        f"Reference source shown in GUI: {handoff.reference_source}",
-        f"Imported {len(imported_inflip_keys)} mapped .inflip parameter(s).",
+        "[Jana2020] Job received",
+        f"  Input: {Path(inflip_path).name}",
+        f"  Working directory: {handoff.values.get('work_dir', '')}",
+        f"  Mode: {handoff.input_mode}",
+        f"  Reflections: {handoff.reflection_source}",
+        f"  Reference: {handoff.reference_source}",
+        f"[Input] {len(imported_inflip_keys)} compatible .inflip settings imported",
     ]
     if "reflection_data_mode" in imported_inflip_keys:
-        lines.append(f"Imported HKL format: {handoff.values['reflection_data_mode']}")
-    lines.extend(f"Import note: {limitation}" for limitation in handoff.limitations)
+        lines.append(f"  Format: {format_reflection_data_mode(handoff.values['reflection_data_mode'])}")
+    lines.extend(f"  Note: {limitation}" for limitation in handoff.limitations)
     return lines
 
 
@@ -925,6 +931,11 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
     app = QApplication.instance() or QApplication([sys.argv[0], *args])
     apply_phase_studio_style(app)
+    # Load after PySide6/style setup, same ordering as the other phase_studio.app
+    # imports in this module: shares the exact header/banner widgets the main
+    # window uses, so the Wizard reads as the same application, not a generic
+    # Qt dialog.
+    from phase_studio.app import create_phase_studio_brand_header, create_phase_studio_context_banner
 
     settings = QSettings("PhaseStudio", "JanaSuperflipWrapper")
     # SharpED connection credentials (server URL, API token) are shared with the
@@ -991,15 +1002,24 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     dialog.setMinimumWidth(640)
 
     root = QVBoxLayout(dialog)
-    root.setContentsMargins(14, 14, 14, 14)
+    root.setContentsMargins(0, 0, 0, 0)
     root.setSpacing(10)
 
-    title = QLabel(f"Phase Studio {__version__} for Jana2020")
-    title_font = title.font()
-    title_font.setPointSize(title_font.pointSize() + 5)
-    title_font.setBold(True)
-    title.setFont(title_font)
-    root.addWidget(title)
+    root.addWidget(create_phase_studio_brand_header())
+
+    context_banner = create_phase_studio_context_banner(
+        "JANA2020 WORKFLOW", "Review the incoming crystallographic data and choose a workflow"
+    )
+    context_title_label = context_banner.findChild(QLabel, "dashboardTitle")
+    context_subtitle_label = context_banner.findChild(QLabel, "dashboardSubtitle")
+    root.addWidget(context_banner)
+
+    content = QWidget()
+    content_layout = QVBoxLayout(content)
+    content_layout.setContentsMargins(14, 10, 14, 14)
+    content_layout.setSpacing(10)
+    root.addWidget(content)
+    root = content_layout
 
     inflip_info = QLabel(
         f"Jana2020 input: {inflip_path.name}" if inflip_path else "No .inflip argument was detected."
@@ -1135,7 +1155,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     # right after, once the dialog's event loop actually starts.
     QTimer.singleShot(0, refresh_input_summary)
 
-    files_group = QGroupBox("Reference and model files")
+    files_group = QGroupBox("Reference and initial model")
     files_form = QFormLayout(files_group)
     files_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
@@ -1184,14 +1204,14 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         return str(found) if found is not None else ""
 
     reference_file = add_file_row(
-        "Reference file (optional)",
+        "Reference structure (optional)",
         "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)",
         "Reference CIF structure or XPLOR density map, used together with the "
-        "incoming Jana .inflip without replacing its embedded reflections or metadata. "
+        "incoming Jana2020 .inflip without replacing its embedded reflections or metadata. "
         "When supplied, Superflip also reports how well each cycle matches this reference, "
         "which is used to recommend the best map for the Jana2020 hand-off. Pre-filled from "
         "the incoming .inflip's own referencefile keyword, if it declares one.",
-        "Use metadata embedded in the Jana .inflip",
+        "No external reference structure",
         _inflip_keyword_default("referencefile"),
     )
     model_file = add_file_row(
@@ -1227,12 +1247,6 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     page2_layout = QVBoxLayout(page2)
     page2_layout.setContentsMargins(0, 0, 0, 0)
     page2_layout.setSpacing(10)
-
-    page2_title = QLabel("")
-    page2_title_font = page2_title.font()
-    page2_title_font.setBold(True)
-    page2_title.setFont(page2_title_font)
-    page2_layout.addWidget(page2_title)
 
     map_group = QGroupBox("Map used for Jana2020 hand-off")
     map_group_layout = QVBoxLayout(map_group)
@@ -1290,12 +1304,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     refresh_row = QWidget()
     refresh_layout = QHBoxLayout(refresh_row)
     refresh_layout.setContentsMargins(0, 0, 0, 0)
-    refresh_models_button = QPushButton("Refresh available models")
-    refresh_models_button.setToolTip(
-        "Query the SharpED /sharp-ed/models endpoint and repopulate the model selector "
-        "with the currently available server models."
-    )
-    model_status = QLabel("Available models have not been loaded yet.")
+    refresh_models_button = QPushButton("Refresh models")
+    refresh_models_button.setToolTip("Query the SharpED server for its currently available models.")
+    model_status = QLabel("Model list not loaded.")
     model_status.setWordWrap(True)
     model_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
     refresh_layout.addWidget(refresh_models_button)
@@ -1421,23 +1432,21 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         model.setCurrentText(current if current in values else "default")
         model.blockSignals(False)
         if default_model:
-            model_status.setText(
-                f"{len(values) - 1} server model(s) available; default: {default_model}."
-            )
+            model_status.setText(f"{len(values) - 1} models available · Default: {default_model}")
         else:
-            model_status.setText(f"{len(values) - 1} server model(s) available.")
+            model_status.setText(f"{len(values) - 1} models available")
 
     refresh_models_button.clicked.connect(refresh_available_models)
     refresh_timer.timeout.connect(poll_model_refresh)
 
-    validation_group = QGroupBox("Scientific validation notice")
+    validation_group = QGroupBox("Scientific validation")
     validation_layout = QHBoxLayout(validation_group)
     warning_icon = QLabel()
     warning_icon.setPixmap(dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
     warning_icon.setAlignment(Qt.AlignTop)
     validation_layout.addWidget(warning_icon, 0, Qt.AlignTop)
     warning_text = QLabel(
-        "SharpED is a neural-network density-processing method. Its output may "
+        "SharpED uses a neural-network density-processing model. Its output may "
         "contain artifacts and should be validated against the measured "
         "diffraction data and an independent crystallographic refinement."
     )
@@ -1465,8 +1474,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     cross_validation_layout.addWidget(omit_checkbox)
     cross_validation_layout.addWidget(rfree_checkbox)
     cross_validation_help = QLabel(
-        "Optional. Cross-validation adds validation calculations for each cycle and can "
-        "be used to rank candidate maps after reconstruction."
+        "Optional. Adds per-cycle OMIT / R_free validation for ranking candidate maps."
     )
     cross_validation_help.setWordWrap(True)
     cross_validation_help.setStyleSheet("color: #52658b;")
@@ -1553,7 +1561,6 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         key = current_workflow()
         for card_key, card in workflow_cards.items():
             card.set_selected(card_key == key)
-        page2_title.setText(WORKFLOW_LABELS[key])
         cycles_visible = key == WORKFLOW_PHASE_RECYCLING
         cycles.setVisible(cycles_visible)
         if cycles_label is not None:
@@ -1571,10 +1578,17 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
     workflow_changed()
 
+    PAGE2_BANNER_TEXT = {
+        WORKFLOW_SUPERFLIP_SHARPED: ("SUPERFLIP + SHARPED", "Configure the map returned to Jana2020"),
+        WORKFLOW_PHASE_RECYCLING: ("PHASE RECYCLING", "Configure iterative reconstruction and validation"),
+    }
+
     def go_to_page1() -> None:
         stack.setCurrentWidget(page1)
         back_button.setVisible(False)
         sync_primary_button_for_page1()
+        context_title_label.setText("JANA2020 WORKFLOW")
+        context_subtitle_label.setText("Review the incoming crystallographic data and choose a workflow")
         dialog.adjustSize()
 
     def go_to_page2() -> None:
@@ -1585,6 +1599,11 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
             "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
         )
+        banner_title, banner_subtitle = PAGE2_BANNER_TEXT.get(
+            current_workflow(), ("JANA2020 WORKFLOW", "")
+        )
+        context_title_label.setText(banner_title)
+        context_subtitle_label.setText(banner_subtitle)
         dialog.adjustSize()
 
     back_button.clicked.connect(go_to_page1)
@@ -1736,7 +1755,7 @@ def launch_phase_studio_from_jana(
             # values applied below (this Jana2020 run's explicit choices) win.
             win._apply_workflow_preset("recommended")
         if inflip_path is not None and handoff_import is not None:
-            splash.set_status("Loading Jana2020 hand-off…")
+            splash.set_status("Loading Jana2020 workflow…")
             app.processEvents()
             applied_keys: list[str] = []
             for key, value in handoff_import.values.items():
@@ -1755,8 +1774,7 @@ def launch_phase_studio_from_jana(
                 win._append_execution_log(line, subsystem="Jana2020")
             if auto_start:
                 win._append_execution_log(
-                    "Phase recycling was requested from the Jana2020 launcher; the pipeline "
-                    "will start automatically. Use 'Send to Jana2020' once it finishes.",
+                    "[Jana2020] Phase recycling requested · calculation will start automatically",
                     level="DETAIL",
                     subsystem="Jana2020",
                 )
