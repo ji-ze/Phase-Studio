@@ -4937,6 +4937,7 @@ def run_edma_on_xplor(
     chlimlist: str = "0.0057 relative",
     extra_edma_keywords: str = "",
     structure_format: str = "cif",
+    write_m40: bool = True,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     inp = out_dir / f"{prefix}_edma.inp"
@@ -4965,8 +4966,6 @@ def run_edma_on_xplor(
             fullcell_value = "no"
         f.write(f"scale fractional\nmaxima {maxima_value}\nfullcell {fullcell_value}\n")
         f.write(f"plimit {float(absolute_plimit):g}\n")
-        # Jana-format peaks (m40) are written unconditionally alongside the CIF/XYZ/PDB
-        # bundle; it costs nothing and keeps the atom-count/charge settings below meaningful.
         f.write(f"composition {ref_ctx.composition}\n")
         if str(numberofatoms or "").strip():
             f.write(f"numberofatoms {str(numberofatoms).strip()}\n")
@@ -4975,8 +4974,13 @@ def run_edma_on_xplor(
             f.write(f"chlimit {str(chlimit).strip()}\n")
         if str(chlimlist or "").strip():
             f.write(f"chlimlist {str(chlimlist).strip()}\n")
-        f.write("m40forjana yes\n")
-        f.write(f"writem40 {outbase}.m40\n")
+        if write_m40:
+            # Jana-format peaks (m40), requested only when this run could
+            # actually be handed off to Jana2020 (a jana_inflip is
+            # configured) -- otherwise it is just another per-cycle file
+            # nothing will ever read.
+            f.write("m40forjana yes\n")
+            f.write(f"writem40 {outbase}.m40\n")
         for line in clean_keyword_lines(extra_edma_keywords):
             f.write(line + "\n")
     map_label = "Deblurred map" if "deblur" in prefix.lower() else "Superflip map"
@@ -12032,6 +12036,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
+                    write_m40=cfg.jana_inflip is not None,
                 )
             else:
                 sf_edma_dir.mkdir(parents=True, exist_ok=True)
@@ -12151,6 +12156,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
+                    write_m40=cfg.jana_inflip is not None,
                 )
             else:
                 deblur_edma_dir.mkdir(parents=True, exist_ok=True)
@@ -12398,6 +12404,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
+                    write_m40=cfg.jana_inflip is not None,
                 )
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx)
                 self.log(f"[EDMA] Completed · Final map · output: {deblur_edma_cif}", subsystem="EDMA")
