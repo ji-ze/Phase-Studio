@@ -5921,6 +5921,29 @@ class MetricsPlotInteraction:
                 best_anchor = (xs[idx], ys[idx])
         return best_cycle, best_dist, best_anchor
 
+    def _tooltip_offset(self, ax, anchor_x: float, anchor_y: float) -> Tuple[float, float, str, str]:
+        """Pick which corner the tooltip grows toward (offset direction plus
+        matching text alignment) from how close the anchor point sits to each
+        edge of the plotting area, in display/pixel space -- proximity-based
+        rather than measuring the not-yet-rendered annotation's exact size,
+        but enough to keep "Cycle N" and the rest of the box on screen for
+        points near the top (y=Best) or right edge (near the legend)."""
+        offset = 11.0
+        try:
+            bbox = ax.get_window_extent()
+            disp = ax.transData.transform((anchor_x, anchor_y))
+            fx = (disp[0] - bbox.x0) / max(1.0, bbox.width)
+            fy = (disp[1] - bbox.y0) / max(1.0, bbox.height)
+        except Exception:
+            fx = fy = 0.0
+        go_left = fx > 0.62
+        go_down = fy > 0.68
+        dx = -offset if go_left else offset
+        dy = -offset if go_down else offset
+        ha = "right" if go_left else "left"
+        va = "top" if go_down else "bottom"
+        return dx, dy, ha, va
+
     def _show_tooltip(self, ax, cycle: int, anchor: Optional[Tuple[float, float]]) -> None:
         if anchor is None:
             self._hide_tooltip()
@@ -5941,15 +5964,22 @@ class MetricsPlotInteraction:
             return
         text = "\n".join(lines)
         anchor_x, anchor_y = anchor
-        # Anchor to the data point itself (axes data coordinates), offset a
-        # few points toward the upper right in screen space, so it tracks
-        # correctly through zoom/pan without per-frame coordinate math.
+        # Anchor to the data point itself (axes data coordinates); the offset
+        # direction and text alignment flip based on how close the point is
+        # to each edge of the plotting area (in display/pixel space, so it
+        # works after zoom/pan and at any DPI), so the tooltip -- including
+        # its "Cycle N" heading -- stays fully on screen instead of being
+        # clipped near the top (e.g. a point at y=Best) or the right edge
+        # (e.g. a point near the legend).
+        dx, dy, ha, va = self._tooltip_offset(ax, anchor_x, anchor_y)
         if self._hover_annotation is None or self._hover_annotation.axes is not ax:
             self._hover_annotation = ax.annotate(
                 text,
                 xy=(anchor_x, anchor_y),
-                xytext=(11, 11),
+                xytext=(dx, dy),
                 textcoords="offset points",
+                ha=ha,
+                va=va,
                 fontsize=7.3,
                 color="#14204a",
                 linespacing=1.5,
@@ -5960,6 +5990,9 @@ class MetricsPlotInteraction:
         else:
             self._hover_annotation.set_text(text)
             self._hover_annotation.xy = (anchor_x, anchor_y)
+            self._hover_annotation.set_position((dx, dy))
+            self._hover_annotation.set_ha(ha)
+            self._hover_annotation.set_va(va)
             self._hover_annotation.set_visible(True)
         # A restrained ring around just the hovered marker -- visual hierarchy
         # stays line < markers < hover-highlighted marker, no new permanent color.
@@ -7263,8 +7296,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.metrics_interactions: Dict[str, MetricsPlotInteraction] = {}
         self._metrics_hover_series: Dict[str, list] = {}
         self._metrics_last_render_args: Dict[str, dict] = {}
-        self.metrics_reset_buttons: Dict[str, QPushButton] = {}
-        self.metrics_mode_buttons: Dict[str, Dict[str, QPushButton]] = {}
+        self._metrics_tab_keys: List[str] = []
         metrics_tab_tooltips = {
             "superflip": (
                 "Reference match, SF RMSD, Recall and Precision compare directly against a supplied reference "
@@ -7295,50 +7327,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("deblur_omit", "SharpED validation"),
             ("powder_repartition", "Powder repartitioning"),
         ):
+            # Each page is now JUST the canvas -- the interaction controls
+            # (hint / Full range / Detail / Reset view) live once in the
+            # QTabWidget's own corner, not a second per-tab toolbar row, so
+            # every pixel of page height goes to the plot itself.
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(0, 0, 0, 0)
-            page_layout.setSpacing(2)
-
-            supports_detail = key == "powder_repartition"
-            control_row = QHBoxLayout()
-            control_row.setContentsMargins(4, 2, 4, 0)
-            control_row.setSpacing(6)
-            hint_label = QLabel("Wheel to zoom · drag to pan · double-click to reset")
-            hint_label.setObjectName("metricsHintLabel")
-            control_row.addWidget(hint_label)
-            control_row.addStretch(1)
-            if supports_detail:
-                full_btn = QPushButton("Full range")
-                detail_btn = QPushButton("Detail")
-                for btn in (full_btn, detail_btn):
-                    btn.setObjectName("metricsViewToggle")
-                    btn.setCheckable(True)
-                    btn.setCursor(Qt.PointingHandCursor)
-                mode_group = QButtonGroup(page)
-                mode_group.setExclusive(True)
-                mode_group.addButton(full_btn)
-                mode_group.addButton(detail_btn)
-                full_btn.setChecked(True)
-                full_btn.setToolTip("Show every value using the normal full y range.")
-                detail_btn.setToolTip(
-                    "Focus the y range on the main body of values (robust to a single outlying cycle). "
-                    "Points outside the current view are not deleted -- they are simply off-screen."
-                )
-                full_btn.clicked.connect(lambda _checked=False, k=key: self._set_metrics_view_mode(k, "full"))
-                detail_btn.clicked.connect(lambda _checked=False, k=key: self._set_metrics_view_mode(k, "detail"))
-                control_row.addWidget(full_btn)
-                control_row.addWidget(detail_btn)
-                self.metrics_mode_buttons[key] = {"full": full_btn, "detail": detail_btn}
-            reset_btn = QPushButton("Reset view")
-            reset_btn.setObjectName("metricsControlButton")
-            reset_btn.setCursor(Qt.PointingHandCursor)
-            reset_btn.setToolTip("Return to the automatically calculated full-data view.")
-            reset_btn.setEnabled(False)
-            reset_btn.clicked.connect(lambda _checked=False, k=key: self._reset_metrics_view(k))
-            control_row.addWidget(reset_btn)
-            self.metrics_reset_buttons[key] = reset_btn
-            page_layout.addLayout(control_row)
+            page_layout.setSpacing(0)
 
             figure = Figure(figsize=(7.5, 3.5), dpi=100)
             canvas = FigureCanvas(figure)
@@ -7352,6 +7348,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             tab_index = self.metrics_tabs.addTab(page, title)
             if key in metrics_tab_tooltips:
                 self.metrics_tabs.setTabToolTip(tab_index, metrics_tab_tooltips[key])
+            self._metrics_tab_keys.append(key)
             self.metrics_figures[key] = figure
             self.metrics_axes[key] = figure.add_subplot(111)
             self.metrics_canvases[key] = canvas
@@ -7360,11 +7357,53 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 canvas,
                 get_axes=(lambda k=key: self.metrics_axes.get(k)),
                 get_series=(lambda k=key: self._metrics_hover_series.get(k, [])),
-                supports_detail=supports_detail,
+                supports_detail=(key == "powder_repartition"),
                 on_state_changed=self._on_metrics_view_changed,
                 request_rerender=(lambda k=key: self._replay_metrics_tab(k)),
             )
         metrics_layout.addWidget(self.metrics_tabs, 1)
+
+        # ----- Shared interaction control strip: lives in the tab bar's own
+        # corner (same horizontal strip as the Superflip/SharpED/... tabs, not
+        # a second row that eats into the plot) and always acts on whichever
+        # tab is currently selected. -----
+        metrics_corner = QWidget()
+        metrics_corner_layout = QHBoxLayout(metrics_corner)
+        metrics_corner_layout.setContentsMargins(6, 0, 4, 0)
+        metrics_corner_layout.setSpacing(6)
+        self.metrics_hint_label = QLabel("Wheel zoom · Drag pan · Double-click reset")
+        self.metrics_hint_label.setObjectName("metricsHintLabel")
+        metrics_corner_layout.addWidget(self.metrics_hint_label)
+        self.metrics_full_range_btn = QPushButton("Full range")
+        self.metrics_detail_btn = QPushButton("Detail")
+        for btn in (self.metrics_full_range_btn, self.metrics_detail_btn):
+            btn.setObjectName("metricsViewToggle")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+        metrics_mode_group = QButtonGroup(metrics_corner)
+        metrics_mode_group.setExclusive(True)
+        metrics_mode_group.addButton(self.metrics_full_range_btn)
+        metrics_mode_group.addButton(self.metrics_detail_btn)
+        self.metrics_full_range_btn.setChecked(True)
+        self.metrics_full_range_btn.setToolTip("Show every value using the normal full y range.")
+        self.metrics_detail_btn.setToolTip(
+            "Focus the y range on the main body of values (robust to a single outlying cycle). "
+            "Points outside the current view are not deleted -- they are simply off-screen."
+        )
+        self.metrics_full_range_btn.clicked.connect(lambda _checked=False: self._set_metrics_view_mode(self._current_metrics_key(), "full"))
+        self.metrics_detail_btn.clicked.connect(lambda _checked=False: self._set_metrics_view_mode(self._current_metrics_key(), "detail"))
+        metrics_corner_layout.addWidget(self.metrics_full_range_btn)
+        metrics_corner_layout.addWidget(self.metrics_detail_btn)
+        self.metrics_reset_btn = QPushButton("Reset view")
+        self.metrics_reset_btn.setObjectName("metricsControlButton")
+        self.metrics_reset_btn.setCursor(Qt.PointingHandCursor)
+        self.metrics_reset_btn.setToolTip("Return to the automatically calculated full-data view.")
+        self.metrics_reset_btn.setEnabled(False)
+        self.metrics_reset_btn.clicked.connect(lambda _checked=False: self._reset_metrics_view(self._current_metrics_key()))
+        metrics_corner_layout.addWidget(self.metrics_reset_btn)
+        self.metrics_tabs.setCornerWidget(metrics_corner, Qt.TopRightCorner)
+        self.metrics_tabs.currentChanged.connect(self._on_metrics_tab_changed)
+        self._on_metrics_tab_changed(self.metrics_tabs.currentIndex())
         self.result_splitter.addWidget(metrics_section)
 
         structure_section, structure_layout = make_result_section("STRUCTURE COMPARISON")
@@ -10550,33 +10589,55 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         self._render_metrics_tab(key, args["series"], raw=args["raw"], raw_ylabel=args["raw_ylabel"])
 
-    def _reset_metrics_view(self, key: str) -> None:
+    def _reset_metrics_view(self, key: Optional[str]) -> None:
+        if key is None:
+            return
         interaction = self.metrics_interactions.get(key)
         if interaction is not None:
             interaction.reset_view()
 
-    def _set_metrics_view_mode(self, key: str, mode: str) -> None:
+    def _set_metrics_view_mode(self, key: Optional[str], mode: str) -> None:
+        if key is None:
+            return
         interaction = self.metrics_interactions.get(key)
         if interaction is not None:
             interaction.set_mode(mode)
 
-    def _on_metrics_view_changed(self, key: str) -> None:
+    def _current_metrics_key(self) -> Optional[str]:
+        if not hasattr(self, "metrics_tabs"):
+            return None
+        index = self.metrics_tabs.currentIndex()
+        if 0 <= index < len(self._metrics_tab_keys):
+            return self._metrics_tab_keys[index]
+        return None
+
+    def _on_metrics_tab_changed(self, index: int) -> None:
+        key = self._metrics_tab_keys[index] if 0 <= index < len(self._metrics_tab_keys) else None
+        supports_detail = key == "powder_repartition"
+        if hasattr(self, "metrics_full_range_btn"):
+            self.metrics_full_range_btn.setVisible(supports_detail)
+        if hasattr(self, "metrics_detail_btn"):
+            self.metrics_detail_btn.setVisible(supports_detail)
+        self._on_metrics_view_changed(key)
+
+    def _on_metrics_view_changed(self, key: Optional[str]) -> None:
+        # The control strip is shared/single, in the tab bar's corner, and
+        # always reflects whichever tab is currently selected -- an
+        # interaction change on a background tab (not realistically
+        # reachable by the mouse, but defensive) must not touch it.
+        if key is None or key != self._current_metrics_key():
+            return
         interaction = self.metrics_interactions.get(key)
         if interaction is None:
             return
-        buttons = self.metrics_mode_buttons.get(key)
-        if buttons is not None:
-            full_btn = buttons.get("full")
-            detail_btn = buttons.get("detail")
-            in_manual = interaction.user_modified
-            if detail_btn is not None:
-                detail_btn.setEnabled(interaction.detail_available)
-                detail_btn.setChecked(not in_manual and interaction.mode == "detail")
-            if full_btn is not None:
-                full_btn.setChecked(not in_manual and interaction.mode != "detail")
-        reset_btn = self.metrics_reset_buttons.get(key)
-        if reset_btn is not None:
-            reset_btn.setEnabled(interaction.user_modified or interaction.mode == "detail")
+        in_manual = interaction.user_modified
+        if hasattr(self, "metrics_detail_btn"):
+            self.metrics_detail_btn.setEnabled(interaction.detail_available)
+            self.metrics_detail_btn.setChecked(not in_manual and interaction.mode == "detail")
+        if hasattr(self, "metrics_full_range_btn"):
+            self.metrics_full_range_btn.setChecked(not in_manual and interaction.mode != "detail")
+        if hasattr(self, "metrics_reset_btn"):
+            self.metrics_reset_btn.setEnabled(interaction.user_modified or interaction.mode == "detail")
 
     def _layout_metrics_figure(self, key: str) -> None:
         figure = self.metrics_figures[key]
@@ -10705,14 +10766,35 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ax.set_ylabel(raw_ylabel, fontsize=7.5, color="#001170")
         else:
             full_ylim = (-0.04, 1.04)
+            # Intermediate ticks stay at their numeric positions (0.25/0.5/0.75)
+            # so the horizontal gridlines remain useful, but only the two
+            # semantic endpoints get a label -- "Worst 0.00"/"Best 1.00" read
+            # as redundant once the axis is understood as a quality scale.
             ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
-            ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
+            ax.set_yticklabels(["Worst", "", "", "", "Best"])
             ax.set_ylabel("Normalized score", fontsize=7.5, color="#001170")
         try:
             cycles_to_run = max(1, self._spin_value("cycles"))
         except Exception:
             cycles_to_run = max(cycles) if cycles else 1
-        x_max = max([cycles_to_run] + cycles) if cycles else cycles_to_run
+        max_completed = max(cycles) if cycles else 0
+        run_status = str(getattr(self, "_run_status", "READY")).upper()
+        if run_status in {"RUNNING", "STOPPING"}:
+            # Live run: fit the currently populated cycles plus a little
+            # right-side headroom for the next point, rather than jumping
+            # straight to the full planned cycle count -- 12 of 50 planned
+            # cycles otherwise compresses all the active data into the left
+            # ~24% of the plot. Headroom grows with progress so the viewport
+            # doesn't visibly jump every single cycle, and is capped at the
+            # planned total.
+            headroom = max(2, round(max_completed * 0.1))
+            x_max = min(cycles_to_run, max(max_completed + headroom, 1))
+        else:
+            # Not currently running (finished, stopped early, or not yet
+            # started): fit the data that actually exists instead of
+            # stretching out to a planned count that will never be reached
+            # for a run stopped before completion.
+            x_max = max_completed if cycles else cycles_to_run
         full_xlim = (0.75, float(x_max) + 0.25)
         if interaction is not None and interaction.user_modified:
             # A manual zoom/pan may no longer align with one-tick-per-cycle;
@@ -10748,7 +10830,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 out[finite] = scaled if higher_is_better else 1.0 - scaled
             return out.tolist()
 
-        is_live = str(getattr(self, "_run_status", "READY")).upper() in {"RUNNING", "STOPPING"}
         plotted = 0
         hover_series: List[Tuple[str, List[int], List[Optional[float]], List[Optional[float]], str]] = []
         for label, values, higher_is_better, color, marker, linestyle in series:
@@ -10772,22 +10853,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 markeredgewidth=0.8,
                 label=label,
             )
-            if is_live:
-                # A subtle ring (same series color, no new permanent color)
-                # around the newest point -- moves to the latest cycle as new
-                # data arrive, never a persistent second marker style.
-                last_idx = int(np.nonzero(finite_mask)[0][-1])
-                ax.plot(
-                    [cycles[last_idx]],
-                    [y[last_idx]],
-                    marker="o",
-                    markersize=9.0,
-                    markerfacecolor="none",
-                    markeredgecolor=color,
-                    markeredgewidth=1.3,
-                    linestyle="none",
-                    zorder=6,
-                )
+            # No persistent "latest cycle" ring: the line ending already shows
+            # the newest point, and a permanent hollow-circle overlay reads as
+            # a leftover hover state even when the pointer isn't over it. Only
+            # an actual hover (MetricsPlotInteraction) emphasizes a marker now.
             unit = "%" if ("%" in label or ("%" in raw_ylabel and raw)) else ""
             hover_series.append((label, list(cycles), list(y), list(values), unit))
         self._metrics_hover_series[key] = hover_series
