@@ -935,7 +935,11 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     # imports in this module: shares the exact header/banner widgets the main
     # window uses, so the Wizard reads as the same application, not a generic
     # Qt dialog.
-    from phase_studio.app import create_phase_studio_brand_header, create_phase_studio_context_banner
+    from phase_studio.app import (
+        compute_safe_dialog_size,
+        create_phase_studio_brand_header,
+        create_phase_studio_context_banner,
+    )
 
     settings = QSettings("PhaseStudio", "JanaSuperflipWrapper")
     # SharpED connection credentials (server URL, API token) are shared with the
@@ -1000,6 +1004,16 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     dialog = QDialog()
     dialog.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
     dialog.setMinimumWidth(640)
+
+    def adjust_dialog_size() -> None:
+        # adjustSize() alone can grow the dialog to whatever a taller page
+        # (or an expanded disclosure section) needs, with nothing capping it
+        # to the actual screen -- clamp the result so the bottom action row
+        # can never end up off-screen or behind the taskbar.
+        dialog.adjustSize()
+        safe_width, safe_height = compute_safe_dialog_size(dialog.width(), dialog.height(), parent=dialog)
+        if safe_width < dialog.width() or safe_height < dialog.height():
+            dialog.resize(min(dialog.width(), safe_width), min(dialog.height(), safe_height))
 
     root = QVBoxLayout(dialog)
     root.setContentsMargins(0, 0, 0, 0)
@@ -1316,6 +1330,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     sharped_group = QGroupBox()
     sharped_outer = QVBoxLayout(sharped_group)
     sharped_toggle = QToolButton()
+    sharped_toggle.setObjectName("disclosureToggle")
     sharped_toggle.setText("SharpED settings")
     sharped_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
     sharped_toggle.setArrowType(Qt.RightArrow)
@@ -1372,7 +1387,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     def sync_sharped_disclosure(opened: bool) -> None:
         sharped_body.setVisible(bool(opened))
         sharped_toggle.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
-        dialog.adjustSize()
+        adjust_dialog_size()
 
     sharped_toggle.toggled.connect(sync_sharped_disclosure)
     page2_layout.addWidget(sharped_group)
@@ -1481,8 +1496,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     cross_validation_layout.addWidget(cross_validation_help)
     page2_layout.addWidget(cross_validation_group)
 
-    omit_checkbox.setChecked(bool(settings.value("compute_omit_maps", False, type=bool)))
-    rfree_checkbox.setChecked(bool(settings.value("compute_omit_rfree", False, type=bool)))
+    # Deliberately not persisted/restored from QSettings: cross-validation is
+    # an expensive, per-job opt-in and must not be silently inherited from an
+    # unrelated previous Jana2020 job. Every fresh invocation starts unchecked.
 
     def sync_rfree_dependency(_checked: bool = False) -> None:
         omit_enabled = omit_checkbox.isChecked()
@@ -1498,7 +1514,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
     def sync_map_choice() -> None:
         validation_group.setVisible(sharped_map_radio.isChecked())
-        dialog.adjustSize()
+        adjust_dialog_size()
 
     sharped_map_radio.toggled.connect(lambda _checked=False: sync_map_choice())
     sync_map_choice()
@@ -1533,14 +1549,19 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         # "Superflip + SharpED" is always a single Superflip call followed by one
         # SharpED pass; only "Phase recycling" repeats that pair over several cycles.
         cycles.setEnabled(key == WORKFLOW_PHASE_RECYCLING)
-        if cycles_user_edited["value"] and key == WORKFLOW_PHASE_RECYCLING:
-            return
+        recompute_default = not (cycles_user_edited["value"] and key == WORKFLOW_PHASE_RECYCLING)
         cycles.blockSignals(True)
         try:
-            if key == WORKFLOW_PHASE_RECYCLING:
-                cycles.setValue(max(int(settings.value("cycles", 5)) or 5, 2))
-            else:
-                cycles.setValue(1)
+            # A single cycle never feeds a map back into a next cycle, so it
+            # isn't actually "recycling" -- the spinbox's own minimum (not
+            # just its default value) is raised to 2 for this workflow so the
+            # control itself can't be turned down to a non-recycling value.
+            cycles.setMinimum(2 if key == WORKFLOW_PHASE_RECYCLING else 1)
+            if recompute_default:
+                if key == WORKFLOW_PHASE_RECYCLING:
+                    cycles.setValue(max(int(settings.value("cycles", 5)) or 5, 2))
+                else:
+                    cycles.setValue(1)
         finally:
             cycles.blockSignals(False)
 
@@ -1589,7 +1610,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         sync_primary_button_for_page1()
         context_title_label.setText("JANA2020 WORKFLOW")
         context_subtitle_label.setText("Review the incoming crystallographic data and choose a workflow")
-        dialog.adjustSize()
+        adjust_dialog_size()
 
     def go_to_page2() -> None:
         stack.setCurrentWidget(page2)
@@ -1604,7 +1625,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         )
         context_title_label.setText(banner_title)
         context_subtitle_label.setText(banner_subtitle)
-        dialog.adjustSize()
+        adjust_dialog_size()
 
     back_button.clicked.connect(go_to_page1)
     go_to_page1()
@@ -1634,8 +1655,6 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         settings.setValue("cycles", effective_cycles())
         settings.setValue("next_cycle_modelfile", next_cycle_mode)
         settings.setValue("use_deblurred_map", next_cycle_mode == "deblurred_xplor")
-        settings.setValue("compute_omit_maps", omit_checkbox.isChecked())
-        settings.setValue("compute_omit_rfree", rfree_checkbox.isChecked())
         # SharpED server URL / API token are the shared credentials also used by
         # the full Phase Studio application; write them there, not to a second,
         # independent copy under this wrapper's own settings (see shared_settings

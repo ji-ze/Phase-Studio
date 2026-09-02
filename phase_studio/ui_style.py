@@ -521,6 +521,22 @@ QToolButton:hover {
     background-color: #44b7ff;
     border-color: #2264b8;
 }
+QToolButton#disclosureToggle {
+    background-color: #ffffff;
+    border: 1px solid #cbd7ea;
+    padding: 4px 8px;
+    color: #001170;
+    font-weight: 600;
+    text-align: left;
+}
+QToolButton#disclosureToggle:hover {
+    background-color: #f2f4f9;
+    border-color: #2264b8;
+}
+QToolButton#disclosureToggle:checked {
+    background-color: #edf3fa;
+    border-color: #2264b8;
+}
 QScrollBar:vertical {
     background: #f2f4f9;
     width: 5px;

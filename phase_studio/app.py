@@ -696,7 +696,11 @@ class CycleProgressState:
         # pipeline's own settings-summary log lines.
         parts = [f"Cycle {self.cycle_index} of {self.cycle_total}", self.stage_name]
         if self.detail:
-            parts.append(self.detail)
+            # Call sites pass lowercase detail phrases ("running", "preparing
+            # upload", ...); capitalize just the leading letter here, in one
+            # place, for sentence-case display rather than editing every
+            # _emit_cycle_progress() call site individually.
+            parts.append(self.detail[:1].upper() + self.detail[1:])
         return " · ".join(part for part in parts if part)
 
 
@@ -1504,7 +1508,16 @@ def count_heavy_atoms(model_cif: Optional[Path]) -> Optional[float]:
 # -----------------------------------------------------------------------------
 
 def normalize_reflection_data_mode(value: str) -> str:
-    mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    # A combo item's own friendly display text (see REFLECTION_DATA_MODE_DISPLAY_LABELS,
+    # used to populate the "HKL format" combo below) must normalize back to its
+    # own internal token, exactly like input_source_mode/metadata_source already
+    # do -- checked before the alias lowering, which would otherwise mangle the
+    # "·"/"σ" characters into something no alias recognizes.
+    raw = str(value or "")
+    for token, label in REFLECTION_DATA_MODE_DISPLAY_LABELS.items():
+        if raw == label:
+            return token
+    mode = raw.strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
         "auto": REFLECTION_DATA_MODE_SET_FROM_INFLIP,
         "auto_detect": REFLECTION_DATA_MODE_AUTO,
@@ -5483,6 +5496,30 @@ def create_phase_studio_context_banner(title: str, subtitle: str, badge: Optiona
     return banner
 
 
+def compute_safe_dialog_size(
+    preferred_width: int, preferred_height: int, *, parent: Optional[QWidget] = None
+) -> Tuple[int, int]:
+    """Cap a top-level dialog's preferred size to the available screen (never
+    QScreen.geometry(), which includes the taskbar) so bottom action rows
+    never end up off-screen or hidden behind it. Shared by the Jana2020
+    Wizard, the Jana2020 result selector, and similar Phase Studio dialogs
+    rather than each hard-coding its own dimensions."""
+    screen = None
+    probe = parent.window() if parent is not None and hasattr(parent, "window") else parent
+    handle = probe.windowHandle() if probe is not None else None
+    if handle is not None:
+        screen = handle.screen()
+    if screen is None:
+        app = QApplication.instance()
+        screen = app.primaryScreen() if app is not None else None
+    if screen is None:
+        return preferred_width, preferred_height
+    available = screen.availableGeometry()
+    safe_width = max(480, int(available.width() * 0.92))
+    safe_height = max(360, int(available.height() * 0.88))
+    return min(preferred_width, safe_width), min(preferred_height, safe_height)
+
+
 class WorkflowDiagram(QWidget):
     """Compact native-Qt overview of the optional reconstruction branches."""
 
@@ -6030,15 +6067,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "reflection_data_mode",
             "HKL format",
             [
-                REFLECTION_DATA_MODE_SET_FROM_INFLIP,
-                REFLECTION_DATA_MODE_INTENSITY,
-                REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
-                REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
-                REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
-                REFLECTION_DATA_MODE_INTENSITY_FWHM,
-                REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+                format_reflection_data_mode(REFLECTION_DATA_MODE_SET_FROM_INFLIP),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM),
             ],
-            REFLECTION_DATA_MODE_SET_FROM_INFLIP,
+            format_reflection_data_mode(REFLECTION_DATA_MODE_SET_FROM_INFLIP),
         )
         hkl_button_row = QHBoxLayout()
         self.test_hkl_btn = QPushButton("Validate HKL")
@@ -7581,7 +7618,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         run_is_idle = str(getattr(self, "_run_status", "READY")).upper() == "READY"
         if running and not pipeline_active and run_is_idle:
             self.progress_bar.setRange(0, 0)
-            self._set_overall_progress_text("HKL analysis...")
+            self._set_overall_progress_text("HKL analysis…")
         elif not running and not pipeline_active and run_is_idle:
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(0)
@@ -8726,7 +8763,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_progress.setValue(completed_stages)
         display_text = state.display_text()
         if self.stop_after_cycle.is_set():
-            stop_detail = "Stopping immediately..." if self.stop_now.is_set() else "Stopping after current cycle..."
+            stop_detail = "Stopping immediately…" if self.stop_now.is_set() else "Stopping after current cycle…"
             display_text = f"{display_text} · {stop_detail}"
         self.current_cycle_detail.setText(display_text)
         self.current_cycle_stage_counter.setText(
@@ -8797,7 +8834,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.status_badge.style().unpolish(self.status_badge)
             self.status_badge.style().polish(self.status_badge)
         self._update_action_states()
-        if hasattr(self, "canvas") and not getattr(self, "results", []):
+        # Refreshes only the metrics tabs' state-aware empty-state text (never
+        # overwrites real plotted data, since it's gated on there being no
+        # results yet); this was previously dead code checking a
+        # self.canvas attribute that is never actually set anywhere.
+        if hasattr(self, "metrics_canvases") and not getattr(self, "results", []):
             self._update_plot()
         if hasattr(self, "structure_canvas"):
             self._update_structure_views()
@@ -8834,7 +8875,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def request_stop_after_cycle(self) -> None:
         self.stop_after_cycle.set()
-        self._annotate_cycle_progress("Stopping after current cycle...")
+        self._annotate_cycle_progress("Stopping after current cycle…")
         self._update_action_states()
         self._show_stopping_badge()
         self.log("Stop after current cycle requested.", level="DETAIL")
@@ -8842,7 +8883,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def request_immediate_stop(self) -> None:
         self.stop_after_cycle.set()
         self.stop_now.set()
-        self._annotate_cycle_progress("Stopping immediately...")
+        self._annotate_cycle_progress("Stopping immediately…")
         self._update_action_states()
         self._show_stopping_badge()
         self.log("Immediate stop requested.", level="DETAIL")
@@ -9437,6 +9478,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         def col_available(getter) -> bool:
             return any(getter(r) not in (None, "") for r in self.results)
 
+        def fmt_count(value: object) -> str:
+            # Heavy-atom counts (count_heavy_atoms(): non-H/He atoms found in
+            # that cycle's own EDMA export -- the same quantity the structure
+            # preview's "N non-H/He atoms" caption reports) are integers even
+            # though stored as float; show them without a trailing ".000".
+            if value is None:
+                return "n/a"
+            try:
+                return f"{int(round(float(value))):,}"
+            except (TypeError, ValueError):
+                return "n/a"
+
         if map_source == "superflip":
             candidate_columns = [
                 ("Saved run", lambda r: r.superflip_saved_run, lambda v: "n/a" if v is None else str(int(v))),
@@ -9450,7 +9503,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ("Mean cycles", lambda r: r.superflip_mean_cycles, fmt),
                 ("Recall", lambda r: r.superflip_recall, fmt),
                 ("Precision", lambda r: r.superflip_precision, fmt),
-                ("Heavy atoms", lambda r: r.superflip_heavy_atom_count, fmt),
+                ("Heavy atoms", lambda r: r.superflip_heavy_atom_count, fmt_count),
             ]
             rfree_getter = lambda r: r.omit_superflip_rfree
             omit_getter = lambda r: r.omit_superflip_correlation
@@ -9462,7 +9515,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             candidate_columns = [
                 ("Recall", lambda r: r.deblur_recall, fmt),
                 ("Precision", lambda r: r.deblur_precision, fmt),
-                ("Heavy atoms", lambda r: r.deblur_heavy_atom_count, fmt),
+                ("Heavy atoms", lambda r: r.deblur_heavy_atom_count, fmt_count),
                 ("Map correlation", lambda r: r.recycle_map_correlation, fmt),
             ]
             rfree_getter = lambda r: r.omit_deblur_rfree
@@ -9524,12 +9577,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 range(len(self.results)),
                 key=lambda i: (scores[i] is None, scores[i] if scores[i] is not None else 0.0, i),
             )
+            # Standard competition ranking: equal scores share the same Rank,
+            # and the next distinct score's rank accounts for the tied rows
+            # it skipped past (1, 1, 3 -- not 1, 1, 2).
             rank_numbers: dict = {}
-            next_rank = 1
+            position = 0
+            previous_score: Optional[float] = None
             for i in order:
-                if scores[i] is not None:
-                    rank_numbers[i] = next_rank
-                    next_rank += 1
+                if scores[i] is None:
+                    continue
+                position += 1
+                if previous_score is None or scores[i] != previous_score:
+                    current_rank = position
+                    previous_score = scores[i]
+                rank_numbers[i] = current_rank
         else:
             order = list(range(len(self.results)))
             rank_numbers = {}
@@ -9539,10 +9600,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         headers += [h for h, _g, _f in ranking_columns]
         headers += [h for h, _g, _f in columns]
         cycle_col_index = headers.index("Cycle")
+        reference_available = bool(self.reference_atoms_for_plot)
 
         dialog = QDialog(self)
         dialog.setWindowTitle("Jana2020 result selection")
-        dialog.resize(1300, 720)
+        # Content-aware target size, capped to the available screen (spec
+        # sections 34/35/45): a one-cycle, no-reference run doesn't need
+        # anywhere near the same window as a multi-cycle, fully-ranked,
+        # reference-compared one.
+        simple_content = len(headers) <= 3 and not reference_available
+        if simple_content:
+            preferred_width, preferred_height = 1150, 680
+        elif len(headers) <= 3 or not reference_available:
+            preferred_width, preferred_height = 1250, 720
+        else:
+            preferred_width, preferred_height = 1400, 800
+        preferred_height = min(preferred_height + max(0, len(self.results) - 5) * 12, preferred_height + 150)
+        dialog.resize(*compute_safe_dialog_size(preferred_width, preferred_height, parent=self))
         outer_layout = QVBoxLayout(dialog)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
@@ -9561,33 +9635,45 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         layout.setSpacing(10)
         outer_layout.addWidget(content, 1)
 
-        source_label = QLabel(f"Result source: {'SharpED map' if map_source == 'deblurred' else 'Superflip map'}")
-        source_font = source_label.font()
-        source_font.setBold(True)
-        source_label.setFont(source_font)
-        layout.addWidget(source_label)
-
         if normalized_dims:
-            ranking_text = "Ranking: " + " + ".join(name for name, _values in normalized_dims)
+            ranking_summary = " + ".join(name for name, _values in normalized_dims)
+            if not rmsd_available and (rfree_available or omit_available):
+                ranking_summary += " (reference RMSD unavailable)"
+        elif len(self.results) <= 1:
+            ranking_summary = "Not applicable"
         else:
-            ranking_text = "Ranking: cycle order (no validation metrics available)"
-        header_lines = [ranking_text, f"Completed cycles: {len(self.results)}"]
-        if not rmsd_available and (rfree_available or omit_available):
-            header_lines.append("Reference RMSD unavailable")
-        header_label = QLabel("\n".join(header_lines))
-        header_label.setWordWrap(True)
-        header_label.setStyleSheet("color: #52658b;")
-        layout.addWidget(header_label)
+            ranking_summary = "Not available"
 
-        info = QLabel(
-            "Phase recycling finished. Select the cycle to hand back to Jana2020 -- the "
-            "table and structure preview reflect the map source already chosen in the "
-            "Jana2020 Wizard."
-        )
-        info.setWordWrap(True)
+        summary_form = QFormLayout()
+        summary_form.setContentsMargins(0, 0, 0, 0)
+        summary_form.setHorizontalSpacing(18)
+        summary_form.setVerticalSpacing(2)
+        summary_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        for label_text, value_text in (
+            ("Result source", "SharpED map" if map_source == "deblurred" else "Superflip map"),
+            ("Completed cycles", str(len(self.results))),
+            ("Ranking", ranking_summary),
+            ("Reference", "Available" if reference_available else "Not available"),
+        ):
+            value_label = QLabel(value_text)
+            value_font = value_label.font()
+            value_font.setBold(True)
+            value_label.setFont(value_font)
+            summary_form.addRow(label_text, value_label)
+        layout.addLayout(summary_form)
+
+        info = QLabel("Select a completed cycle for Jana2020 hand-off.")
         layout.addWidget(info)
+        info_secondary = QLabel("Result source was selected in the Jana2020 Wizard.")
+        info_secondary.setStyleSheet("color: #7183a6; font-style: italic;")
+        layout.addWidget(info_secondary)
+
+        table_section_label = QLabel("CANDIDATE CYCLES")
+        table_section_label.setObjectName("sectionLabel")
+        layout.addWidget(table_section_label)
 
         table = QTableWidget(len(self.results), len(headers))
+        table.setObjectName("diagnosticTable")
         table.setHorizontalHeaderLabels(headers)
         table.setAlternatingRowColors(True)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -9595,7 +9681,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.verticalHeader().setVisible(False)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        table.horizontalHeader().setStretchLastSection(False)
+        # A handful of compact columns would otherwise sit compressed against
+        # the left edge with the rest of the pane blank; stretch the last
+        # column to fill the viewport only when there is little content.
+        table.horizontalHeader().setStretchLastSection(len(headers) <= 3)
 
         class _NumericTableWidgetItem(QTableWidgetItem):
             """Sorts by an explicit numeric/string key instead of Qt's default
@@ -9623,9 +9712,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             table.setItem(display_row, col, item)
             return item
 
-        initial_result_idx = order[0] if ranking_active else self._recommended_handoff_index()
-        if not (0 <= initial_result_idx < len(self.results)):
-            initial_result_idx = order[0] if order else 0
+        # Without a validation ranking metric, no cycle is scientifically
+        # "recommended" -- the first (chronologically earliest) cycle is
+        # selected purely so a preview is shown, with no best/preferred
+        # framing (spec sections 24/25).
+        initial_result_idx = order[0] if order else 0
 
         for display_row, result_idx in enumerate(order):
             result = self.results[result_idx]
@@ -9634,13 +9725,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 rank = rank_numbers.get(result_idx)
                 add_cell(display_row, col, "n/a" if rank is None else str(rank), rank)
                 col += 1
-            cycle_item = add_cell(display_row, col, f"{int(result.cycle):03d}", int(result.cycle))
+            cycle_item = add_cell(display_row, col, str(int(result.cycle)), int(result.cycle))
             cycle_item.setData(Qt.UserRole, int(result.cycle))
-            if result_idx == initial_result_idx:
-                cycle_item.setToolTip(
-                    "Best-ranked cycle (lowest Selection score)." if ranking_active
-                    else "Recommended cycle (Phase Studio's existing hand-off heuristic)."
-                )
+            if ranking_active and result_idx == initial_result_idx:
+                cycle_item.setToolTip("Best-ranked cycle (lowest Selection score).")
             col += 1
             if ranking_active:
                 score = scores[result_idx]
@@ -9712,30 +9800,35 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             preview_figure.patch.set_facecolor("#ffffff")
             preview_host.structure_axes = []
             preview_host._structure_depth_artists = []
-            panels = [
-                (
-                    f"{source_title} · Cycle {int(result.cycle):03d}",
-                    preview_atoms_for(result),
-                    "Structure preview unavailable for this cycle",
-                ),
-                ("Reference", self.reference_atoms_for_plot, "Reference structure unavailable"),
-            ]
+            panels = [(
+                f"{source_title} · Cycle {int(result.cycle)}",
+                preview_atoms_for(result),
+                "Structure preview unavailable for this cycle",
+            )]
+            if reference_available:
+                panels.append(("Reference", self.reference_atoms_for_plot, "Reference structure unavailable"))
+            # With no atomic reference, a full second pane would just show
+            # "Reference structure unavailable" -- give the selected result the
+            # whole viewer instead of wasting half of it (spec sections 32/33).
+            column_count = len(panels)
+            x_positions = (0.5,) if column_count == 1 else (0.25, 0.75)
             metadata = []
             for idx, (_title, atoms, empty_text) in enumerate(panels, start=1):
-                ax = preview_figure.add_subplot(1, 2, idx, projection="3d")
+                ax = preview_figure.add_subplot(1, column_count, idx, projection="3d")
                 preview_host.structure_axes.append(ax)
                 metadata.append(preview_host._plot_structure_atoms(ax, atoms, empty_text))
-            for x_position, (title, _atoms, _empty_text) in zip((0.25, 0.75), panels):
+            for x_position, (title, _atoms, _empty_text) in zip(x_positions, panels):
                 preview_figure.text(
                     x_position, 0.96, title, ha="center", va="center",
                     fontsize=10, fontweight="bold", color="#001170",
                 )
-            for x_position, meta in zip((0.25, 0.75), metadata):
+            for x_position, meta in zip(x_positions, metadata):
                 preview_figure.text(x_position, 0.03, meta, ha="center", va="center", fontsize=7.5, color="#52658b")
-            preview_figure.add_artist(Line2D(
-                [0.5, 0.5], [0.08, 0.90], transform=preview_figure.transFigure,
-                color="#cbd7ea", linewidth=0.45, alpha=0.62,
-            ))
+            if column_count > 1:
+                preview_figure.add_artist(Line2D(
+                    [0.5, 0.5], [0.08, 0.90], transform=preview_figure.transFigure,
+                    color="#cbd7ea", linewidth=0.45, alpha=0.62,
+                ))
             preview_figure.subplots_adjust(left=0.01, right=0.99, bottom=0.09, top=0.90, wspace=0.04)
             preview_canvas.draw_idle()
 
@@ -9762,39 +9855,41 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         table.sortItems(0, Qt.AscendingOrder)
         table.selectRow(order.index(initial_result_idx) if initial_result_idx in order else 0)
 
+        viewer_section = QWidget()
+        viewer_section_layout = QVBoxLayout(viewer_section)
+        viewer_section_layout.setContentsMargins(0, 0, 0, 0)
+        viewer_section_layout.setSpacing(3)
+        viewer_section_label = QLabel("STRUCTURE COMPARISON")
+        viewer_section_label.setObjectName("sectionLabel")
+        viewer_section_layout.addWidget(viewer_section_label)
+        viewer_section_layout.addWidget(preview_canvas, 1)
+
         splitter = QSplitter(Qt.Horizontal)
         splitter.addWidget(table)
-        preview_container = QWidget()
-        preview_container_layout = QVBoxLayout(preview_container)
-        preview_container_layout.setContentsMargins(0, 0, 0, 0)
-        preview_container_layout.addWidget(preview_canvas, 1)
-        splitter.addWidget(preview_container)
-        splitter.setSizes([720, 540])
+        splitter.addWidget(viewer_section)
+        # A handful of columns doesn't need half the dialog; give the table
+        # only as much width as its content plausibly needs and let the
+        # structure viewer take the rest (spec section 30).
+        table_share = 0.32 if len(headers) <= 3 else 0.55
+        splitter_total = 1260
+        splitter.setSizes([
+            int(splitter_total * table_share), int(splitter_total * (1.0 - table_share))
+        ])
         layout.addWidget(splitter, 1)
 
         if ranking_active:
-            note_text = (
-                "Selection score is a relative ranking of completed cycles using the "
-                "available R_free, OMIT-map correlation and RMSD values -- lower is "
-                "better. It is a sorting aid only: it is not fed back into "
-                "reconstruction and does not change any map or metric. The "
-                "best-ranked cycle is selected initially; you can override it manually."
-            )
+            note_text = "Selection score combines available validation ranks; lower is better."
         else:
-            note_text = (
-                "No cross-validation metrics are available to rank cycles by, so the "
-                "initially selected cycle uses Phase Studio's existing Superflip-based "
-                "recommendation (best symmetry agreement, or reference match if "
-                "unavailable) regardless of the map source shown above. You can "
-                "override it manually."
-            )
+            note_text = "No validation metric is available for ranking. Select a cycle manually."
         note = QLabel(note_text)
+        note.setStyleSheet("color: #52658b;")
         note.setWordWrap(True)
         layout.addWidget(note)
 
         button_row = QHBoxLayout()
-        close_btn = QPushButton("Close / Return to Phase Studio")
+        close_btn = QPushButton("Return to Phase Studio")
         send_btn = QPushButton("Send to Jana2020")
+        send_btn.setObjectName("primaryButton")
         button_row.addWidget(close_btn)
         button_row.addStretch(1)
         button_row.addWidget(send_btn)
@@ -10178,8 +10273,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._structure_depth_artists.append(depth_artists)
         self._update_structure_depth_artist(depth_artists, self.structure_elev, self.structure_azim)
         shown = len(plot_atoms)
-        suffix = "" if shown == len(non_h_atoms) else f"; first {shown} heaviest shown"
-        return f"{len(non_h_atoms)} non-H/He atoms{suffix}"
+        suffix = "" if shown == len(non_h_atoms) else f" · displaying {shown:,} heaviest"
+        return f"{len(non_h_atoms):,} non-H/He atoms{suffix}"
 
     def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
         atom_fade = structure_depth_fade(
@@ -10568,13 +10663,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_overall_progress_text("Running")
         self._cycle_progress_state = None
         self.current_cycle_progress.setRange(0, 0)
-        self.current_cycle_detail.setText("Preparing pipeline...")
+        self.current_cycle_detail.setText("Preparing pipeline…")
         self.current_cycle_stage_counter.setText("Preparing")
         self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
-        self.run_btn.setText("Running...")
-        self._append_execution_log("Preparing validated pipeline inputs...", level="DETAIL")
+        self.run_btn.setText("Running…")
+        self._append_execution_log("Preparing validated pipeline inputs…", level="DETAIL")
         QApplication.processEvents()
         self.worker = threading.Thread(target=self.pipeline_worker, args=(cfg,), daemon=True)
         self.worker.start()
@@ -10603,12 +10698,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_overall_progress_text("Running")
         self._cycle_progress_state = None
         self.current_cycle_progress.setRange(0, 0)
-        self.current_cycle_detail.setText("Resuming pipeline...")
+        self.current_cycle_detail.setText("Resuming pipeline…")
         self.current_cycle_stage_counter.setText("Preparing")
         self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
-        self.run_btn.setText("Running...")
+        self.run_btn.setText("Running…")
         self._append_execution_log(
             f"Continuing pipeline from cycle {state.completed_cycles + 1} of {requested_cycles}, "
             "reusing the previous run's metadata, reflections and cycle feedback.",
