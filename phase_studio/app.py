@@ -7509,7 +7509,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             value = self.settings.value(f"inputs/{key}", None)
             if value is not None:
                 if key == "reflection_data_mode":
-                    value = normalize_reflection_data_mode(str(value))
+                    # The combo's items are the human-readable display labels
+                    # (see REFLECTION_DATA_MODE_DISPLAY_LABELS), not the raw
+                    # internal tokens, so a saved value -- whether an old raw
+                    # token from before that change or a display label saved
+                    # since -- must be normalized then re-formatted to match
+                    # an actual item, or findText() below fails to locate it
+                    # and the saved HKL format selection is silently lost.
+                    value = format_reflection_data_mode(normalize_reflection_data_mode(str(value)))
                 self._set_widget_value_from_string(widget, str(value))
 
         # Migrate legacy generic executable names to the Jana2020 installation
@@ -9036,7 +9043,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("plimit_deblur", "0.5")
             set_value("map_export_format", "xplor")
         elif "atomic" in name:
-            set_value("reflection_data_mode", REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA)
+            set_value("reflection_data_mode", format_reflection_data_mode(REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA))
             set_value("modelfile_source", "deblurred_xplor")
             set_value("plimit_superflip", "3.0")
             set_value("plimit_deblur", "3.0")
@@ -9044,19 +9051,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("bestdensities_metric", "symmetry")
             set_value("map_export_format", "jana")
         elif "medium" in name:
-            set_value("reflection_data_mode", REFLECTION_DATA_MODE_AUTO)
+            set_value("reflection_data_mode", format_reflection_data_mode(REFLECTION_DATA_MODE_AUTO))
             set_value("modelfile_source", "deblurred_edma_cif")
             set_value("plimit_superflip", "0.5")
             set_value("plimit_deblur", "0.5")
             set_value("resolution_d_min", "0.0")
         elif "small" in name:
-            set_value("reflection_data_mode", REFLECTION_DATA_MODE_INTENSITY)
+            set_value("reflection_data_mode", format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY))
             set_value("modelfile_source", "deblurred_edma_cif")
             set_value("plimit_superflip", "0.5")
             set_value("plimit_deblur", "0.5")
             set_value("bestdensities_metric", "rvalue")
         elif "inorganic" in name:
-            set_value("reflection_data_mode", REFLECTION_DATA_MODE_AUTO)
+            set_value("reflection_data_mode", format_reflection_data_mode(REFLECTION_DATA_MODE_AUTO))
             set_value("modelfile_source", "deblurred_edma_cif")
             set_value("plimit_superflip", "1.0")
             set_value("plimit_deblur", "1.0")
@@ -10846,8 +10853,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.superflip_referencefile is not None:
                     self.log(f"  Reference: {cfg.superflip_referencefile}")
             self.log(f"  HKL: {cfg.hkl}")
+            # In pure Jana .inflip mode the HKL format control is disabled and
+            # its stored value ignored (dataformat always comes straight from
+            # the .inflip file) -- force AUTO here too so a stale/corrupted
+            # widget value can never override that, regardless of what is
+            # still sitting in cfg.reflection_data_mode.
+            effective_configured_mode = (
+                REFLECTION_DATA_MODE_AUTO if mode == INPUT_MODE_INFLIP else cfg.reflection_data_mode
+            )
             configured_data_mode = resolve_reflection_data_mode_from_sources(
-                cfg.hkl, cfg.reflection_data_mode, cfg.jana_inflip
+                cfg.hkl, effective_configured_mode, cfg.jana_inflip
             )
             value_col, sigma_col, include_000 = reflection_columns_for_mode(configured_data_mode)
             refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
