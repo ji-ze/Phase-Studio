@@ -416,7 +416,7 @@ LOG_DETAIL_PREFIXES = (
     "prepared hkl",
     "standardized hkl export",
     "superflip map:",
-    "deblurred map:",
+    "sharped map:",
     "removed stale superflip",
     "xplor map normalized",
     "cif-only exclude settings",
@@ -727,6 +727,68 @@ class CycleProgressState:
             # _emit_cycle_progress() call site individually.
             parts.append(self.detail[:1].upper() + self.detail[1:])
         return " · ".join(part for part in parts if part)
+
+
+@dataclass(frozen=True)
+class SuperflipProgress:
+    """One live progress observation parsed from Superflip's own stdout.
+
+    repeat/repeat_total describe Superflip's internal repeatmode attempt
+    counter -- NOT the Phase Studio workflow cycle ("Cycle N of M") and NOT
+    the final "Saved run" selected-density index. phase is "running" while a
+    repeat is in progress and "completed" once Superflip reports its last run
+    finished."""
+
+    repeat: Optional[int] = None
+    repeat_total: Optional[int] = None
+    phase: str = "running"
+
+
+class SuperflipRepeatProgressParser:
+    """Best-effort, defensive line-by-line parser for Superflip's repeatmode
+    progress, e.g.:
+
+        Starting iteration:                  (first repeat begins)
+        Run number  1. Still  9 to go.       (repeat 1 finished, repeat 2 begins)
+        ...
+        Last run from 10 completed.          (final repeat finished)
+
+    repeat_total is always the EFFECTIVE repeatmode Phase Studio itself wrote
+    into the current .inflip (never parsed from the log), per the requirement
+    that live progress describe the running calculation, not just the GUI
+    setting. Unrecognized lines are ignored; this parser never raises."""
+
+    _RUN_NUMBER_RE = re.compile(r"run\s+number\s+(\d+)\s*\.\s*still\s+(\d+)\s+to\s+go", re.IGNORECASE)
+    _LAST_RUN_RE = re.compile(r"last\s+run\s+from\s+(\d+)\s+completed", re.IGNORECASE)
+
+    def __init__(self, repeat_total: int) -> None:
+        self.repeat_total = max(1, int(repeat_total))
+        self.completed_runs = 0
+        self.saw_progress = False
+
+    def feed(self, line: str) -> Optional[SuperflipProgress]:
+        try:
+            text = str(line or "")
+            if not text.strip():
+                return None
+            if "starting iteration:" in text.lower():
+                self.saw_progress = True
+                repeat = min(self.completed_runs + 1, self.repeat_total)
+                return SuperflipProgress(repeat=repeat, repeat_total=self.repeat_total, phase="running")
+            match = self._RUN_NUMBER_RE.search(text)
+            if match:
+                self.saw_progress = True
+                self.completed_runs = int(match.group(1))
+                repeat = min(self.completed_runs + 1, self.repeat_total)
+                return SuperflipProgress(repeat=repeat, repeat_total=self.repeat_total, phase="running")
+            match = self._LAST_RUN_RE.search(text)
+            if match:
+                self.saw_progress = True
+                self.completed_runs = int(match.group(1))
+                return SuperflipProgress(repeat=self.repeat_total, repeat_total=self.repeat_total, phase="completed")
+        except Exception:
+            return None
+        return None
 
 
 def cycle_progress_stages(cfg: object) -> List[str]:
@@ -1437,7 +1499,7 @@ def reference_context_with_external_atom_sites(
 ) -> ReferenceContext:
     """Use atom sites from an explicit reference CIF without replacing Jana HKL.
 
-    In Jana .inflip mode, Phase Studio can synthesize a metadata-only CIF from
+    In Jana2020 .inflip mode, Phase Studio can synthesize a metadata-only CIF from
     cell/spacegroup/composition.  That file is useful for setting up the run,
     but it has zero atom sites and is invalid as a Superflip reference density.
     When the user explicitly selects a real CIF as Superflip referencefile, keep
@@ -3117,6 +3179,43 @@ def normalize_modelfile_source(value: str) -> str:
         return "deblurred_xplor"
     return "deblurred_edma_cif"
 
+def make_run_scoped_dedup_log(
+    base_log: Callable[..., None],
+    seen: set,
+    dedupe_prefixes: Tuple[str, ...],
+) -> Callable[..., None]:
+    """Wrap a log callable so a message starting with one of dedupe_prefixes
+    is logged at its normal level only the first time it is seen (per
+    `seen`, a plain set the caller creates fresh once per workflow run);
+    every later, byte-identical occurrence is demoted to DETAIL instead of
+    repeating at full prominence once per cycle. Every other message, and
+    every UNIQUE occurrence of a deduped one, passes through unchanged --
+    nothing is ever suppressed, only its repeat prominence."""
+
+    def wrapped(message: object, *args, **kwargs) -> None:
+        text = str(message)
+        if text.startswith(dedupe_prefixes):
+            if text in seen:
+                kwargs.setdefault("level", "DETAIL")
+            else:
+                seen.add(text)
+        base_log(message, *args, **kwargs)
+
+    return wrapped
+
+def modelfile_source_display_label(value: str) -> str:
+    """Canonical user-facing text for a Next-cycle model token -- the same
+    labels the GUI combo itself shows (see _add_combo_with_values() call
+    site), so a normal-facing log line never leaks the internal token."""
+    token = normalize_modelfile_source(value)
+    if token == "none":
+        return "None"
+    if token == "superflip_xplor":
+        return f"{result_map_label('superflip')} (XPLOR)"
+    if token == "deblurred_xplor":
+        return f"{result_map_label('deblurred')} (XPLOR)"
+    return f"{result_structure_label('deblurred')} (EDMA CIF)"
+
 def normalize_reconstruction_mode(value: str) -> str:
     """Canonical internal code behind the "Phasing method" combo. "superflip" (GUI
     label "Superflip") is the default charge-flipping cycle, unchanged. The other two
@@ -3422,9 +3521,9 @@ def blend_xplor_maps(previous_model: Path, deblurred_map: Path, output_map: Path
     old_map = read_xplor_map(previous_model)
     new_map = read_xplor_map(deblurred_map)
     if old_map.grid != new_map.grid or old_map.axis_order.strip().upper() != new_map.axis_order.strip().upper():
-        raise RuntimeError("Cannot damp XPLOR modelfile: previous model and deblurred map have different grids")
+        raise RuntimeError(f"Cannot damp XPLOR modelfile: previous model and {result_map_label('deblurred').lower()} have different grids")
     if len(old_map.cell) != len(new_map.cell) or any(abs(a - b) > 1e-3 for a, b in zip(old_map.cell, new_map.cell)):
-        raise RuntimeError("Cannot damp XPLOR modelfile: previous model and deblurred map have different cells")
+        raise RuntimeError(f"Cannot damp XPLOR modelfile: previous model and {result_map_label('deblurred').lower()} have different cells")
     blended = ((factor - 1.0) * old_map.data + new_map.data) / factor
     out = XplorMap(
         title=f"damped model factor {factor:g}",
@@ -3545,7 +3644,7 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Pat
                         pass
             reflections.append(record)
     if not reflections:
-        raise ValueError(f"No fbegin/endf reflection block was found in Jana .inflip: {inflip_path}")
+        raise ValueError(f"No fbegin/endf reflection block was found in Jana2020 .inflip: {inflip_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
     out = output_dir / f"{Path(inflip_path).stem}_embedded_reflections.hkl"
     out.write_text(
@@ -3591,16 +3690,16 @@ def parse_inflip_crystallography(inflip_path: Path) -> Tuple[gemmi.UnitCell, gem
         elif key == "composition" and len(parts) > 1:
             composition = " ".join(parts[1:]).strip() or composition
     if cell_values is None:
-        raise ValueError(f"Jana .inflip does not contain a readable cell keyword: {inflip_path}")
+        raise ValueError(f"Jana2020 .inflip does not contain a readable cell keyword: {inflip_path}")
     if not hm:
-        raise ValueError(f"Jana .inflip does not contain a spacegroup keyword: {inflip_path}")
+        raise ValueError(f"Jana2020 .inflip does not contain a spacegroup keyword: {inflip_path}")
     if not composition:
-        raise ValueError(f"Jana .inflip does not contain a composition keyword: {inflip_path}")
+        raise ValueError(f"Jana2020 .inflip does not contain a composition keyword: {inflip_path}")
     sg = get_spacegroup_from_number(hm) if re.fullmatch(r"\d+(?:\.0+)?", str(hm).strip()) else None
     if sg is None:
         sg = resolve_spacegroup_symbol(hm)
     if sg is None:
-        raise ValueError(f"Jana .inflip contains an unrecognized space group: {hm}")
+        raise ValueError(f"Jana2020 .inflip contains an unrecognized space group: {hm}")
     low = hm.lower().replace("'", "").replace('"', "").replace(" ", "")
     if "21/n" in low:
         hm_out = "P 21/n"
@@ -3629,7 +3728,7 @@ def resolve_crystal_metadata(
     resolved_source = normalize_metadata_source(source)
     if resolved_source == METADATA_SOURCE_INFLIP:
         if jana_inflip is None or not Path(jana_inflip).is_file():
-            raise ValueError("Crystal metadata is incomplete. Select a readable Jana .inflip file.")
+            raise ValueError("Crystal metadata is incomplete. Select a readable Jana2020 .inflip file.")
         path = Path(jana_inflip).expanduser().resolve()
         cell, spacegroup, hm, composition = parse_inflip_crystallography(path)
         return CrystalMetadata(cell, spacegroup, hm, composition, resolved_source, path)
@@ -3814,7 +3913,7 @@ def return_phase_studio_result_to_jana(
     map_source: str = "deblurred",
 ) -> None:
     if not cfg.jana_return_to_jana or cfg.jana_inflip is None:
-        raise RuntimeError("Jana2020 hand-off requires a Jana .inflip primary input.")
+        raise RuntimeError("Jana2020 hand-off requires a Jana2020 .inflip primary input.")
     inflip_path = Path(cfg.jana_inflip)
     if not inflip_path.is_file():
         raise RuntimeError(f"Jana2020 .inflip no longer exists: {inflip_path}")
@@ -4464,7 +4563,18 @@ def run_command(
     timeout: Optional[int] = None,
     stop_event: Optional[threading.Event] = None,
     allow_foreground: bool = False,
+    on_output_line: Optional[Callable[[str], None]] = None,
 ) -> int:
+    """Run an external command, writing its complete raw stdout/stderr to
+    log_path unchanged, byte for byte (including any bare '\\r' console
+    overwrite sequences some tools emit) -- this is a live-streaming reader,
+    not a filter, and never alters what a diagnostic log-file comparison
+    would see.
+
+    on_output_line, when given, is called with each decoded line as it
+    arrives WHILE the process is still running (best-effort progress
+    observation only; a raised exception from it is swallowed so a parsing
+    bug can never fail the run or block stop_event/timeout handling)."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     display_cmd = [Path(str(cmd[0])).name] if cmd else []
     for argument in cmd[1:]:
@@ -4475,9 +4585,17 @@ def run_command(
         except Exception:
             display_cmd.append(text)
     log("  $ " + " ".join(display_cmd))
-    with log_path.open("w", encoding="utf-8", errors="replace") as lf:
+    with log_path.open("wb") as lf:
+        def relay(raw_bytes: bytes) -> None:
+            lf.write(raw_bytes)
+            if on_output_line is not None:
+                try:
+                    on_output_line(raw_bytes.decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+
         try:
-            proc = subprocess.Popen(list(cmd), cwd=str(cwd), stdout=lf, stderr=subprocess.STDOUT, text=True)
+            proc = subprocess.Popen(list(cmd), cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if allow_foreground:
                 _allow_external_process_foreground(proc.pid)
         except OSError as exc:
@@ -4492,24 +4610,82 @@ def run_command(
                 )
             else:
                 message = f"Could not start external command: {' '.join(str(x) for x in cmd)}\n{exc}"
-            lf.write(message + "\n")
+            lf.write((message + "\n").encode("utf-8", errors="replace"))
             raise RuntimeError(message) from exc
+
+        # A dedicated reader thread drains the pipe with blocking readline()
+        # calls -- pipes/threads are used instead of select()/pty so this
+        # works identically on a Windows PyInstaller build. The main loop
+        # below never blocks on it (queue.get(timeout=...)), so stop_event
+        # and the timeout deadline stay checked at the same ~0.2s cadence as
+        # before, regardless of how much (or how little) output arrives.
+        line_queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
+
+        def reader() -> None:
+            try:
+                stream = proc.stdout
+                if stream is not None:
+                    for raw_bytes in iter(stream.readline, b""):
+                        line_queue.put(raw_bytes)
+            except Exception:
+                pass
+            finally:
+                line_queue.put(None)
+
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+
         deadline = None if timeout is None else time.monotonic() + float(timeout)
+        reader_done = False
         while proc.poll() is None:
             if stop_event is not None and stop_event.is_set():
-                lf.write("\nImmediate stop requested by user.\n")
+                lf.write(b"\nImmediate stop requested by user.\n")
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=5)
+                while True:
+                    try:
+                        raw_bytes = line_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if raw_bytes is None:
+                        break
+                    relay(raw_bytes)
                 raise RuntimeError(f"Immediate stop requested; terminated command: {' '.join(str(x) for x in cmd)}")
             if deadline is not None and time.monotonic() > deadline:
                 proc.kill()
                 proc.wait(timeout=5)
                 raise RuntimeError(f"Command timed out after {timeout} seconds: {' '.join(str(x) for x in cmd)}")
-            time.sleep(0.2)
+            drained_any = False
+            while True:
+                try:
+                    raw_bytes = line_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if raw_bytes is None:
+                    reader_done = True
+                    break
+                relay(raw_bytes)
+                drained_any = True
+            if not drained_any:
+                time.sleep(0.2)
+        # The process has exited; drain whatever the reader thread already
+        # queued (or is about to finish queueing), bounded so a stalled
+        # reader can never hang command completion.
+        if not reader_done:
+            drain_deadline = time.monotonic() + 5.0
+            while time.monotonic() < drain_deadline:
+                try:
+                    raw_bytes = line_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if raw_bytes is None:
+                    break
+                relay(raw_bytes)
+        reader_thread.join(timeout=2.0)
     if proc.returncode != 0:
         tail = ""
         try:
@@ -4556,7 +4732,7 @@ def warn_if_windows_unsigned_exe(exe: str, label: str) -> str:
         pass
     return ""
 
-def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext, observed_hkl: Path, model_file: Optional[Path], reference_file: Optional[Path], reference_format: str, superflip_exe: str, perform_algorithm: str, output_format: str, write_auxiliary_outputs: bool, export_superflip_xplor: bool, export_superflip_ccp4: bool, export_superflip_jana: bool, voxel: str, bestdensities_count: int, bestdensities_metric: str, bestdensities_symmetry: bool, polish: bool, maxcycles: int, repeatmode: int, randomseed: str, delta: str, weakratio: str, biso: str, reflection_data_mode: str, normalize: str, nresshells: int, missing: str, searchsymmetry: str, derivesymmetry: str, electrons: str, dataitemwidths: str, extra_superflip_keywords: str, log: Callable[[str], None], stop_event: Optional[threading.Event] = None) -> Path:
+def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext, observed_hkl: Path, model_file: Optional[Path], reference_file: Optional[Path], reference_format: str, superflip_exe: str, perform_algorithm: str, output_format: str, write_auxiliary_outputs: bool, export_superflip_xplor: bool, export_superflip_ccp4: bool, export_superflip_jana: bool, voxel: str, bestdensities_count: int, bestdensities_metric: str, bestdensities_symmetry: bool, polish: bool, maxcycles: int, repeatmode: int, randomseed: str, delta: str, weakratio: str, biso: str, reflection_data_mode: str, normalize: str, nresshells: int, missing: str, searchsymmetry: str, derivesymmetry: str, electrons: str, dataitemwidths: str, extra_superflip_keywords: str, log: Callable[[str], None], stop_event: Optional[threading.Event] = None, on_output_line: Optional[Callable[[str], None]] = None) -> Path:
     cycle_dir.mkdir(parents=True, exist_ok=True)
     output_name = f"{prefix}.xplor"
     inp = cycle_dir / f"{prefix}.inflip"
@@ -4592,7 +4768,7 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
     if reference_file is not None:
         suffix = ".xplor" if str(reference_format or "").strip().lower() == "xplor" else reference_file.suffix.lower()
         # Keep the Superflip referencefile separate from ref_ctx.work_ref_cif.
-        # In Jana .inflip mode ref_ctx.work_ref_cif can be a synthetic metadata-only CIF
+        # In Jana2020 .inflip mode ref_ctx.work_ref_cif can be a synthetic metadata-only CIF
         # named referencefile.cif with zero atoms.  Using the same filename would overwrite
         # the explicit user-selected Superflip reference CIF and Superflip would stop with
         # "no atoms found in the CIF file".
@@ -4620,6 +4796,7 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
         log=log,
         stop_event=stop_event,
         allow_foreground=True,
+        on_output_line=on_output_line,
     )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
@@ -5334,7 +5511,7 @@ class PathRow(QWidget):
         self.edit.setToolTip(tooltip)
 
 INPUT_TOOLTIPS = {
-    "input_source_mode": "Choose whether reflections come from Jana .inflip, selected overrides, or an external HKL file.",
+    "input_source_mode": "Choose whether reflections come from Jana2020 .inflip, selected overrides, or an external HKL file.",
     "jana_inflip": "Jana2020 Superflip input file. In Jana modes its fbegin/endf reflection block is the default HKL source, and its cell/space-group/composition keywords can provide the reference metadata.",
     "hkl": "External reflection file. In Jana override mode it replaces only the fbegin/endf reflection block; in external mode it is the required reflection source.",
     "metadata_source": "Authoritative source for unit cell, space group and composition.",
@@ -5367,11 +5544,11 @@ INPUT_TOOLTIPS = {
     "extra_edma_keywords": "Additional raw EDMA keyword lines appended to the generated EDMA input. Use this for documented EDMA options not exposed above.",
     "damping_factor": "Inverse XPLOR damping value 1/x. 1.0 means no damping; 0.5 is equivalent to the previous factor 2.0; 0.25 is equivalent to factor 4.0. Disabled/ignored for CIF or none.",
     "modelfile_source": "Authoritative source for cycle 2 and later. none forces the run to one cycle; superflip_xplor cycles without SharpED deblurring; deblurred_xplor uses the SharpED XPLOR map; deblurred_edma_cif ignores XPLOR damping.",
-    "reconstruction_mode": "Superflip runs the standard charge-flipping cycle every cycle (unchanged default). '1st Superflip, then SharpED (beta)' runs Superflip only once, then each cycle deblurs with SharpED, reads phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle; it does not work well with some models. 'SharpED (experimental)' skips Superflip entirely and starts cycle 1 from |Fobs| with independent random phases; it does not work yet and is intended for development, not production use. Hidden unless 'Show beta and experimental features' is enabled on Advanced -> Setup.",
+    "reconstruction_mode": "Superflip runs the standard charge-flipping cycle every cycle (unchanged default). '1st Superflip, then SharpED (beta)' runs Superflip only once, then each cycle deblurs with SharpED, reads phi_calc by FFT from that SharpED map for every measured hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle; it does not work well with some models. 'SharpED (experimental)' skips Superflip entirely and starts cycle 1 from |Fobs| with independent random phases; it does not work yet and is intended for development, not production use. Hidden unless 'Show beta and experimental features' is enabled on Advanced -> Setup.",
     "run_edma_recycle_final": "Only used by the '1st Superflip, then SharpED (beta)' and 'SharpED (experimental)' phasing methods: run EDMA peak extraction and structure export once, on the final cycle's |Fobs|+phi_calc map.",
     "exclude_atoms": "Optional atom labels to remove from CIF modelfiles before the next Superflip cycle. Use comma, semicolon or whitespace separation.",
     "run_edma_superflip": "Run EDMA peak search on the raw Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
-    "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
+    "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the SharpED map is a copy of the Superflip map.",
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
     "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip validation and SharpED validation tabs' omit-map correlation series (full map vs. omit map). Roughly doubles Superflip/SharpED time per cycle.",
@@ -6630,7 +6807,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         hkl_button_row = QHBoxLayout()
         self.test_hkl_btn = QPushButton("Validate HKL")
         self.analyze_hkl_btn = QPushButton("Analyze completeness")
-        self.test_hkl_btn.setToolTip("Parse the selected HKL or Jana .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
+        self.test_hkl_btn.setToolTip("Parse the selected HKL or Jana2020 .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
         self.analyze_hkl_btn.setToolTip("Open completeness and data-statistics plots for the selected HKL data.")
         self.test_hkl_btn.clicked.connect(self.test_hkl_load_dialog)
         self.analyze_hkl_btn.clicked.connect(self.open_hkl_completeness_dialog)
@@ -6832,7 +7009,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "Phasing method",
             "Superflip is the standard iterative charge-flipping cycle (unchanged). "
             "1st Superflip, then SharpED (beta) runs Superflip only once, then each cycle deblurs the previous map with "
-            "SharpED, calculates phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map "
+            "SharpED, calculates phi_calc by FFT from that SharpED map for every measured hkl, and recomposes a map "
             "from |Fobs| + phi_calc for the next cycle's SharpED input. "
             "SharpED (experimental) skips Superflip entirely: cycle 1 starts from |Fobs| with independent random phases instead."
         )
@@ -6927,7 +7104,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         powder_feedback_form.addRow("", settings_callout(
             "Note",
             "Only applies to reflections with an FWHM value (hkl I/F fwhm data). Wavelength is auto-detected -- if "
-            "left at 0 -- from the Jana .inflip file (dataformat's lambda/wavelength line), or otherwise from the "
+            "left at 0 -- from the Jana2020 .inflip file (dataformat's lambda/wavelength line), or otherwise from the "
             "reference file's _diffrn_radiation_wavelength; enter it manually if neither is available. Reflections "
             "whose Bragg peaks overlap -- delta(2theta) below Separation factor times the mean of their FWHM -- "
             "have their combined observed intensity redistributed between them using intensities calculated by FFT "
@@ -6970,7 +7147,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         setup_help_layout = add_help_section(basic_help_tab, "setup", "Systematic setup guide", """
             <h3>1. Select the input</h3>
             <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
-            <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
+            <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana2020 .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
             <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
             <h3>2. Choose a reconstruction preset</h3>
             <p><b>Workflow preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
@@ -6995,13 +7172,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         add_back_to_contents(setup_help_layout)
         input_help_layout = add_help_section(basic_help_tab, "input", "Input reference", """
             <h3>Data input</h3>
-            <p><b>Input mode</b> chooses the reflection source: <b>Jana .inflip</b>, <b>Jana .inflip with overrides</b>, or <b>External HKL</b>. In Jana modes, the .inflip file's fbegin/endf block is the default HKL source and its cell/space-group/composition keywords can provide crystallographic metadata; External mode uses reflection data loaded independently of Jana2020 and requires metadata from another source.</p>
+            <p><b>Input mode</b> chooses the reflection source: <b>Jana2020 .inflip</b>, <b>Jana2020 .inflip with overrides</b>, or <b>External HKL</b>. In Jana modes, the .inflip file's fbegin/endf block is the default HKL source and its cell/space-group/composition keywords can provide crystallographic metadata; External mode uses reflection data loaded independently of Jana2020 and requires metadata from another source.</p>
             <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
             <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
             <p><b>HKL format</b> is the exact column order of the reflection data. <code>set from inflip</code> imports the format from Jana, including a <code>dataformat ... fwhm</code> line; the other modes accept intensity or amplitude followed by sigma, optionally with a phase column in degrees before sigma. <b>hkl I fwhm</b> and <b>hkl F fwhm</b> are for data whose second column is a peak-shape FWHM (e.g. from a Le Bail powder extraction) rather than a genuine uncertainty -- Validate HKL and Analyze completeness relabel sigma-based columns and statistics accordingly (I/FWHM instead of I/&sigma;(I)) and hide the I/&sigma;(I)=3 significance threshold, which does not apply to FWHM data.</p>
             <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
             <h3>Crystal metadata</h3>
-            <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
+            <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana2020 .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
             <p>When <b>Manual</b> is selected: <b>a, b, c</b> (&Aring;) and <b>alpha, beta, gamma</b> (&deg;) are the unit-cell parameters; <b>Number</b> (1-230) or <b>Symbol</b> identifies the space group; <b>Composition</b> uses Superflip syntax, for example <code>Ag196 S108 O40 B1000</code>.</p>
             <h3>Reference and initial model</h3>
             <p><b>Reference file</b> is an optional external reference: CIF/INS/RES files can supply metadata and atom sites used for comparison metrics; Jana/XPLOR/CCP4 maps can serve as a Superflip reference density (referencefile keyword), which also anchors the reciprocal-space origin from cycle 2 onward when no explicit reference is chosen.</p>
@@ -7405,6 +7582,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_detail.setObjectName("currentCycleDetail")
         self.current_cycle_detail.setWordWrap(True)
         run_status_layout.addWidget(self.current_cycle_detail)
+        # Secondary, subordinate line for Superflip's own live repeatmode
+        # progress (e.g. "Superflip repeat 17 of 50"). Hidden whenever there
+        # is nothing live to show: repeatmode==1, a non-Superflip stage, or
+        # between cycles -- see _apply_cycle_progress_state().
+        self.superflip_repeat_detail = QLabel("")
+        self.superflip_repeat_detail.setObjectName("superflipRepeatDetail")
+        self.superflip_repeat_detail.setWordWrap(True)
+        self.superflip_repeat_detail.setVisible(False)
+        run_status_layout.addWidget(self.superflip_repeat_detail)
+        self.superflip_repeat_progress = QProgressBar()
+        self.superflip_repeat_progress.setObjectName("superflipRepeatProgress")
+        self.superflip_repeat_progress.setRange(0, 1)
+        self.superflip_repeat_progress.setValue(0)
+        self.superflip_repeat_progress.setTextVisible(False)
+        self.superflip_repeat_progress.setFixedHeight(6)
+        self.superflip_repeat_progress.setToolTip("Superflip's own repeatmode attempt counter for the running Superflip stage -- subordinate to the stage progress above.")
+        self.superflip_repeat_progress.setVisible(False)
+        run_status_layout.addWidget(self.superflip_repeat_progress)
         self.current_cycle_progress = QProgressBar()
         self.current_cycle_progress.setObjectName("currentCycleProgress")
         self.current_cycle_progress.setRange(0, 1)
@@ -7894,7 +8089,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("symmetrize_deblurred_map", "Ignored: symmetry averaging is not part of the selected Phasing method."),
             ("run_edma_superflip", "Ignored: EDMA after the Superflip map is not part of the selected Phasing method."),
             ("run_sharped", "Ignored: the selected Phasing method always deblurs with SharpED every cycle."),
-            ("run_edma_deblurred", "Ignored: EDMA after the deblurred map is not part of the selected Phasing method; use Run EDMA on final map instead."),
+            ("run_edma_deblurred", "Ignored: EDMA after the SharpED map is not part of the selected Phasing method; use Run EDMA on final map instead."),
             ("compute_omit_maps", "Ignored: omit maps are only computed for the standard Superflip cycle."),
         ):
             widget = self.inputs.get(key)
@@ -8126,7 +8321,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         reflection_data_mode_widget = self.inputs.get("reflection_data_mode")
         if hasattr(reflection_data_mode_widget, "setToolTip"):
             reflection_data_mode_widget.setToolTip(  # type: ignore[attr-defined]
-                "Ignored: the dataformat keyword is read directly from the Jana .inflip file."
+                "Ignored: the dataformat keyword is read directly from the Jana2020 .inflip file."
                 if not reflection_data_mode_enabled else INPUT_TOOLTIPS.get("reflection_data_mode", "")
             )
         self._sync_metadata_source_widgets()
@@ -8167,7 +8362,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if isinstance(widget, QTextEdit):
             return widget.toPlainText()
         if isinstance(widget, QComboBox):
-            return widget.currentText()
+            # Internal-token combos (e.g. Next-cycle model) store the saved
+            # token as Qt item data, distinct from the display text shown to
+            # the user -- see _add_combo_with_values(). Combos whose items
+            # are their own value simply have no data on the current item
+            # and fall through to the display text as before.
+            data = widget.currentData()
+            return str(data) if data is not None else widget.currentText()
         if isinstance(widget, QCheckBox):
             return "true" if widget.isChecked() else "false"
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
@@ -8347,12 +8548,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         use_inflip_hkl = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
         if use_inflip_hkl:
             if jana_path is None or not jana_path.is_file():
-                raise FileNotFoundError("Jana .inflip is required to test or analyze embedded HKL data.")
+                raise FileNotFoundError("Jana2020 .inflip is required to test or analyze embedded HKL data.")
             hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
             source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
         else:
             if not request.hkl_text:
-                raise FileNotFoundError("Select an external HKL file or a Jana .inflip with embedded reflections.")
+                raise FileNotFoundError("Select an external HKL file or a Jana2020 .inflip with embedded reflections.")
             hkl_path = Path(request.hkl_text).expanduser().resolve()
             if not hkl_path.is_file():
                 raise FileNotFoundError(f"HKL file not found: {hkl_path}")
@@ -9438,6 +9639,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_stage_counter.setText("Idle")
         self.current_cycle_progress.setRange(0, 1)
         self.current_cycle_progress.setValue(0)
+        self._apply_superflip_repeat_state(None)
         self._set_run_status("Ready")
         if hasattr(self, "handoff_btn"):
             self.handoff_btn.setEnabled(False)
@@ -9562,6 +9764,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_stage_counter.setText(
             "Completed" if state.complete else f"Stage {state.stage_index} of {stage_total}"
         )
+        self._apply_superflip_repeat_state(state)
+
+    def _apply_superflip_repeat_state(self, state: Optional[CycleProgressState]) -> None:
+        sub_total = None if state is None else state.sub_total
+        sub_index = None if state is None else state.sub_index
+        if state is None or state.complete or sub_total is None or sub_index is None or int(sub_total) <= 1:
+            self.superflip_repeat_detail.setVisible(False)
+            self.superflip_repeat_progress.setVisible(False)
+            return
+        sub_total = int(sub_total)
+        sub_index = max(1, min(int(sub_index), sub_total))
+        self.superflip_repeat_detail.setText(f"Superflip repeat {sub_index} of {sub_total}")
+        self.superflip_repeat_detail.setVisible(True)
+        self.superflip_repeat_progress.setRange(0, sub_total)
+        self.superflip_repeat_progress.setValue(sub_index)
+        self.superflip_repeat_progress.setVisible(True)
 
     def _annotate_cycle_progress(self, detail: str) -> None:
         state = self._cycle_progress_state
@@ -9574,6 +9792,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _set_terminal_cycle_state(self, terminal: str) -> None:
         """Preserve the last reached stage without retaining active-state wording."""
         state = self._cycle_progress_state
+        self._apply_superflip_repeat_state(None)
         if state is None:
             self.current_cycle_progress.setRange(0, 1)
             self.current_cycle_progress.setValue(0)
@@ -9962,6 +10181,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.current_cycle_progress.setRange(0, 0)
                     self.current_cycle_detail.setText(f"Cycle 1 of {total} · Preparing cycle")
                     self.current_cycle_stage_counter.setText("Preparing")
+                    self._apply_superflip_repeat_state(None)
                 elif kind == "cycle_progress":
                     self._apply_cycle_progress_state(payload)  # type: ignore[arg-type]
                 elif kind == "progress":
@@ -9991,7 +10211,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.run_btn.setEnabled(True)
                     self.run_btn.setText("Run phasing")
                     # Send to Jana2020 is Jana-Wizard-owned functionality: a
-                    # standalone session that happens to load a Jana .inflip
+                    # standalone session that happens to load a Jana2020 .inflip
                     # manually must never enable it (spec: only a session
                     # actually launched from the Wizard -- either Full
                     # configuration or Phase recycling -- is eligible).
@@ -10059,7 +10279,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if cfg is None or cfg.jana_inflip is None:
             self._show_error_report(
                 build_error_report(
-                    RuntimeError("Jana2020 hand-off requires a run started from a Jana .inflip file."),
+                    RuntimeError("Jana2020 hand-off requires a run started from a Jana2020 .inflip file."),
                     subsystem="Jana2020",
                     operation="Jana2020 hand-off",
                     severity="warning",
@@ -11477,7 +11697,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
 
     def _resolve_configured_data_mode(self, cfg: RunConfig) -> str:
-        # In pure Jana .inflip mode the HKL format control is disabled and its
+        # In pure Jana2020 .inflip mode the HKL format control is disabled and its
         # stored value ignored (dataformat always comes straight from the
         # .inflip file) -- force AUTO here too so a stale/corrupted widget
         # value can never override that, regardless of what is still sitting
@@ -11516,8 +11736,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
         if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
             if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
-                issues.append("The Jana .inflip file does not exist or cannot be read.")
-                details.append(f"Jana .inflip: {cfg.jana_inflip or '(not selected)'}")
+                issues.append("The Jana2020 .inflip file does not exist or cannot be read.")
+                details.append(f"Jana2020 .inflip: {cfg.jana_inflip or '(not selected)'}")
             if mode == INPUT_MODE_INFLIP_OVERRIDES:
                 if hkl_text and not cfg.hkl.is_file():
                     issues.append("The external HKL override does not exist.")
@@ -11589,10 +11809,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         mode = normalize_input_source_mode(cfg.input_source_mode)
         if mode == INPUT_MODE_INFLIP:
-            self._append_execution_log("Input mode: Jana .inflip. Embedded HKL data will be used.")
+            self._append_execution_log("Input mode: Jana2020 .inflip. Embedded HKL data will be used.")
         elif mode == INPUT_MODE_INFLIP_OVERRIDES:
             if not self._path_value("hkl").strip():
-                self._append_execution_log("HKL override is empty; the Jana .inflip fbegin/endf block will be used.", level="DETAIL")
+                self._append_execution_log("HKL override is empty; the Jana2020 .inflip fbegin/endf block will be used.", level="DETAIL")
             if not self._path_value("reference_cif").strip():
                 self._append_execution_log("External reference file is empty; no external reference density or atom sites will be used.", level="DETAIL")
         self.stop_after_cycle.clear()
@@ -11682,11 +11902,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"  Work directory: {cfg.work_dir}")
             if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
                 if cfg.jana_inflip is None:
-                    raise RuntimeError("Jana input mode selected, but no Jana .inflip file is configured.")
+                    raise RuntimeError("Jana input mode selected, but no Jana2020 .inflip file is configured.")
                 self.log(f"  Jana2020 .inflip: {cfg.jana_inflip}", level="DETAIL")
                 if mode == INPUT_MODE_INFLIP or not cfg.hkl.is_file():
                     cfg.hkl = extract_embedded_hkl_from_inflip(cfg.jana_inflip, cfg.work_dir)
-                    self.log("  HKL source: embedded fbegin/endf block exported from Jana .inflip", level="DETAIL")
+                    self.log("  HKL source: embedded fbegin/endf block exported from Jana2020 .inflip", level="DETAIL")
                 else:
                     self.log("  HKL source: external override", level="DETAIL")
 
@@ -11763,7 +11983,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log("Workflow", level="STEP")
             self.log("  Stages: " + " → ".join(workflow), level="INFO")
             self.log(f"  Cycles: {cfg.cycles}", level="INFO")
-            self.log(f"  Next-cycle model: {modelfile_mode}", level="INFO")
+            self.log(f"  Next-cycle model: {modelfile_source_display_label(modelfile_mode)}", level="INFO")
             if use_xplor_modelfile:
                 self.log(
                     f"  XPLOR damping 1/x: {max(0.001, min(1.0, float(cfg.damping_factor))):g}",
@@ -11909,6 +12129,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         exclude_labels = state.exclude_labels
         progress_stages = state.progress_stages
         all_results = state.all_results
+        # Some Superflip diagnostics (e.g. the normalize-keyword-unsupported
+        # notice) repeat byte-for-byte on every cycle since Superflip's input
+        # is regenerated each time; demote every repeat after the first to
+        # DETAIL for the whole run instead of showing it at full prominence
+        # once per cycle. Nothing is ever suppressed -- only the repeats.
+        seen_repeated_superflip_warnings: set = set()
+        superflip_log = make_run_scoped_dedup_log(
+            self.log,
+            seen_repeated_superflip_warnings,
+            ("Superflip normalize value", "  Ignored duplicate/managed Superflip keyword"),
+        )
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
             if self.stop_after_cycle.is_set():
                 self.msg_queue.put(("cancelled", state.completed_cycles))
@@ -11932,13 +12163,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif state.current_model is not None and use_xplor_modelfile:
                 model_source = modelfile_mode
                 model_for_sf = state.current_model
-                self.log(f"[Cycle model] Source: {modelfile_mode} from cycle {cyc - 1} · {model_for_sf}")
+                self.log(f"[Cycle {cyc}] Next-cycle model · {modelfile_source_display_label(modelfile_mode)} (from cycle {cyc - 1}) · {model_for_sf}")
                 self.log("  CIF-only exclude settings skipped for XPLOR modelfile.", level="DETAIL")
             elif state.current_model is not None and use_cif_modelfile:
                 model_source = "deblurred_edma_cif"
                 model_for_sf = cycle_dir / f"cycle_{cyc:03d}_modelfile_prepared.cif"
                 model_for_sf, removed, kept = write_filtered_cif(state.current_model, model_for_sf, exclude_labels)
-                self.log(f"[Cycle model] Prepared CIF model · {model_for_sf}")
+                self.log(f"[Cycle {cyc}] Next-cycle model · {modelfile_source_display_label('deblurred_edma_cif')} (from cycle {cyc - 1})")
+                self.log(f"[Cycle model] Prepared CIF model · {model_for_sf}", level="DETAIL")
                 self.log(f"  removed={removed}, kept={kept}", level="DETAIL")
                 self.log("  Superflip infers CIF from the .cif extension; no explicit format keyword is written.", level="DETAIL")
                 model_metric = nearest_metric_to_reference(model_for_sf, ref_ctx)
@@ -11973,6 +12205,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         f"finevoxel {sf_voxel}",
                     )
             effective_repeat = 1 if model_for_sf is not None else max(1, int(cfg.repeatmode))
+
+            def make_superflip_progress_relay(detail: str) -> Optional[Callable[[str], None]]:
+                # Live sub-progress is only meaningful when Superflip will
+                # actually attempt more than one repeat with THIS generated
+                # input (the effective, not just configured, repeatmode) --
+                # see SuperflipRepeatProgressParser for the parsed syntax.
+                if effective_repeat <= 1:
+                    return None
+                tracker = SuperflipRepeatProgressParser(effective_repeat)
+
+                def relay(line: str) -> None:
+                    progress = tracker.feed(line)
+                    if progress is not None:
+                        self._emit_cycle_progress(
+                            cyc,
+                            cfg.cycles,
+                            progress_stages,
+                            "Superflip",
+                            sub_index=progress.repeat,
+                            sub_total=progress.repeat_total,
+                            detail=detail,
+                            busy=True,
+                        )
+
+                relay.tracker = tracker  # type: ignore[attr-defined]
+                return relay
+
             if effective_repeat == 1:
                 self._emit_cycle_progress(
                     cyc,
@@ -12002,7 +12261,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_map_format = normalize_map_export_format(cfg.map_export_format)
             sf_export_ccp4 = sf_map_format == "ccp4"
             sf_export_jana = sf_map_format == "jana"
-            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
+            sf_progress_relay = make_superflip_progress_relay("running")
+            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=sf_progress_relay)
+            if sf_progress_relay is not None and not sf_progress_relay.tracker.saw_progress:  # type: ignore[attr-defined]
+                self.log("[Superflip] Live repeat progress unavailable for this executable.", level="DETAIL")
             self.log(f"Superflip map: {sf_map}")
             if self.stop_now.is_set():
                 raise RuntimeError("Immediate stop requested.")
@@ -12019,7 +12281,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 omit_hkl = cycle_dir / f"{sf_prefix}_omit_input.hkl"
                 write_observed_reflections(omit_hkl, omit_reflections, cfg.i_over_sigma_min, data_mode=configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 omit_prefix = f"{sf_prefix}_omit"
-                omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
+                omit_progress_relay = make_superflip_progress_relay("omit map · running")
+                omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay)
                 self.log(f"Omit Superflip map ({len(state.omit_test_hkls)} reflections excluded): {omit_sf_map}")
                 omit_sf_correlation = xplor_map_correlation(sf_map, omit_sf_map)
                 if cfg.compute_omit_rfree:
