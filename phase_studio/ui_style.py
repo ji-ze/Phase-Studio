@@ -537,6 +537,27 @@ QToolButton#disclosureToggle:checked {
     background-color: #edf3fa;
     border-color: #2264b8;
 }
+QFrame#workflowCard {
+    background-color: #ffffff;
+    border: 1px solid #cbd7ea;
+    border-radius: 3px;
+}
+QFrame#workflowCard:hover {
+    background-color: #f5f9ff;
+}
+QFrame#workflowCard[selected="true"] {
+    background-color: #edf3fa;
+    border: 1px solid #2264b8;
+}
+QFrame#workflowCard[selected="true"]:hover {
+    background-color: #edf3fa;
+}
+QFrame#workflowCard QLabel {
+    background-color: transparent;
+}
+QLabel#workflowCardDescription {
+    color: #52658b;
+}
 QScrollBar:vertical {
     background: #f2f4f9;
     width: 5px;

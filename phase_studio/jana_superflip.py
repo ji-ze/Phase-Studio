@@ -894,11 +894,13 @@ WORKFLOW_LABELS = {
     WORKFLOW_PHASE_RECYCLING: "Phase recycling with Superflip + SharpED",
 }
 WORKFLOW_DESCRIPTIONS = {
-    WORKFLOW_SUPERFLIP_ONLY: "Run Superflip once and hand the result back to Jana2020.",
-    WORKFLOW_SUPERFLIP_SHARPED: "Run Superflip once, then sharpen the resulting map with SharpED.",
+    WORKFLOW_SUPERFLIP_ONLY: "Run one Superflip reconstruction and return the result to Jana2020.",
+    WORKFLOW_SUPERFLIP_SHARPED: (
+        "Run Superflip once, process the resulting map with SharpED, and return it to Jana2020."
+    ),
     WORKFLOW_PHASE_RECYCLING: (
-        "Repeat Superflip and SharpED over several cycles, feeding each cycle's map "
-        "back in as the next model."
+        "Iterate Superflip and SharpED over multiple cycles, using each selected map to "
+        "initialize the next cycle."
     ),
 }
 
@@ -976,6 +978,13 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             self.setObjectName("workflowCard")
             self.setFrameShape(QFrame.NoFrame)
             self.setCursor(Qt.PointingHandCursor)
+            # Selected/hover states are driven entirely by the "selected" dynamic
+            # property + the shared QSS rules for QFrame#workflowCard (ui_style.py),
+            # mirroring the statusBadge[runState=...] pattern used elsewhere in
+            # Phase Studio, instead of swapping the whole stylesheet in Python.
+            # WA_Hover is required for a plain QFrame to actually repaint on
+            # mouse-enter/leave -- QAbstractButton gets this for free, QFrame does not.
+            self.setAttribute(Qt.WA_Hover, True)
             layout = QVBoxLayout(self)
             layout.setContentsMargins(12, 8, 12, 8)
             layout.setSpacing(2)
@@ -985,7 +994,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             title_label.setFont(title_font)
             desc_label = QLabel(description)
             desc_label.setWordWrap(True)
-            desc_label.setStyleSheet("color: #52658b;")
+            desc_label.setObjectName("workflowCardDescription")
             layout.addWidget(title_label)
             layout.addWidget(desc_label)
             self.set_selected(False)
@@ -995,36 +1004,71 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             self._on_click(self._key)
 
         def set_selected(self, selected: bool) -> None:
-            if selected:
-                self.setStyleSheet(
-                    "QFrame#workflowCard { background-color: #edf3fa; border: 1px solid #2264b8; }"
-                )
-            else:
-                self.setStyleSheet(
-                    "QFrame#workflowCard { background-color: #ffffff; border: 1px solid #cbd7ea; }"
-                )
+            self.setProperty("selected", bool(selected))
+            self.style().unpolish(self)
+            self.style().polish(self)
 
     dialog = QDialog()
     dialog.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
     dialog.setMinimumWidth(640)
 
+    # footer is only constructed later (after page1/page2), but
+    # adjust_dialog_size() is also invoked by callbacks wired up during page2
+    # construction, before it exists -- this mutable holder (same pattern as
+    # backing_window_holder below) lets adjust_dialog_size() reference
+    # whatever footer currently exists (or none yet) without a NameError; the
+    # final go_to_page1() call after construction recomputes the size once
+    # footer is available, so an early, footer-less estimate here is harmless.
+    chrome_holder: dict = {"footer": None}
+
     def adjust_dialog_size() -> None:
-        # adjustSize() alone can grow the dialog to whatever a taller page (or
-        # an expanded disclosure section) needs, with nothing capping it to
-        # the actual screen or repositioning it -- apply_safe_dialog_geometry
-        # caps BOTH size and position to availableGeometry() (excludes the
-        # taskbar) and re-centers within it, so the title bar can never end
-        # up unreachable as content grows. Only the scrollable central
-        # content area below (never this top-level window) may exceed the
-        # screen's usable height.
+        # dialog.adjustSize() alone under-sizes the window here: QScrollArea's
+        # own sizeHint() does not reliably grow to match its contained page's
+        # actual sizeHint (Qt quirk), so relying on it can leave the dialog
+        # shorter than the current page truly needs -- forcing an unwanted
+        # vertical scrollbar even though the page would otherwise fit
+        # entirely. Compute the target size explicitly instead, from the
+        # fixed chrome (brand header + context banner + footer) plus the
+        # scrollable content's own required height, then let
+        # apply_safe_dialog_geometry cap BOTH size and position to
+        # availableGeometry() (excludes the taskbar) and re-center within it,
+        # so the title bar can never end up unreachable as content grows.
+        # Only the scrollable central content area (never this top-level
+        # window) may still exceed the screen's usable height, for a page
+        # taller than the whole screen can show at once.
+        # Deliberately NOT max()'d against dialog.width()/height(): the
+        # dialog must be able to shrink back down again too (e.g. going from
+        # the taller page2 back to page1, or collapsing an expanded SharpED
+        # disclosure) -- always resize from a fresh measurement of what the
+        # CURRENT page actually needs, not whatever the dialog happened to be
+        # sized to from an earlier call.
         dialog.adjustSize()
-        apply_safe_dialog_geometry(dialog, dialog.width(), dialog.height())
+        footer_widget = chrome_holder["footer"]
+        chrome_height = (
+            brand_header.sizeHint().height()
+            + context_banner.sizeHint().height()
+            + (footer_widget.sizeHint().height() if footer_widget is not None else 0)
+        )
+        target_width = content.sizeHint().width() + 8
+        # content.sizeHint() alone is unreliable here: it is computed at some
+        # narrower candidate width, so word-wrapped labels (workflow card
+        # descriptions, the Cell row, etc.) end up wrapping to more lines
+        # than they actually will at target_width, overstating the needed
+        # height by 100+ px. heightForWidth(target_width) asks for the real
+        # answer at the width the dialog will actually use.
+        content_height = (
+            content.heightForWidth(target_width) if content.hasHeightForWidth()
+            else content.sizeHint().height()
+        )
+        target_height = chrome_height + content_height + 8
+        apply_safe_dialog_geometry(dialog, target_width, target_height)
 
     outer_root = QVBoxLayout(dialog)
     outer_root.setContentsMargins(0, 0, 0, 0)
     outer_root.setSpacing(0)
 
-    outer_root.addWidget(create_phase_studio_brand_header())
+    brand_header = create_phase_studio_brand_header()
+    outer_root.addWidget(brand_header)
 
     context_banner = create_phase_studio_context_banner(
         "JANA2020 WORKFLOW", "Review the incoming crystallographic data and choose a workflow"
@@ -1064,7 +1108,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     page1 = QWidget()
     page1_layout = QVBoxLayout(page1)
     page1_layout.setContentsMargins(0, 0, 0, 0)
-    page1_layout.setSpacing(10)
+    page1_layout.setSpacing(8)
 
     # A hidden, never-shown full Phase Studio window used purely as a dialog
     # factory: it reuses the exact same HKL parsing/validation/completeness
@@ -1097,8 +1141,60 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         backing_window_holder["win"] = win
         return win
 
-    input_summary_group = QGroupBox("Input summary")
-    input_summary_layout = QFormLayout(input_summary_group)
+    def build_page1_section(title: str, helper_text: str = "") -> tuple:
+        # A plain QGroupBox's title/border/padding chrome (shared app-wide via
+        # ui_style.py, so not something this single-page pass may change)
+        # costs roughly 35-40px of pure vertical overhead per section on top
+        # of its actual content -- with three stacked sections on this page,
+        # that alone can be the difference between fitting on screen at
+        # 150% Windows scaling and needing a scrollbar. Using the same
+        # lightweight sectionLabel-plus-rule heading for all three of this
+        # page's sections (Input summary / Reference and initial model /
+        # Workflow) instead keeps them visually distinct and on-brand while
+        # recovering that space; this only affects page1 of the Wizard, not
+        # QGroupBox elsewhere in the app.
+        section = QWidget()
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(4)
+        heading_row = QHBoxLayout()
+        heading_row.setSpacing(8)
+        heading_label = QLabel(title.upper())
+        heading_label.setObjectName("sectionLabel")
+        heading_row.addWidget(heading_label)
+        heading_row.addStretch(1)
+        if helper_text:
+            helper_label = QLabel(helper_text)
+            helper_label.setStyleSheet("color: #7183a6; font-style: italic;")
+            heading_row.addWidget(helper_label)
+        section_layout.addLayout(heading_row)
+        separator = QFrame()
+        separator.setFixedHeight(2)
+        separator.setFrameShape(QFrame.NoFrame)
+        separator.setStyleSheet("background-color: #2264b8;")
+        section_layout.addWidget(separator)
+        body = QWidget()
+        body_layout = QVBoxLayout(body)
+        body_layout.setContentsMargins(0, 6, 0, 0)
+        body_layout.setSpacing(4)
+        section_layout.addWidget(body)
+        return section, body_layout
+
+    # Compact single-row-per-field summary with the diagnostic actions
+    # (Validate HKL / Analyze completeness) as a small button column on the
+    # right rather than a third row underneath the metadata -- keeps the
+    # whole section short enough that it, the Reference/model section and
+    # all three Workflow cards fit on the first page without scrolling.
+    input_summary_section, input_summary_body = build_page1_section("Input summary")
+    input_summary_outer = QHBoxLayout()
+    input_summary_outer.setSpacing(14)
+    input_summary_body.addLayout(input_summary_outer)
+
+    input_summary_fields = QWidget()
+    input_summary_layout = QFormLayout(input_summary_fields)
+    input_summary_layout.setContentsMargins(0, 0, 0, 0)
+    input_summary_layout.setVerticalSpacing(3)
+    input_summary_layout.setHorizontalSpacing(10)
     input_summary_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
     reflections_value = QLabel("Not available")
     format_value = QLabel("Not available")
@@ -1112,15 +1208,17 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     input_summary_layout.addRow("Cell", cell_value)
     input_summary_layout.addRow("Space group", spacegroup_value)
     input_summary_layout.addRow("Composition", composition_value)
+    input_summary_outer.addWidget(input_summary_fields, 1)
 
-    hkl_buttons_row = QHBoxLayout()
+    hkl_buttons_column = QVBoxLayout()
+    hkl_buttons_column.setSpacing(4)
     validate_hkl_button = QPushButton("Validate HKL")
     analyze_completeness_button = QPushButton("Analyze completeness")
-    hkl_buttons_row.addWidget(validate_hkl_button)
-    hkl_buttons_row.addWidget(analyze_completeness_button)
-    hkl_buttons_row.addStretch(1)
-    input_summary_layout.addRow("", hkl_buttons_row)
-    page1_layout.addWidget(input_summary_group)
+    hkl_buttons_column.addWidget(validate_hkl_button)
+    hkl_buttons_column.addWidget(analyze_completeness_button)
+    hkl_buttons_column.addStretch(1)
+    input_summary_outer.addLayout(hkl_buttons_column)
+    page1_layout.addWidget(input_summary_section)
 
     def refresh_input_summary() -> None:
         no_inflip_tip = "No incoming Jana2020 .inflip was supplied."
@@ -1185,9 +1283,13 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     # right after, once the dialog's event loop actually starts.
     QTimer.singleShot(0, refresh_input_summary)
 
-    files_group = QGroupBox("Reference and initial model")
-    files_form = QFormLayout(files_group)
+    files_section, files_body = build_page1_section("Reference and initial model")
+    files_form_widget = QWidget()
+    files_form = QFormLayout(files_form_widget)
+    files_form.setContentsMargins(0, 0, 0, 0)
     files_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    files_form.setVerticalSpacing(4)
+    files_body.addWidget(files_form_widget)
 
     def add_file_row(label_text: str, file_filter: str, tooltip: str, placeholder: str, initial: str):
         row_widget = QWidget()
@@ -1250,25 +1352,30 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         "Model or density map to seed the first Superflip cycle. If supplied, "
         "cycle 1 is model-seeded: repeatmode is forced to 1 and randomseed is omitted. "
         "Pre-filled from the incoming .inflip's own modelfile keyword, if it declares one.",
-        "No first-cycle modelfile",
+        "No first-cycle model",
         _inflip_keyword_default("modelfile"),
     )
-    page1_layout.addWidget(files_group)
+    page1_layout.addWidget(files_section)
 
     def workflow_card_clicked(key: str) -> None:
         workflow_state["key"] = key
         workflow_changed()
 
-    workflow_group = QGroupBox("Workflow")
-    workflow_group_layout = QVBoxLayout(workflow_group)
-    workflow_group_layout.setSpacing(6)
+    # Workflow is the single most important choice on this page (it decides
+    # the whole execution path) and must not blend in as one more same-weight
+    # section -- it gets the same lightweight sectionLabel heading as Input
+    # summary / Reference and initial model above, plus the explicit
+    # "Choose one of three workflows." helper text called for in the spec.
+    workflow_section, workflow_body = build_page1_section("Workflow", "Choose one of three workflows.")
+    workflow_body.setSpacing(5)
     workflow_cards: dict[str, "_WorkflowCard"] = {}
     for key in (WORKFLOW_SUPERFLIP_ONLY, WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING):
         card = _WorkflowCard(key, WORKFLOW_LABELS[key], WORKFLOW_DESCRIPTIONS[key], workflow_card_clicked)
         card.setToolTip("Select this workflow, then use Run phasing / Next below to proceed.")
-        workflow_group_layout.addWidget(card)
+        workflow_body.addWidget(card)
         workflow_cards[key] = card
-    page1_layout.addWidget(workflow_group)
+
+    page1_layout.addWidget(workflow_section)
     page1_layout.addStretch(1)
     stack.addWidget(page1)
 
@@ -1552,6 +1659,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     button_row.addWidget(edit_button)
     button_row.addWidget(primary_button)
     outer_root.addWidget(footer)
+    chrome_holder["footer"] = footer
 
     def current_workflow() -> str:
         return workflow_state["key"]
@@ -1740,6 +1848,14 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     primary_button.clicked.connect(attempt_run)
     edit_button.clicked.connect(edit_clicked)
     cancel_button.clicked.connect(dialog.reject)
+
+    # Word-wrapped labels' heightForWidth() is not fully trustworthy until
+    # the widget tree has actually been laid out and polished at least once,
+    # so the synchronous adjust_dialog_size() calls made during construction
+    # above can overstate the needed height. A second pass once the dialog's
+    # event loop has actually started (same deferred-refit pattern used for
+    # the HKL Completeness dialog in app.py) settles it accurately.
+    QTimer.singleShot(0, adjust_dialog_size)
 
     accepted = dialog.exec()
     refresh_timer.stop()
