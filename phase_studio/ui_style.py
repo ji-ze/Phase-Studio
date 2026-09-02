@@ -192,13 +192,18 @@ QPlainTextEdit[configurationLocked="true"]:disabled,
 QSpinBox[configurationLocked="true"]:disabled,
 QDoubleSpinBox[configurationLocked="true"]:disabled,
 QComboBox[configurationLocked="true"]:disabled {
-    color: #52658b;
+    /* A locked-during-RUNNING value must stay comfortably readable -- this
+       is the configuration actively being used, not a genuinely irrelevant
+       field -- while remaining clearly lower-contrast than an enabled
+       control. Medium-muted navy rather than the near-invisible gray a
+       plain :disabled state would give it. */
+    color: #3d4d73;
     background-color: #edf2f8;
     border-bottom-color: #aebdd2;
 }
 QLabel[configurationLocked="true"]:disabled,
 QCheckBox[configurationLocked="true"]:disabled {
-    color: #7183a6;
+    color: #4f5f87;
 }
 QSpinBox:disabled::up-button, QSpinBox:disabled::down-button,
 QDoubleSpinBox:disabled::up-button, QDoubleSpinBox:disabled::down-button,

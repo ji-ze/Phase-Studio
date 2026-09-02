@@ -6667,6 +6667,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
         self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
         self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
+        input_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         input_tab.addStretch(1)
 
         # Basic / Workflow
@@ -6751,6 +6752,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.recycle_stages_label.setObjectName("inlineGroupTitle")
         optional_form.addRow(self.recycle_stages_label)
         self._add_checkbox(optional_form, "run_edma_recycle_final", "Run EDMA on final map", False, align_with_fields=True)
+        workflow_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         workflow_tab.addStretch(1)
 
         # Basic / Output
@@ -6760,15 +6762,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana", "HKL reflections with phases", "ShelX (fcf)"], "xplor")
         self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
         output_form.addRow("", self._secondary_help(
-            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles. ccp4/jana "
-            "additionally save one extra density map for external use or Jana2020, while HKL reflections with "
-            "phases and ShelX (fcf) instead save, for each cycle's Superflip map, the observed reflections "
-            "together with phases read by FFT from that map, in place of an extra density map."
+            "Internal processing: XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle "
+            "modelfiles, regardless of the formats selected below."
         ))
+        output_form.addRow("", self._secondary_help(
+            "Export behavior: ccp4/jana additionally save one extra density map for external use or Jana2020, "
+            "while HKL reflections with phases and ShelX (fcf) instead save, for each cycle's Superflip map, the "
+            "observed reflections together with phases read by FFT from that map, in place of an extra density map."
+        ))
+        output_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         output_tab.addStretch(1)
 
         # Basic / Map feedback
         feedback_tab = add_settings_tab("Map feedback")
+        # Every other page's first section is a QGroupBox, which carries its
+        # own ~1.25em top margin from the shared QGroupBox QSS -- this page's
+        # Warning callout has no such margin of its own, so without an
+        # explicit spacer here it sits noticeably closer to the sub-tab row
+        # than any other page's first section does.
+        feedback_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         feedback_tab.addWidget(settings_callout(
             "Warning",
             "The operations on this page modify the reflection data supplied to subsequent cycles. "
@@ -6812,6 +6824,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.inputs[key].valueChanged.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
             except Exception:
                 pass
+        feedback_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         feedback_tab.addStretch(1)
 
         # Basic / Help
@@ -6946,6 +6959,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             resource_row.addStretch(1)
             about_layout.addLayout(resource_row)
         add_back_to_contents(about_layout)
+        basic_help_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         basic_help_tab.addStretch(1)
 
         # Advanced / Setup
@@ -6989,6 +7003,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "Off by default. Enable this option to expose experimental phasing methods and their "
             "method-specific settings, hidden entirely rather than just disabled while it is off."
         ))
+        setup_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         setup_tab.addStretch(1)
 
         # Advanced / Superflip
@@ -7041,6 +7056,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.load_inflip_btn.setToolTip("Read Superflip keyword settings from an existing .inflip file. Reflection data blocks are ignored.")
         self.load_inflip_btn.clicked.connect(self.load_inflip_settings_dialog)
         additional_sf_form.addRow("", self.load_inflip_btn)
+        superflip_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         superflip_tab.addStretch(1)
 
         # Advanced / EDMA
@@ -7062,6 +7078,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         edma_extra_form = add_form_group(edma_tab, "Additional keywords")
         self._add_multiline(edma_extra_form, "extra_edma_keywords", "Extra EDMA keywords", "", 110)
+        edma_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         edma_tab.addStretch(1)
 
         # Advanced / SharpED
@@ -7079,6 +7096,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         max_polls_widget = self.inputs.get("sharped_max_polls")
         if isinstance(max_polls_widget, QSpinBox):
             max_polls_widget.setSpecialValueText("Unlimited")
+        sharped_advanced_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         sharped_advanced_tab.addStretch(1)
 
         # Advanced / Help
@@ -7179,6 +7197,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             advanced=True,
         )
         add_back_to_contents(keyword_help_layout, advanced=True)
+        advanced_help_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         advanced_help_tab.addStretch(1)
 
         # Persistent actions
