@@ -6086,6 +6086,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ],
             format_reflection_data_mode(REFLECTION_DATA_MODE_SET_FROM_INFLIP),
         )
+        try:
+            self.inputs["reflection_data_mode"].currentTextChanged.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        # jana_inflip already gets a dedicated on_change handler
+        # (_jana_inflip_path_changed, assigned further below) which also
+        # refreshes map-feedback gating; hkl has no such handler of its own,
+        # so give it one here rather than silently overwriting whichever of
+        # the two assignments runs last.
+        hkl_row = self.inputs.get("hkl")
+        if hasattr(hkl_row, "on_change"):
+            hkl_row.on_change = self._hkl_path_changed
         hkl_button_row = QHBoxLayout()
         self.test_hkl_btn = QPushButton("Validate HKL")
         self.analyze_hkl_btn = QPushButton("Analyze completeness")
@@ -6998,6 +7010,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._metadata_source_user_selected = False
             self._set_metadata_source(METADATA_SOURCE_INFLIP)
         self._sync_metadata_source_widgets()
+        # A different .inflip file can declare a different embedded dataformat
+        # (e.g. FWHM vs. plain intensity), which gates powder overlap
+        # repartitioning -- refresh that alongside the metadata sync above.
+        self._sync_map_feedback_widgets()
+        self.save_settings()
+
+    def _hkl_path_changed(self) -> None:
+        # Mirrors _jana_inflip_path_changed()'s map-feedback refresh: an
+        # external HKL file's detected format also gates powder overlap
+        # repartitioning (FWHM-carrying data only).
+        self._sync_map_feedback_widgets()
         self.save_settings()
 
     def _reference_path_changed(self) -> None:
@@ -7367,9 +7390,32 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # that common case. The pipeline itself already tolerates a
         # start-after-cycle beyond the actual run length as a harmless no-op.
         cycles_value = max(1, self._spin_value("cycles")) if "cycles" in self.inputs else 1
+        # Powder overlap repartitioning only makes sense for FWHM-carrying
+        # reflection data (hkl I fwhm / hkl F fwhm); gate the checkbox itself
+        # on that, on top of (not instead of) its own checked state below.
+        # The checked state itself is left untouched while disabled -- so a
+        # user's choice survives switching to a non-FWHM source and back --
+        # but _validate_run_config() blocks Run outright if it is still
+        # checked against non-FWHM data, since a disabled-but-checked box
+        # must never silently reach the pipeline.
+        redistribute_checkbox = self.inputs.get("redistribute_overlaps")
+        if isinstance(redistribute_checkbox, QCheckBox):
+            has_fwhm_data = reflection_mode_has_fwhm(self._resolve_configured_data_mode_for_ui())
+            redistribute_checkbox.setEnabled(has_fwhm_data)
+            redistribute_label = self.input_labels.get("redistribute_overlaps")
+            if redistribute_label is not None:
+                redistribute_label.setEnabled(has_fwhm_data)
+            redistribute_checkbox.setToolTip(
+                INPUT_TOOLTIPS.get("redistribute_overlaps", "") if has_fwhm_data
+                else "Requires FWHM-carrying reflection data (hkl I fwhm / hkl F fwhm); no FWHM format is currently detected for the configured HKL source."
+            )
+        else:
+            has_fwhm_data = True
         for checkbox_key, checkbox_label, from_cycle_key, other_field_keys in groups:
             checkbox = self.inputs.get(checkbox_key)
             checkbox_enabled = bool(checkbox.isChecked()) if isinstance(checkbox, QCheckBox) else True
+            if checkbox_key == "redistribute_overlaps":
+                checkbox_enabled = checkbox_enabled and has_fwhm_data
             from_cycle_widget = self.inputs.get(from_cycle_key)
             if hasattr(from_cycle_widget, "setEnabled"):
                 from_cycle_widget.setEnabled(checkbox_enabled)  # type: ignore[attr-defined]
@@ -7430,6 +7476,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if not reflection_data_mode_enabled else INPUT_TOOLTIPS.get("reflection_data_mode", "")
             )
         self._sync_metadata_source_widgets()
+        self._sync_map_feedback_widgets()
 
     def _set_configuration_locked(self, locked: bool) -> None:
         locked = bool(locked)
@@ -10660,6 +10707,37 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sharped_max_polls=self._spin_value("sharped_max_polls"),
         )
 
+    def _resolve_configured_data_mode(self, cfg: RunConfig) -> str:
+        # In pure Jana .inflip mode the HKL format control is disabled and its
+        # stored value ignored (dataformat always comes straight from the
+        # .inflip file) -- force AUTO here too so a stale/corrupted widget
+        # value can never override that, regardless of what is still sitting
+        # in cfg.reflection_data_mode.
+        mode = normalize_input_source_mode(cfg.input_source_mode)
+        effective_configured_mode = (
+            REFLECTION_DATA_MODE_AUTO if mode == INPUT_MODE_INFLIP else cfg.reflection_data_mode
+        )
+        return resolve_reflection_data_mode_from_sources(cfg.hkl, effective_configured_mode, cfg.jana_inflip)
+
+    def _resolve_configured_data_mode_for_ui(self) -> str:
+        """Best-effort equivalent of _resolve_configured_data_mode() for live
+        widget state (before a RunConfig exists), used to gate controls that
+        only make sense for a particular HKL format -- e.g. powder overlap
+        repartitioning requires FWHM-carrying data. Never raises: falls back
+        to the configured mode itself if paths are missing/unreadable."""
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
+        configured = (
+            REFLECTION_DATA_MODE_AUTO if mode == INPUT_MODE_INFLIP
+            else (self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO)
+        )
+        hkl_text = self._path_value("hkl").strip() if "hkl" in self.inputs else ""
+        inflip_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
+        inflip_path = Path(inflip_text) if inflip_text else None
+        try:
+            return resolve_reflection_data_mode_from_sources(Path(hkl_text), configured, inflip_path)
+        except Exception:
+            return normalize_reflection_data_mode(configured)
+
     def _validate_run_config(self, cfg: RunConfig) -> Tuple[List[str], str]:
         issues: List[str] = []
         details: List[str] = []
@@ -10697,6 +10775,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "entry, the .inflip file, or the reference file's _diffrn_radiation_wavelength tag."
             )
             details.append("Wavelength (Å): Basic → Map feedback → Powder overlap repartitioning")
+        if cfg.redistribute_overlaps and not reflection_mode_has_fwhm(self._resolve_configured_data_mode(cfg)):
+            issues.append(
+                "Powder overlap repartitioning is enabled, but the configured reflection data does not carry a "
+                "FWHM value (hkl I fwhm / hkl F fwhm). This mechanism only applies to FWHM-carrying data."
+            )
+            details.append("Enable powder overlap repartitioning: Basic → Map feedback → Powder overlap repartitioning")
         reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
         is_recycling = reconstruction_mode != "superflip"
         if (cfg.run_sharped or is_recycling) and not cfg.sharped_api_token.strip():
@@ -10853,17 +10937,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.superflip_referencefile is not None:
                     self.log(f"  Reference: {cfg.superflip_referencefile}")
             self.log(f"  HKL: {cfg.hkl}")
-            # In pure Jana .inflip mode the HKL format control is disabled and
-            # its stored value ignored (dataformat always comes straight from
-            # the .inflip file) -- force AUTO here too so a stale/corrupted
-            # widget value can never override that, regardless of what is
-            # still sitting in cfg.reflection_data_mode.
-            effective_configured_mode = (
-                REFLECTION_DATA_MODE_AUTO if mode == INPUT_MODE_INFLIP else cfg.reflection_data_mode
-            )
-            configured_data_mode = resolve_reflection_data_mode_from_sources(
-                cfg.hkl, effective_configured_mode, cfg.jana_inflip
-            )
+            configured_data_mode = self._resolve_configured_data_mode(cfg)
             value_col, sigma_col, include_000 = reflection_columns_for_mode(configured_data_mode)
             refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
             refl = merge_duplicate_reflections(refl_raw)
