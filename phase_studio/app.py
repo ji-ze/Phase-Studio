@@ -7304,8 +7304,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _sync_map_feedback_widgets(self) -> None:
         if self._configuration_locked:
             return
-        cycles_widget = self.inputs.get("cycles")
-        max_cycle = max(1, int(cycles_widget.value())) if isinstance(cycles_widget, QSpinBox) else 999
         groups = (
             ("map_feedback_missing_enabled", "Enable missing-reflection completion", (
                 "map_feedback_missing_from_cycle", "map_feedback_missing_percent_limit",
@@ -7319,18 +7317,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "powder_separation_factor", "powder_redistribution_mix",
             )),
         )
-        from_cycle_keys = {
-            "map_feedback_missing_from_cycle", "map_feedback_intensity_from_cycle", "powder_redistribution_from_cycle",
-        }
+        # "Start after cycle" fields deliberately keep their own full range
+        # (1-999) regardless of the current Cycles value: Cycles is often
+        # still at its default of 1 while the user is setting these up ahead
+        # of increasing it, and clamping the spin box's maximum to the
+        # current Cycles value made it un-editable (min==max==1) in exactly
+        # that common case. The pipeline itself already tolerates a
+        # start-after-cycle beyond the actual run length as a harmless no-op.
         for checkbox_key, checkbox_label, field_keys in groups:
             checkbox = self.inputs.get(checkbox_key)
             enabled = bool(checkbox.isChecked()) if isinstance(checkbox, QCheckBox) else True
             for field_key in field_keys:
                 widget = self.inputs.get(field_key)
-                if isinstance(widget, QSpinBox) and field_key in from_cycle_keys:
-                    if widget.value() > max_cycle:
-                        widget.setValue(max_cycle)
-                    widget.setMaximum(max_cycle)
                 if hasattr(widget, "setEnabled"):
                     widget.setEnabled(enabled)  # type: ignore[attr-defined]
                 label = self.input_labels.get(field_key)
