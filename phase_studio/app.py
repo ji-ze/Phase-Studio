@@ -1584,6 +1584,28 @@ def format_reflection_data_mode(value: str) -> str:
     return REFLECTION_DATA_MODE_DISPLAY_LABELS.get(mode, str(value or ""))
 
 
+def wrap_path_tooltip(path_text: str, width: int = 60) -> str:
+    """Wrap a long file path across multiple tooltip lines instead of one
+    huge horizontal line covering most of the window. Paths rarely contain
+    the whitespace textwrap-style wrapping needs, so break after path
+    separators instead."""
+    text = str(path_text or "")
+    if len(text) <= width:
+        return text
+    parts = re.split(r"([\\/])", text)
+    lines: List[str] = []
+    current = ""
+    for part in parts:
+        if current and len(current) + len(part) > width:
+            lines.append(current)
+            current = part
+        else:
+            current += part
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
+
+
 def reflection_mode_is_amplitude(data_mode: str) -> bool:
     return normalize_reflection_data_mode(data_mode) in {
         REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
@@ -5496,28 +5518,15 @@ def create_phase_studio_context_banner(title: str, subtitle: str, badge: Optiona
     return banner
 
 
-def compute_safe_dialog_size(
-    preferred_width: int, preferred_height: int, *, parent: Optional[QWidget] = None
-) -> Tuple[int, int]:
-    """Cap a top-level dialog's preferred size to the available screen (never
-    QScreen.geometry(), which includes the taskbar) so bottom action rows
-    never end up off-screen or hidden behind it. Shared by the Jana2020
-    Wizard, the Jana2020 result selector, and similar Phase Studio dialogs
-    rather than each hard-coding its own dimensions."""
-    screen = None
-    probe = parent.window() if parent is not None and hasattr(parent, "window") else parent
-    handle = probe.windowHandle() if probe is not None else None
-    if handle is not None:
-        screen = handle.screen()
-    if screen is None:
-        app = QApplication.instance()
-        screen = app.primaryScreen() if app is not None else None
-    if screen is None:
-        return preferred_width, preferred_height
-    available = screen.availableGeometry()
-    safe_width = max(480, int(available.width() * 0.92))
-    safe_height = max(360, int(available.height() * 0.88))
-    return min(preferred_width, safe_width), min(preferred_height, safe_height)
+def apply_safe_dialog_geometry(dialog: QWidget, width: int, height: int) -> None:
+    """Int-based convenience wrapper around the existing
+    fit_dialog_to_available_screen() (frame-aware: measures the dialog's
+    actual native frame, not an approximate margin, and double-clamps after
+    the window manager settles) -- the one shared safe top-level-window
+    geometry helper for the Jana2020 Wizard, the Jana2020 result selector,
+    HKL Validation/Completeness, and any other Phase Studio dialog, rather
+    than each maintaining its own hard-coded/partial sizing logic."""
+    fit_dialog_to_available_screen(dialog, QSize(width, height))
 
 
 class WorkflowDiagram(QWidget):
@@ -7723,12 +7732,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             source_layout.setSpacing(5)
             source_value = MiddleElidedLabel(hkl_path.name)
             source_value.setObjectName("diagnosticSummaryValue")
-            source_value.setToolTip(str(hkl_path))
+            source_value.setToolTip(wrap_path_tooltip(str(hkl_path)))
             source_layout.addWidget(source_value, 1)
             copy_path = QToolButton()
             copy_path.setObjectName("diagnosticTextAction")
             copy_path.setText("Copy path")
-            copy_path.setToolTip(str(hkl_path))
+            copy_path.setToolTip("Copy the full reflection-source path.")
             copy_path.clicked.connect(lambda: QApplication.clipboard().setText(str(hkl_path)))
             source_layout.addWidget(copy_path)
 
@@ -7768,12 +7777,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         source_layout.setSpacing(7)
         source_value = QLabel(hkl_path.name)
         source_value.setObjectName("diagnosticSummaryValue")
-        source_value.setToolTip(str(hkl_path))
+        source_value.setToolTip(wrap_path_tooltip(str(hkl_path)))
         source_layout.addWidget(source_value)
         copy_path = QToolButton()
         copy_path.setObjectName("diagnosticTextAction")
         copy_path.setText("Copy path")
-        copy_path.setToolTip(str(hkl_path))
+        copy_path.setToolTip("Copy the full reflection-source path.")
         copy_path.clicked.connect(lambda: QApplication.clipboard().setText(str(hkl_path)))
         source_layout.addWidget(copy_path)
         source_layout.addStretch(1)
@@ -7884,7 +7893,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog.setObjectName("hklValidationDialog")
         dialog.setWindowTitle("HKL Validation")
         dialog.resize(1060, 680)
-        dialog.setMinimumSize(820, 520)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(9)
@@ -8015,10 +8023,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog.hkl_table = table  # type: ignore[attr-defined]
         dialog.summary_text = summary_text  # type: ignore[attr-defined]
         dialog.full_source_path = str(hkl_path)  # type: ignore[attr-defined]
+        fit_dialog_to_available_screen(dialog, QSize(1060, 680))
         return dialog
 
     def _show_hkl_load_result_dialog(self, payload: object) -> None:
         dialog = self._build_hkl_validation_dialog(payload)  # type: ignore[arg-type]
+        # A second, deferred fit once the native window is fully realized
+        # (matches _show_hkl_completeness_dialog): the first fit's frame
+        # measurement can be inaccurate before the window manager settles.
+        QTimer.singleShot(0, lambda: fit_dialog_to_available_screen(dialog, QSize(1060, 680)))
         dialog.exec()
 
     def open_hkl_completeness_dialog(self) -> None:
@@ -9387,6 +9400,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         buttons.rejected.connect(dialog.reject)
         layout.addWidget(buttons)
 
+        fit_dialog_to_available_screen(dialog, QSize(1180, 560))
         if dialog.exec() != QDialog.Accepted:
             return
 
@@ -9616,7 +9630,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         else:
             preferred_width, preferred_height = 1400, 800
         preferred_height = min(preferred_height + max(0, len(self.results) - 5) * 12, preferred_height + 150)
-        dialog.resize(*compute_safe_dialog_size(preferred_width, preferred_height, parent=self))
+        # Also positions the dialog centered within availableGeometry() (not
+        # just capping its size), so its title bar can never end up
+        # unreachable above the usable desktop.
+        apply_safe_dialog_geometry(dialog, preferred_width, preferred_height)
         outer_layout = QVBoxLayout(dialog)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)

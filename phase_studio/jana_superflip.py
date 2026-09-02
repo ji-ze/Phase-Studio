@@ -822,6 +822,7 @@ def _qt_imports():
             QMessageBox,
             QPushButton,
             QRadioButton,
+            QScrollArea,
             QSizePolicy,
             QSpinBox,
             QStackedWidget,
@@ -858,6 +859,7 @@ def _qt_imports():
         "QMessageBox": QMessageBox,
         "QPushButton": QPushButton,
         "QRadioButton": QRadioButton,
+        "QScrollArea": QScrollArea,
         "QSettings": QSettings,
         "QSizePolicy": QSizePolicy,
         "QSpinBox": QSpinBox,
@@ -918,6 +920,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     QPushButton = qt["QPushButton"]
     QCheckBox = qt["QCheckBox"]
     QRadioButton = qt["QRadioButton"]
+    QScrollArea = qt["QScrollArea"]
     QSettings = qt["QSettings"]
     QSizePolicy = qt["QSizePolicy"]
     QSpinBox = qt["QSpinBox"]
@@ -936,7 +939,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     # window uses, so the Wizard reads as the same application, not a generic
     # Qt dialog.
     from phase_studio.app import (
-        compute_safe_dialog_size,
+        apply_safe_dialog_geometry,
         create_phase_studio_brand_header,
         create_phase_studio_context_banner,
     )
@@ -1006,33 +1009,46 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     dialog.setMinimumWidth(640)
 
     def adjust_dialog_size() -> None:
-        # adjustSize() alone can grow the dialog to whatever a taller page
-        # (or an expanded disclosure section) needs, with nothing capping it
-        # to the actual screen -- clamp the result so the bottom action row
-        # can never end up off-screen or behind the taskbar.
+        # adjustSize() alone can grow the dialog to whatever a taller page (or
+        # an expanded disclosure section) needs, with nothing capping it to
+        # the actual screen or repositioning it -- apply_safe_dialog_geometry
+        # caps BOTH size and position to availableGeometry() (excludes the
+        # taskbar) and re-centers within it, so the title bar can never end
+        # up unreachable as content grows. Only the scrollable central
+        # content area below (never this top-level window) may exceed the
+        # screen's usable height.
         dialog.adjustSize()
-        safe_width, safe_height = compute_safe_dialog_size(dialog.width(), dialog.height(), parent=dialog)
-        if safe_width < dialog.width() or safe_height < dialog.height():
-            dialog.resize(min(dialog.width(), safe_width), min(dialog.height(), safe_height))
+        apply_safe_dialog_geometry(dialog, dialog.width(), dialog.height())
 
-    root = QVBoxLayout(dialog)
-    root.setContentsMargins(0, 0, 0, 0)
-    root.setSpacing(10)
+    outer_root = QVBoxLayout(dialog)
+    outer_root.setContentsMargins(0, 0, 0, 0)
+    outer_root.setSpacing(0)
 
-    root.addWidget(create_phase_studio_brand_header())
+    outer_root.addWidget(create_phase_studio_brand_header())
 
     context_banner = create_phase_studio_context_banner(
         "JANA2020 WORKFLOW", "Review the incoming crystallographic data and choose a workflow"
     )
     context_title_label = context_banner.findChild(QLabel, "dashboardTitle")
     context_subtitle_label = context_banner.findChild(QLabel, "dashboardSubtitle")
-    root.addWidget(context_banner)
+    outer_root.addWidget(context_banner)
 
+    # Only this central area scrolls (spec: "WIZARD WINDOW SIZING" section 5) --
+    # the branded header/banner above and the action footer added at the very
+    # end of this function (via outer_root, not `root`) always stay fixed and
+    # visible, however tall an expanded page's content gets.
+    scroll_area = QScrollArea()
+    scroll_area.setObjectName("wizardScrollArea")
+    scroll_area.setFrameShape(QFrame.NoFrame)
+    scroll_area.setWidgetResizable(True)
+    scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     content = QWidget()
     content_layout = QVBoxLayout(content)
-    content_layout.setContentsMargins(14, 10, 14, 14)
+    content_layout.setContentsMargins(14, 10, 14, 10)
     content_layout.setSpacing(10)
-    root.addWidget(content)
+    scroll_area.setWidget(content)
+    outer_root.addWidget(scroll_area, 1)
     root = content_layout
 
     inflip_info = QLabel(
@@ -1519,9 +1535,16 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     sharped_map_radio.toggled.connect(lambda _checked=False: sync_map_choice())
     sync_map_choice()
 
-    # ----- Shared bottom row: a prominent "Run" action (page 2 only) plus the
-    # less prominent Back / Cancel / Open full Phase Studio actions. -----
-    button_row = QHBoxLayout()
+    # ----- Fixed action footer: added to outer_root (NOT the scrollable
+    # `root`/content_layout), so Back/Cancel/Open config/Run phasing always
+    # stay visible above the taskbar regardless of how tall the scrollable
+    # page content above them gets (spec: "WIZARD WINDOW SIZING" sections
+    # 5/8). A prominent "Run" action on page 2 plus the less prominent
+    # Back / Cancel / Open full Phase Studio actions. -----
+    footer = QWidget()
+    footer.setObjectName("wizardFooter")
+    button_row = QHBoxLayout(footer)
+    button_row.setContentsMargins(14, 8, 14, 12)
     back_button = QPushButton("‹ Back")
     back_button.setToolTip("Return to the workflow selection.")
     cancel_button = QPushButton("Cancel")
@@ -1540,7 +1563,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     button_row.addWidget(cancel_button)
     button_row.addWidget(edit_button)
     button_row.addWidget(primary_button)
-    root.addLayout(button_row)
+    outer_root.addWidget(footer)
 
     def current_workflow() -> str:
         return workflow_state["key"]
