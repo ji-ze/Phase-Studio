@@ -537,6 +537,7 @@ class CycleResult:
     deblur_precision: Optional[float] = None
     deblur_heavy_atom_count: Optional[float] = None
     powder_repartition_avg_change_percent: Optional[float] = None
+    intensity_correction_avg_change_percent: Optional[float] = None
 
 
 INPUT_MODE_INFLIP = "jana_inflip"
@@ -699,6 +700,7 @@ class PipelineState:
     recycle_map: Optional[Path] = None
     omit_test_hkls: FrozenSet[Tuple[int, int, int]] = field(default_factory=frozenset)
     pending_powder_repartition_change_percent: Optional[float] = None
+    pending_intensity_correction_change_percent: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -2882,11 +2884,17 @@ def apply_map_feedback_to_reflections(
     intensity_damping: float,
     intensity_max_i_over_sigma: float,
     log: Callable[[str], None],
-) -> List[Reflection]:
+) -> Tuple[List[Reflection], Optional[float]]:
+    """Returns (updated_reflections, intensity_correction_avg_change_percent),
+    the latter being the mean, across reflections actually corrected this
+    call, of |after - before| / before * 100 -- i.e. the average percent
+    change in intensity from map-based correction alone (add_missing
+    reflections are new, not changed, so they never contribute) -- or None
+    when correct_intensities is off or nothing was corrected."""
     mode = normalize_reflection_data_mode(data_mode)
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     if not current:
-        return current
+        return current, None
     existing_keys = [(int(r.h), int(r.k), int(r.l)) for r in current]
     predictions = xplor_fft_predictions(feedback_map, existing_keys)
     ratios: List[float] = []
@@ -2899,6 +2907,7 @@ def apply_map_feedback_to_reflections(
     corrected = 0
     damping = max(0.0, min(1.0, float(intensity_damping or 0.0)))
     max_i_over_sigma = max(0.0, float(intensity_max_i_over_sigma or 0.0))
+    change_percentages: List[float] = []
     if correct_intensities and damping > 0:
         corrected_reflections: List[Reflection] = []
         for r in current:
@@ -2916,9 +2925,12 @@ def apply_map_feedback_to_reflections(
                 phase = r.phase if r.phase is not None else (map_phase if reflection_mode_has_phase(mode) else None)
                 corrected_reflections.append(Reflection(r.h, r.k, r.l, value, r.sigma, phase))
                 corrected += 1
+                if obs_i > 1e-12:
+                    change_percentages.append(abs(new_i - obs_i) / obs_i * 100.0)
             else:
                 corrected_reflections.append(r)
         current = corrected_reflections
+    avg_change_percent = sum(change_percentages) / len(change_percentages) if change_percentages else None
     added = 0
     if add_missing and missing_percent_limit > 0:
         max_add = int(math.floor(len(current) * max(0.0, float(missing_percent_limit)) / 100.0))
@@ -2943,9 +2955,10 @@ def apply_map_feedback_to_reflections(
     log(
         "Map feedback: "
         f"scale={scale:.6g}, corrected={corrected}, added_missing={added}, "
-        f"intensity_max_i_over_sigma={max_i_over_sigma:g}, reflections={len(current)}"
+        f"intensity_max_i_over_sigma={max_i_over_sigma:g}, reflections={len(current)}, "
+        f"avg_intensity_change={'n/a' if avg_change_percent is None else f'{avg_change_percent:.2f}%'}"
     )
-    return current
+    return current, avg_change_percent
 
 def bragg_two_theta_deg(d_value: float, wavelength: float) -> Optional[float]:
     """Bragg angle 2theta in degrees; None (not raised) for a reflection that is
@@ -5368,6 +5381,7 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
             "deblur_precision",
             "deblur_heavy_atom_count",
             "powder_repartition_avg_change_percent",
+            "intensity_correction_avg_change_percent",
         ])
         for r in results:
             w.writerow([
@@ -5402,6 +5416,7 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
                 "" if r.deblur_precision is None else r.deblur_precision,
                 "" if r.deblur_heavy_atom_count is None else r.deblur_heavy_atom_count,
                 "" if r.powder_repartition_avg_change_percent is None else r.powder_repartition_avg_change_percent,
+                "" if r.intensity_correction_avg_change_percent is None else r.intensity_correction_avg_change_percent,
             ])
 
 
@@ -7227,7 +7242,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Missing-reflection completion</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
             <h3>Intensity correction</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
+            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
             <h3>Powder overlap repartitioning</h3>
             <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose final map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2theta) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's processed map (the SharpED-deblurred map when SharpED deblurring is enabled, otherwise a copy of the raw Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2theta; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
@@ -7651,15 +7666,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "observed data. Each cycle's point reflects the repartitioning that fed its input, so it lags one "
                 "cycle behind the repartitioning run itself."
             ),
+            "intensity_correction": (
+                "Average, across corrected reflections, of the intensity change caused by that cycle's map-based "
+                "intensity correction (Basic -> Map feedback -> Intensity correction). Only appears when intensity "
+                "correction is enabled; lower is better, since it should shrink toward 0% as the map increasingly "
+                "agrees with the observed data. Each cycle's point reflects the correction that fed its input, so it "
+                "lags one cycle behind the correction run itself."
+            ),
             "superflip_omit": "OMIT maps + R_free cross-validation for the Superflip map.",
             "deblur_omit": "OMIT maps + R_free cross-validation for the SharpED map.",
         }
+        self._metrics_detail_supported_keys = {"powder_repartition", "intensity_correction"}
         for key, title in (
             ("superflip", "Superflip"),
             ("deblur", "SharpED"),
             ("superflip_omit", "Superflip validation"),
             ("deblur_omit", "SharpED validation"),
             ("powder_repartition", "Powder repartitioning"),
+            ("intensity_correction", "Intensity correction"),
         ):
             # Each page is now JUST the canvas -- the interaction controls
             # (hint / Full range / Detail / Reset view) live once in the
@@ -7691,7 +7715,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 canvas,
                 get_axes=(lambda k=key: self.metrics_axes.get(k)),
                 get_series=(lambda k=key: self._metrics_hover_series.get(k, [])),
-                supports_detail=(key == "powder_repartition"),
+                supports_detail=(key in self._metrics_detail_supported_keys),
                 on_state_changed=self._on_metrics_view_changed,
                 request_rerender=(lambda k=key: self._replay_metrics_tab(k)),
             )
@@ -10928,7 +10952,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _on_metrics_tab_changed(self, index: int) -> None:
         key = self._metrics_tab_keys[index] if 0 <= index < len(self._metrics_tab_keys) else None
-        supports_detail = key == "powder_repartition"
+        supports_detail = key in self._metrics_detail_supported_keys
         if hasattr(self, "metrics_full_range_btn"):
             self.metrics_full_range_btn.setVisible(supports_detail)
         if hasattr(self, "metrics_detail_btn"):
@@ -11238,36 +11262,75 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         canvas.draw_idle()
 
     def _update_plot(self) -> None:
-        self._render_metrics_tab("superflip", [
+        def series_has_data(series) -> bool:
+            return any(v is not None for _label, values, *_rest in series for v in values)
+
+        def set_tab_visible(key: str, series) -> None:
+            try:
+                index = self._metrics_tab_keys.index(key)
+            except ValueError:
+                return
+            # Before any cycle has completed there is nothing to distinguish
+            # "no data yet" from "irrelevant for this run" -- keep every tab
+            # visible (showing the normal "Run phasing..." placeholder) until
+            # results start arriving, only then hide tabs that stayed empty.
+            self.metrics_tabs.setTabVisible(index, (not self.results) or series_has_data(series))
+
+        superflip_series = [
             ("Reference match", [r.superflip_ref_match for r in self.results], False, "#001170", "D", ":"),
             ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
             ("Recall", [r.superflip_recall for r in self.results], True, "#2264b8", "^", "-"),
             ("Precision", [r.superflip_precision for r in self.results], True, "#082a8a", "P", "--"),
             ("Heavy atoms found", [r.superflip_heavy_atom_count for r in self.results], True, "#7183a6", "h", ":"),
-        ])
-        self._render_metrics_tab("deblur", [
+        ]
+        self._render_metrics_tab("superflip", superflip_series)
+        set_tab_visible("superflip", superflip_series)
+
+        deblur_series = [
             ("SharpED RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
             ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
             ("Recall", [r.deblur_recall for r in self.results], True, "#44b7ff", "^", "-"),
             ("Precision", [r.deblur_precision for r in self.results], True, "#082a8a", "P", "--"),
             ("Heavy atoms found", [r.deblur_heavy_atom_count for r in self.results], True, "#7183a6", "h", ":"),
-        ])
-        self._render_metrics_tab("superflip_omit", [
+        ]
+        self._render_metrics_tab("deblur", deblur_series)
+        set_tab_visible("deblur", deblur_series)
+
+        superflip_omit_series = [
             ("Omit map correlation", [r.omit_superflip_correlation for r in self.results], True, "#2264b8", "*", "-"),
             ("R_free", [r.omit_superflip_rfree for r in self.results], False, "#001170", "o", "-"),
-        ])
-        self._render_metrics_tab("deblur_omit", [
+        ]
+        self._render_metrics_tab("superflip_omit", superflip_omit_series)
+        set_tab_visible("superflip_omit", superflip_omit_series)
+
+        deblur_omit_series = [
             ("Omit map correlation", [r.omit_deblur_correlation for r in self.results], True, "#2264b8", "*", "-"),
             ("R_free", [r.omit_deblur_rfree for r in self.results], False, "#001170", "o", "-"),
-        ])
+        ]
+        self._render_metrics_tab("deblur_omit", deblur_omit_series)
+        set_tab_visible("deblur_omit", deblur_omit_series)
+
+        powder_repartition_series = [
+            ("Mean intensity change (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
+        ]
         self._render_metrics_tab(
             "powder_repartition",
-            [
-                ("Mean intensity change (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
-            ],
+            powder_repartition_series,
             raw=True,
             raw_ylabel="Mean intensity change (%)",
         )
+        set_tab_visible("powder_repartition", powder_repartition_series)
+
+        intensity_correction_series = [
+            ("Mean intensity change (%)", [r.intensity_correction_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
+        ]
+        self._render_metrics_tab(
+            "intensity_correction",
+            intensity_correction_series,
+            raw=True,
+            raw_ylabel="Mean intensity change (%)",
+        )
+        set_tab_visible("intensity_correction", intensity_correction_series)
 
     def _element_color(self, element: str) -> str:
         # This extended blue scale is intentionally exclusive to structure atoms.
@@ -12503,8 +12566,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_precision=deblur_precision,
                 deblur_heavy_atom_count=deblur_heavy_atoms,
                 powder_repartition_avg_change_percent=state.pending_powder_repartition_change_percent,
+                intensity_correction_avg_change_percent=state.pending_intensity_correction_change_percent,
             )
             state.pending_powder_repartition_change_percent = None
+            state.pending_intensity_correction_change_percent = None
             all_results.append(result)
             write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
             self.msg_queue.put(("result", result))
@@ -12516,7 +12581,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log("Overlap repartitioning enabled but Wavelength is 0; skipping for this cycle.", level="WARNING")
                 if add_missing or correct_intensities or redistribute:
                     if add_missing or correct_intensities:
-                        state.current_reflections = apply_map_feedback_to_reflections(
+                        state.current_reflections, state.pending_intensity_correction_change_percent = apply_map_feedback_to_reflections(
                             state.current_reflections,
                             configured_data_mode,
                             deblur_map,
