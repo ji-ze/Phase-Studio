@@ -7974,23 +7974,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._set_metadata_error(exc)
 
     def _set_metadata_error(self, error: object) -> None:
+        # Run stays clickable even with invalid metadata: start_run()'s own
+        # get_config() call raises the same underlying error, reported
+        # through the normal error dialog on click -- instead of a silently
+        # inert button that gives the user no indication of what to fix.
         report = build_error_report(error, subsystem="Crystal metadata", operation="Resolve crystal metadata")
         self._metadata_valid = False
         self._metadata_error_report = report
         if hasattr(self, "metadata_error_text"):
             self.metadata_error_text.setText(f"{report.title}\n{report.guidance}")
             self.metadata_error_panel.setVisible(True)
-        if hasattr(self, "run_btn"):
-            self.run_btn.setEnabled(False)
 
     def _clear_metadata_error(self) -> None:
         self._metadata_valid = True
         self._metadata_error_report = None
         if hasattr(self, "metadata_error_panel"):
             self.metadata_error_panel.setVisible(False)
-        if hasattr(self, "run_btn"):
-            active = str(getattr(self, "_run_status", "READY")).upper() in {"RUNNING", "STOPPING"}
-            self.run_btn.setEnabled(not active)
 
     def _show_metadata_error_details(self) -> None:
         report = self._metadata_error_report
@@ -8266,14 +8265,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # Powder overlap repartitioning only makes sense for FWHM-carrying
         # reflection data (hkl I fwhm / hkl F fwhm); gate the checkbox itself
         # on that, on top of (not instead of) its own checked state below.
-        # The checked state itself is left untouched while disabled -- so a
-        # user's choice survives switching to a non-FWHM source and back --
-        # but _validate_run_config() blocks Run outright if it is still
-        # checked against non-FWHM data, since a disabled-but-checked box
-        # must never silently reach the pipeline.
+        # A disabled-but-still-checked box reads as "queued but blocked" and
+        # is confusing/misleading, so it is force-unchecked (not just grayed)
+        # the moment it becomes unavailable -- an unavailable feature must
+        # look and behave exactly like "off", never "on but you can't touch
+        # it". _validate_run_config() still blocks Run if it is somehow
+        # checked against non-FWHM data (e.g. a stale saved setting), as a
+        # last-resort safety net, not the primary mechanism.
         redistribute_checkbox = self.inputs.get("redistribute_overlaps")
         if isinstance(redistribute_checkbox, QCheckBox):
             has_fwhm_data = reflection_mode_has_fwhm(self._resolve_configured_data_mode_for_ui())
+            if not has_fwhm_data and redistribute_checkbox.isChecked():
+                redistribute_checkbox.setChecked(False)
             redistribute_checkbox.setEnabled(has_fwhm_data)
             redistribute_label = self.input_labels.get("redistribute_overlaps")
             if redistribute_label is not None:
@@ -9884,7 +9887,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         active = status == "RUNNING"
         self._set_configuration_locked(active)
         if hasattr(self, "run_btn"):
-            self.run_btn.setEnabled(not active and bool(getattr(self, "_metadata_valid", False)))
+            # Invalid crystal metadata does not disable Run: start_run()'s
+            # own get_config() call raises the same underlying error, which
+            # is already reported through the normal error dialog on click.
+            self.run_btn.setEnabled(not active)
         if hasattr(self, "continue_btn"):
             self.continue_btn.setEnabled(not active and getattr(self, "_resume_state", None) is not None)
         if hasattr(self, "stop_btn"):
