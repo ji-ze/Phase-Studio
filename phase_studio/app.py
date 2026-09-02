@@ -948,6 +948,42 @@ def validate_composition_text(value: str) -> str:
     return text
 
 
+def parse_composition_counts(composition: str) -> List[Tuple[str, int]]:
+    """Parse the existing whitespace-separated Superflip composition syntax
+    (e.g. "Zn8 I8 C8 H8 N8" or "Ag 196 S 108") into ordered (element, count)
+    pairs, mirroring validate_composition_text()'s grammar. Used as a
+    composition-driven fallback for EDMA peak element assignment when no
+    reference-structure atom sites are available (see
+    assign_elements_by_reference_composition())."""
+    text = str(composition or "").strip()
+    if not text:
+        return []
+    tokens = [token for token in re.split(r"[\s,;]+", text) if token]
+    result: List[Tuple[str, int]] = []
+    pending_symbol: Optional[str] = None
+    for token in tokens:
+        match = re.fullmatch(r"([A-Z][a-z]?|D)([0-9]+(?:\.[0-9]+)?)?", token)
+        if match:
+            if pending_symbol is not None:
+                result.append((pending_symbol, 1))
+            symbol = "H" if match.group(1) == "D" else match.group(1)
+            if match.group(2) is not None:
+                result.append((symbol, max(1, int(round(float(match.group(2)))))))
+                pending_symbol = None
+            else:
+                pending_symbol = symbol
+            continue
+        if pending_symbol is not None and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", token):
+            result.append((pending_symbol, max(1, int(round(float(token))))))
+            pending_symbol = None
+            continue
+        # Unrecognized token: ignore defensively here -- validate_composition_text()
+        # is the authoritative validator and already runs earlier in the pipeline.
+    if pending_symbol is not None:
+        result.append((pending_symbol, 1))
+    return result
+
+
 def validate_crystal_cell(cell: gemmi.UnitCell) -> gemmi.UnitCell:
     values = (cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
     if not all(math.isfinite(float(value)) for value in values):
@@ -4821,11 +4857,22 @@ def scaled_element_quotas(target_counts: Sequence[Tuple[str, int]], n_items: int
                 quotas[elem] = 1
     return quotas
 
-def assign_elements_by_reference_composition(density: np.ndarray, ref_atoms: Sequence[AtomSite]) -> List[str]:
+def assign_elements_by_reference_composition(
+    density: np.ndarray, ref_atoms: Sequence[AtomSite], composition: str = ""
+) -> List[str]:
     if density is None or len(density) == 0:
         return []
     counts, order = atom_element_counts(ref_atoms)
     target_counts = [(elem, counts[elem]) for elem in order if counts.get(elem, 0) > 0]
+    if not target_counts:
+        # No reference-structure atom sites to draw element counts from --
+        # the common case when the run has no external reference file, just
+        # an entered composition. Fall back to that composition itself
+        # instead of dropping straight to the generic Ag/B density-threshold
+        # placeholder below, so the written CIF's elements match what was
+        # actually entered/declared, the same way EDMA's own m40 output
+        # already does via its own "composition" keyword.
+        target_counts = parse_composition_counts(composition)
     quotas = scaled_element_quotas(target_counts, len(density))
     if not quotas:
         return assign_elements_by_density(density, heavy="Ag", light="B")
@@ -4958,7 +5005,7 @@ def run_edma_on_xplor(
         write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], structure_format)
         return cif
     frac, dens = symmetry_merge_peaks(frac, dens, ref_ctx, merge_distance_a)
-    elements = assign_elements_by_reference_composition(dens, ref_ctx.atoms)
+    elements = assign_elements_by_reference_composition(dens, ref_ctx.atoms, ref_ctx.composition)
     atoms = [AtomSite(label=f"{elements[i]}{i+1}", element=elements[i], frac=frac[i], density=float(dens[i])) for i in range(len(frac))]
     write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms, structure_format)
     return cif
