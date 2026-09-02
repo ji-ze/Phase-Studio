@@ -94,7 +94,7 @@ try:
     from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QPoint, QRect, QRectF, QSize
     from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (
-        QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
+        QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
         QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
         QDialog, QDialogButtonBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QSplashScreen, QToolButton,
         QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QTextEdit, QVBoxLayout, QWidget
@@ -5613,6 +5613,393 @@ class WorkflowDiagram(QWidget):
         finally:
             painter.end()
 
+
+def format_metric_hover_value(value: float) -> str:
+    """Magnitude-adaptive display formatting for a hover-tooltip number.
+    Display only -- never used for the stored/plotted metric value itself."""
+    magnitude = abs(float(value))
+    if magnitude >= 1000:
+        return f"{value:,.0f}"
+    if magnitude >= 100:
+        return f"{value:.1f}"
+    if magnitude >= 10:
+        return f"{value:.2f}"
+    return f"{value:.3f}"
+
+
+def robust_detail_range(values: Sequence[Optional[float]], min_points: int = 4) -> Optional[Tuple[float, float]]:
+    """Display-only robust y-range covering the main body of ``values`` (a
+    padded IQR fence around the median), for a "Detail" viewport that stays
+    readable when one extreme outlier would otherwise dominate the full
+    autoscaled range. Never modifies, discards or recalculates any stored
+    metric value -- points outside the returned range are simply outside the
+    current viewport, exactly like an ordinary zoom. Returns None when there
+    are too few finite points for a robust range to mean anything."""
+    finite = np.asarray(
+        [float(v) for v in values if v is not None and np.isfinite(float(v))], dtype=float
+    )
+    if finite.size < min_points:
+        return None
+    q1, q3 = np.percentile(finite, [25, 75])
+    iqr = q3 - q1
+    pad = iqr * 1.5 if iqr > 1e-9 else max(abs(float(np.median(finite))), 1.0) * 0.1
+    lo, hi = q1 - pad, q3 + pad
+    if hi - lo < 1e-9:
+        hi = lo + max(abs(lo), 1.0) * 0.05
+    return (float(lo), float(hi))
+
+
+class MetricsPlotInteraction:
+    """Reusable hover/zoom/pan/reset controller for one Reconstruction
+    Metrics tab's Matplotlib canvas.
+
+    _render_metrics_tab() tears down and rebuilds the tab's Axes on every
+    refresh (figure.clear() + add_subplot), so this controller intentionally
+    holds no reference to a specific Axes/artist across redraws -- it looks
+    up the CURRENT Axes and CURRENT series data through the callables passed
+    to __init__ every time an event fires, and notify_redraw_start() drops
+    any hover state pointing at an Axes that is about to be destroyed.
+    """
+
+    HOVER_RADIUS_PX = 9.0
+    ZOOM_FACTOR = 1.3
+    AXIS_EDGE_PX = 22.0
+
+    def __init__(
+        self,
+        key: str,
+        canvas: "FigureCanvas",
+        get_axes: Callable[[], object],
+        get_series: Callable[[], List[Tuple[str, List[int], List[Optional[float]], List[Optional[float]], str]]],
+        *,
+        supports_detail: bool = False,
+        on_state_changed: Optional[Callable[[str], None]] = None,
+        request_rerender: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.key = key
+        self.canvas = canvas
+        self._get_axes = get_axes
+        self._get_series = get_series
+        self.supports_detail = supports_detail
+        self.on_state_changed = on_state_changed
+        self.request_rerender = request_rerender
+        self.user_modified = False
+        self.mode = "full"
+        self.detail_available = False
+        self._stored_xlim: Optional[Tuple[float, float]] = None
+        self._stored_ylim: Optional[Tuple[float, float]] = None
+        self._drag: Optional[dict] = None
+        self._hover_annotation = None
+        self._hover_ring = None
+        self._hover_cycle: Optional[int] = None
+        canvas.mpl_connect("scroll_event", self._on_scroll)
+        canvas.mpl_connect("button_press_event", self._on_press)
+        canvas.mpl_connect("motion_notify_event", self._on_motion)
+        canvas.mpl_connect("button_release_event", self._on_release)
+        canvas.mpl_connect("figure_leave_event", self._on_leave)
+
+    # ----- external API used by _render_metrics_tab() and the control row -----
+
+    def notify_redraw_start(self) -> None:
+        """Call at the very top of each render pass, before figure.clear()."""
+        self._hover_annotation = None
+        self._hover_ring = None
+        self._hover_cycle = None
+
+    def apply_limits(
+        self,
+        ax,
+        full_xlim: Tuple[float, float],
+        full_ylim: Tuple[float, float],
+        detail_ylim: Optional[Tuple[float, float]],
+    ) -> str:
+        """Set the Axes' x/y limits for this render pass, honoring a stored
+        manual zoom/pan (section 16: live updates must not reset it) or an
+        active Detail mode, falling back to the freshly computed full-range
+        limits otherwise. Returns which view is actually in effect."""
+        self.detail_available = detail_ylim is not None
+        if not self.detail_available and self.mode == "detail":
+            self.mode = "full"
+        if self.user_modified and self._stored_xlim is not None and self._stored_ylim is not None:
+            ax.set_xlim(self._stored_xlim)
+            ax.set_ylim(self._stored_ylim)
+            return "manual"
+        if self.mode == "detail" and detail_ylim is not None:
+            ax.set_xlim(full_xlim)
+            ax.set_ylim(detail_ylim)
+            return "detail"
+        ax.set_xlim(full_xlim)
+        ax.set_ylim(full_ylim)
+        return "full"
+
+    def reset_view(self) -> None:
+        self.user_modified = False
+        self.mode = "full"
+        self._stored_xlim = None
+        self._stored_ylim = None
+        self._request_rerender()
+        self._notify()
+
+    def set_mode(self, mode: str) -> None:
+        if mode == self.mode and not self.user_modified:
+            return
+        self.mode = mode
+        self.user_modified = False
+        self._stored_xlim = None
+        self._stored_ylim = None
+        self._request_rerender()
+        self._notify()
+
+    # ----- internal -----
+
+    def _request_rerender(self) -> None:
+        if self.request_rerender is not None:
+            try:
+                self.request_rerender()
+            except Exception:
+                pass
+
+    def _notify(self) -> None:
+        if self.on_state_changed is not None:
+            try:
+                self.on_state_changed(self.key)
+            except Exception:
+                pass
+
+    def _mark_user_modified(self, ax) -> None:
+        self.user_modified = True
+        self._stored_xlim = tuple(ax.get_xlim())
+        self._stored_ylim = tuple(ax.get_ylim())
+
+    def _axis_targets(self, ax, event) -> Tuple[bool, bool]:
+        # Cursor proximity to the axes edges (display/pixel space, so this is
+        # DPI- and zoom-independent) decides whether to zoom one axis or both.
+        try:
+            bbox = ax.get_window_extent()
+        except Exception:
+            return True, True
+        near_bottom = event.y is not None and (event.y - bbox.y0) <= self.AXIS_EDGE_PX
+        near_left = event.x is not None and (event.x - bbox.x0) <= self.AXIS_EDGE_PX
+        if near_bottom and not near_left:
+            return True, False
+        if near_left and not near_bottom:
+            return False, True
+        return True, True
+
+    def _on_scroll(self, event) -> None:
+        ax = self._get_axes()
+        if ax is None or event.inaxes is not ax or event.xdata is None or event.ydata is None:
+            return
+        factor = (1.0 / self.ZOOM_FACTOR) if event.button == "up" else self.ZOOM_FACTOR
+        zoom_x, zoom_y = self._axis_targets(ax, event)
+        if zoom_x:
+            xlim = ax.get_xlim()
+            x = event.xdata
+            ax.set_xlim(x - (x - xlim[0]) * factor, x + (xlim[1] - x) * factor)
+        if zoom_y:
+            ylim = ax.get_ylim()
+            y = event.ydata
+            ax.set_ylim(y - (y - ylim[0]) * factor, y + (ylim[1] - y) * factor)
+        self._mark_user_modified(ax)
+        self._hide_tooltip()
+        self.canvas.draw_idle()
+        self._notify()
+
+    def _on_press(self, event) -> None:
+        ax = self._get_axes()
+        if ax is None or event.inaxes is not ax:
+            return
+        if event.dblclick:
+            self.reset_view()
+            return
+        if event.button not in (1, 2):
+            return
+        self._drag = {
+            "button": event.button,
+            "x_px": event.x,
+            "y_px": event.y,
+            "xlim": ax.get_xlim(),
+            "ylim": ax.get_ylim(),
+        }
+        self._hide_tooltip()
+        try:
+            self.canvas.setCursor(Qt.ClosedHandCursor)
+        except Exception:
+            pass
+
+    def _on_motion(self, event) -> None:
+        ax = self._get_axes()
+        if ax is None:
+            return
+        if self._drag is not None:
+            if event.button in (1, 2):
+                self._do_pan(ax, event)
+            else:
+                self._end_drag()
+            return
+        if event.inaxes is not ax:
+            self._hide_tooltip()
+            return
+        self._update_hover(ax, event)
+
+    def _do_pan(self, ax, event) -> None:
+        drag = self._drag
+        if drag is None or event.x is None or event.y is None:
+            return
+        inv = ax.transData.inverted()
+        x0_data, y0_data = inv.transform((drag["x_px"], drag["y_px"]))
+        x1_data, y1_data = inv.transform((event.x, event.y))
+        dx = x0_data - x1_data
+        dy = y0_data - y1_data
+        xlim = drag["xlim"]
+        ylim = drag["ylim"]
+        ax.set_xlim(xlim[0] + dx, xlim[1] + dx)
+        ax.set_ylim(ylim[0] + dy, ylim[1] + dy)
+        self._mark_user_modified(ax)
+        self.canvas.draw_idle()
+
+    def _on_release(self, event) -> None:
+        self._end_drag()
+
+    def _end_drag(self) -> None:
+        if self._drag is not None:
+            self._drag = None
+            try:
+                self.canvas.setCursor(Qt.ArrowCursor)
+            except Exception:
+                pass
+            self._notify()
+
+    def _on_leave(self, event) -> None:
+        self._hide_tooltip()
+        self._end_drag()
+
+    # ----- hover tooltip -----
+
+    def _update_hover(self, ax, event) -> None:
+        if event.x is None or event.y is None:
+            self._hide_tooltip()
+            return
+        cycle, best_dist, anchor = self._nearest_cycle(ax, event)
+        if cycle is None or best_dist > self.HOVER_RADIUS_PX:
+            self._hide_tooltip()
+            return
+        if cycle == self._hover_cycle and self._hover_annotation is not None:
+            return
+        self._show_tooltip(ax, cycle, anchor)
+
+    def _nearest_cycle(self, ax, event) -> Tuple[Optional[int], float, Optional[Tuple[float, float]]]:
+        # Hit-testing is done in DISPLAY (pixel) space against the actually
+        # PLOTTED values (which for the normalized-score tabs is the 0-1
+        # score, not the raw metric) so proximity behaves consistently after
+        # zoom/pan and across DPI scales; the raw value used for the tooltip
+        # TEXT is looked up separately in _show_tooltip(). ``anchor`` is the
+        # exact (x, y) of the single closest marker, in data coordinates, for
+        # both the tooltip anchor and the hover-highlight ring.
+        best_cycle: Optional[int] = None
+        best_dist = float("inf")
+        best_anchor: Optional[Tuple[float, float]] = None
+        for _label, cycles, plotted_values, _raw_values, _unit in self._get_series():
+            xs: List[float] = []
+            ys: List[float] = []
+            for c, v in zip(cycles, plotted_values):
+                if v is None:
+                    continue
+                fv = float(v)
+                if not np.isfinite(fv):
+                    continue
+                xs.append(float(c))
+                ys.append(fv)
+            if not xs:
+                continue
+            disp = ax.transData.transform(np.column_stack([xs, ys]))
+            dists = np.hypot(disp[:, 0] - event.x, disp[:, 1] - event.y)
+            idx = int(np.argmin(dists))
+            if dists[idx] < best_dist:
+                best_dist = float(dists[idx])
+                best_cycle = int(round(xs[idx]))
+                best_anchor = (xs[idx], ys[idx])
+        return best_cycle, best_dist, best_anchor
+
+    def _show_tooltip(self, ax, cycle: int, anchor: Optional[Tuple[float, float]]) -> None:
+        if anchor is None:
+            self._hide_tooltip()
+            return
+        lines = [f"Cycle {cycle}"]
+        for label, cycles, _plotted_values, raw_values, unit in self._get_series():
+            value = None
+            for c, v in zip(cycles, raw_values):
+                if c == cycle and v is not None and np.isfinite(float(v)):
+                    value = float(v)
+                    break
+            if value is None:
+                continue
+            clean_label = label.replace("(%)", "").strip()
+            lines.append(f"{clean_label}: {format_metric_hover_value(value)}{unit}")
+        if len(lines) <= 1:
+            self._hide_tooltip()
+            return
+        text = "\n".join(lines)
+        anchor_x, anchor_y = anchor
+        # Anchor to the data point itself (axes data coordinates), offset a
+        # few points toward the upper right in screen space, so it tracks
+        # correctly through zoom/pan without per-frame coordinate math.
+        if self._hover_annotation is None or self._hover_annotation.axes is not ax:
+            self._hover_annotation = ax.annotate(
+                text,
+                xy=(anchor_x, anchor_y),
+                xytext=(11, 11),
+                textcoords="offset points",
+                fontsize=7.3,
+                color="#14204a",
+                linespacing=1.5,
+                bbox=dict(boxstyle="square,pad=0.35", facecolor="#f5f9ff", edgecolor="#2264b8", linewidth=0.9),
+                zorder=12,
+                annotation_clip=False,
+            )
+        else:
+            self._hover_annotation.set_text(text)
+            self._hover_annotation.xy = (anchor_x, anchor_y)
+            self._hover_annotation.set_visible(True)
+        # A restrained ring around just the hovered marker -- visual hierarchy
+        # stays line < markers < hover-highlighted marker, no new permanent color.
+        if self._hover_ring is None or self._hover_ring.axes is not ax:
+            (self._hover_ring,) = ax.plot(
+                [anchor_x],
+                [anchor_y],
+                marker="o",
+                markersize=9.5,
+                markerfacecolor="none",
+                markeredgecolor="#001170",
+                markeredgewidth=1.3,
+                linestyle="none",
+                zorder=11,
+            )
+        else:
+            self._hover_ring.set_data([anchor_x], [anchor_y])
+            self._hover_ring.set_visible(True)
+        self._hover_cycle = cycle
+        self.canvas.draw_idle()
+
+    def _hide_tooltip(self) -> None:
+        changed = False
+        if self._hover_annotation is not None:
+            try:
+                self._hover_annotation.set_visible(False)
+                changed = True
+            except Exception:
+                pass
+        if self._hover_ring is not None:
+            try:
+                self._hover_ring.set_visible(False)
+                changed = True
+            except Exception:
+                pass
+        if changed:
+            self.canvas.draw_idle()
+        self._hover_cycle = None
+
+
 class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -6873,6 +7260,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.metrics_figures: Dict[str, Figure] = {}
         self.metrics_axes: Dict[str, object] = {}
         self.metrics_canvases: Dict[str, FigureCanvas] = {}
+        self.metrics_interactions: Dict[str, MetricsPlotInteraction] = {}
+        self._metrics_hover_series: Dict[str, list] = {}
+        self._metrics_last_render_args: Dict[str, dict] = {}
+        self.metrics_reset_buttons: Dict[str, QPushButton] = {}
+        self.metrics_mode_buttons: Dict[str, Dict[str, QPushButton]] = {}
         metrics_tab_tooltips = {
             "superflip": (
                 "Reference match, SF RMSD, Recall and Precision compare directly against a supplied reference "
@@ -6906,6 +7298,48 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             page = QWidget()
             page_layout = QVBoxLayout(page)
             page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(2)
+
+            supports_detail = key == "powder_repartition"
+            control_row = QHBoxLayout()
+            control_row.setContentsMargins(4, 2, 4, 0)
+            control_row.setSpacing(6)
+            hint_label = QLabel("Wheel to zoom · drag to pan · double-click to reset")
+            hint_label.setObjectName("metricsHintLabel")
+            control_row.addWidget(hint_label)
+            control_row.addStretch(1)
+            if supports_detail:
+                full_btn = QPushButton("Full range")
+                detail_btn = QPushButton("Detail")
+                for btn in (full_btn, detail_btn):
+                    btn.setObjectName("metricsViewToggle")
+                    btn.setCheckable(True)
+                    btn.setCursor(Qt.PointingHandCursor)
+                mode_group = QButtonGroup(page)
+                mode_group.setExclusive(True)
+                mode_group.addButton(full_btn)
+                mode_group.addButton(detail_btn)
+                full_btn.setChecked(True)
+                full_btn.setToolTip("Show every value using the normal full y range.")
+                detail_btn.setToolTip(
+                    "Focus the y range on the main body of values (robust to a single outlying cycle). "
+                    "Points outside the current view are not deleted -- they are simply off-screen."
+                )
+                full_btn.clicked.connect(lambda _checked=False, k=key: self._set_metrics_view_mode(k, "full"))
+                detail_btn.clicked.connect(lambda _checked=False, k=key: self._set_metrics_view_mode(k, "detail"))
+                control_row.addWidget(full_btn)
+                control_row.addWidget(detail_btn)
+                self.metrics_mode_buttons[key] = {"full": full_btn, "detail": detail_btn}
+            reset_btn = QPushButton("Reset view")
+            reset_btn.setObjectName("metricsControlButton")
+            reset_btn.setCursor(Qt.PointingHandCursor)
+            reset_btn.setToolTip("Return to the automatically calculated full-data view.")
+            reset_btn.setEnabled(False)
+            reset_btn.clicked.connect(lambda _checked=False, k=key: self._reset_metrics_view(k))
+            control_row.addWidget(reset_btn)
+            self.metrics_reset_buttons[key] = reset_btn
+            page_layout.addLayout(control_row)
+
             figure = Figure(figsize=(7.5, 3.5), dpi=100)
             canvas = FigureCanvas(figure)
             canvas.setObjectName("metricsCanvas")
@@ -6913,6 +7347,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             canvas.mpl_connect("resize_event", lambda _event, k=key: self._layout_metrics_figure(k))
             canvas.setToolTip("")
+            canvas.setFocusPolicy(Qt.ClickFocus)
             page_layout.addWidget(canvas, 1)
             tab_index = self.metrics_tabs.addTab(page, title)
             if key in metrics_tab_tooltips:
@@ -6920,6 +7355,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.metrics_figures[key] = figure
             self.metrics_axes[key] = figure.add_subplot(111)
             self.metrics_canvases[key] = canvas
+            self.metrics_interactions[key] = MetricsPlotInteraction(
+                key,
+                canvas,
+                get_axes=(lambda k=key: self.metrics_axes.get(k)),
+                get_series=(lambda k=key: self._metrics_hover_series.get(k, [])),
+                supports_detail=supports_detail,
+                on_state_changed=self._on_metrics_view_changed,
+                request_rerender=(lambda k=key: self._replay_metrics_tab(k)),
+            )
         metrics_layout.addWidget(self.metrics_tabs, 1)
         self.result_splitter.addWidget(metrics_section)
 
@@ -10096,32 +10540,79 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _replay_metrics_tab(self, key: str) -> None:
+        """Re-run the last _render_metrics_tab() call for this tab with its
+        original series data, so a Reset view / Full range / Detail control
+        (or a double-click reset) can update the displayed limits without
+        waiting for the next data-driven refresh."""
+        args = self._metrics_last_render_args.get(key)
+        if args is None:
+            return
+        self._render_metrics_tab(key, args["series"], raw=args["raw"], raw_ylabel=args["raw_ylabel"])
+
+    def _reset_metrics_view(self, key: str) -> None:
+        interaction = self.metrics_interactions.get(key)
+        if interaction is not None:
+            interaction.reset_view()
+
+    def _set_metrics_view_mode(self, key: str, mode: str) -> None:
+        interaction = self.metrics_interactions.get(key)
+        if interaction is not None:
+            interaction.set_mode(mode)
+
+    def _on_metrics_view_changed(self, key: str) -> None:
+        interaction = self.metrics_interactions.get(key)
+        if interaction is None:
+            return
+        buttons = self.metrics_mode_buttons.get(key)
+        if buttons is not None:
+            full_btn = buttons.get("full")
+            detail_btn = buttons.get("detail")
+            in_manual = interaction.user_modified
+            if detail_btn is not None:
+                detail_btn.setEnabled(interaction.detail_available)
+                detail_btn.setChecked(not in_manual and interaction.mode == "detail")
+            if full_btn is not None:
+                full_btn.setChecked(not in_manual and interaction.mode != "detail")
+        reset_btn = self.metrics_reset_buttons.get(key)
+        if reset_btn is not None:
+            reset_btn.setEnabled(interaction.user_modified or interaction.mode == "detail")
+
     def _layout_metrics_figure(self, key: str) -> None:
         figure = self.metrics_figures[key]
         canvas = self.metrics_canvases[key]
         width = max(1.0, float(canvas.width()))
         height = max(1.0, float(canvas.height()))
         has_data = bool(self.results)
+        # A single-series tab (e.g. Powder repartitioning) omits its legend
+        # entirely -- the y-axis label already names the one plotted metric
+        # -- so it should reclaim the margin a legend would otherwise cost,
+        # rather than leaving a wide empty band on the right.
+        has_legend = has_data and bool(figure.legends)
+        legend_gap_pixels = 8.0
         left_pixels = 86.0 if has_data else 70.0
         left = min(0.18, max(0.07, left_pixels / width))
         bottom = min(0.22, max(0.12, 34.0 / height))
         if has_data:
-            # Reserve a compact, fixed-width band for the vertical legend.  Keeping
-            # this budget pixel based avoids wasting plot width on large canvases
-            # while still fitting the longest label at moderately narrow widths.
-            legend_width_pixels = 112.0
-            legend_gap_pixels = 8.0
-            outer_right_pixels = 8.0
-            right = 1.0 - min(
-                0.32,
-                (legend_width_pixels + legend_gap_pixels + outer_right_pixels) / width,
-            )
             top = 1.0 - min(0.08, max(0.035, 10.0 / height))
+            if has_legend:
+                # Reserve a compact, fixed-width band for the vertical legend.
+                # Keeping this budget pixel based avoids wasting plot width on
+                # large canvases while still fitting the longest label at
+                # moderately narrow widths.
+                legend_width_pixels = 112.0
+                outer_right_pixels = 8.0
+                right = 1.0 - min(
+                    0.32,
+                    (legend_width_pixels + legend_gap_pixels + outer_right_pixels) / width,
+                )
+            else:
+                right = 1.0 - min(0.04, max(0.02, 18.0 / width))
         else:
             right = 1.0 - min(0.04, max(0.02, 18.0 / width))
             top = 1.0 - min(0.16, max(0.07, 22.0 / height))
         figure.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
-        if has_data and figure.legends:
+        if has_legend:
             legend_left = right + (legend_gap_pixels / width)
             legend_center_y = (bottom + top) / 2.0
             figure.legends[0].set_bbox_to_anchor(
@@ -10142,7 +10633,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         recall, reference match, ...) can be compared on one axis. Pass raw=True
         for a tab with a single metric already in one meaningful unit (for
         example a percentage), where that rescaling would hide whether the
-        actual value is trending down/up and should instead be plotted as-is."""
+        actual value is trending down/up and should instead be plotted as-is.
+
+        Visualization only: the values plotted/shown here (and in hover
+        tooltips) are exactly the stored CycleResult metrics or, for
+        non-raw tabs, a display-only 0-1 rescaling of them for a shared axis
+        -- nothing here recomputes or alters a scientific value."""
+        self._metrics_last_render_args[key] = {"series": series, "raw": raw, "raw_ylabel": raw_ylabel}
+        interaction = self.metrics_interactions.get(key)
+        if interaction is not None:
+            interaction.notify_redraw_start()
         figure = self.metrics_figures[key]
         canvas = self.metrics_canvases[key]
         figure.clear()
@@ -10152,6 +10652,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ax.set_facecolor("#ffffff")
         cycles = [r.cycle for r in self.results]
         if not cycles:
+            self._metrics_hover_series[key] = []
             status = str(getattr(self, "_run_status", "READY")).upper()
             if status in {"RUNNING", "STOPPING"}:
                 empty_message = "Waiting for reconstruction metrics…"
@@ -10177,6 +10678,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ax.set_title("")
         ax.set_xlabel("")
         figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#14204a", fontsize=8.5)
+        detail_ylim: Optional[Tuple[float, float]] = None
         if raw:
             all_finite = [
                 float(v)
@@ -10188,10 +10690,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 lo = min(0.0, min(all_finite))
                 hi = max(all_finite)
                 pad = max(1e-9, (hi - lo) * 0.08)
-                ax.set_ylim(lo - pad, hi + pad)
+                full_ylim = (lo - pad, hi + pad)
+                candidate_detail = robust_detail_range(all_finite)
+                if candidate_detail is not None:
+                    full_span = full_ylim[1] - full_ylim[0]
+                    detail_span = candidate_detail[1] - candidate_detail[0]
+                    # Only offer Detail when it would actually narrow the
+                    # view meaningfully -- otherwise it's the same as Full
+                    # range and just adds a confusing extra control.
+                    if full_span > 0 and detail_span < full_span * 0.92:
+                        detail_ylim = candidate_detail
+            else:
+                full_ylim = (0.0, 1.0)
             ax.set_ylabel(raw_ylabel, fontsize=7.5, color="#001170")
         else:
-            ax.set_ylim(-0.04, 1.04)
+            full_ylim = (-0.04, 1.04)
             ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
             ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
             ax.set_ylabel("Normalized score", fontsize=7.5, color="#001170")
@@ -10200,8 +10713,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         except Exception:
             cycles_to_run = max(cycles) if cycles else 1
         x_max = max([cycles_to_run] + cycles) if cycles else cycles_to_run
-        ax.set_xlim(0.75, float(x_max) + 0.25)
-        if x_max <= 30:
+        full_xlim = (0.75, float(x_max) + 0.25)
+        if interaction is not None and interaction.user_modified:
+            # A manual zoom/pan may no longer align with one-tick-per-cycle;
+            # let Matplotlib choose sensible ticks for whatever is visible.
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10, min_n_ticks=2))
+        elif x_max <= 30:
             ax.set_xticks(list(range(1, x_max + 1)))
         else:
             ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12, min_n_ticks=2))
@@ -10231,13 +10748,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 out[finite] = scaled if higher_is_better else 1.0 - scaled
             return out.tolist()
 
+        is_live = str(getattr(self, "_run_status", "READY")).upper() in {"RUNNING", "STOPPING"}
         plotted = 0
+        hover_series: List[Tuple[str, List[int], List[Optional[float]], List[Optional[float]], str]] = []
         for label, values, higher_is_better, color, marker, linestyle in series:
             if raw:
                 y = [np.nan if v is None else float(v) for v in values]
             else:
                 y = best_score(values, higher_is_better)
-            if not np.any(np.isfinite(np.asarray(y, dtype=float))):
+            finite_mask = np.isfinite(np.asarray(y, dtype=float))
+            if not np.any(finite_mask):
                 continue
             plotted += 1
             ax.plot(
@@ -10252,7 +10772,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 markeredgewidth=0.8,
                 label=label,
             )
-        if plotted:
+            if is_live:
+                # A subtle ring (same series color, no new permanent color)
+                # around the newest point -- moves to the latest cycle as new
+                # data arrive, never a persistent second marker style.
+                last_idx = int(np.nonzero(finite_mask)[0][-1])
+                ax.plot(
+                    [cycles[last_idx]],
+                    [y[last_idx]],
+                    marker="o",
+                    markersize=9.0,
+                    markerfacecolor="none",
+                    markeredgecolor=color,
+                    markeredgewidth=1.3,
+                    linestyle="none",
+                    zorder=6,
+                )
+            unit = "%" if ("%" in label or ("%" in raw_ylabel and raw)) else ""
+            hover_series.append((label, list(cycles), list(y), list(values), unit))
+        self._metrics_hover_series[key] = hover_series
+        if plotted > 1:
             handles, labels = ax.get_legend_handles_labels()
             figure.legend(
                 handles,
@@ -10267,7 +10806,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 handletextpad=0.4,
                 borderaxespad=0.0,
             )
-        else:
+        elif not plotted:
             ax.text(
                 0.5,
                 0.5,
@@ -10277,6 +10816,40 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 color="#7183a6",
                 transform=ax.transAxes,
             )
+        # A single-series tab (Powder repartitioning) omits its legend: the
+        # y-axis label already uniquely names the one plotted metric, and a
+        # one-item legend just repeats it while wasting horizontal space.
+
+        view_mode = "full"
+        if interaction is not None:
+            view_mode = interaction.apply_limits(ax, full_xlim, full_ylim, detail_ylim)
+        else:
+            ax.set_xlim(*full_xlim)
+            ax.set_ylim(*full_ylim)
+
+        if view_mode == "detail":
+            ylo, yhi = ax.get_ylim()
+            clipped = sum(
+                1
+                for _label, values, *_rest in series
+                for v in values
+                if v is not None and np.isfinite(float(v)) and not (ylo <= float(v) <= yhi)
+            )
+            if clipped:
+                noun = "point" if clipped == 1 else "points"
+                ax.text(
+                    0.02,
+                    0.965,
+                    f"{clipped} {noun} outside detail range · Full range to view",
+                    ha="left",
+                    va="top",
+                    color="#52658b",
+                    fontsize=7.0,
+                    style="italic",
+                    transform=ax.transAxes,
+                    bbox=dict(boxstyle="square,pad=0.25", facecolor="#ffffff", edgecolor="none", alpha=0.82),
+                )
+
         self._layout_metrics_figure(key)
         canvas.draw_idle()
 

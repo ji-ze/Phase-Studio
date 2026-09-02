@@ -847,6 +847,50 @@ QPushButton#diagnosticSecondaryButton:hover {
     background-color: #f2f4f9;
     color: #001170;
 }
+QPushButton#metricsControlButton {
+    background-color: #ffffff;
+    color: #2264b8;
+    border: 1px solid #cbd7ea;
+    border-radius: 0;
+    padding: 1px 8px;
+    min-height: 17px;
+    font-size: 7.7pt;
+    font-weight: 600;
+}
+QPushButton#metricsControlButton:hover {
+    background-color: #f2f4f9;
+    border-color: #2264b8;
+    color: #001170;
+}
+QPushButton#metricsViewToggle {
+    background-color: #ffffff;
+    color: #52658b;
+    border: 1px solid #cbd7ea;
+    border-radius: 0;
+    padding: 1px 8px;
+    min-height: 17px;
+    font-size: 7.7pt;
+    font-weight: 600;
+}
+QPushButton#metricsViewToggle:hover {
+    border-color: #2264b8;
+    color: #001170;
+}
+QPushButton#metricsViewToggle:checked {
+    background-color: #edf3fa;
+    border-color: #2264b8;
+    color: #001170;
+}
+QPushButton#metricsViewToggle:disabled {
+    color: #b7c2d9;
+    border-color: #e3e9f3;
+    background-color: #f7f9fc;
+}
+QLabel#metricsHintLabel {
+    color: #9aa8c2;
+    font-size: 7.3pt;
+    font-style: italic;
+}
 QSplitter#diagnosticSplitter::handle {
     background-color: #cbd7ea;
 }
