@@ -6287,7 +6287,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "Method-specific recycling settings take precedence when Phasing method is not Superflip."
         )
         workflow_form.addRow("", workflow_note)
-        recycle_note = settings_callout(
+        self.recycle_note = settings_callout(
             "Phasing method",
             "Superflip is the standard iterative charge-flipping cycle (unchanged). "
             "1st Superflip, then SharpED (beta) runs Superflip only once, then each cycle deblurs the previous map with "
@@ -6295,7 +6295,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "from |Fobs| + phi_calc for the next cycle's SharpED input. "
             "SharpED (experimental) skips Superflip entirely: cycle 1 starts from |Fobs| with independent random phases instead."
         )
-        workflow_form.addRow("", recycle_note)
+        workflow_form.addRow("", self.recycle_note)
 
         model_form = add_form_group(workflow_tab, "SharpED model", "sharped")
         self._add_combo(model_form, "sharped_model", "Model", ["koala 2.0"], "koala 2.0")
@@ -6327,9 +6327,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.inputs["compute_omit_maps"].toggled.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
             pass
-        recycle_stages_label = QLabel("Phase-recycling methods")
-        recycle_stages_label.setObjectName("inlineGroupTitle")
-        optional_form.addRow(recycle_stages_label)
+        self.recycle_stages_label = QLabel("Phase-recycling methods")
+        self.recycle_stages_label.setObjectName("inlineGroupTitle")
+        optional_form.addRow(self.recycle_stages_label)
         self._add_checkbox(optional_form, "run_edma_recycle_final", "Run EDMA on final map", False, align_with_fields=True)
         workflow_tab.addStretch(1)
 
@@ -7211,6 +7211,38 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 symmetrize_widget.setVisible(show_beta)
             if not show_beta and symmetrize_widget.isChecked():
                 symmetrize_widget.setChecked(False)
+        # The "Phasing method" note only has something to explain once another
+        # method besides Superflip can actually be picked; and the
+        # "Phase-recycling methods" group (Run EDMA on final map) only applies
+        # to those same beta/experimental methods -- hide both, not just
+        # disable them, right alongside the combo items themselves.
+        recycle_note_widget = getattr(self, "recycle_note", None)
+        if recycle_note_widget is not None:
+            recycle_note_widget.setVisible(show_beta)
+            if hasattr(self, "_workflow_form"):
+                try:
+                    self._workflow_form.setRowVisible(recycle_note_widget, show_beta)
+                except Exception:
+                    pass
+        recycle_stages_label_widget = getattr(self, "recycle_stages_label", None)
+        if recycle_stages_label_widget is not None:
+            recycle_stages_label_widget.setVisible(show_beta)
+            if hasattr(self, "_optional_form"):
+                try:
+                    self._optional_form.setRowVisible(recycle_stages_label_widget, show_beta)
+                except Exception:
+                    pass
+        recycle_final_widget = self.inputs.get("run_edma_recycle_final")
+        if isinstance(recycle_final_widget, QCheckBox):
+            if hasattr(self, "_optional_form"):
+                try:
+                    self._optional_form.setRowVisible(recycle_final_widget, show_beta)
+                except Exception:
+                    recycle_final_widget.setVisible(show_beta)
+            else:
+                recycle_final_widget.setVisible(show_beta)
+            if not show_beta and recycle_final_widget.isChecked():
+                recycle_final_widget.setChecked(False)
 
     def _sync_normalization_widgets(self, *_args) -> None:
         # nresshells (Resolution shells) is only meaningful for "local" normalization.
