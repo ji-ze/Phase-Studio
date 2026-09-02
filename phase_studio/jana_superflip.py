@@ -1132,7 +1132,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             return
         try:
             win = get_backing_window()
-            from phase_studio.app import format_reflection_data_mode
+            from phase_studio.app import compact_spacegroup_symbol, format_reflection_data_mode
             request = win._collect_hkl_analysis_request()
             result = win._build_hkl_load_result(request)
         except Exception:
@@ -1148,7 +1148,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             f"{rcell.a:.5g} × {rcell.b:.5g} × {rcell.c:.5g} Å\n"
             f"{rcell.alpha:.4g}° × {rcell.beta:.4g}° × {rcell.gamma:.4g}°"
         )
-        spacegroup_value.setText(f"{result.spacegroup_hm} (#{result.spacegroup.number})")
+        spacegroup_value.setText(f"{compact_spacegroup_symbol(result.spacegroup)} (#{result.spacegroup.number})")
         metadata = request.metadata
         composition_value.setText(metadata.composition if metadata is not None and metadata.composition else "—")
         validate_hkl_button.setEnabled(True)

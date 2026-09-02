@@ -5327,14 +5327,14 @@ INPUT_TOOLTIPS = {
     "dataitemwidths": "Not required for generated inputs because Phase Studio writes whitespace-separated fbegin records.",
     "extra_superflip_keywords": "Additional raw Superflip keyword lines inserted before fbegin. Use this for advanced/manual keywords not represented by a widget.",
     "map_feedback_missing_enabled": "Enables missing-reflection completion. When off, the fields below are ignored.",
-    "map_feedback_missing_from_cycle": "First completed cycle whose final map is used to add missing reflections for the next cycle. Range: 1 to the current Cycles value.",
+    "map_feedback_missing_from_cycle": "First completed cycle whose final map is used to add missing reflections for the next cycle.",
     "map_feedback_missing_percent_limit": "Maximum number of added missing reflections, expressed as a percent of the current HKL count. This prevents map feedback from overwhelming measured data.",
     "map_feedback_intensity_enabled": "Enables map-based intensity correction. When off, the fields below are ignored.",
-    "map_feedback_intensity_from_cycle": "First completed cycle whose final map is used to damp observed intensities for the next cycle. Range: 1 to the current Cycles value.",
+    "map_feedback_intensity_from_cycle": "First completed cycle whose final map is used to damp observed intensities for the next cycle.",
     "map_feedback_intensity_damping": "Damping factor for map-based intensity correction. 0 keeps observed data; 1 replaces them by scaled map-derived intensities.",
     "map_feedback_intensity_max_i_over_sigma": "Apply map-based intensity correction only to non-zero reflections with value/sigma below this limit. Use 0 to correct all non-zero reflections.",
     "redistribute_overlaps": "Enables powder overlap repartitioning: each cycle, redistribute the combined observed intensity of overlapping-reflection groups (hkl I/F fwhm data only) between their members, using intensities calculated by FFT from that cycle's processed map. When off, the fields below are ignored.",
-    "powder_redistribution_from_cycle": "First completed cycle whose final map is used to redistribute overlapping powder reflections for the next cycle. Range: 1 to the current Cycles value.",
+    "powder_redistribution_from_cycle": "First completed cycle whose final map is used to redistribute overlapping powder reflections for the next cycle.",
     "powder_wavelength": "Radiation wavelength in angstrom, required to compute 2theta for powder overlap repartitioning. If left at 0, it is auto-detected first from the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
     "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2theta-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
     "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
@@ -6249,6 +6249,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_spin(workflow_form, "cycles", "Cycles", 5, 1, 999, 1)
         self.inputs["cycles"].valueChanged.connect(self._update_plot)  # type: ignore[attr-defined]
         self.inputs["cycles"].valueChanged.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
+        self.inputs["cycles"].valueChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         self._add_combo(workflow_form, "reconstruction_mode", "Phasing method", ["Superflip", "1st Superflip, then SharpED (beta)", "SharpED (experimental)"], "Superflip")
         try:
             self.inputs["reconstruction_mode"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
@@ -6257,6 +6258,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.reconstruction_mode_warning = settings_callout("", "")
         self.reconstruction_mode_warning.setVisible(False)
         workflow_form.addRow("", self.reconstruction_mode_warning)
+        self.single_cycle_note = settings_callout("Single-cycle run", "Next-cycle settings are inactive.")
+        self.single_cycle_note.setVisible(False)
+        workflow_form.addRow("", self.single_cycle_note)
         self._add_combo(workflow_form, "modelfile_source", "Next-cycle model", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "deblurred_xplor")
         try:
             self.inputs["modelfile_source"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
@@ -6324,10 +6328,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana", "HKL reflections with phases", "ShelX (fcf)"], "xplor")
         self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
         output_form.addRow("", self._secondary_help(
-            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles; ccp4/jana add one "
-            "extra saved density map on top for external use or Jana2020. HKL reflections with phases and ShelX (fcf) "
-            "instead save, for each cycle's Superflip map, the observed reflections together with phases read by FFT "
-            "from that map, in place of an extra density map."
+            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles. ccp4/jana "
+            "additionally save one extra density map for external use or Jana2020, while HKL reflections with "
+            "phases and ShelX (fcf) instead save, for each cycle's Superflip map, the observed reflections "
+            "together with phases read by FFT from that map, in place of an extra density map."
         ))
         output_tab.addStretch(1)
 
@@ -6369,6 +6373,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         for key in ("map_feedback_missing_enabled", "map_feedback_intensity_enabled", "redistribute_overlaps"):
             try:
                 self.inputs[key].toggled.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        for key in ("map_feedback_missing_from_cycle", "map_feedback_intensity_from_cycle", "powder_redistribution_from_cycle"):
+            try:
+                self.inputs[key].valueChanged.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
             except Exception:
                 pass
         feedback_tab.addStretch(1)
@@ -6472,7 +6481,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """)
         add_back_to_contents(output_help_layout)
         map_feedback_layout = add_help_section(basic_help_tab, "map_feedback", "Map feedback reference", """
-            <p>Each of the three mechanisms below has its own <b>Enable</b> checkbox at the top of its group; unchecking it grays out the rest of that group and skips the mechanism entirely. <b>Start after cycle</b> ranges from 1 to the current <b>Cycles</b> value (Basic &rarr; Workflow) and is kept in sync automatically as Cycles changes.</p>
+            <p>Each of the three mechanisms below has its own <b>Enable</b> checkbox at the top of its group; unchecking it grays out the rest of that group and skips the mechanism entirely. <b>Start after cycle</b> keeps its own 1-999 range regardless of the current <b>Cycles</b> value (Basic &rarr; Workflow), so it can be set up ahead of raising Cycles; the fields below it stay grayed out with a hint whenever the current Cycles value cannot reach the configured starting cycle.</p>
             <h3>Missing-reflection completion</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
             <h3>Intensity correction</h3>
@@ -7263,6 +7272,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 except Exception:
                     pass
         if is_recycling:
+            note_widget = getattr(self, "single_cycle_note", None)
+            if note_widget is not None:
+                note_widget.setVisible(False)
+                if hasattr(self, "_workflow_form"):
+                    try:
+                        self._workflow_form.setRowVisible(note_widget, False)
+                    except Exception:
+                        pass
             self._update_plot()
             return
         mode = normalize_modelfile_source(self._combo_value("modelfile_source") if "modelfile_source" in self.inputs else "")
@@ -7281,15 +7298,41 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             cycles_label = self.input_labels.get("cycles")
             if cycles_label is not None:
                 cycles_label.setEnabled(mode != "none")
+        single_cycle = mode != "none" and max(1, self._spin_value("cycles") if "cycles" in self.inputs else 1) <= 1
+        single_cycle_tooltip = "Used only when more than one reconstruction cycle is requested."
+        note_widget = getattr(self, "single_cycle_note", None)
+        if note_widget is not None:
+            note_widget.setVisible(single_cycle)
+            if hasattr(self, "_workflow_form"):
+                try:
+                    self._workflow_form.setRowVisible(note_widget, single_cycle)
+                except Exception:
+                    pass
+        modelfile_widget = self.inputs.get("modelfile_source")
+        # Next-cycle model stays editable even at Cycles=1 when it is itself the
+        # reason the run is forced to one cycle (mode == "none"), so the user can
+        # always change away from "none" to re-enable multi-cycle runs.
+        if hasattr(modelfile_widget, "setEnabled"):
+            modelfile_widget.setEnabled(not single_cycle)  # type: ignore[attr-defined]
+        modelfile_label = self.input_labels.get("modelfile_source")
+        if modelfile_label is not None:
+            modelfile_label.setEnabled(not single_cycle)
+        if hasattr(modelfile_widget, "setToolTip"):
+            modelfile_widget.setToolTip(  # type: ignore[attr-defined]
+                single_cycle_tooltip if single_cycle else INPUT_TOOLTIPS.get("modelfile_source", "")
+            )
         if isinstance(damping_widget, QDoubleSpinBox):
-            damping_widget.setEnabled(mode in {"superflip_xplor", "deblurred_xplor"})
+            damping_mode_ok = mode in {"superflip_xplor", "deblurred_xplor"}
+            damping_widget.setEnabled(damping_mode_ok and not single_cycle)
             damping_label = self.input_labels.get("damping_factor")
             if damping_label is not None:
-                damping_label.setEnabled(mode in {"superflip_xplor", "deblurred_xplor"})
-            if mode in {"superflip_xplor", "deblurred_xplor"}:
-                damping_widget.setToolTip(INPUT_TOOLTIPS.get("damping_factor", ""))
-            else:
+                damping_label.setEnabled(damping_mode_ok and not single_cycle)
+            if not damping_mode_ok:
                 damping_widget.setToolTip("XPLOR damping is used only when Next-cycle model is superflip_xplor or deblurred_xplor.")
+            elif single_cycle:
+                damping_widget.setToolTip(single_cycle_tooltip)
+            else:
+                damping_widget.setToolTip(INPUT_TOOLTIPS.get("damping_factor", ""))
         if isinstance(symmetrize_widget, QCheckBox):
             symmetrize_widget.setEnabled(mode != "superflip_xplor")
             symmetrize_label = self.input_labels.get("symmetrize_deblurred_map")
@@ -7305,17 +7348,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if self._configuration_locked:
             return
         groups = (
-            ("map_feedback_missing_enabled", "Enable missing-reflection completion", (
-                "map_feedback_missing_from_cycle", "map_feedback_missing_percent_limit",
-            )),
-            ("map_feedback_intensity_enabled", "Enable intensity correction", (
-                "map_feedback_intensity_from_cycle", "map_feedback_intensity_damping",
-                "map_feedback_intensity_max_i_over_sigma",
-            )),
-            ("redistribute_overlaps", "Enable powder overlap repartitioning", (
-                "powder_redistribution_from_cycle", "powder_wavelength",
-                "powder_separation_factor", "powder_redistribution_mix",
-            )),
+            ("map_feedback_missing_enabled", "Enable missing-reflection completion",
+             "map_feedback_missing_from_cycle", ("map_feedback_missing_percent_limit",)),
+            ("map_feedback_intensity_enabled", "Enable intensity correction",
+             "map_feedback_intensity_from_cycle", (
+                 "map_feedback_intensity_damping", "map_feedback_intensity_max_i_over_sigma",
+             )),
+            ("redistribute_overlaps", "Enable powder overlap repartitioning",
+             "powder_redistribution_from_cycle", (
+                 "powder_wavelength", "powder_separation_factor", "powder_redistribution_mix",
+             )),
         )
         # "Start after cycle" fields deliberately keep their own full range
         # (1-999) regardless of the current Cycles value: Cycles is often
@@ -7324,21 +7366,42 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # current Cycles value made it un-editable (min==max==1) in exactly
         # that common case. The pipeline itself already tolerates a
         # start-after-cycle beyond the actual run length as a harmless no-op.
-        for checkbox_key, checkbox_label, field_keys in groups:
+        cycles_value = max(1, self._spin_value("cycles")) if "cycles" in self.inputs else 1
+        for checkbox_key, checkbox_label, from_cycle_key, other_field_keys in groups:
             checkbox = self.inputs.get(checkbox_key)
-            enabled = bool(checkbox.isChecked()) if isinstance(checkbox, QCheckBox) else True
-            for field_key in field_keys:
+            checkbox_enabled = bool(checkbox.isChecked()) if isinstance(checkbox, QCheckBox) else True
+            from_cycle_widget = self.inputs.get(from_cycle_key)
+            if hasattr(from_cycle_widget, "setEnabled"):
+                from_cycle_widget.setEnabled(checkbox_enabled)  # type: ignore[attr-defined]
+            from_cycle_label = self.input_labels.get(from_cycle_key)
+            if from_cycle_label is not None:
+                from_cycle_label.setEnabled(checkbox_enabled)
+            if hasattr(from_cycle_widget, "setToolTip"):
+                from_cycle_widget.setToolTip(  # type: ignore[attr-defined]
+                    INPUT_TOOLTIPS.get(from_cycle_key, "") if checkbox_enabled
+                    else f"Ignored: requires '{checkbox_label}' to be enabled."
+                )
+            # Feedback starting at cycle N is first applied to the reflections
+            # used for cycle N+1 -- so the mechanism can only ever act while
+            # Cycles allows at least one cycle from that starting point onward.
+            from_cycle_value = int(from_cycle_widget.value()) if isinstance(from_cycle_widget, QSpinBox) else 1
+            reachable = cycles_value >= from_cycle_value
+            fields_active = checkbox_enabled and reachable
+            for field_key in other_field_keys:
                 widget = self.inputs.get(field_key)
                 if hasattr(widget, "setEnabled"):
-                    widget.setEnabled(enabled)  # type: ignore[attr-defined]
+                    widget.setEnabled(fields_active)  # type: ignore[attr-defined]
                 label = self.input_labels.get(field_key)
                 if label is not None:
-                    label.setEnabled(enabled)
+                    label.setEnabled(fields_active)
                 if hasattr(widget, "setToolTip"):
-                    widget.setToolTip(
-                        INPUT_TOOLTIPS.get(field_key, "") if enabled
-                        else f"Ignored: requires '{checkbox_label}' to be enabled."
-                    )  # type: ignore[attr-defined]
+                    if not checkbox_enabled:
+                        tooltip = f"Ignored: requires '{checkbox_label}' to be enabled."
+                    elif not reachable:
+                        tooltip = "Requires a subsequent reconstruction cycle."
+                    else:
+                        tooltip = INPUT_TOOLTIPS.get(field_key, "")
+                    widget.setToolTip(tooltip)  # type: ignore[attr-defined]
 
     def _sync_input_source_mode_widgets(self) -> None:
         if self._configuration_locked:
@@ -7896,15 +7959,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         layout.setSpacing(9)
         layout.addWidget(self._diagnostic_header("HKL VALIDATION", "Reflection parsing and input diagnostics", "VALID"))
         column_summary = (
-            f"{value_label} column: {value_col} · {sigma_label} column: "
+            f"{value_label}: column {value_col} · {sigma_label}: column "
             f"{sigma_col if sigma_col is not None else 'none'} · "
-            f"(0 0 0) {'included' if include_000 else 'excluded'}"
+            f"(0 0 0): {'included' if include_000 else 'excluded'}"
         )
         layout.addWidget(self._diagnostic_input_summary(
             hkl_path,
             data_mode,
             cell,
-            hm,
+            f"{compact_spacegroup_symbol(result.spacegroup)} (#{result.spacegroup.number})",
             source_note,
             (("Columns", column_summary),),
         ))
@@ -8103,7 +8166,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             analysis.hkl_path,
             analysis.data_mode,
             analysis.cell,
-            analysis.spacegroup_hm,
+            f"{compact_spacegroup_symbol(analysis.spacegroup)} (#{analysis.spacegroup.number})",
             analysis.source_note,
             compact=True,
         )
@@ -8508,9 +8571,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         summary_text = (
             "HKL COMPLETENESS\n"
-            f"Source: {analysis.hkl_path}\nFormat: {analysis.data_mode}\n"
+            f"Source: {analysis.hkl_path}\nFormat: {format_reflection_data_mode(analysis.data_mode)}\n"
             f"Unit cell: {analysis.cell.a:.5g} {analysis.cell.b:.5g} {analysis.cell.c:.5g} {analysis.cell.alpha:.4g} {analysis.cell.beta:.4g} {analysis.cell.gamma:.4g}\n"
-            f"Space group: {analysis.spacegroup_hm}\nParsed / unique: {len(analysis.reflections_raw):,} / {len(analysis.reflections_unique):,}\n"
+            f"Space group: {compact_spacegroup_symbol(analysis.spacegroup)} (#{analysis.spacegroup.number})\nParsed / unique: {len(analysis.reflections_raw):,} / {len(analysis.reflections_unique):,}\n"
             f"{sigma_label} coverage: {raw_sigma_count:,}/{len(analysis.reflections_raw):,} raw; {unique_sigma_count:,}/{len(analysis.reflections_unique):,} unique\n"
             f"Phase values: {phase_count:,}/{len(analysis.reflections_raw):,}\n"
             f"d_min: {d_min_text}\nd at 98% cumulative completeness: {d_full}\n"
@@ -8642,6 +8705,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def clear_log_plot(self) -> None:
         self.log_text.clear()
+        self.log_text.horizontalScrollBar().setValue(0)
         self._last_log_record = None
         self.results.clear()
         self.reference_atoms_for_plot.clear()
@@ -10684,6 +10748,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
         self.run_btn.setText("Running…")
+        self.log_text.horizontalScrollBar().setValue(0)
         self._append_execution_log("Preparing validated pipeline inputs…", level="DETAIL")
         QApplication.processEvents()
         self.worker = threading.Thread(target=self.pipeline_worker, args=(cfg,), daemon=True)
@@ -10812,7 +10877,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if cfg.crystal_metadata.source_path is not None:
                 self.log(f"  Metadata file: {cfg.crystal_metadata.source_path}", level="DETAIL")
             self.log(f"  Cell: {ref_ctx.cell.a:.5f} {ref_ctx.cell.b:.5f} {ref_ctx.cell.c:.5f} {ref_ctx.cell.alpha:.3f} {ref_ctx.cell.beta:.3f} {ref_ctx.cell.gamma:.3f}")
-            self.log(f"  Space group: {ref_ctx.spacegroup_hm} (#{ref_ctx.spacegroup.number})")
+            self.log(f"  Space group: {compact_spacegroup_symbol(ref_ctx.spacegroup)} (#{ref_ctx.spacegroup.number})")
             self.log(f"  Composition: {ref_ctx.composition}")
             self.log(
                 f"  Atom sites: {atom_source.name if atom_source is not None else 'none'} · {len(ref_ctx.atoms)} atoms",
