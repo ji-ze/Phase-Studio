@@ -1380,23 +1380,11 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     )
     sharped_form.addRow("API token", api_token)
 
-    elements = QLineEdit(str(settings.value("elements", "C N O")))
-    elements.setPlaceholderText("C N O")
-    elements.setToolTip(
-        "Space-separated chemical element symbols expected in the density map, for "
-        "example 'C N O' or 'C N O Zn'."
-    )
-    sharped_form.addRow("Elements", elements)
-
-    outres = QDoubleSpinBox()
-    outres.setRange(0.001, 10.0)
-    outres.setDecimals(4)
-    outres.setSingleStep(0.05)
-    outres.setSuffix(" Å")
-    outres.setValue(float(settings.value("outres", 0.2)))
-    outres.setToolTip("Requested SharpED output-map sampling in ångströms.")
-    sharped_form.addRow("Output resolution", outres)
-
+    # Elements and Output resolution are deliberately not exposed here: they
+    # are shared with the full Phase Studio application's own Advanced ->
+    # SharpED values (auto-detected from composition there), the same way
+    # Server URL / API token are shared above -- see effective_elements()/
+    # effective_outres() below.
     sharped_outer.addWidget(sharped_body)
     sharped_body.setVisible(False)
 
@@ -1663,6 +1651,15 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     def effective_cycles() -> int:
         return 1 if current_workflow() == WORKFLOW_SUPERFLIP_ONLY else cycles.value()
 
+    def effective_elements() -> str:
+        return shared_or_legacy_value("sharped_elements", "elements", "C N O")
+
+    def effective_outres() -> float:
+        try:
+            return float(shared_or_legacy_value("sharped_outres", "outres", "0.2"))
+        except ValueError:
+            return 0.2
+
     def effective_compute_omit_maps() -> bool:
         # Cross-validation is Phase-recycling-only; the checkboxes are hidden
         # (never even shown) for either single-pass workflow, and their value
@@ -1686,8 +1683,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         shared_settings.setValue("inputs/sharped_api_token", api_token.text())
         shared_settings.sync()
         settings.setValue("model", model.currentText())
-        settings.setValue("elements", elements.text())
-        settings.setValue("outres", outres.value())
+        # Elements and Output resolution have no control of their own here
+        # any more -- they come from the shared full-application settings (see
+        # effective_elements()/effective_outres()) and are not re-persisted.
         # Reference file / model file are deliberately not persisted: they should
         # reflect the incoming .inflip (or be blank), never a leftover value from
         # an unrelated previous Jana2020 job.
@@ -1703,8 +1701,8 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             api_token=api_token.text().strip(),
             server_url=server_url.text().strip() or DEFAULT_SERVER_URL,
             model=model.currentText().strip() or "default",
-            elements=elements.text().strip() or "C N O",
-            outres=float(outres.value()),
+            elements=effective_elements(),
+            outres=effective_outres(),
             input_mode=INPUT_MODE_INFLIP,
             hkl_override="",
             reference_override="",
