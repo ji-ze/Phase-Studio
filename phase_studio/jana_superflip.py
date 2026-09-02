@@ -1893,16 +1893,23 @@ def launch_phase_studio_from_jana(
 
     def build_window() -> IterativeSuperflipPipelineQtGUI:
         win = IterativeSuperflipPipelineQtGUI()
+        # Both launches that reach this function (Wizard "Open full
+        # configuration" and Wizard "Phase recycling") are genuinely
+        # Wizard-initiated -- set this before any handed-off settings are
+        # applied below and before a run can start, so the main window
+        # always knows a future completed run is Jana2020-hand-off-eligible,
+        # even for a plain "Open full configuration" session that the user
+        # drives and completes manually.
+        win.jana_wizard_context.launched_from_jana_wizard = True
         if auto_start:
             # Phase recycling still runs the ordinary full pipeline (start_run()
-            # below); these flags only annotate that run as Wizard-initiated so
+            # below); this mode only annotates that run as Wizard-initiated so
             # its completion opens the source-specific result selector instead
             # of the ordinary "Send to Jana2020" dialog. The map source was
             # already chosen on the Wizard's second page (superflip_xplor /
             # deblurred_xplor are the only two values that reach this launch
             # path -- see effective_next_cycle_mode() in show_jana_dialog()).
-            win.jana_wizard_context.launched_from_jana_wizard = True
-            win.jana_wizard_context.phase_recycling_active = True
+            win.jana_wizard_context.launch_mode = "phase_recycling"
             win.jana_wizard_context.wizard_map_source = (
                 "superflip" if options.next_cycle_modelfile == "superflip_xplor" else "deblurred"
             )
@@ -1910,6 +1917,11 @@ def launch_phase_studio_from_jana(
             # cover with Phase Studio's own "recommended" preset first, so the
             # values applied below (this Jana2020 run's explicit choices) win.
             win._apply_workflow_preset("recommended")
+        else:
+            # "Open full configuration": the user drives the whole workflow
+            # manually and explicitly clicks Send to Jana2020 once a run
+            # completes -- no auto-selected map source, no auto-start.
+            win.jana_wizard_context.launch_mode = "full_configuration"
         if inflip_path is not None and handoff_import is not None:
             splash.set_status("Loading Jana2020 workflow…")
             app.processEvents()

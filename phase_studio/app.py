@@ -326,22 +326,47 @@ class ReferenceContext:
 
 @dataclass
 class JanaWizardContext:
-    """Distinguishes a normal standalone Phase Studio launch from one hosting a
-    Jana2020-Wizard-initiated Phase recycling run -- the only Wizard workflow
-    that opens this window at all. Both single-pass workflows (Superflip only,
-    Superflip + SharpED) run through the original lightweight console/wrapper
-    path and never construct this window or this context.
+    """Distinguishes a normal standalone Phase Studio launch from the two
+    Jana2020-Wizard-initiated launches that open this same main window. Both
+    single-pass workflows (Superflip only, Superflip + SharpED) run through
+    the original lightweight console/wrapper path and never construct this
+    window or this context at all.
 
-    The all-False/empty default is a normal standalone launch: no field here
-    may change behavior unless launched_from_jana_wizard is True."""
+    The default (launch_mode="standalone") is a normal standalone launch: no
+    field here may change behavior unless launched_from_jana_wizard is True."""
 
     launched_from_jana_wizard: bool = False
-    # Phase recycling runs through the normal full pipeline (start_run()); these
-    # two fields only annotate that run as Wizard-initiated so its completion
-    # opens the source-specific result selector instead of (or in addition to)
-    # the ordinary "Send to Jana2020" hand-off dialog.
-    phase_recycling_active: bool = False
-    wizard_map_source: str = ""  # "superflip" or "deblurred"; only meaningful when phase_recycling_active
+    # "standalone" | "full_configuration" | "phase_recycling" -- which of the
+    # two Wizard launches (if any) opened this window. "full_configuration"
+    # is Jana Wizard -> Open full configuration (the user drives the whole
+    # workflow manually, then explicitly clicks Send to Jana2020, with a
+    # Superflip/SharpED source switch in the result selector).
+    # "phase_recycling" is Jana Wizard -> Phase recycling (auto-started, its
+    # map source fixed to whatever was chosen in the Wizard, and its result
+    # selector opens automatically on completion with no source switch).
+    launch_mode: str = "standalone"
+    wizard_map_source: str = ""  # "superflip" or "deblurred"; only meaningful when launch_mode == "phase_recycling"
+
+
+# --- Shared canonical Superflip/SharpED display-name mapping (spec: create
+# one shared user-facing source mapping, do not scatter conditional string
+# literals like `"SharpED" if source == "deblurred" else "Superflip"`
+# throughout the GUI). The internal token stays "superflip" / "deblurred" --
+# only these three helpers translate it to what the user sees. ---
+
+def result_source_title(source: str) -> str:
+    """Canonical short display name for a result-source token."""
+    return "Superflip" if str(source or "").strip().lower() == "superflip" else "SharpED"
+
+
+def result_map_label(source: str) -> str:
+    """Canonical "<Source> map" display label."""
+    return f"{result_source_title(source)} map"
+
+
+def result_structure_label(source: str) -> str:
+    """Canonical "<Source> structure" display label."""
+    return f"{result_source_title(source)} structure"
 
 
 @dataclass(frozen=True)
@@ -716,7 +741,7 @@ def cycle_progress_stages(cfg: object) -> List[str]:
     if bool(getattr(cfg, "symmetrize_deblurred_map", False)) and not raw_superflip_cycling:
         stages.append("Superflip symmetry averaging")
     if bool(getattr(cfg, "run_edma_deblurred", False)) and not raw_superflip_cycling:
-        stages.append("EDMA · deblurred map")
+        stages.append(f"EDMA · {result_map_label('deblurred')}")
     stages.append("Finalizing cycle")
     return stages
 
@@ -3799,11 +3824,11 @@ def return_phase_studio_result_to_jana(
     if source_key.startswith("super"):
         source_map = Path(result.superflip_map)
         target_map = jana_cwd / f"{base_name}-phase-studio-superflip-cycle_{int(result.cycle):03d}.xplor"
-        source_label = "Superflip map"
+        source_label = result_map_label("superflip")
     else:
         source_map = Path(result.deblur_map)
         target_map = jana_cwd / f"{base_name}-deb.xplor"
-        source_label = "deblurred map"
+        source_label = result_map_label("deblurred")
     if not source_map.is_file():
         raise RuntimeError(f"Selected Jana2020 hand-off map not found: {source_map}")
     if source_map.resolve() != target_map.resolve():
@@ -4983,7 +5008,7 @@ def run_edma_on_xplor(
             f.write(f"writem40 {outbase}.m40\n")
         for line in clean_keyword_lines(extra_edma_keywords):
             f.write(line + "\n")
-    map_label = "Deblurred map" if "deblur" in prefix.lower() else "Superflip map"
+    map_label = result_map_label("deblurred" if "deblur" in prefix.lower() else "superflip")
     log(f"[EDMA] {map_label} · threshold {plimit_sigma:g} σ")
     if map_sigma is None:
         log(f"  plimit={float(absolute_plimit):g}")
@@ -5611,7 +5636,7 @@ class WorkflowDiagram(QWidget):
             margin = 8.0
             top_boxes, bottom_boxes = self._diagram_geometry(width)
             top_labels = ("Reflections", "Superflip", "XPLOR map", "SharpED")
-            bottom_labels = ("EDMA", "Processed map", "Next-cycle model", "Jana2020")
+            bottom_labels = ("EDMA", "SharpED map", "Next-cycle model", "Jana2020")
             diagram_font = painter.font()
             diagram_font.setPointSizeF(8.5)
             painter.setFont(diagram_font)
@@ -6201,6 +6226,39 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._apply_input_tooltip(key, w)
         self._apply_form_label_tooltip(form, w, key)
 
+    def _add_combo_with_values(
+        self,
+        form: QFormLayout,
+        key: str,
+        label: str,
+        items: Sequence[Tuple[str, str]],
+        default_value: str,
+    ) -> None:
+        """Like _add_combo, but each item's user-facing text (items[i][1]) is
+        independent of the internal token stored as its Qt userData
+        (items[i][0]) -- _combo_value()/_set_widget_value_from_string() read
+        and write that token via currentData()/findData(), never by parsing
+        the display text. Use this instead of _add_combo whenever a combo's
+        internal values are not already presentable as-is (e.g. raw file-role
+        tokens like "deblurred_xplor")."""
+        w = QComboBox()
+        for value, text in items:
+            w.addItem(text, value)
+        w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        w.setMinimumContentsLength(18)
+        w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        w.setEditable(True)
+        w.lineEdit().setReadOnly(True)
+        w.lineEdit().setCursor(Qt.CursorShape.ArrowCursor)
+        w.setInsertPolicy(QComboBox.NoInsert)
+        idx = w.findData(default_value)
+        if idx >= 0:
+            w.setCurrentIndex(idx)
+        form.addRow(label, w)
+        self.inputs[key] = w
+        self._apply_input_tooltip(key, w)
+        self._apply_form_label_tooltip(form, w, key)
+
     def _add_checkbox(
         self,
         form: QFormLayout,
@@ -6468,7 +6526,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.status_badge.setObjectName("statusBadge")
         self.status_badge.setAlignment(Qt.AlignCenter)
         right_layout.addWidget(create_phase_studio_context_banner(
-            "RUN OVERVIEW", "Reconstruction progress and results", badge=self.status_badge
+            "RUN OVERVIEW", "Phasing progress and results", badge=self.status_badge
         ))
 
         def make_result_section(title: str) -> Tuple[QWidget, QVBoxLayout]:
@@ -6725,7 +6783,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         workflow_tab = add_settings_tab("Workflow")
         workflow_form = add_form_group(workflow_tab, "Reconstruction", "setup")
         self._workflow_form = workflow_form
-        self._add_combo(workflow_form, "workflow_preset", "Reconstruction preset", ["Recommended", "Custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "Recommended")
+        self._add_combo(workflow_form, "workflow_preset", "Workflow preset", ["Recommended", "Custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "Recommended")
         try:
             self.inputs["workflow_preset"].currentTextChanged.connect(self._apply_workflow_preset)  # type: ignore[attr-defined]
         except Exception:
@@ -6745,7 +6803,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.single_cycle_note = settings_callout("Single-cycle run", "Next-cycle settings are inactive.")
         self.single_cycle_note.setVisible(False)
         workflow_form.addRow("", self.single_cycle_note)
-        self._add_combo(workflow_form, "modelfile_source", "Next-cycle model", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "deblurred_xplor")
+        self._add_combo_with_values(
+            workflow_form,
+            "modelfile_source",
+            "Next-cycle model",
+            [
+                ("superflip_xplor", f"{result_map_label('superflip')} (XPLOR)"),
+                ("deblurred_xplor", f"{result_map_label('deblurred')} (XPLOR)"),
+                ("deblurred_edma_cif", f"{result_structure_label('deblurred')} (EDMA CIF)"),
+                ("none", "None"),
+            ],
+            "deblurred_xplor",
+        )
         try:
             self.inputs["modelfile_source"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
@@ -6790,9 +6859,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         superflip_stages_label.setObjectName("inlineGroupTitle")
         optional_form.addRow(superflip_stages_label)
         self._add_checkbox(optional_form, "run_edma_superflip", "Run EDMA on Superflip map", True, align_with_fields=True)
-        self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True, align_with_fields=True)
-        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize processed map with Superflip (beta)", False, align_with_fields=True)
-        self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on processed map", True, align_with_fields=True)
+        self._add_checkbox(optional_form, "run_sharped", "Run SharpED", True, align_with_fields=True)
+        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize SharpED map with Superflip (beta)", False, align_with_fields=True)
+        self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on SharpED map", True, align_with_fields=True)
         self._add_checkbox(optional_form, "compute_omit_maps", "Compute OMIT validation maps (5% holdout)", False, align_with_fields=True)
         self._add_checkbox(optional_form, "compute_omit_rfree", "Calculate R_free on the 5% holdout", False, align_with_fields=True)
         try:
@@ -6904,7 +6973,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
             <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
             <h3>2. Choose a reconstruction preset</h3>
-            <p><b>Reconstruction preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
+            <p><b>Workflow preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
             <ul><li><b>Recommended</b> (default): a general-purpose baseline that matches the built-in defaults.</li>
             <li><b>small molecule:</b> settings intended as a starting point for small-molecule data.</li>
             <li><b>inorganic:</b> settings intended as a starting point for inorganic materials.</li>
@@ -6941,7 +7010,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         add_back_to_contents(input_help_layout)
         workflow_help_layout = add_help_section(basic_help_tab, "workflow", "Workflow reference", """
             <h3>Reconstruction</h3>
-            <p><b>Reconstruction preset</b> applies a bundle of starting values in one step; every value stays individually editable afterward. <b>Recommended</b> (default) is a general-purpose baseline matching the built-in defaults; the MOF/small-molecule/inorganic presets tune values for a specific sample type; <b>Custom</b> applies nothing.</p>
+            <p><b>Workflow preset</b> applies a bundle of starting values in one step; every value stays individually editable afterward. <b>Recommended</b> (default) is a general-purpose baseline matching the built-in defaults; the MOF/small-molecule/inorganic presets tune values for a specific sample type; <b>Custom</b> applies nothing.</p>
             <p><b>Cycles</b> is the number of iterative Superflip &rarr; EDMA &rarr; SharpED &rarr; EDMA cycles to run. The effective count is forced to 1 when Next-cycle model is <code>none</code>.</p>
             <p><b>Phasing method</b> chooses the reconstruction algorithm:</p>
             <ul>
@@ -6949,8 +7018,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 <li><b>1st Superflip, then SharpED (beta)</b> &mdash; Superflip runs only once, on cycle 1. Every following cycle deblurs the previous map with SharpED, calculates phases by FFT from that deblurred map for every measured reflection (expanded over the full space-group symmetry), and recomposes a map from |Fobs| with those phases for the next cycle. Does not work well with some models.</li>
                 <li><b>SharpED (experimental)</b> &mdash; the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases. Not production-ready; can take hundreds of cycles to converge, if it converges at all.</li>
             </ul>
-            <p>Both recycling methods are hidden unless <b>Show beta and experimental features</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize processed map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. The convergence graph adds a <b>Map correlation</b> series for these methods (each cycle's recomposed map compared with the previous cycle's).</p>
-            <p><b>Next-cycle model</b> (Superflip phasing method only) is the authoritative source for cycle 2 onward: <code>none</code> forces a one-cycle run; <code>superflip_xplor</code> cycles without SharpED deblurring; <code>deblurred_xplor</code> uses the SharpED-processed XPLOR map; <code>deblurred_edma_cif</code> uses the EDMA structure extracted from the deblurred map and ignores XPLOR damping.</p>
+            <p>Both recycling methods are hidden unless <b>Show beta and experimental features</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize SharpED map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. The convergence graph adds a <b>Map correlation</b> series for these methods (each cycle's recomposed map compared with the previous cycle's).</p>
+            <p><b>Next-cycle model</b> (Superflip phasing method only) is the authoritative source for cycle 2 onward: <b>None</b> forces a one-cycle run; <b>Superflip map (XPLOR)</b> cycles without SharpED processing; <b>SharpED map (XPLOR)</b> uses the SharpED-processed XPLOR map; <b>SharpED structure (EDMA CIF)</b> uses the EDMA structure extracted from the SharpED map and ignores XPLOR damping.</p>
             <p><b>XPLOR damping (1/x)</b> (Superflip phasing method, XPLOR next-cycle models only) is the inverse damping factor: 1.0 means no damping, 0.5 is equivalent to the previous factor 2.0, 0.25 to factor 4.0.</p>
             <p><b>Excluded atoms</b> removes selected atom labels from CIF modelfiles before the next Superflip cycle (comma/semicolon/whitespace-separated); it does not apply to XPLOR-only model paths.</p>
             <h3>SharpED model</h3>
@@ -6959,9 +7028,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>Under <b>Superflip cycle</b> (used when Phasing method is Superflip):</p>
             <ul>
                 <li><b>Run EDMA on Superflip map</b> &mdash; peak-search the raw Superflip XPLOR map and export CIF/XYZ/PDB.</li>
-                <li><b>Run SharpED deblurring</b> &mdash; process the Superflip map with the SharpED server. If disabled, the "deblurred" map used downstream is just a copy of the Superflip map.</li>
-                <li><b>Symmetrize processed map with Superflip (beta)</b> &mdash; after deblurring, run Superflip in symmetry mode (no charge flipping) with the deblurred map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
-                <li><b>Run EDMA on processed map</b> &mdash; peak-search the deblurred (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
+                <li><b>Run SharpED</b> &mdash; process the Superflip map with the SharpED server. If disabled, the SharpED map used downstream is just a copy of the Superflip map.</li>
+                <li><b>Symmetrize SharpED map with Superflip (beta)</b> &mdash; after SharpED processing, run Superflip in symmetry mode (no charge flipping) with the SharpED map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
+                <li><b>Run EDMA on SharpED map</b> &mdash; peak-search the SharpED (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
                 <li><b>Compute OMIT validation maps (5% holdout)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip validation</b> and <b>SharpED validation</b> tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
                 <li><b>Calculate R_free on the 5% holdout</b> &mdash; requires the option above; also computes R_free (the crystallographic R-factor between the excluded reflections' observed |F| and |F| calculated by FFT from the omit map) for both the omit-map series.</li>
             </ul>
@@ -7177,7 +7246,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>SharpED connection</h3>
             <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
             <h3>Interface</h3>
-            <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize processed map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
+            <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize SharpED map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
         """, advanced=True)
         add_back_to_contents(adv_setup_help_layout, advanced=True)
         superflip_help_layout = add_help_section(advanced_help_tab, "superflip", "Superflip guide", """
@@ -7228,7 +7297,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>4. Upload and network</h3>
             <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check (confirm the actual limit with the configured service). If Voxel grid is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits under this limit. <b>HTTP timeout</b> covers model queries, upload, status and download requests and is enforced at 600 seconds minimum. <b>Polling interval</b> sets the delay between status checks. <b>Maximum polls</b> limits those checks; <b>-1</b> means no fixed polling limit.</p>
             <h3>5. SharpED in iterative workflows</h3>
-            <p><b>Run SharpED deblurring</b> (Basic &rarr; Workflow &rarr; Optional processing) enables server processing; if disabled, the "deblurred" map used downstream is a copy of the Superflip map. <b>Symmetrize processed map with Superflip (beta)</b> performs symmetry averaging, not another charge-flipping reconstruction. <code>deblurred_xplor</code> (Next-cycle model) feeds the processed map into the next cycle; <code>deblurred_edma_cif</code> feeds its EDMA structure instead.</p>
+            <p><b>Run SharpED</b> (Basic &rarr; Workflow &rarr; Optional processing) enables server processing; if disabled, the SharpED map used downstream is a copy of the Superflip map. <b>Symmetrize SharpED map with Superflip (beta)</b> performs symmetry averaging, not another charge-flipping reconstruction. Next-cycle model's <b>SharpED map (XPLOR)</b> option feeds the SharpED map into the next cycle; <b>SharpED structure (EDMA CIF)</b> feeds its EDMA structure instead.</p>
             <h3>6. Phase-recycling methods (beta/experimental)</h3>
             <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features</b> (Advanced &rarr; Setup) to select them. Neither is production-ready.</p>
         """, advanced=True)
@@ -7281,7 +7350,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_btn.setToolTip("Request a graceful stop after the currently running cycle has completed.")
         self.stop_now_btn.setToolTip("Terminate the currently running external Superflip/EDMA process and stop the pipeline as soon as possible.")
         self.clear_btn.setToolTip("Clear the log panel and reset the plotted metrics for the current GUI session.")
-        self.handoff_btn.setToolTip("After a completed run started from a Jana .inflip, select a cycle and pass either its Superflip map or deblurred map back to Jana2020.")
+        self.handoff_btn.setToolTip("After a run launched from the Jana2020 Wizard completes, select a cycle and either its Superflip or SharpED result for hand-off back to Jana2020.")
         self.run_btn.clicked.connect(self.start_run)
         self.continue_btn.clicked.connect(self.continue_run)
         self.stop_btn.clicked.connect(self.request_stop_after_cycle)
@@ -7357,7 +7426,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.result_splitter.setChildrenCollapsible(False)
         right_layout.addWidget(self.result_splitter, 1)
 
-        metrics_section, metrics_layout = make_result_section("RECONSTRUCTION METRICS")
+        metrics_section, metrics_layout = make_result_section("WORKFLOW METRICS")
         self.metrics_tabs = QTabWidget()
         self.metrics_tabs.setObjectName("metricsTabs")
         self.metrics_figures: Dict[str, Figure] = {}
@@ -8115,7 +8184,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif isinstance(widget, QTextEdit):
                 widget.setPlainText(value)
             elif isinstance(widget, QComboBox):
-                idx = widget.findText(value)
+                # Internal-token combos (userData != display text, e.g. the
+                # Next-cycle model combo) are matched by data first; combos
+                # whose items are their own value (the common case) simply
+                # have no data to match and fall through to findText().
+                idx = widget.findData(value)
+                if idx < 0:
+                    idx = widget.findText(value)
                 if idx < 0:
                     # Case-insensitive fallback so a saved value survives a
                     # display-only capitalization change to a combo item
@@ -9316,6 +9391,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         widget = self.inputs.get(key)
         if widget is None or not hasattr(widget, "currentText"):
             return ""
+        if hasattr(widget, "currentData"):
+            data = widget.currentData()  # type: ignore[attr-defined]
+            if data is not None:
+                return str(data)
         return widget.currentText().strip()  # type: ignore[attr-defined]
 
     def _check_value(self, key: str) -> bool:
@@ -9911,51 +9990,71 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self.current_cycle_stage_counter.setText("Completed")
                     self.run_btn.setEnabled(True)
                     self.run_btn.setText("Run phasing")
-                    can_handoff = bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None)
+                    # Send to Jana2020 is Jana-Wizard-owned functionality: a
+                    # standalone session that happens to load a Jana .inflip
+                    # manually must never enable it (spec: only a session
+                    # actually launched from the Wizard -- either Full
+                    # configuration or Phase recycling -- is eligible).
+                    can_handoff = bool(
+                        self.results
+                        and self.last_run_config
+                        and self.last_run_config.jana_inflip is not None
+                        and self.jana_wizard_context.launched_from_jana_wizard
+                        and self.jana_wizard_context.launch_mode in ("full_configuration", "phase_recycling")
+                    )
                     self.handoff_btn.setEnabled(can_handoff)
                     if can_handoff:
-                        if self.jana_wizard_context.phase_recycling_active:
+                        if self.jana_wizard_context.launch_mode == "phase_recycling":
                             self._append_execution_log(
                                 "Phase recycling complete. Opening the Jana2020 result selector automatically.",
                                 subsystem="Jana2020",
                             )
-                            self.open_jana_wizard_result_selector()
+                            self.open_jana_result_selector(
+                                source_mode="locked",
+                                initial_source=self.jana_wizard_context.wizard_map_source or "deblurred",
+                            )
                         else:
                             self._append_execution_log(
-                                "Jana2020 hand-off is ready. Use 'Send to Jana2020' to select the cycle and map source.",
+                                "[Jana2020] Hand-off ready · select Superflip or SharpED result",
                                 subsystem="Jana2020",
                             )
         except queue.Empty:
             pass
 
-    def _recommended_handoff_index(self) -> int:
-        if not self.results:
-            return -1
-        finite_symm = [
-            (idx, float(r.superflip_symm))
-            for idx, r in enumerate(self.results)
-            if r.superflip_symm is not None and np.isfinite(float(r.superflip_symm))
-        ]
-        if finite_symm:
-            # Superflip's Symm. column is an agreement residual; lower values mean better symmetry agreement.
-            return min(finite_symm, key=lambda item: item[1])[0]
-        finite_ref = [
-            (idx, float(r.superflip_ref_match))
-            for idx, r in enumerate(self.results)
-            if r.superflip_ref_match is not None and np.isfinite(float(r.superflip_ref_match))
-        ]
-        if finite_ref:
-            return min(finite_ref, key=lambda item: item[1])[0]
-        return len(self.results) - 1
+    def _source_map_path(self, result: CycleResult, source: str) -> Path:
+        return Path(result.superflip_map) if source == "superflip" else Path(result.deblur_map)
 
-    def open_jana_handoff_dialog(self) -> None:
-        if self.jana_wizard_context.phase_recycling_active:
-            # A Wizard-initiated phase-recycling run uses the source-specific
-            # result selector instead of this dialog, both for the automatic
-            # post-run open and for a manual "Send to Jana2020" retry. Normal,
-            # non-Wizard use (the default) never takes this branch.
-            self.open_jana_wizard_result_selector()
-            return
+    def _source_structure_path(self, result: CycleResult, source: str) -> Path:
+        return Path(result.superflip_edma_cif) if source == "superflip" else Path(result.deblur_edma_cif)
+
+    def _source_available_for_results(self, source: str) -> bool:
+        return any(self._source_map_path(r, source).is_file() for r in self.results)
+
+    def _default_handoff_source(self) -> str:
+        # No Wizard choice exists for a Full-configuration hand-off -- default
+        # to SharpED (typically the more refined final result) when it was
+        # actually produced, else Superflip (always present in the standard
+        # workflow).
+        if self._source_available_for_results("deblurred"):
+            return "deblurred"
+        return "superflip"
+
+    def open_jana_result_selector(self, source_mode: str, initial_source: str) -> None:
+        """One shared Jana2020 result selector reused by both Jana-Wizard
+        launch contexts that reach this main window:
+
+        - source_mode="locked": Wizard Phase recycling. The map source was
+          already chosen in the Wizard (jana_wizard_context.wizard_map_source)
+          and is shown read-only, with no switch offered.
+        - source_mode="switchable": Wizard "Open full configuration". The
+          user interactively switches between Superflip and SharpED.
+          Switching is presentation only: it never reruns Superflip, SharpED,
+          EDMA, FFT, OMIT, R_free, RMSD or any other metric -- it only
+          changes which existing CycleResult fields are displayed and which
+          map/structure paths are used for the preview and hand-off.
+
+        Both modes hand off through the exact same perform_jana_handoff()
+        used before; this method only changes presentation."""
         cfg = self.last_run_config
         if cfg is None or cfg.jana_inflip is None:
             self._show_error_report(
@@ -9978,42 +10077,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Pass Phase Studio result to Jana2020")
-        dialog.resize(1180, 560)
-        layout = QVBoxLayout(dialog)
-        info = QLabel(
-            "Select the completed Phase Studio cycle and the map that should be used "
-            "as the model for Jana2020's final Superflip hand-off. The table shows "
-            "all Superflip metrics currently parsed from every completed cycle. Rvalue, "
-            "Peaks, Symm. and Der.SG come from the saved-density run actually used by Superflip."
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        headers = [
-            "Cycle",
-            "Saved run",
-            "Rvalue",
-            "Peaks",
-            "Symm.",
-            "Der.SG",
-            "Ref.match",
-            "FoM / Score",
-            "Success rate %",
-            "Mean cycles",
-            "Superflip map",
-            "Deblurred map",
-        ]
-        metrics_table = QTableWidget(len(self.results), len(headers))
-        metrics_table.setHorizontalHeaderLabels(headers)
-        metrics_table.setAlternatingRowColors(True)
-        metrics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        metrics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        metrics_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        metrics_table.verticalHeader().setVisible(False)
-        metrics_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        metrics_table.horizontalHeader().setStretchLastSection(False)
+        switchable = source_mode == "switchable"
+        superflip_ok = self._source_available_for_results("superflip")
+        sharped_ok = self._source_available_for_results("deblurred")
+        wants_superflip = str(initial_source or "").strip().lower() == "superflip"
+        if wants_superflip and not superflip_ok and sharped_ok:
+            initial_source = "deblurred"
+        elif not wants_superflip and not sharped_ok and superflip_ok:
+            initial_source = "superflip"
+        state: Dict[str, object] = {"source": initial_source, "cycle": None}
 
         def fmt(value: object) -> str:
             if value is None:
@@ -10025,179 +10097,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 return f"{value_f:.3f}"
             except Exception:
                 return str(value) if str(value) else "n/a"
-
-        for row, result in enumerate(self.results):
-            values = [
-                f"{int(result.cycle):03d}",
-                "n/a" if result.superflip_saved_run is None else str(int(result.superflip_saved_run)),
-                fmt(result.superflip_rvalue),
-                fmt(result.superflip_peaks),
-                fmt(result.superflip_symm),
-                result.superflip_derived_sg or "n/a",
-                fmt(result.superflip_ref_match),
-                fmt(result.superflip_fom),
-                fmt(result.superflip_success_rate),
-                fmt(result.superflip_mean_cycles),
-                "available" if Path(result.superflip_map).is_file() else "missing",
-                "available" if Path(result.deblur_map).is_file() else "missing",
-            ]
-            for col, text in enumerate(values):
-                item = QTableWidgetItem(text)
-                if col == 0:
-                    item.setData(Qt.UserRole, int(result.cycle))
-                metrics_table.setItem(row, col, item)
-        layout.addWidget(metrics_table, 1)
-
-        form = QFormLayout()
-        cycle_combo = QComboBox()
-        for result in self.results:
-            symm = "n/a" if result.superflip_symm is None else f"{float(result.superflip_symm):.3f}"
-            rvalue = "n/a" if result.superflip_rvalue is None else f"{float(result.superflip_rvalue):.3f}"
-            run_label = "n/a" if result.superflip_saved_run is None else str(int(result.superflip_saved_run))
-            label = f"Cycle {int(result.cycle):03d} — saved run {run_label}, Symm. {symm}, Rvalue {rvalue}"
-            cycle_combo.addItem(label, int(result.cycle))
-        recommended = self._recommended_handoff_index()
-        if recommended >= 0:
-            cycle_combo.setCurrentIndex(recommended)
-            metrics_table.selectRow(recommended)
-
-        map_combo = QComboBox()
-        map_combo.addItem("Deblurred map (SharpED output)", "deblurred")
-        map_combo.addItem("Superflip map", "superflip")
-        try:
-            rec = self.results[recommended]
-            if not Path(rec.deblur_map).is_file():
-                map_combo.setCurrentIndex(1)
-        except Exception:
-            pass
-
-        def sync_table_from_combo(index: int) -> None:
-            if 0 <= index < metrics_table.rowCount():
-                metrics_table.selectRow(index)
-
-        def sync_combo_from_table() -> None:
-            row = metrics_table.currentRow()
-            if 0 <= row < cycle_combo.count() and row != cycle_combo.currentIndex():
-                cycle_combo.setCurrentIndex(row)
-
-        cycle_combo.currentIndexChanged.connect(sync_table_from_combo)
-        metrics_table.itemSelectionChanged.connect(sync_combo_from_table)
-
-        form.addRow("Cycle", cycle_combo)
-        form.addRow("Map source", map_combo)
-        layout.addLayout(form)
-
-        note = QLabel(
-            "The suggested cycle is selected by the best Superflip symmetry agreement "
-            "(lowest Symm. residual). You can override it manually. After a successful "
-            "hand-off Phase Studio closes automatically."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Pass to Jana2020")
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
-
-        fit_dialog_to_available_screen(dialog, QSize(1180, 560))
-        if dialog.exec() != QDialog.Accepted:
-            return
-
-        selected_cycle = int(cycle_combo.currentData())
-        selected_map = str(map_combo.currentData() or "deblurred")
-        selected_result = next((r for r in self.results if int(r.cycle) == selected_cycle), None)
-        if selected_result is None:
-            self._show_error_report(
-                build_error_report(
-                    RuntimeError("Selected Jana2020 hand-off cycle is no longer available."),
-                    subsystem="Jana2020",
-                    operation="Jana2020 hand-off",
-                    severity="warning",
-                )
-            )
-            return
-
-        self.handoff_btn.setEnabled(False)
-        self._append_execution_log(
-            f"Starting Jana2020 hand-off from cycle {selected_cycle:03d} ({selected_map}).",
-            level="STEP",
-            subsystem="Jana2020",
-        )
-
-        def worker() -> None:
-            try:
-                perform_jana_handoff(cfg, selected_result, selected_map, log=self.log)
-                self.msg_queue.put(("handoff_done", None))
-            except Exception as exc:
-                self.msg_queue.put((
-                    "handoff_error",
-                    build_error_report(
-                        exc,
-                        subsystem="Jana2020",
-                        operation="Jana2020 hand-off",
-                        extra_details=traceback.format_exc(),
-                    ),
-                ))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def open_jana_wizard_result_selector(self) -> None:
-        """Post-phase-recycling result selector for a Jana2020-Wizard-initiated
-        run: a source-specific (Superflip vs SharpED) metrics table, ranked by
-        a UI-only Selection score, plus a two-pane selected-result/reference
-        structure preview. The map source itself was already chosen in the
-        Wizard and is not re-asked here.
-
-        This consumes only the existing CycleResult objects the full pipeline
-        already produced (no metric is recomputed) and hands off through the
-        exact same perform_jana_handoff() used by open_jana_handoff_dialog();
-        the only new thing here is presentation."""
-        cfg = self.last_run_config
-        if cfg is None or cfg.jana_inflip is None:
-            self._show_error_report(
-                build_error_report(
-                    RuntimeError("Jana2020 hand-off requires a run started from a Jana .inflip file."),
-                    subsystem="Jana2020",
-                    operation="Jana2020 hand-off",
-                    severity="warning",
-                )
-            )
-            return
-        if not self.results:
-            self._show_error_report(
-                build_error_report(
-                    RuntimeError("No completed cycle is available for Jana2020 hand-off."),
-                    subsystem="Jana2020",
-                    operation="Jana2020 hand-off",
-                    severity="warning",
-                )
-            )
-            return
-
-        map_source = self.jana_wizard_context.wizard_map_source or "deblurred"
-        source_title = "Superflip" if map_source == "superflip" else "SharpED"
-
-        def fmt(value: object) -> str:
-            if value is None:
-                return "n/a"
-            try:
-                value_f = float(value)
-                if not np.isfinite(value_f):
-                    return "n/a"
-                return f"{value_f:.3f}"
-            except Exception:
-                return str(value) if str(value) else "n/a"
-
-        def col_available(getter) -> bool:
-            return any(getter(r) not in (None, "") for r in self.results)
 
         def fmt_count(value: object) -> str:
-            # Heavy-atom counts (count_heavy_atoms(): non-H/He atoms found in
-            # that cycle's own EDMA export -- the same quantity the structure
-            # preview's "N non-H/He atoms" caption reports) are integers even
-            # though stored as float; show them without a trailing ".000".
             if value is None:
                 return "n/a"
             try:
@@ -10205,287 +10106,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             except (TypeError, ValueError):
                 return "n/a"
 
-        if map_source == "superflip":
-            candidate_columns = [
-                ("Saved run", lambda r: r.superflip_saved_run, lambda v: "n/a" if v is None else str(int(v))),
-                ("R value", lambda r: r.superflip_rvalue, fmt),
-                ("Peakiness", lambda r: r.superflip_peaks, fmt),
-                ("Symmetry", lambda r: r.superflip_symm, fmt),
-                ("Derived SG", lambda r: (r.superflip_derived_sg or None), lambda v: v or "n/a"),
-                ("Ref. match", lambda r: r.superflip_ref_match, fmt),
-                ("FoM / Score", lambda r: r.superflip_fom, fmt),
-                ("Success rate %", lambda r: r.superflip_success_rate, fmt),
-                ("Mean cycles", lambda r: r.superflip_mean_cycles, fmt),
-                ("Recall", lambda r: r.superflip_recall, fmt),
-                ("Precision", lambda r: r.superflip_precision, fmt),
-                ("Heavy atoms", lambda r: r.superflip_heavy_atom_count, fmt_count),
-            ]
-            rfree_getter = lambda r: r.omit_superflip_rfree
-            omit_getter = lambda r: r.omit_superflip_correlation
-            rmsd_getter = lambda r: r.superflip_metric
-        else:
-            # Deliberately excludes Superflip-only fields (R value, Peakiness,
-            # Symmetry, Derived SG) -- they describe the raw Superflip map, not
-            # the SharpED-processed one this table represents (spec section 21).
-            candidate_columns = [
-                ("Recall", lambda r: r.deblur_recall, fmt),
-                ("Precision", lambda r: r.deblur_precision, fmt),
-                ("Heavy atoms", lambda r: r.deblur_heavy_atom_count, fmt_count),
-                ("Map correlation", lambda r: r.recycle_map_correlation, fmt),
-            ]
-            rfree_getter = lambda r: r.omit_deblur_rfree
-            omit_getter = lambda r: r.omit_deblur_correlation
-            rmsd_getter = lambda r: r.deblur_metric
-
-        # --- Selection score: rank-based normalization of whichever of R_free
-        # (lower better), OMIT correlation (higher better) and RMSD (lower
-        # better) are actually populated for this run. UI sorting aid only --
-        # never written back into any CycleResult, metrics.csv or hand-off.
-        def rank_normalize(values: List[Optional[float]], higher_is_better: bool) -> List[Optional[float]]:
-            pairs = [(i, float(v)) for i, v in enumerate(values) if v is not None and np.isfinite(float(v))]
-            normalized: List[Optional[float]] = [None] * len(values)
-            if not pairs:
-                return normalized
-            if len(pairs) == 1:
-                normalized[pairs[0][0]] = 0.0
-                return normalized
-            ordered = sorted(pairs, key=lambda p: p[1], reverse=higher_is_better)
-            n = len(ordered)
-            i = 0
-            while i < n:
-                j = i
-                while j + 1 < n and ordered[j + 1][1] == ordered[i][1]:
-                    j += 1
-                average_rank = (i + j) / 2.0
-                for k in range(i, j + 1):
-                    normalized[ordered[k][0]] = average_rank / (n - 1)
-                i = j + 1
-            return normalized
-
-        rfree_values = [rfree_getter(r) for r in self.results]
-        omit_values = [omit_getter(r) for r in self.results]
-        rmsd_values = [rmsd_getter(r) for r in self.results]
-        rfree_available = any(v is not None for v in rfree_values)
-        omit_available = any(v is not None for v in omit_values)
-        rmsd_available = any(v is not None for v in rmsd_values)
-
-        ranking_columns = []
-        normalized_dims: List[Tuple[str, List[Optional[float]]]] = []
-        if rfree_available:
-            ranking_columns.append(("R_free", rfree_getter, fmt))
-            normalized_dims.append(("R_free", rank_normalize(rfree_values, higher_is_better=False)))
-        if omit_available:
-            ranking_columns.append(("OMIT correlation", omit_getter, fmt))
-            normalized_dims.append(("OMIT correlation", rank_normalize(omit_values, higher_is_better=True)))
-        if rmsd_available:
-            ranking_columns.append(("RMSD (Å)", rmsd_getter, fmt))
-            normalized_dims.append(("RMSD", rank_normalize(rmsd_values, higher_is_better=False)))
-
-        scores: List[Optional[float]] = []
-        for idx in range(len(self.results)):
-            valid = [normalized[idx] for _name, normalized in normalized_dims if normalized[idx] is not None]
-            scores.append(sum(valid) / len(valid) if valid else None)
-        ranking_active = any(s is not None for s in scores)
-
-        if ranking_active:
-            order = sorted(
-                range(len(self.results)),
-                key=lambda i: (scores[i] is None, scores[i] if scores[i] is not None else 0.0, i),
-            )
-            # Standard competition ranking: equal scores share the same Rank,
-            # and the next distinct score's rank accounts for the tied rows
-            # it skipped past (1, 1, 3 -- not 1, 1, 2).
-            rank_numbers: dict = {}
-            position = 0
-            previous_score: Optional[float] = None
-            for i in order:
-                if scores[i] is None:
-                    continue
-                position += 1
-                if previous_score is None or scores[i] != previous_score:
-                    current_rank = position
-                    previous_score = scores[i]
-                rank_numbers[i] = current_rank
-        else:
-            order = list(range(len(self.results)))
-            rank_numbers = {}
-
-        columns = [(h, g, f) for (h, g, f) in candidate_columns if col_available(g)]
-        headers: List[str] = (["Rank", "Cycle", "Selection score"] if ranking_active else ["Cycle"])
-        headers += [h for h, _g, _f in ranking_columns]
-        headers += [h for h, _g, _f in columns]
-        cycle_col_index = headers.index("Cycle")
-        reference_available = bool(self.reference_atoms_for_plot)
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Jana2020 result selection")
-        # Content-aware target size, capped to the available screen (spec
-        # sections 34/35/45): a one-cycle, no-reference run doesn't need
-        # anywhere near the same window as a multi-cycle, fully-ranked,
-        # reference-compared one.
-        simple_content = len(headers) <= 3 and not reference_available
-        if simple_content:
-            preferred_width, preferred_height = 1150, 680
-        elif len(headers) <= 3 or not reference_available:
-            preferred_width, preferred_height = 1250, 720
-        else:
-            preferred_width, preferred_height = 1400, 800
-        preferred_height = min(preferred_height + max(0, len(self.results) - 5) * 12, preferred_height + 150)
-        # Also positions the dialog centered within availableGeometry() (not
-        # just capping its size), so its title bar can never end up
-        # unreachable above the usable desktop.
-        apply_safe_dialog_geometry(dialog, preferred_width, preferred_height)
-        outer_layout = QVBoxLayout(dialog)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
-
-        # Same branded header + navy context banner as the main window and the
-        # Jana2020 Wizard, so this reads as the same application rather than a
-        # generic Qt dialog.
-        outer_layout.addWidget(create_phase_studio_brand_header())
-        outer_layout.addWidget(create_phase_studio_context_banner(
-            "JANA2020 RESULT SELECTION", "Compare completed cycles and select a map for hand-off"
-        ))
-
-        content = QWidget()
-        layout = QVBoxLayout(content)
-        layout.setContentsMargins(14, 10, 14, 14)
-        layout.setSpacing(10)
-        outer_layout.addWidget(content, 1)
-
-        if normalized_dims:
-            ranking_summary = " + ".join(name for name, _values in normalized_dims)
-            if not rmsd_available and (rfree_available or omit_available):
-                ranking_summary += " (reference RMSD unavailable)"
-        elif len(self.results) <= 1:
-            ranking_summary = "Not applicable"
-        else:
-            ranking_summary = "Not available"
-
-        summary_form = QFormLayout()
-        summary_form.setContentsMargins(0, 0, 0, 0)
-        summary_form.setHorizontalSpacing(18)
-        summary_form.setVerticalSpacing(2)
-        summary_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        for label_text, value_text in (
-            ("Result source", "SharpED map" if map_source == "deblurred" else "Superflip map"),
-            ("Completed cycles", str(len(self.results))),
-            ("Ranking", ranking_summary),
-            ("Reference", "Available" if reference_available else "Not available"),
-        ):
-            value_label = QLabel(value_text)
-            value_font = value_label.font()
-            value_font.setBold(True)
-            value_label.setFont(value_font)
-            summary_form.addRow(label_text, value_label)
-        layout.addLayout(summary_form)
-
-        info = QLabel("Select a completed cycle for Jana2020 hand-off.")
-        layout.addWidget(info)
-        info_secondary = QLabel("Result source was selected in the Jana2020 Wizard.")
-        info_secondary.setStyleSheet("color: #7183a6; font-style: italic;")
-        layout.addWidget(info_secondary)
-
-        table_section_label = QLabel("CANDIDATE CYCLES")
-        table_section_label.setObjectName("sectionLabel")
-        layout.addWidget(table_section_label)
-
-        table = QTableWidget(len(self.results), len(headers))
-        table.setObjectName("diagnosticTable")
-        table.setHorizontalHeaderLabels(headers)
-        table.setAlternatingRowColors(True)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SingleSelection)
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        # A handful of compact columns would otherwise sit compressed against
-        # the left edge with the rest of the pane blank; stretch the last
-        # column to fill the viewport only when there is little content.
-        table.horizontalHeader().setStretchLastSection(len(headers) <= 3)
-
-        class _NumericTableWidgetItem(QTableWidgetItem):
-            """Sorts by an explicit numeric/string key instead of Qt's default
-            lexicographic text compare, so header-click sorting (spec section
-            39/55: "true numeric sorting") is correct for this table."""
-
-            def __init__(self, text: str, sort_value: object) -> None:
-                super().__init__(text)
-                self._sort_value = sort_value
-
-            def __lt__(self, other: object) -> bool:  # noqa: N802 - Qt override
-                other_value = getattr(other, "_sort_value", None)
-                if self._sort_value is None:
-                    return False
-                if other_value is None:
-                    return True
-                try:
-                    return float(self._sort_value) < float(other_value)
-                except (TypeError, ValueError):
-                    return str(self._sort_value) < str(other_value)
-
-        def add_cell(display_row: int, col: int, text: str, sort_value: object, left_align: bool = False) -> "_NumericTableWidgetItem":
-            item = _NumericTableWidgetItem(text, sort_value)
-            item.setTextAlignment((Qt.AlignLeft if left_align else Qt.AlignRight) | Qt.AlignVCenter)
-            table.setItem(display_row, col, item)
-            return item
-
-        # Without a validation ranking metric, no cycle is scientifically
-        # "recommended" -- the first (chronologically earliest) cycle is
-        # selected purely so a preview is shown, with no best/preferred
-        # framing (spec sections 24/25).
-        initial_result_idx = order[0] if order else 0
-
-        for display_row, result_idx in enumerate(order):
-            result = self.results[result_idx]
-            col = 0
-            if ranking_active:
-                rank = rank_numbers.get(result_idx)
-                add_cell(display_row, col, "n/a" if rank is None else str(rank), rank)
-                col += 1
-            cycle_item = add_cell(display_row, col, str(int(result.cycle)), int(result.cycle))
-            cycle_item.setData(Qt.UserRole, int(result.cycle))
-            if ranking_active and result_idx == initial_result_idx:
-                cycle_item.setToolTip("Best-ranked cycle (lowest Selection score).")
-            col += 1
-            if ranking_active:
-                score = scores[result_idx]
-                add_cell(display_row, col, fmt(score), score)
-                col += 1
-            for _header, getter, formatter in ranking_columns:
-                value = getter(result)
-                add_cell(display_row, col, formatter(value), value)
-                col += 1
-            for header, getter, formatter in columns:
-                value = getter(result)
-                add_cell(display_row, col, formatter(value), value, left_align=(header == "Derived SG"))
-                col += 1
-
-        def result_for_table_row(row: int) -> Optional[CycleResult]:
-            if row < 0:
-                return None
-            item = table.item(row, cycle_col_index)
-            if item is None:
-                return None
-            cycle_id = item.data(Qt.UserRole)
-            if cycle_id is None:
-                return None
-            return next((r for r in self.results if int(r.cycle) == int(cycle_id)), None)
-
-        preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
-        preview_canvas = FigureCanvas(preview_figure)
-        preview_canvas.setObjectName("janaResultPreviewCanvas")
-        preview_canvas.setMinimumHeight(260)
-        preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        preview_canvas.setToolTip("")
+        def col_available(getter) -> bool:
+            return any(getter(r) not in (None, "") for r in self.results)
 
         class _PreviewHost:
             """Reuses IterativeSuperflipPipelineQtGUI's own atom/cell/depth-cue
             rendering and rotation-drag methods -- unchanged, on a disposable
-            object -- so this two-pane preview looks and behaves exactly like
-            the main Structure Comparison view without ever touching the main
-            window's own rendering state (self.structure_axes,
-            self._structure_depth_artists, ...)."""
+            object -- so this preview looks and behaves exactly like the main
+            Structure Comparison view without touching the main window's own
+            rendering state. Created once for the whole dialog (not per
+            source-switch rebuild) so rotation survives a source switch."""
 
             _structure_cartesian_geometry = IterativeSuperflipPipelineQtGUI._structure_cartesian_geometry
             _element_color = IterativeSuperflipPipelineQtGUI._element_color
@@ -10507,102 +10137,107 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.structure_canvas = None
 
         preview_host = _PreviewHost(self.structure_cell, self.structure_elev, self.structure_azim)
-        preview_host.structure_canvas = preview_canvas
 
-        def preview_atoms_for(result: CycleResult) -> List[AtomSite]:
-            path = result.superflip_edma_cif if map_source == "superflip" else result.deblur_edma_cif
-            return self._safe_parse_structure(path)
-
-        def render_preview(result: CycleResult) -> None:
-            preview_figure.clear()
-            preview_figure.patch.set_facecolor("#ffffff")
-            preview_host.structure_axes = []
-            preview_host._structure_depth_artists = []
-            panels = [(
-                f"{source_title} · Cycle {int(result.cycle)}",
-                preview_atoms_for(result),
-                "Structure preview unavailable for this cycle",
-            )]
-            if reference_available:
-                panels.append(("Reference", self.reference_atoms_for_plot, "Reference structure unavailable"))
-            # With no atomic reference, a full second pane would just show
-            # "Reference structure unavailable" -- give the selected result the
-            # whole viewer instead of wasting half of it (spec sections 32/33).
-            column_count = len(panels)
-            x_positions = (0.5,) if column_count == 1 else (0.25, 0.75)
-            metadata = []
-            for idx, (_title, atoms, empty_text) in enumerate(panels, start=1):
-                ax = preview_figure.add_subplot(1, column_count, idx, projection="3d")
-                preview_host.structure_axes.append(ax)
-                metadata.append(preview_host._plot_structure_atoms(ax, atoms, empty_text))
-            for x_position, (title, _atoms, _empty_text) in zip(x_positions, panels):
-                preview_figure.text(
-                    x_position, 0.96, title, ha="center", va="center",
-                    fontsize=10, fontweight="bold", color="#001170",
-                )
-            for x_position, meta in zip(x_positions, metadata):
-                preview_figure.text(x_position, 0.03, meta, ha="center", va="center", fontsize=7.5, color="#52658b")
-            if column_count > 1:
-                preview_figure.add_artist(Line2D(
-                    [0.5, 0.5], [0.08, 0.90], transform=preview_figure.transFigure,
-                    color="#cbd7ea", linewidth=0.45, alpha=0.62,
-                ))
-            preview_figure.subplots_adjust(left=0.01, right=0.99, bottom=0.09, top=0.90, wspace=0.04)
-            preview_canvas.draw_idle()
-
-        preview_canvas.mpl_connect("button_press_event", preview_host._begin_structure_rotation)
-        preview_canvas.mpl_connect("motion_notify_event", preview_host._sync_structure_view_from_event)
-        preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_rotation)
-
-        def on_selection_changed() -> None:
-            result = result_for_table_row(table.currentRow())
-            if result is not None:
-                render_preview(result)
-
-        table.itemSelectionChanged.connect(on_selection_changed)
-        # Populate rows first, THEN enable sorting -- enabling it before
-        # setItem() calls would let each insertion re-sort mid-population.
-        # Cycle identity is resolved via Qt.UserRole (result_for_table_row),
-        # never the visible row index, so header-click sorting stays correct.
-        table.setSortingEnabled(True)
-        # setSortingEnabled(True) itself immediately re-sorts existing rows
-        # (descending, by column 0, by default) -- force a deterministic
-        # ascending sort by column 0 (Rank when ranked, else Cycle) so the
-        # already-built `order` sequence (best-first / chronological) is what
-        # actually ends up on screen, not an arbitrary Qt default.
-        table.sortItems(0, Qt.AscendingOrder)
-        table.selectRow(order.index(initial_result_idx) if initial_result_idx in order else 0)
-
-        viewer_section = QWidget()
-        viewer_section_layout = QVBoxLayout(viewer_section)
-        viewer_section_layout.setContentsMargins(0, 0, 0, 0)
-        viewer_section_layout.setSpacing(3)
-        viewer_section_label = QLabel("STRUCTURE COMPARISON")
-        viewer_section_label.setObjectName("sectionLabel")
-        viewer_section_layout.addWidget(viewer_section_label)
-        viewer_section_layout.addWidget(preview_canvas, 1)
-
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(table)
-        splitter.addWidget(viewer_section)
-        # A handful of columns doesn't need half the dialog; give the table
-        # only as much width as its content plausibly needs and let the
-        # structure viewer take the rest (spec section 30).
-        table_share = 0.32 if len(headers) <= 3 else 0.55
-        splitter_total = 1260
-        splitter.setSizes([
-            int(splitter_total * table_share), int(splitter_total * (1.0 - table_share))
-        ])
-        layout.addWidget(splitter, 1)
-
-        if ranking_active:
-            note_text = "Selection score combines available validation ranks; lower is better."
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Jana2020 result selection")
+        # Content-aware target size, capped to the available screen: a
+        # single-cycle, no-reference run doesn't need the same window as a
+        # multi-cycle, fully-ranked, reference-compared one. Computed once
+        # up front rather than per source-switch -- switching source changes
+        # column count modestly but not enough to justify visibly resizing
+        # an already-open dialog under the user's cursor.
+        reference_available_hint = bool(self.reference_atoms_for_plot)
+        if len(self.results) <= 1 and not reference_available_hint:
+            preferred_width, preferred_height = 1150, 680
         else:
-            note_text = "No validation metric is available for ranking. Select a cycle manually."
-        note = QLabel(note_text)
-        note.setStyleSheet("color: #52658b;")
-        note.setWordWrap(True)
-        layout.addWidget(note)
+            preferred_width, preferred_height = 1400, 800
+        preferred_height = min(preferred_height + max(0, len(self.results) - 5) * 12, preferred_height + 150)
+        apply_safe_dialog_geometry(dialog, preferred_width, preferred_height)
+        outer_layout = QVBoxLayout(dialog)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+
+        # Same branded header + navy context banner as the main window and the
+        # Jana2020 Wizard, so this reads as the same application rather than a
+        # generic Qt dialog -- identical for both source_mode values.
+        outer_layout.addWidget(create_phase_studio_brand_header())
+        outer_layout.addWidget(create_phase_studio_context_banner(
+            "JANA2020 RESULT SELECTION", "Compare completed cycles and select a map for hand-off"
+        ))
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(14, 10, 14, 14)
+        content_layout.setSpacing(10)
+        outer_layout.addWidget(content, 1)
+
+        # --- Result source: a switchable Superflip/SharpED segmented control
+        # for Full configuration, or a read-only label for the Wizard's own
+        # Phase-recycling choice (spec sections 14-16, 34-35). ---
+        source_row = QHBoxLayout()
+        source_row.setSpacing(8)
+        source_heading = QLabel("Result source")
+        source_row.addWidget(source_heading)
+        superflip_btn: Optional[QPushButton] = None
+        sharped_btn: Optional[QPushButton] = None
+        locked_source_value_label: Optional[QLabel] = None
+        if switchable:
+            superflip_btn = QPushButton("Superflip")
+            sharped_btn = QPushButton("SharpED")
+            for btn in (superflip_btn, sharped_btn):
+                btn.setObjectName("metricsViewToggle")
+                btn.setCheckable(True)
+                btn.setCursor(Qt.PointingHandCursor)
+            source_group = QButtonGroup(dialog)
+            source_group.setExclusive(True)
+            source_group.addButton(superflip_btn)
+            source_group.addButton(sharped_btn)
+            superflip_btn.setEnabled(superflip_ok)
+            sharped_btn.setEnabled(sharped_ok)
+            if not superflip_ok:
+                superflip_btn.setToolTip("No Superflip map is available for the completed cycles.")
+            if not sharped_ok:
+                sharped_btn.setToolTip("No SharpED map is available for the completed cycles.")
+            source_row.addWidget(superflip_btn)
+            source_row.addWidget(sharped_btn)
+        else:
+            locked_source_value_label = QLabel(result_map_label(str(state["source"])))
+            locked_font = locked_source_value_label.font()
+            locked_font.setBold(True)
+            locked_source_value_label.setFont(locked_font)
+            source_row.addWidget(locked_source_value_label)
+        source_row.addStretch(1)
+        content_layout.addLayout(source_row)
+        if not switchable:
+            wizard_note = QLabel("Result source was selected in the Jana2020 Wizard.")
+            wizard_note.setStyleSheet("color: #7183a6; font-style: italic;")
+            content_layout.addWidget(wizard_note)
+
+        summary_form = QFormLayout()
+        summary_form.setContentsMargins(0, 0, 0, 0)
+        summary_form.setHorizontalSpacing(18)
+        summary_form.setVerticalSpacing(2)
+        summary_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        content_layout.addLayout(summary_form)
+
+        content_layout.addWidget(QLabel("Select a completed cycle for Jana2020 hand-off."))
+
+        availability_note = QLabel("")
+        availability_note.setObjectName("janaSourceAvailabilityNote")
+        availability_note.setStyleSheet("color: #b3261e; font-weight: 600;")
+        availability_note.setWordWrap(True)
+        availability_note.setVisible(False)
+        content_layout.addWidget(availability_note)
+
+        table_section_label = QLabel("CANDIDATE CYCLES")
+        table_section_label.setObjectName("sectionLabel")
+        content_layout.addWidget(table_section_label)
+
+        body_holder = QWidget()
+        body_layout = QVBoxLayout(body_holder)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
+        content_layout.addWidget(body_holder, 1)
 
         button_row = QHBoxLayout()
         close_btn = QPushButton("Return to Phase Studio")
@@ -10611,30 +10246,407 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         button_row.addWidget(close_btn)
         button_row.addStretch(1)
         button_row.addWidget(send_btn)
-        layout.addLayout(button_row)
+        content_layout.addLayout(button_row)
         close_btn.clicked.connect(dialog.reject)
         send_btn.clicked.connect(dialog.accept)
 
+        current_result_ref: Dict[str, Optional[CycleResult]] = {"result": None}
+
+        def rebuild(map_source: str) -> None:
+            state["source"] = map_source
+            if switchable:
+                superflip_btn.setChecked(map_source == "superflip")
+                sharped_btn.setChecked(map_source != "superflip")
+            else:
+                locked_source_value_label.setText(result_map_label(map_source))
+
+            while body_layout.count():
+                child = body_layout.takeAt(0)
+                widget = child.widget()
+                if widget is not None:
+                    # Detach immediately (not just deleteLater) so a stray
+                    # findChild(QTableWidget) mid-switch -- in tests or any
+                    # other introspection -- can never see the outgoing table.
+                    widget.setParent(None)
+                    widget.deleteLater()
+
+            source_title = result_source_title(map_source)
+
+            if map_source == "superflip":
+                candidate_columns = [
+                    ("Saved run", lambda r: r.superflip_saved_run, lambda v: "n/a" if v is None else str(int(v))),
+                    ("R value", lambda r: r.superflip_rvalue, fmt),
+                    ("Peakiness", lambda r: r.superflip_peaks, fmt),
+                    ("Symmetry", lambda r: r.superflip_symm, fmt),
+                    ("Derived SG", lambda r: (r.superflip_derived_sg or None), lambda v: v or "n/a"),
+                    ("Ref. match", lambda r: r.superflip_ref_match, fmt),
+                    ("FoM / Score", lambda r: r.superflip_fom, fmt),
+                    ("Success rate %", lambda r: r.superflip_success_rate, fmt),
+                    ("Mean cycles", lambda r: r.superflip_mean_cycles, fmt),
+                    ("Recall", lambda r: r.superflip_recall, fmt),
+                    ("Precision", lambda r: r.superflip_precision, fmt),
+                    ("Heavy atoms", lambda r: r.superflip_heavy_atom_count, fmt_count),
+                ]
+                rfree_getter = lambda r: r.omit_superflip_rfree
+                omit_getter = lambda r: r.omit_superflip_correlation
+                rmsd_getter = lambda r: r.superflip_metric
+            else:
+                # Deliberately excludes Superflip-only fields (R value,
+                # Peakiness, Symmetry, Derived SG) -- they describe the
+                # Superflip map, not the SharpED-processed one this table
+                # represents.
+                candidate_columns = [
+                    ("Recall", lambda r: r.deblur_recall, fmt),
+                    ("Precision", lambda r: r.deblur_precision, fmt),
+                    ("Heavy atoms", lambda r: r.deblur_heavy_atom_count, fmt_count),
+                    ("Map correlation", lambda r: r.recycle_map_correlation, fmt),
+                ]
+                rfree_getter = lambda r: r.omit_deblur_rfree
+                omit_getter = lambda r: r.omit_deblur_correlation
+                rmsd_getter = lambda r: r.deblur_metric
+
+            # --- Selection score: rank-based normalization of whichever of
+            # R_free (lower better), OMIT correlation (higher better) and
+            # RMSD (lower better) are actually populated for THIS source.
+            # UI sorting aid only -- never written back into any CycleResult,
+            # metrics.csv or hand-off, and switching source recomputes this
+            # display-only ranking from the existing values, never a metric.
+            def rank_normalize(values: List[Optional[float]], higher_is_better: bool) -> List[Optional[float]]:
+                pairs = [(i, float(v)) for i, v in enumerate(values) if v is not None and np.isfinite(float(v))]
+                normalized: List[Optional[float]] = [None] * len(values)
+                if not pairs:
+                    return normalized
+                if len(pairs) == 1:
+                    normalized[pairs[0][0]] = 0.0
+                    return normalized
+                ordered = sorted(pairs, key=lambda p: p[1], reverse=higher_is_better)
+                n = len(ordered)
+                i = 0
+                while i < n:
+                    j = i
+                    while j + 1 < n and ordered[j + 1][1] == ordered[i][1]:
+                        j += 1
+                    average_rank = (i + j) / 2.0
+                    for k in range(i, j + 1):
+                        normalized[ordered[k][0]] = average_rank / (n - 1)
+                    i = j + 1
+                return normalized
+
+            rfree_values = [rfree_getter(r) for r in self.results]
+            omit_values = [omit_getter(r) for r in self.results]
+            rmsd_values = [rmsd_getter(r) for r in self.results]
+            rfree_available = any(v is not None for v in rfree_values)
+            omit_available = any(v is not None for v in omit_values)
+            rmsd_available = any(v is not None for v in rmsd_values)
+
+            ranking_columns = []
+            normalized_dims: List[Tuple[str, List[Optional[float]]]] = []
+            if rfree_available:
+                ranking_columns.append(("R_free", rfree_getter, fmt))
+                normalized_dims.append(("R_free", rank_normalize(rfree_values, higher_is_better=False)))
+            if omit_available:
+                ranking_columns.append(("OMIT correlation", omit_getter, fmt))
+                normalized_dims.append(("OMIT correlation", rank_normalize(omit_values, higher_is_better=True)))
+            if rmsd_available:
+                ranking_columns.append(("RMSD (Å)", rmsd_getter, fmt))
+                normalized_dims.append(("RMSD", rank_normalize(rmsd_values, higher_is_better=False)))
+
+            scores: List[Optional[float]] = []
+            for idx in range(len(self.results)):
+                valid = [normalized[idx] for _name, normalized in normalized_dims if normalized[idx] is not None]
+                scores.append(sum(valid) / len(valid) if valid else None)
+            ranking_active = any(s is not None for s in scores)
+
+            if ranking_active:
+                order = sorted(
+                    range(len(self.results)),
+                    key=lambda i: (scores[i] is None, scores[i] if scores[i] is not None else 0.0, i),
+                )
+                # Standard competition ranking: equal scores share the same
+                # Rank (1, 1, 3 -- not 1, 1, 2).
+                rank_numbers: dict = {}
+                position = 0
+                previous_score: Optional[float] = None
+                current_rank = 0
+                for i in order:
+                    if scores[i] is None:
+                        continue
+                    position += 1
+                    if previous_score is None or scores[i] != previous_score:
+                        current_rank = position
+                        previous_score = scores[i]
+                    rank_numbers[i] = current_rank
+            else:
+                order = list(range(len(self.results)))
+                rank_numbers = {}
+
+            columns = [(h, g, f) for (h, g, f) in candidate_columns if col_available(g)]
+            headers: List[str] = (["Rank", "Cycle", "Selection score"] if ranking_active else ["Cycle"])
+            headers += [h for h, _g, _f in ranking_columns]
+            headers += [h for h, _g, _f in columns]
+            cycle_col_index = headers.index("Cycle")
+            reference_available = bool(self.reference_atoms_for_plot)
+
+            if normalized_dims:
+                ranking_summary = " + ".join(name for name, _values in normalized_dims)
+                if not rmsd_available and (rfree_available or omit_available):
+                    ranking_summary += " (reference RMSD unavailable)"
+            elif len(self.results) <= 1:
+                ranking_summary = "Not applicable"
+            else:
+                ranking_summary = "Not available"
+
+            while summary_form.rowCount():
+                summary_form.removeRow(0)
+            for label_text, value_text in (
+                ("Completed cycles", str(len(self.results))),
+                ("Ranking", ranking_summary),
+                ("Reference", "Available" if reference_available else "Not available"),
+            ):
+                value_label = QLabel(value_text)
+                value_font = value_label.font()
+                value_font.setBold(True)
+                value_label.setFont(value_font)
+                summary_form.addRow(label_text, value_label)
+
+            table = QTableWidget(len(self.results), len(headers))
+            table.setObjectName("diagnosticTable")
+            table.setHorizontalHeaderLabels(headers)
+            table.setAlternatingRowColors(True)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setSelectionMode(QAbstractItemView.SingleSelection)
+            table.verticalHeader().setVisible(False)
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            table.horizontalHeader().setStretchLastSection(len(headers) <= 3)
+
+            class _NumericTableWidgetItem(QTableWidgetItem):
+                """Sorts by an explicit numeric/string key instead of Qt's
+                default lexicographic text compare, so header-click sorting
+                is correct for this table."""
+
+                def __init__(self, text: str, sort_value: object) -> None:
+                    super().__init__(text)
+                    self._sort_value = sort_value
+
+                def __lt__(self, other: object) -> bool:  # noqa: N802 - Qt override
+                    other_value = getattr(other, "_sort_value", None)
+                    if self._sort_value is None:
+                        return False
+                    if other_value is None:
+                        return True
+                    try:
+                        return float(self._sort_value) < float(other_value)
+                    except (TypeError, ValueError):
+                        return str(self._sort_value) < str(other_value)
+
+            def add_cell(display_row: int, col: int, text: str, sort_value: object, left_align: bool = False) -> "_NumericTableWidgetItem":
+                item = _NumericTableWidgetItem(text, sort_value)
+                item.setTextAlignment((Qt.AlignLeft if left_align else Qt.AlignRight) | Qt.AlignVCenter)
+                table.setItem(display_row, col, item)
+                return item
+
+            # Without a validation ranking metric, no cycle is scientifically
+            # "recommended" -- the first (chronologically earliest) cycle is
+            # selected purely so a preview is shown, with no best/preferred
+            # framing.
+            initial_result_idx = order[0] if order else 0
+            preserved_cycle = state.get("cycle")
+            preserved_result_idx = None
+            if preserved_cycle is not None:
+                for idx, r in enumerate(self.results):
+                    if int(r.cycle) == preserved_cycle:
+                        preserved_result_idx = idx
+                        break
+            select_result_idx = preserved_result_idx if preserved_result_idx is not None else initial_result_idx
+
+            for display_row, result_idx in enumerate(order):
+                result = self.results[result_idx]
+                col = 0
+                if ranking_active:
+                    rank = rank_numbers.get(result_idx)
+                    add_cell(display_row, col, "n/a" if rank is None else str(rank), rank)
+                    col += 1
+                cycle_item = add_cell(display_row, col, str(int(result.cycle)), int(result.cycle))
+                cycle_item.setData(Qt.UserRole, int(result.cycle))
+                if ranking_active and result_idx == initial_result_idx:
+                    cycle_item.setToolTip("Best-ranked cycle (lowest Selection score).")
+                col += 1
+                if ranking_active:
+                    score = scores[result_idx]
+                    add_cell(display_row, col, fmt(score), score)
+                    col += 1
+                for _header, getter, formatter in ranking_columns:
+                    value = getter(result)
+                    add_cell(display_row, col, formatter(value), value)
+                    col += 1
+                for header, getter, formatter in columns:
+                    value = getter(result)
+                    add_cell(display_row, col, formatter(value), value, left_align=(header == "Derived SG"))
+                    col += 1
+
+            def result_for_table_row(row: int) -> Optional[CycleResult]:
+                if row < 0:
+                    return None
+                item = table.item(row, cycle_col_index)
+                if item is None:
+                    return None
+                cycle_id = item.data(Qt.UserRole)
+                if cycle_id is None:
+                    return None
+                return next((r for r in self.results if int(r.cycle) == int(cycle_id)), None)
+
+            preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
+            preview_canvas = FigureCanvas(preview_figure)
+            preview_canvas.setObjectName("janaResultPreviewCanvas")
+            preview_canvas.setMinimumHeight(260)
+            preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            preview_canvas.setToolTip("")
+            preview_host.structure_canvas = preview_canvas
+
+            def preview_atoms_for(result: CycleResult) -> List[AtomSite]:
+                return self._safe_parse_structure(self._source_structure_path(result, map_source))
+
+            def render_preview(result: CycleResult) -> None:
+                current_result_ref["result"] = result
+                state["cycle"] = int(result.cycle)
+                has_map = self._source_map_path(result, map_source).is_file()
+                if has_map:
+                    availability_note.setVisible(False)
+                else:
+                    extra = " Choose another cycle, or switch source." if switchable else " Choose another cycle."
+                    availability_note.setText(f"No {source_title} map is available for cycle {int(result.cycle)}.{extra}")
+                    availability_note.setVisible(True)
+                send_btn.setEnabled(has_map)
+
+                preview_figure.clear()
+                preview_figure.patch.set_facecolor("#ffffff")
+                preview_host.structure_axes = []
+                preview_host._structure_depth_artists = []
+                panels = [(
+                    f"{source_title} · Cycle {int(result.cycle)}",
+                    preview_atoms_for(result),
+                    "Structure preview unavailable for this cycle",
+                )]
+                if reference_available:
+                    panels.append(("Reference", self.reference_atoms_for_plot, "Reference structure unavailable"))
+                # With no atomic reference, a full second pane would just show
+                # "Reference structure unavailable" -- give the selected
+                # result the whole viewer instead of wasting half of it.
+                column_count = len(panels)
+                x_positions = (0.5,) if column_count == 1 else (0.25, 0.75)
+                metadata = []
+                for idx, (_title, atoms, empty_text) in enumerate(panels, start=1):
+                    ax = preview_figure.add_subplot(1, column_count, idx, projection="3d")
+                    preview_host.structure_axes.append(ax)
+                    metadata.append(preview_host._plot_structure_atoms(ax, atoms, empty_text))
+                for x_position, (title, _atoms, _empty_text) in zip(x_positions, panels):
+                    preview_figure.text(
+                        x_position, 0.96, title, ha="center", va="center",
+                        fontsize=10, fontweight="bold", color="#001170",
+                    )
+                for x_position, meta in zip(x_positions, metadata):
+                    preview_figure.text(x_position, 0.03, meta, ha="center", va="center", fontsize=7.5, color="#52658b")
+                if column_count > 1:
+                    preview_figure.add_artist(Line2D(
+                        [0.5, 0.5], [0.08, 0.90], transform=preview_figure.transFigure,
+                        color="#cbd7ea", linewidth=0.45, alpha=0.62,
+                    ))
+                preview_figure.subplots_adjust(left=0.01, right=0.99, bottom=0.09, top=0.90, wspace=0.04)
+                preview_canvas.draw_idle()
+
+            preview_canvas.mpl_connect("button_press_event", preview_host._begin_structure_rotation)
+            preview_canvas.mpl_connect("motion_notify_event", preview_host._sync_structure_view_from_event)
+            preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_rotation)
+
+            def on_selection_changed() -> None:
+                result = result_for_table_row(table.currentRow())
+                if result is not None:
+                    render_preview(result)
+
+            table.itemSelectionChanged.connect(on_selection_changed)
+            # Populate rows first, THEN enable sorting -- enabling it before
+            # setItem() calls would let each insertion re-sort mid-population.
+            # Cycle identity is resolved via Qt.UserRole (result_for_table_row),
+            # never the visible row index, so header-click sorting stays correct.
+            table.setSortingEnabled(True)
+            # setSortingEnabled(True) itself immediately re-sorts existing rows
+            # (descending, by column 0, by default) -- force a deterministic
+            # ascending sort by column 0 (Rank when ranked, else Cycle) so the
+            # already-built `order` sequence (best-first / chronological) is
+            # what actually ends up on screen, not an arbitrary Qt default.
+            table.sortItems(0, Qt.AscendingOrder)
+            select_display_row = order.index(select_result_idx) if select_result_idx in order else 0
+            table.selectRow(select_display_row)
+            # selectRow() doesn't reliably fire itemSelectionChanged the very
+            # first time a freshly (re)built table is populated -- render
+            # explicitly so the preview is never blank after a rebuild.
+            initial_result = result_for_table_row(select_display_row)
+            if initial_result is not None:
+                render_preview(initial_result)
+
+            viewer_section = QWidget()
+            viewer_section_layout = QVBoxLayout(viewer_section)
+            viewer_section_layout.setContentsMargins(0, 0, 0, 0)
+            viewer_section_layout.setSpacing(3)
+            viewer_section_label = QLabel("STRUCTURE COMPARISON")
+            viewer_section_label.setObjectName("sectionLabel")
+            viewer_section_layout.addWidget(viewer_section_label)
+            viewer_section_layout.addWidget(preview_canvas, 1)
+
+            splitter = QSplitter(Qt.Horizontal)
+            splitter.addWidget(table)
+            splitter.addWidget(viewer_section)
+            # A handful of columns doesn't need half the dialog; give the
+            # table only as much width as its content plausibly needs and let
+            # the structure viewer take the rest.
+            table_share = 0.32 if len(headers) <= 3 else 0.55
+            splitter_total = 1260
+            splitter.setSizes([
+                int(splitter_total * table_share), int(splitter_total * (1.0 - table_share))
+            ])
+            body_layout.addWidget(splitter, 1)
+
+            if ranking_active:
+                note_text = "Selection score combines available validation ranks; lower is better."
+            else:
+                note_text = "No validation metric is available for ranking. Select a cycle manually."
+            note = QLabel(note_text)
+            note.setStyleSheet("color: #52658b;")
+            note.setWordWrap(True)
+            body_layout.addWidget(note)
+
+        if switchable:
+            superflip_btn.clicked.connect(lambda _checked=False: rebuild("superflip"))
+            sharped_btn.clicked.connect(lambda _checked=False: rebuild("deblurred"))
+
+        rebuild(str(state["source"]))
+
         if dialog.exec() != QDialog.Accepted:
             # Closing without sending keeps the main window and its completed
-            # results exactly as they are; "Send to Jana2020" reopens this same
-            # selector (see the redirect at the top of open_jana_handoff_dialog).
+            # results exactly as they are; "Send to Jana2020" reopens this
+            # same selector.
             return
 
-        selected_result = result_for_table_row(table.currentRow())
+        selected_result = current_result_ref["result"]
         if selected_result is None:
+            return
+        final_source = str(state["source"])
+        if not self._source_map_path(selected_result, final_source).is_file():
+            # Defensive: Send is disabled whenever this is true, but never
+            # silently hand off the wrong source if it is somehow reached.
             return
 
         self.handoff_btn.setEnabled(False)
         self._append_execution_log(
-            f"Starting Jana2020 hand-off from cycle {int(selected_result.cycle):03d} ({map_source}).",
+            f"[Jana2020] Hand-off source · Cycle {int(selected_result.cycle):03d} · {result_map_label(final_source)}",
             level="STEP",
             subsystem="Jana2020",
         )
 
         def worker() -> None:
             try:
-                perform_jana_handoff(cfg, selected_result, map_source, log=self.log)
+                perform_jana_handoff(cfg, selected_result, final_source, log=self.log)
                 self.msg_queue.put(("handoff_done", None))
             except Exception as exc:
                 self.msg_queue.put((
@@ -10648,6 +10660,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def open_jana_handoff_dialog(self) -> None:
+        """Entry point for the main window's "Send to Jana2020" button.
+        Dispatches to the one shared open_jana_result_selector(): locked to
+        the Wizard's own choice for a Phase-recycling session, switchable
+        between Superflip/SharpED for a Full-configuration session."""
+        if self.jana_wizard_context.launch_mode == "phase_recycling":
+            self.open_jana_result_selector(
+                source_mode="locked",
+                initial_source=self.jana_wizard_context.wizard_map_source or "deblurred",
+            )
+            return
+        self.open_jana_result_selector(source_mode="switchable", initial_source=self._default_handoff_source())
 
     def _replay_metrics_tab(self, key: str) -> None:
         """Re-run the last _render_metrics_tab() call for this tab with its
@@ -11753,7 +11778,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"  Elements: {sharped_elements}")
 
             self.log(f"EDMA plimit after Superflip: {cfg.plimit_superflip:g} sigma multiplier", level="DETAIL")
-            self.log(f"EDMA plimit after deblurring: {cfg.plimit_deblur:g} sigma multiplier", level="DETAIL")
+            self.log(f"EDMA plimit after SharpED: {cfg.plimit_deblur:g} sigma multiplier", level="DETAIL")
             self.log(f"EDMA maxima/fullcell/numberofatoms: {cfg.edma_maxima} / {cfg.edma_fullcell} / {cfg.edma_numberofatoms}", level="DETAIL")
             self.log(f"SharpED maximum upload size: {cfg.sharped_max_upload_mb:g} MB" if cfg.sharped_max_upload_mb > 0 else "SharpED maximum upload size: disabled", level="DETAIL")
             if use_xplor_modelfile:
@@ -11762,7 +11787,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     level="DETAIL",
                 )
             if use_superflip_xplor_modelfile:
-                self.log("Next-cycle XPLOR modelfile uses the raw Superflip map; SharpED deblurring is not required for cycling.", level="DETAIL")
+                self.log("Next-cycle XPLOR modelfile uses the raw Superflip map; SharpED is not required for cycling.", level="DETAIL")
             if use_cif_modelfile:
                 self.log("CIF modelfiles are written without an explicit CIF format keyword; Superflip infers CIF from the .cif extension.", level="DETAIL")
             self.log(f"Superflip perform: {cfg.perform_algorithm.upper()}")
@@ -11771,7 +11796,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"map={normalize_map_export_format(cfg.map_export_format)}, "
                 f"structure={normalize_structure_export_format(cfg.structure_export_format)}"
             )
-            self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, Superflip symmetry/deblurred={'yes' if cfg.symmetrize_deblurred_map else 'no'}, EDMA/deblurred={'yes' if cfg.run_edma_deblurred else 'no'}")
+            self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, Superflip symmetry/SharpED={'yes' if cfg.symmetrize_deblurred_map else 'no'}, EDMA/SharpED={'yes' if cfg.run_edma_deblurred else 'no'}")
             if cfg.first_cycle_modelfile is not None:
                 self.log(f"First-cycle external modelfile: {cfg.first_cycle_modelfile}")
             explicit_superflip_referencefile = cfg.superflip_referencefile
@@ -12091,10 +12116,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             else:
                 shutil.copy2(sf_map, deblur_map)
                 if use_superflip_xplor_modelfile:
-                    self.log("SharpED deblurring skipped; raw Superflip XPLOR is used for the next-cycle modelfile.")
+                    self.log("SharpED skipped; raw Superflip XPLOR is used for the next-cycle modelfile.")
                 else:
-                    self.log("SharpED disabled; deblurred map is a copy of the Superflip map.")
-            self.log(f"Deblurred map: {deblur_map}")
+                    self.log(f"SharpED disabled; the {result_map_label('deblurred')} is a copy of the Superflip map.")
+            self.log(f"{result_map_label('deblurred')}: {deblur_map}")
             omit_deblur_correlation: Optional[float] = None
             omit_deblur_rfree: Optional[float] = None
             if cfg.compute_omit_maps and state.omit_test_hkls and omit_sf_map is not None and cfg.run_sharped and not use_superflip_xplor_modelfile:
@@ -12110,13 +12135,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         cycle, cfg.cycles, progress_stages, "SharpED", detail=f"omit map · {detail}", busy=detail != "completed",
                     ),
                 )
-                self.log(f"Omit deblurred map: {omit_deblur_map}")
+                self.log(f"Omit {result_map_label('deblurred')}: {omit_deblur_map}")
                 omit_deblur_correlation = xplor_map_correlation(deblur_map, omit_deblur_map)
                 if cfg.compute_omit_rfree:
                     predictions = xplor_fft_predictions(omit_deblur_map, list(state.omit_test_hkls))
                     omit_deblur_rfree = compute_rfree(state.current_reflections, state.omit_test_hkls, configured_data_mode, predictions)
                 self.log(
-                    f"[Omit] Deblurred map correlation={('n/a' if omit_deblur_correlation is None else f'{omit_deblur_correlation:.4f}')}"
+                    f"[Omit] {result_map_label('deblurred')} correlation={('n/a' if omit_deblur_correlation is None else f'{omit_deblur_correlation:.4f}')}"
                     f" · R_free={('n/a' if omit_deblur_rfree is None else f'{omit_deblur_rfree:.4f}')}",
                     subsystem="SharpED",
                 )
@@ -12132,7 +12157,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     busy=True,
                 )
                 sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
-                self.log("  Superflip symmetry uses the deblurred XPLOR map as both modelfile and referencefile.")
+                self.log(f"  Superflip symmetry uses the {result_map_label('deblurred').lower()} XPLOR map as both modelfile and referencefile.")
                 deblur_map = run_superflip_symmetrize_map(
                     cycle_dir=cycle_dir,
                     prefix=sym_prefix,
@@ -12149,7 +12174,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             deblur_prefix = f"cycle_{cyc:03d}_deblurred"
             deblur_edma_dir = cycle_dir / "edma_deblurred"
             if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
-                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · deblurred map", busy=True)
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, f"EDMA · {result_map_label('deblurred')}", busy=True)
                 deblur_edma_cif = run_edma_on_xplor(
                     deblur_map, deblur_edma_dir, deblur_prefix, ref_ctx, cfg.plimit_deblur,
                     cfg.merge_distance, cfg.edma_exe, self.log,
@@ -12163,9 +12188,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_edma_cif = deblur_edma_dir / f"{deblur_prefix}_edma.cif"
                 write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
                 if use_superflip_xplor_modelfile:
-                    self.log("EDMA after deblurred map skipped for raw Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
+                    self.log(f"EDMA after {result_map_label('deblurred').lower()} skipped for raw Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
                 else:
-                    self.log("EDMA after deblurred map disabled; empty placeholder CIF/XYZ/PDB written.")
+                    self.log(f"EDMA after {result_map_label('deblurred').lower()} disabled; empty placeholder CIF/XYZ/PDB written.")
             deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
             deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
             deblur_recall: Optional[float] = None
@@ -12179,7 +12204,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     deblur_heavy_atoms = count_heavy_atoms(deblur_edma_cif)
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
             self.log(
-                f"[EDMA] Completed · Deblurred map · RMSD={deblur_metric_text} Å\n"
+                f"[EDMA] Completed · {result_map_label('deblurred')} · RMSD={deblur_metric_text} Å\n"
                 f"  output: {deblur_edma_cif}",
                 subsystem="EDMA",
             )
@@ -12379,7 +12404,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     cycle, cfg.cycles, progress_stages, "SharpED", detail=detail, busy=detail != "completed",
                 ),
             )
-            self.log(f"Deblurred map: {deblur_map}")
+            self.log(f"{result_map_label('deblurred')}: {deblur_map}")
             if self.stop_now.is_set():
                 raise RuntimeError("Immediate stop requested.")
 
