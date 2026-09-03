@@ -5566,8 +5566,8 @@ INPUT_TOOLTIPS = {
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the SharpED map is a copy of the Superflip map.",
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
-    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip validation and SharpED validation tabs' omit-map correlation series (full map vs. omit map). Roughly doubles Superflip/SharpED time per cycle.",
-    "compute_omit_rfree": "Also compute R_free from the excluded 5% holdout: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Requires 'Compute OMIT validation maps'.",
+    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip validation and SharpED validation tabs' omit-map correlation series (full map vs. omit map); together with R_free, this also feeds the phase-recycling result selector's Selection score, helping identify the most suitable final map among the recycling cycles. Roughly doubles Superflip/SharpED time per cycle.",
+    "compute_omit_rfree": "Also compute R_free from the excluded 5% holdout: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Feeds the phase-recycling result selector's Selection score alongside OMIT correlation, helping rank cycles and choose the most suitable final map. Requires 'Compute OMIT validation maps'.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
     "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save, for each cycle's Superflip map, the observed |Fobs|/intensity together with phases (and, for ShelX, calculated F squared) read by FFT from that map, in a standardized text file or a ShelX/Jana-compatible .fcf file.",
     "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
@@ -10941,7 +10941,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             body_layout.addWidget(splitter, 1)
 
             if ranking_active:
-                note_text = "Selection score combines available validation ranks; lower is better."
+                note_text = (
+                    "Selection score combines available validation ranks -- R_free and OMIT correlation "
+                    "(from the 5% reflection holdout) and RMSD (vs. a reference structure, if provided); "
+                    "lower is better."
+                )
             else:
                 note_text = "No validation metric is available for ranking. Select a cycle manually."
             note = QLabel(note_text)

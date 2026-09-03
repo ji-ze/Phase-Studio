@@ -168,6 +168,18 @@ def build_jana_handoff_import(
     explicit_superflip_reference = _resolved_handoff_path(options.superflip_referencefile, base_dir)
     explicit_first_model = _resolved_handoff_path(options.first_cycle_modelfile, base_dir)
 
+    # The Wizard's Phase-recycling "map used for Jana2020 hand-off" radio
+    # (superflip_xplor / deblurred_xplor) only ever decides which map the
+    # user is offered to review/select at the end -- see wizard_map_source
+    # in launch_phase_studio_from_jana(), which reads options.next_cycle_modelfile
+    # directly and is unaffected by this. It must never silently stop
+    # SharpED from running each cycle: only "none" (the "Superflip only"
+    # single-pass workflow) is genuinely SharpED-free. Both map preferences
+    # keep SharpED running every cycle and keep feeding its deblurred map
+    # forward, exactly like the "SharpED map" preference already did.
+    handoff_run_sharped = options.next_cycle_modelfile != "none"
+    handoff_modelfile_source = "none" if options.next_cycle_modelfile == "none" else "deblurred_xplor"
+
     handoff_values = {
         "input_source_mode": app_input_label,
         "jana_inflip": str(inflip_path),
@@ -175,13 +187,13 @@ def build_jana_handoff_import(
         "superflip_exe": str(DEFAULT_JANA_SUPERFLIP),
         "edma_exe": str(DEFAULT_JANA_EDMA),
         "cycles": str(options.cycles),
-        "run_sharped": "true" if options.next_cycle_modelfile == "deblurred_xplor" else "false",
+        "run_sharped": "true" if handoff_run_sharped else "false",
         "sharped_base_url": options.server_url,
         "sharped_api_token": options.api_token,
         "sharped_model": options.model,
         "sharped_elements": options.elements,
         "sharped_outres": str(options.outres),
-        "modelfile_source": options.next_cycle_modelfile,
+        "modelfile_source": handoff_modelfile_source,
         # Must match one of the "Map format" combo items in app.py exactly (XPLOR is
         # always produced regardless; "jana" additionally saves Jana m80/m81 for hand-off).
         "map_export_format": "jana",
@@ -1626,18 +1638,24 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     omit_checkbox.setToolTip(
         "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed "
         "random 5% holdout of reflections excluded from the input, for cross-validation. "
-        "Roughly doubles Superflip/SharpED time per cycle."
+        "Feeds the phase-recycling result selector's Selection score, helping identify the "
+        "most suitable final map among the recycling cycles. Roughly doubles Superflip/SharpED "
+        "time per cycle."
     )
     rfree_checkbox = QCheckBox("Calculate R_free")
     rfree_checkbox.setToolTip(
         "Compute R_free (the crystallographic R-factor between the excluded holdout "
         "reflections' observed |F| and |F| calculated by FFT from the omit map) for each "
-        "cycle. Requires 'Compute OMIT validation maps'."
+        "cycle. Feeds the phase-recycling result selector's Selection score alongside OMIT "
+        "correlation, helping rank cycles and choose the most suitable final map. Requires "
+        "'Compute OMIT validation maps'."
     )
     cross_validation_layout.addWidget(omit_checkbox)
     cross_validation_layout.addWidget(rfree_checkbox)
     cross_validation_help = QLabel(
-        "Optional. Adds per-cycle OMIT / R_free validation for ranking candidate maps."
+        "Optional. Excludes a random 5% of reflections each cycle to compute OMIT / R_free "
+        "validation metrics, which help rank the recycling cycles and select the most "
+        "suitable final map."
     )
     cross_validation_help.setWordWrap(True)
     cross_validation_help.setStyleSheet("color: #52658b;")
