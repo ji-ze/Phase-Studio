@@ -8665,9 +8665,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             data_mode = resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
         return hkl_path, data_mode, cell, sg, hm, source_note
 
-    def _hkl_analysis_inputs(self) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
-        return self._resolve_hkl_analysis_inputs(self._collect_hkl_analysis_request())
-
     def _build_hkl_load_result(self, request: HklAnalysisRequest) -> HklLoadResult:
         hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
         value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)

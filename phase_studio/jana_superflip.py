@@ -11,7 +11,6 @@ expected next to it as superflip_original.exe.
 from __future__ import annotations
 
 import locale
-import math
 import os
 import queue
 import re
