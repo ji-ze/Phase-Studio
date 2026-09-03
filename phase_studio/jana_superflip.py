@@ -2029,6 +2029,16 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
                 if key == WORKFLOW_PHASE_RECYCLING
                 else "Map used for Jana2020 hand-off"
             )
+            # The raw-vs-SharpED map choice is only meaningful for Phase
+            # recycling; "Superflip + SharpED" always uses the SharpED map
+            # (see effective_next_cycle_mode()), so offering it as a live
+            # choice there would be misleading. Force the radio to match
+            # before hiding it, so it reflects the truth if ever shown again.
+            map_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
+            if key == WORKFLOW_SUPERFLIP_SHARPED:
+                sharped_map_radio.setChecked(True)
+                sync_map_choice()
+            adjust_dialog_size()
         cross_validation_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
         if stack.currentWidget() is page1:
             sync_primary_button_for_page1()
@@ -2098,6 +2108,14 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     def effective_next_cycle_mode() -> str:
         if current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
             return "none"
+        if current_workflow() == WORKFLOW_SUPERFLIP_SHARPED:
+            # This workflow always runs SharpED and hands its (deblurred)
+            # map off to Jana2020 -- the raw-vs-SharpED map choice only has
+            # real meaning for Phase recycling, where each cycle genuinely
+            # can feed forward either map. Never let a leftover radio
+            # selection from an earlier Phase-recycling session silently
+            # skip SharpED here even if somehow still checked.
+            return "deblurred_xplor"
         return "superflip_xplor" if superflip_map_radio.isChecked() else "deblurred_xplor"
 
     def effective_cycles() -> int:
