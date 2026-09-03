@@ -121,7 +121,7 @@ def build_error_report(
         elif "download" in lower and any(token in lower for token in ("failed", "could not", "did not create", "request failed")):
             category = "sharped_download"
             title = "SharpED result could not be downloaded"
-            summary = "Phase Studio could not retrieve or save the processed SharpED map."
+            summary = "Phase Studio could not retrieve or save the SharpED map."
             guidance = "Check the server connection and working-folder permissions, then retry the operation."
         elif any(token in lower for token in ("request failed", "unreachable", "urlerror", "tls error", "certificate", "name or service", "connection refused", "connection reset")):
             category = "sharped_network"
@@ -203,13 +203,13 @@ def build_error_report(
     elif ".inflip" in lower or "inflip" in lower:
         resolved_subsystem = "Jana2020"
         category = "inflip"
-        title = "Jana2020 hand-off could not be loaded"
-        summary = "The supplied .inflip input is missing, unreadable, or incomplete."
+        title = "Jana2020 handoff could not be loaded"
+        summary = "The supplied Jana2020 .inflip file is missing, unreadable, or incomplete."
         guidance = "Select a valid Jana2020 .inflip file containing the required crystallographic input."
-    elif "jana2020" in lower or "hand-off" in lower:
+    elif "jana2020" in lower or "hand-off" in lower or "handoff" in lower:
         resolved_subsystem = "Jana2020"
         category = "jana_handoff"
-        title = "Jana2020 hand-off failed"
+        title = "Jana2020 handoff failed"
         summary = "Phase Studio could not prepare or transfer the selected result to Jana2020."
         guidance = "Check that the selected cycle, map, and original Jana2020 input are still available."
     elif "hkl" in lower or "reflection" in lower or resolved_subsystem == "HKL":
@@ -218,7 +218,7 @@ def build_error_report(
             category = "hkl_missing"
             title = "HKL file not found"
             summary = "Phase Studio could not read the selected reflection file."
-            guidance = "Select an existing HKL file or a Jana .inflip containing reflections."
+            guidance = "Select an existing HKL file or a Jana2020 .inflip file containing reflections."
         else:
             category = "hkl_invalid"
             title = "HKL validation failed"

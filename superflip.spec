@@ -68,7 +68,16 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=True,
+    # Windowed, not console: Jana2020 launches this executable directly, and
+    # console=True made Windows attach a persistent black console window for
+    # this process's entire lifetime, visible behind the Jana2020 Wizard.
+    # Nothing depends on that console: every message logged through
+    # JanaLogger already writes to log.txt regardless (see jana_superflip.py),
+    # and all user interaction/error reporting goes through Qt dialogs, never
+    # the console. disable_windowed_traceback stays False, so PyInstaller's
+    # own crash dialog still appears for an unhandled exception even without
+    # a console.
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

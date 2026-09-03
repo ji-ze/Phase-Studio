@@ -292,7 +292,16 @@ class JanaLogger:
 
     def __call__(self, message: str) -> None:
         text = sanitize_error_details(message)
-        print(text, flush=True)
+        # log.txt (below) is the authoritative, always-available copy of this
+        # message; the console mirror is a bonus for a development console
+        # window, not something later code depends on. This wrapper builds
+        # windowed (console=False, see superflip.spec) precisely so no black
+        # console window appears behind the Jana2020 Wizard -- stdout may
+        # therefore be absent entirely, which must never take down logging.
+        try:
+            print(text, flush=True)
+        except Exception:
+            pass
         self._fh.write(text + "\n")
         self._fh.flush()
 
@@ -687,12 +696,12 @@ def run_final_jana_handoff(
     log: Callable[[str], None],
 ) -> int:
     if not selected_map.is_file() or selected_map.stat().st_size == 0:
-        raise RuntimeError(f"Selected hand-off map does not exist or is empty: {selected_map}")
+        raise RuntimeError(f"Selected handoff map does not exist or is empty: {selected_map}")
     header = inflip_header_for_m80(original_lines)
     calc_m80 = exe_dir / "deblurrer" / "calc_m80.inflip"
     write_text_lines(calc_m80, define_m80_inflip(header, base_name, selected_map.name))
     log(f"Final Jana inflip: {calc_m80}")
-    log(f"Final Jana hand-off model: {selected_map}")
+    log(f"Final Jana handoff model: {selected_map}")
     return run_process([str(original), str(calc_m80)], cwd=cwd, log=log)
 
 
@@ -722,7 +731,7 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
 
     _arg_index, inflip_path = inflip_arg
     if not inflip_path.is_file():
-        raise FileNotFoundError(f"Inflip file not found: {inflip_path}")
+        raise FileNotFoundError(f"Jana2020 .inflip file not found: {inflip_path}")
     base_name = inflip_path.stem
     original_lines = read_text_lines(inflip_path)
     original_bytes = inflip_path.read_bytes()
@@ -814,14 +823,14 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
         if use_sharped:
             deblur_with_sharped(xplor_map, deblurred_map, options, log=log)
             if not deblurred_map.is_file() or deblurred_map.stat().st_size == 0:
-                raise RuntimeError(f"SharpED did not create expected deblurred map: {deblurred_map}")
-            log(f"Deblurred map: {deblurred_map}")
+                raise RuntimeError(f"SharpED did not create the expected SharpED map: {deblurred_map}")
+            log(f"SharpED map: {deblurred_map}")
             selected_map = deblurred_map
         else:
             selected_map = xplor_map
 
         code = run_final_jana_handoff(original, exe_dir, cwd, original_lines, base_name, selected_map, log)
-        log("Jana2020 hand-off completed. The Phase Studio launcher will close automatically.")
+        log("Jana2020 handoff completed. The Phase Studio launcher will close automatically.")
         try:
             qt = _qt_imports()
             app = qt["QApplication"].instance()
@@ -1385,14 +1394,14 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         return str(found) if found is not None else ""
 
     reference_file = add_file_row(
-        "Reference structure (optional)",
+        "Reference (optional)",
         "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)",
         "Reference CIF structure or XPLOR density map, used together with the "
         "incoming Jana2020 .inflip without replacing its embedded reflections or metadata. "
         "When supplied, Superflip also reports how well each cycle matches this reference, "
-        "which is used to recommend the best map for the Jana2020 hand-off. Pre-filled from "
+        "which is used to recommend the best map for the Jana2020 handoff. Pre-filled from "
         "the incoming .inflip's own referencefile keyword, if it declares one.",
-        "No external reference structure",
+        "No external reference",
         _inflip_keyword_default("referencefile"),
     )
     model_file = add_file_row(
@@ -1434,16 +1443,16 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     page2_layout.setContentsMargins(0, 0, 0, 0)
     page2_layout.setSpacing(10)
 
-    map_group = QGroupBox("Map used for Jana2020 hand-off")
+    map_group = QGroupBox("Map used for Jana2020 handoff")
     map_group_layout = QVBoxLayout(map_group)
     map_buttons = QButtonGroup(dialog)
-    sharped_map_radio = QRadioButton("SharpED map (deblurred)")
-    superflip_map_radio = QRadioButton("Superflip map (raw)")
+    sharped_map_radio = QRadioButton("SharpED map")
+    superflip_map_radio = QRadioButton("Superflip map")
     sharped_map_radio.setToolTip(
-        "Feed each next cycle with the SharpED-sharpened map and prefer it for the Jana2020 hand-off."
+        "Use the SharpED map for the next phase-recycling cycle and for the Jana2020 handoff."
     )
     superflip_map_radio.setToolTip(
-        "Feed each next cycle with the raw Superflip map, without SharpED sharpening."
+        "Use the Superflip map for the next phase-recycling cycle and for the Jana2020 handoff."
     )
     map_buttons.addButton(sharped_map_radio)
     map_buttons.addButton(superflip_map_radio)
@@ -1462,8 +1471,8 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     cycles = QSpinBox()
     cycles.setRange(1, 999)
     cycles.setValue(int(settings.value("cycles", 1)) or 1)
-    cycles.setToolTip("Number of Superflip/SharpED phase-recycling iterations.")
-    processing_form.addRow("Phase-recycling cycles", cycles)
+    cycles.setToolTip("Number of Superflip/SharpED phase-recycling cycles.")
+    processing_form.addRow("Recycling cycles", cycles)
     cycles_label = processing_form.labelForField(cycles)
 
     cycles_user_edited = {"value": False}
@@ -1519,7 +1528,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     server_url.setPlaceholderText(DEFAULT_SERVER_URL)
     server_url.setToolTip(
         "Base URL of the SharpED service used for model discovery and map processing. "
-        "Shared with the full Phase Studio application's own Advanced -> Setup value."
+        "Shared with the full Phase Studio application's own Advanced → Setup value."
     )
     sharped_form.addRow("Server URL", server_url)
 
@@ -1639,7 +1648,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed "
         "random 5% holdout of reflections excluded from the input, for cross-validation. "
         "Feeds the phase-recycling result selector's Selection score, helping identify the "
-        "most suitable final map among the recycling cycles. Roughly doubles Superflip/SharpED "
+        "most suitable map among the recycling cycles. Roughly doubles Superflip/SharpED "
         "time per cycle."
     )
     rfree_checkbox = QCheckBox("Calculate R_free")
@@ -1647,7 +1656,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         "Compute R_free (the crystallographic R-factor between the excluded holdout "
         "reflections' observed |F| and |F| calculated by FFT from the omit map) for each "
         "cycle. Feeds the phase-recycling result selector's Selection score alongside OMIT "
-        "correlation, helping rank cycles and choose the most suitable final map. Requires "
+        "correlation, helping rank cycles and choose the most suitable map. Requires "
         "'Compute OMIT validation maps'."
     )
     cross_validation_layout.addWidget(omit_checkbox)
@@ -1655,7 +1664,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     cross_validation_help = QLabel(
         "Optional. Excludes a random 5% of reflections each cycle to compute OMIT / R_free "
         "validation metrics, which help rank the recycling cycles and select the most "
-        "suitable final map."
+        "suitable map."
     )
     cross_validation_help.setWordWrap(True)
     cross_validation_help.setStyleSheet("color: #52658b;")
@@ -1742,7 +1751,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     missing_start_cycle_spin.setRange(1, 999)
     missing_start_cycle_spin.setValue(1)
     missing_start_cycle_spin.setToolTip(
-        "First completed cycle whose final map is used to add missing reflections for the next cycle."
+        "First completed cycle whose map is used to add missing reflections for the next cycle."
     )
     missing_form.addRow("Start after cycle", missing_start_cycle_spin)
     missing_percent_spin = QDoubleSpinBox()
@@ -1768,7 +1777,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     intensity_start_cycle_spin.setRange(1, 999)
     intensity_start_cycle_spin.setValue(1)
     intensity_start_cycle_spin.setToolTip(
-        "First completed cycle whose final map is used to damp observed intensities for the next cycle."
+        "First completed cycle whose map is used to damp observed intensities for the next cycle."
     )
     intensity_form.addRow("Start after cycle", intensity_start_cycle_spin)
     intensity_damping_spin = QDoubleSpinBox()
@@ -1811,7 +1820,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     powder_start_cycle_spin.setRange(1, 999)
     powder_start_cycle_spin.setValue(1)
     powder_start_cycle_spin.setToolTip(
-        "First completed cycle whose final map is used to redistribute overlapping reflections for the next cycle."
+        "First completed cycle whose map is used to redistribute overlapping reflections for the next cycle."
     )
     powder_form.addRow("Start after cycle", powder_start_cycle_spin)
     powder_wavelength_spin = QDoubleSpinBox()
@@ -1820,7 +1829,7 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     powder_wavelength_spin.setDecimals(5)
     powder_wavelength_spin.setValue(0.0)
     powder_wavelength_spin.setToolTip(
-        "Required to compute 2theta. Auto-detected -- when left at 0 -- from the Jana2020 .inflip "
+        "Required to compute 2θ. Auto-detected -- when left at 0 -- from the Jana2020 .inflip "
         "file, then the reference file; enter it manually if neither source has it."
     )
     powder_form.addRow("Wavelength (Å)", powder_wavelength_spin)
@@ -2043,9 +2052,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         if key != WORKFLOW_SUPERFLIP_ONLY:
             apply_workflow_cycle_default(key)
             map_group.setTitle(
-                "Map used for phase recycling and Jana2020 hand-off"
+                "Map used for phase recycling and Jana2020 handoff"
                 if key == WORKFLOW_PHASE_RECYCLING
-                else "Map used for Jana2020 hand-off"
+                else "Map used for Jana2020 handoff"
             )
             # The raw-vs-SharpED map choice is only meaningful for Phase
             # recycling; "Superflip + SharpED" always uses the SharpED map
@@ -2332,11 +2341,13 @@ def launch_phase_studio_from_jana(
             # manually and explicitly clicks Send to Jana2020 once a run
             # completes -- no auto-selected map source, no auto-start.
             win.jana_wizard_context.launch_mode = "full_configuration"
-        # The third primary button defaults to standalone's "Install to
-        # Jana2020" at construction; both Wizard launch paths above just
-        # changed jana_wizard_context, so re-sync it to "Send to Jana2020"
-        # immediately rather than waiting for the next unrelated state change.
+        # The third primary button and window title default to standalone's
+        # "Install to Jana2020" / "Phase Studio <version>" at construction;
+        # both Wizard launch paths above just changed jana_wizard_context, so
+        # re-sync both immediately rather than waiting for the next unrelated
+        # state change.
         win._sync_jana_action_button()
+        win._sync_window_title()
         if inflip_path is not None and handoff_import is not None:
             splash.set_status("Loading Jana2020 workflow…")
             app.processEvents()
@@ -2363,7 +2374,7 @@ def launch_phase_studio_from_jana(
                 )
             else:
                 win._append_execution_log(
-                    "After the full pipeline finishes, use the 'Send to Jana2020' button to choose the cycle and map source for the final Jana2020 hand-off.",
+                    "After the full pipeline finishes, use the 'Send to Jana2020' button to choose the cycle and map source for the final Jana2020 handoff.",
                     level="DETAIL",
                     subsystem="Jana2020",
                 )

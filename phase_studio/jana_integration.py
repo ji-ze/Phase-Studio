@@ -328,7 +328,7 @@ def install_or_update_integration(
         if report.has_original_exe:
             conflict_detail = "Existing Superflip backup detected"
         else:
-            conflict_detail = f"An existing {RUNTIME_DIR_NAME} folder was found"
+            conflict_detail = "An existing Superflip runtime folder was found"
         return OperationResult(
             False, state,
             f"{conflict_detail}. Phase Studio did not modify this installation because its "
@@ -358,7 +358,7 @@ def install_or_update_integration(
         if payload_runtime.is_dir():
             shutil.copytree(payload_runtime, staging_dir / RUNTIME_DIR_NAME)
         if not (staging_dir / WRAPPER_EXE_NAME).is_file():
-            raise RuntimeError("Staged wrapper executable is missing after copy.")
+            raise RuntimeError("Staged launcher executable is missing after copy.")
         if payload_runtime.is_dir() and not (staging_dir / RUNTIME_DIR_NAME).is_dir():
             raise RuntimeError("Staged runtime directory is missing after copy.")
     except Exception as exc:
@@ -431,7 +431,7 @@ def install_or_update_integration(
         if (staging_dir / RUNTIME_DIR_NAME).is_dir():
             shutil.move(str(staging_dir / RUNTIME_DIR_NAME), str(live_runtime))
         if not live_exe.is_file():
-            return rollback("Phase Studio wrapper executable is missing after install.")
+            return rollback("Phase Studio launcher executable is missing after install.")
 
         marker = IntegrationMarker(
             product="Phase Studio",
@@ -491,14 +491,14 @@ def remove_integration(jana_superflip_dir: Path, *, log: Optional[Callable[[str]
     if not original_exe.is_file():
         return OperationResult(
             False, "error",
-            f"{ORIGINAL_EXE_NAME} is missing; refusing to remove the Phase Studio wrapper, which would leave "
+            f"{ORIGINAL_EXE_NAME} is missing; refusing to remove the Phase Studio launcher, which would leave "
             "Jana2020 without a working Superflip. The current installation was left unchanged.",
             lines,
         )
     if original_exe.stat().st_size <= 0:
         return OperationResult(
             False, "error",
-            f"{ORIGINAL_EXE_NAME} appears empty or invalid; refusing to remove the active wrapper. "
+            f"{ORIGINAL_EXE_NAME} appears empty or invalid; refusing to remove the active launcher. "
             "The current installation was left unchanged.",
             lines,
         )

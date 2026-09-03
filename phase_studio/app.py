@@ -2195,8 +2195,15 @@ def reflection_sigma_label(data_mode: str) -> str:
     return "σ(F)" if reflection_mode_is_amplitude(data_mode) else "σ(I)"
 
 def reflection_primary_snr_label(data_mode: str) -> str:
+    # FWHM is a peak-shape width, not an uncertainty (see
+    # reflection_mode_has_fwhm's own docstring warning), so this ratio is
+    # never a true signal-to-noise figure -- but it must at least name the
+    # correct numerator: F/FWHM for amplitude data, I/FWHM for intensity
+    # data (see reflection_signal_to_noise()'s amplitude branch, which
+    # divides |F| by FWHM directly, never converting to the intensity
+    # domain the way the non-FWHM amplitude branch below does).
     if reflection_mode_has_fwhm(data_mode):
-        return "I/FWHM"
+        return "F/FWHM" if reflection_mode_is_amplitude(data_mode) else "I/FWHM"
     return "I/σ(I)"
 
 def reflection_primary_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
@@ -3046,7 +3053,7 @@ def write_powder_repartitioning_log(
         f"average intensity change per group: {avg_change_text}",
         f"map-fallback groups (no usable map signal): {fallback_groups}",
         "",
-        f"First {min(3, len(ordered_groups))} groups by d-spacing (largest d / lowest 2theta first):",
+        f"First {min(3, len(ordered_groups))} groups by d-spacing (largest d / lowest 2θ first):",
     ]
     for gid, members in ordered_groups[:3]:
         d_avg = group_d(members)
@@ -3106,14 +3113,14 @@ def redistribute_overlap_reflections(
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     groups = assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
     if not groups:
-        log("Overlap repartitioning: no overlap groups found (need at least two reflections with FWHM and accessible 2theta).")
+        log("Overlap repartitioning: no overlap groups found (need at least two reflections with FWHM and accessible 2θ).")
         if log_path is not None:
             try:
                 log_path.write_text(
                     "Powder overlap repartitioning\n"
                     f"feedback map: {feedback_map}\n"
-                    f"wavelength={wavelength:g} A  separation_factor={separation_factor:g}  mix={mix:g}\n"
-                    "No overlap groups found (need at least two reflections with FWHM and accessible 2theta).\n",
+                    f"wavelength={wavelength:g} Å  separation_factor={separation_factor:g}  mix={mix:g}\n"
+                    "No overlap groups found (need at least two reflections with FWHM and accessible 2θ).\n",
                     encoding="utf-8",
                 )
             except OSError:
@@ -3926,7 +3933,7 @@ def return_phase_studio_result_to_jana(
     map_source: str = "deblurred",
 ) -> None:
     if not cfg.jana_return_to_jana or cfg.jana_inflip is None:
-        raise RuntimeError("Jana2020 hand-off requires a Jana2020 .inflip primary input.")
+        raise RuntimeError("Jana2020 handoff requires a Jana2020 .inflip primary input.")
     inflip_path = Path(cfg.jana_inflip)
     if not inflip_path.is_file():
         raise RuntimeError(f"Jana2020 .inflip no longer exists: {inflip_path}")
@@ -3942,11 +3949,11 @@ def return_phase_studio_result_to_jana(
         target_map = jana_cwd / f"{base_name}-deb.xplor"
         source_label = result_map_label("deblurred")
     if not source_map.is_file():
-        raise RuntimeError(f"Selected Jana2020 hand-off map not found: {source_map}")
+        raise RuntimeError(f"Selected Jana2020 handoff map not found: {source_map}")
     if source_map.resolve() != target_map.resolve():
         shutil.copy2(source_map, target_map)
-    log(f"Jana2020 hand-off source: cycle {int(result.cycle):03d}, {source_label}")
-    log(f"Jana2020 hand-off map: {target_map}")
+    log(f"Jana2020 handoff source: cycle {int(result.cycle):03d}, {source_label}")
+    log(f"Jana2020 handoff map: {target_map}")
     original = Path(str(cfg.superflip_exe)).expanduser()
     calc_dir = original.parent / "deblurrer"
     calc_inflip = calc_dir / "calc_m80.inflip"
@@ -3962,7 +3969,7 @@ def return_phase_studio_result_to_jana(
         stop_event=stop_event,
         allow_foreground=True,
     )
-    log("Jana2020 final Superflip hand-off completed.")
+    log("Jana2020 final Superflip handoff completed.")
 
 
 
@@ -5545,7 +5552,7 @@ INPUT_TOOLTIPS = {
     "superflip_exe": "Absolute path to the original Jana2020 Superflip executable. Default: C:\\Jana2020\\SUPERFLIP\\superflip_original.exe. Do not select the Phase Studio wrapper named superflip.exe.",
     "edma_exe": "Absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps. Default: C:\\Jana2020\\SUPERFLIP\\EDMA.exe.",
     "workflow_preset": "Applies a bundle of starting values for a common crystallographic workflow. 'Recommended' is a general-purpose baseline (matches the built-in defaults); the others tune settings for a specific sample type. All values remain individually editable afterward, and 'Custom' leaves everything untouched.",
-    "cycles": "Number of iterative Superflip -> EDMA -> SharpED -> EDMA cycles to run.",
+    "cycles": "Number of iterative Superflip → EDMA → SharpED → EDMA cycles to run.",
     "composition_override": "Optional Superflip composition string. Leave blank to derive composition from the reference CIF formula or atom list.",
     "plimit_superflip": "Peak threshold as a multiplier of the XPLOR map sigma. Phase Studio converts it to EDMA's absolute 'plimit <value>'.",
     "plimit_deblur": "Peak threshold as a multiplier of the XPLOR map sigma. Phase Studio converts it to EDMA's absolute 'plimit <value>'.",
@@ -5562,12 +5569,12 @@ INPUT_TOOLTIPS = {
     "reconstruction_mode": "Superflip runs the standard charge-flipping cycle every cycle (unchanged default). '1st Superflip, then SharpED (beta)' runs Superflip only once, then each cycle deblurs with SharpED, reads phi_calc by FFT from that SharpED map for every measured hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle; it does not work well with some models. 'SharpED (experimental)' skips Superflip entirely and starts cycle 1 from |Fobs| with independent random phases; it does not work yet and is intended for development, not production use. Hidden unless 'Show beta and experimental features' is enabled on Advanced -> Setup.",
     "run_edma_recycle_final": "Only used by the '1st Superflip, then SharpED (beta)' and 'SharpED (experimental)' phasing methods: run EDMA peak extraction and structure export once, on the final cycle's |Fobs|+phi_calc map.",
     "exclude_atoms": "Optional atom labels to remove from CIF modelfiles before the next Superflip cycle. Use comma, semicolon or whitespace separation.",
-    "run_edma_superflip": "Run EDMA peak search on the raw Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
+    "run_edma_superflip": "Run EDMA peak search on the Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the SharpED map is a copy of the Superflip map.",
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
-    "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
-    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip validation and SharpED validation tabs' omit-map correlation series (full map vs. omit map); together with R_free, this also feeds the phase-recycling result selector's Selection score, helping identify the most suitable final map among the recycling cycles. Roughly doubles Superflip/SharpED time per cycle.",
-    "compute_omit_rfree": "Also compute R_free from the excluded 5% holdout: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Feeds the phase-recycling result selector's Selection score alongside OMIT correlation, helping rank cycles and choose the most suitable final map. Requires 'Compute OMIT validation maps'.",
+    "run_edma_deblurred": "Run EDMA peak search on the SharpED XPLOR map. Disable this when you only want map export or Superflip EDMA results.",
+    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip validation and SharpED validation tabs' omit-map correlation series (full map vs. omit map); together with R_free, this also feeds the phase-recycling result selector's Selection score, helping identify the most suitable map among the recycling cycles. Roughly doubles Superflip/SharpED time per cycle.",
+    "compute_omit_rfree": "Also compute R_free from the excluded 5% holdout: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Feeds the phase-recycling result selector's Selection score alongside OMIT correlation, helping rank cycles and choose the most suitable map. Requires 'Compute OMIT validation maps'.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
     "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save, for each cycle's Superflip map, the observed |Fobs|/intensity together with phases (and, for ShelX, calculated F squared) read by FFT from that map, in a standardized text file or a ShelX/Jana-compatible .fcf file.",
     "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
@@ -5595,16 +5602,16 @@ INPUT_TOOLTIPS = {
     "dataitemwidths": "Not required for generated inputs because Phase Studio writes whitespace-separated fbegin records.",
     "extra_superflip_keywords": "Additional raw Superflip keyword lines inserted before fbegin. Use this for advanced/manual keywords not represented by a widget.",
     "map_feedback_missing_enabled": "Enables missing-reflection completion. When off, the fields below are ignored.",
-    "map_feedback_missing_from_cycle": "First completed cycle whose final map is used to add missing reflections for the next cycle.",
+    "map_feedback_missing_from_cycle": "First completed cycle whose map is used to add missing reflections for the next cycle.",
     "map_feedback_missing_percent_limit": "Maximum number of added missing reflections, expressed as a percent of the current HKL count. This prevents map feedback from overwhelming measured data.",
     "map_feedback_intensity_enabled": "Enables map-based intensity correction. When off, the fields below are ignored.",
-    "map_feedback_intensity_from_cycle": "First completed cycle whose final map is used to damp observed intensities for the next cycle.",
+    "map_feedback_intensity_from_cycle": "First completed cycle whose map is used to damp observed intensities for the next cycle.",
     "map_feedback_intensity_damping": "Damping factor for map-based intensity correction. 0 keeps observed data; 1 replaces them by scaled map-derived intensities.",
     "map_feedback_intensity_max_i_over_sigma": "Apply map-based intensity correction only to non-zero reflections with value/sigma below this limit. Use 0 to correct all non-zero reflections.",
     "redistribute_overlaps": "Enables powder overlap repartitioning: each cycle, redistribute the combined observed intensity of overlapping-reflection groups (hkl I/F fwhm data only) between their members, using intensities calculated by FFT from that cycle's processed map. When off, the fields below are ignored.",
-    "powder_redistribution_from_cycle": "First completed cycle whose final map is used to redistribute overlapping powder reflections for the next cycle.",
-    "powder_wavelength": "Radiation wavelength in angstrom, required to compute 2theta for powder overlap repartitioning. If left at 0, it is auto-detected first from the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
-    "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2theta-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
+    "powder_redistribution_from_cycle": "First completed cycle whose map is used to redistribute overlapping powder reflections for the next cycle.",
+    "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected first from the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
+    "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2θ-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
     "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
     "sharped_base_url": "SharpED inference server base URL. The C++ reference client uses https://jana.fzu.cz.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
@@ -6304,7 +6311,10 @@ class MetricsPlotInteraction:
 class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
+        # Standalone default; _sync_window_title() (called once jana_wizard_context
+        # exists, below, mirroring _sync_jana_action_button()) sets the
+        # Jana2020-launched title instead when that context applies.
+        self.setWindowTitle(f"Phase Studio {__version__}")
         self.setWindowIcon(create_phase_studio_app_icon(64))
         self.resize(1420, 880)
         self.msg_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
@@ -7121,7 +7131,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "Only applies to reflections with an FWHM value (hkl I/F fwhm data). Wavelength is auto-detected -- if "
             "left at 0 -- from the Jana2020 .inflip file (dataformat's lambda/wavelength line), or otherwise from the "
             "reference file's _diffrn_radiation_wavelength; enter it manually if neither is available. Reflections "
-            "whose Bragg peaks overlap -- delta(2theta) below Separation factor times the mean of their FWHM -- "
+            "whose Bragg peaks overlap -- delta(2θ) below Separation factor times the mean of their FWHM -- "
             "have their combined observed intensity redistributed between them using intensities calculated by FFT "
             "from that cycle's processed map, blended by Map ratio mix (0 keeps the observed split, 1 uses the map "
             "split fully); the group total is always conserved.",
@@ -7178,7 +7188,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>observed reflections &rarr; Superflip &rarr; XPLOR map &rarr; EDMA and/or SharpED &rarr; deblurred XPLOR &rarr; EDMA &rarr; next-cycle model</b></p>
             <p>The exact branches depend on <b>Basic &rarr; Workflow &rarr; Optional processing</b>. The next-cycle source can be Superflip XPLOR, SharpED/deblurred XPLOR, deblurred EDMA CIF, or <b>none</b>. Selecting none forces a one-cycle run.</p>
             <h3>4. Inspect each cycle</h3>
-            <p>Review convergence metrics, structure previews, detected atom/peak counts, reference agreement when available, raw Superflip versus SharpED results, and the execution log. Phase Studio does not replace final crystallographic refinement.</p>
+            <p>Review convergence metrics, structure previews, detected atom/peak counts, reference agreement when available, Superflip versus SharpED results, and the execution log. Phase Studio does not replace final crystallographic refinement.</p>
             <h3>5. Return the selected result to Jana2020</h3>
             <p>After a successful run, <b>Send to Jana2020</b> lets you select a completed cycle and map source. Final interpretation and refinement remain in Jana2020.</p>
         """)
@@ -7219,7 +7229,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Optional processing</h3>
             <p>Under <b>Superflip cycle</b> (used when Phasing method is Superflip):</p>
             <ul>
-                <li><b>Run EDMA on Superflip map</b> &mdash; peak-search the raw Superflip XPLOR map and export CIF/XYZ/PDB.</li>
+                <li><b>Run EDMA on Superflip map</b> &mdash; peak-search the Superflip XPLOR map and export CIF/XYZ/PDB.</li>
                 <li><b>Run SharpED</b> &mdash; process the Superflip map with the SharpED server. If disabled, the SharpED map used downstream is just a copy of the Superflip map.</li>
                 <li><b>Symmetrize SharpED map with Superflip (beta)</b> &mdash; after SharpED processing, run Superflip in symmetry mode (no charge flipping) with the SharpED map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
                 <li><b>Run EDMA on SharpED map</b> &mdash; peak-search the SharpED (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
@@ -7240,11 +7250,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         map_feedback_layout = add_help_section(basic_help_tab, "map_feedback", "Map feedback reference", """
             <p>Each of the three mechanisms below has its own <b>Enable</b> checkbox at the top of its group; unchecking it grays out the rest of that group and skips the mechanism entirely. <b>Start after cycle</b> keeps its own 1-999 range regardless of the current <b>Cycles</b> value (Basic &rarr; Workflow), so it can be set up ahead of raising Cycles; the fields below it stay grayed out with a hint whenever the current Cycles value cannot reach the configured starting cycle.</p>
             <h3>Missing-reflection completion</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
+            <p><b>Start after cycle</b> is the first completed cycle whose map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
             <h3>Intensity correction</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
+            <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
             <h3>Powder overlap repartitioning</h3>
-            <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose final map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2theta) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's processed map (the SharpED-deblurred map when SharpED deblurring is enabled, otherwise a copy of the raw Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2theta; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
+            <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
         add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.")
         add_back_to_contents(map_feedback_layout)
@@ -7272,7 +7282,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Send to Jana2020</h3>
             <p>When Phase Studio is instead launched <i>from</i> the Jana2020 Wizard (via the installed launcher, or
             "Open full configuration"), the same button reads <b>Send to Jana2020</b> and opens the existing
-            Superflip/SharpED cycle-result selection and hand-off dialog described above -- unrelated to installing
+            Superflip/SharpED cycle-result selection and handoff dialog described above -- unrelated to installing
             or removing the integration itself.</p>
         """)
         add_help_callout(jana_integration_layout, "Note", "Installing or removing the Jana2020 integration only manages the superflip.exe launcher inside the selected Jana2020 SUPERFLIP folder. It never modifies crystallographic project data, and a completed Phase Studio run is never required to install, update, repair or remove it.")
@@ -7493,7 +7503,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         add_back_to_contents(superflip_help_layout, advanced=True)
         edma_help_layout = add_help_section(advanced_help_tab, "edma", "EDMA guide", """
             <h3>What EDMA does in Phase Studio</h3>
-            <p>EDMA extracts density maxima from an XPLOR map. Phase Studio uses these maxima to create structural models and exports, independently for the raw Superflip map and the SharpED/deblurred map when enabled.</p>
+            <p>EDMA extracts density maxima from an XPLOR map. Phase Studio uses these maxima to create structural models and exports, independently for the Superflip map and the SharpED map when enabled.</p>
             <h3>Peak extraction</h3>
             <p><b>Superflip threshold</b> and <b>SharpED threshold (&sigma;)</b> are multipliers of the corresponding map sigma; Phase Studio converts each multiplier to EDMA's absolute <code>plimit</code> for that map. A higher threshold is stricter; a lower threshold includes more maxima &mdash; there is no universal correct value. <b>Maxima selection = all</b> requests all maxima above plimit; advanced users may enter more restrictive documented EDMA syntax. <b>Atom-count mode = composition</b> requests atom counts consistent with the chemical composition.</p>
             <h3>Symmetry and peak positions</h3>
@@ -7600,6 +7610,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # call establishes the correct standalone label/state immediately
         # for every OTHER launch path.
         self._sync_jana_action_button()
+        self._sync_window_title()
 
         self.run_status_panel = QWidget()
         self.run_status_panel.setObjectName("runStatusPanel")
@@ -8393,6 +8404,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             reflection_data_mode_widget.setToolTip(  # type: ignore[attr-defined]
                 "Ignored: the dataformat keyword is read directly from the Jana2020 .inflip file."
                 if not reflection_data_mode_enabled else INPUT_TOOLTIPS.get("reflection_data_mode", "")
+            )
+        jana_inflip_widget = self.inputs.get("jana_inflip")
+        if isinstance(jana_inflip_widget, PathRow):
+            jana_inflip_widget.set_tooltip(
+                INPUT_TOOLTIPS.get("jana_inflip", "") if jana_enabled
+                else "Not used in External HKL mode."
+            )
+        hkl_widget = self.inputs.get("hkl")
+        if isinstance(hkl_widget, PathRow):
+            hkl_widget.set_tooltip(
+                INPUT_TOOLTIPS.get("hkl", "") if (override_enabled or external_enabled)
+                else "Not used with the Jana2020 .inflip input mode; reflections come from the .inflip file."
             )
         self._sync_metadata_source_widgets()
         self._sync_map_feedback_widgets()
@@ -9274,8 +9297,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         signal_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
         signal_values = [float(v) for v in signal_values if v is not None and math.isfinite(float(v))]
         if is_fwhm_mode:
-            signal_math_label = r"$I/\mathrm{FWHM}$"
-            mean_signal_math_label = r"Mean $I/\mathrm{FWHM}$"
+            fwhm_numerator = "F" if reflection_mode_is_amplitude(analysis.data_mode) else "I"
+            signal_math_label = rf"${fwhm_numerator}/\mathrm{{FWHM}}$"
+            mean_signal_math_label = rf"Mean ${fwhm_numerator}/\mathrm{{FWHM}}$"
             threshold_math_label = None
         else:
             signal_math_label = r"$I/\sigma(I)$"
@@ -9494,7 +9518,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             histogram_weights = np.full(len(signal_values), 100.0 / float(histogram_denominator), dtype=np.float64)
             ax_histogram.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#44b7ff", alpha=0.82)
         else:
-            ax_histogram.text(0.5, 0.5, "No sigma values available", transform=ax_histogram.transAxes, ha="center", va="center")
+            no_signal_text = (
+                f"No {reflection_primary_snr_label(analysis.data_mode)} values available"
+                if is_fwhm_mode else "No sigma values available"
+            )
+            ax_histogram.text(0.5, 0.5, no_signal_text, transform=ax_histogram.transAxes, ha="center", va="center")
         histogram_title_artist = ax_histogram.set_title(
             "REFLECTION DISTRIBUTION",
             loc="left",
@@ -9958,6 +9986,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             and self.jana_wizard_context.launch_mode in ("full_configuration", "phase_recycling")
         )
 
+    def _sync_window_title(self) -> None:
+        """Single source of truth for the window title, driven entirely by
+        launch context (jana_wizard_context.launched_from_jana_wizard) --
+        never inferred from whether a .inflip happens to be loaded. Mirrors
+        _sync_jana_action_button()'s "Install to Jana2020" / "Send to
+        Jana2020" pattern."""
+        if self.jana_wizard_context.launched_from_jana_wizard:
+            self.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
+        else:
+            self.setWindowTitle(f"Phase Studio {__version__}")
+
     def _sync_jana_action_button(self) -> None:
         """Single source of truth for the third primary action button's
         label/tooltip/enabled state, driven entirely by launch context
@@ -9970,7 +10009,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.jana_action_btn.setText("Send to Jana2020")
             self.jana_action_btn.setToolTip(
                 "After a run launched from the Jana2020 Wizard completes, select a cycle and either its "
-                "Superflip or SharpED result for hand-off back to Jana2020."
+                "Superflip or SharpED result for handoff back to Jana2020."
             )
             self.jana_action_btn.setEnabled((not active) and self._jana_wizard_handoff_available())
         else:
@@ -10280,7 +10319,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 elif kind == "handoff_done":
                     self._set_run_status("Transferred")
                     self._append_execution_log(
-                        "Jana2020 hand-off completed. Phase Studio will close automatically.",
+                        "Jana2020 handoff completed. Phase Studio will close automatically.",
                         level="SUCCESS",
                         subsystem="Jana2020",
                     )
@@ -10288,7 +10327,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     QTimer.singleShot(400, QApplication.instance().quit)
                 elif kind == "handoff_error":
                     self._set_run_status("Error")
-                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, subsystem="Jana2020", operation="Jana2020 hand-off")
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, subsystem="Jana2020", operation="Jana2020 handoff")
                     self._show_error_report(report)
                     self.handoff_btn.setEnabled(bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None))
                 elif kind == "progress_setup":
@@ -10392,9 +10431,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if cfg is None or cfg.jana_inflip is None:
             self._show_error_report(
                 build_error_report(
-                    RuntimeError("Jana2020 hand-off requires a run started from a Jana2020 .inflip file."),
+                    RuntimeError("Jana2020 handoff requires a run started from a Jana2020 .inflip file."),
                     subsystem="Jana2020",
-                    operation="Jana2020 hand-off",
+                    operation="Jana2020 handoff",
                     severity="warning",
                 )
             )
@@ -10402,9 +10441,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if not self.results:
             self._show_error_report(
                 build_error_report(
-                    RuntimeError("No completed cycle is available for Jana2020 hand-off."),
+                    RuntimeError("No completed cycle is available for Jana2020 handoff."),
                     subsystem="Jana2020",
-                    operation="Jana2020 hand-off",
+                    operation="Jana2020 handoff",
                     severity="warning",
                 )
             )
@@ -10495,7 +10534,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # generic Qt dialog -- identical for both source_mode values.
         outer_layout.addWidget(create_phase_studio_brand_header())
         outer_layout.addWidget(create_phase_studio_context_banner(
-            "JANA2020 RESULT SELECTION", "Compare completed cycles and select a map for hand-off"
+            "JANA2020 RESULT SELECTION", "Compare completed cycles and select a map for handoff"
         ))
 
         content = QWidget()
@@ -10553,7 +10592,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         summary_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         content_layout.addLayout(summary_form)
 
-        content_layout.addWidget(QLabel("Select a completed cycle for Jana2020 hand-off."))
+        content_layout.addWidget(QLabel("Select a completed cycle for Jana2020 handoff."))
 
         availability_note = QLabel("")
         availability_note.setObjectName("janaSourceAvailabilityNote")
@@ -10991,7 +11030,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     build_error_report(
                         exc,
                         subsystem="Jana2020",
-                        operation="Jana2020 hand-off",
+                        operation="Jana2020 handoff",
                         extra_details=traceback.format_exc(),
                     ),
                 ))
@@ -11962,12 +12001,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             (
                 "Superflip",
                 self.superflip_atoms_for_plot,
-                "Waiting for Superflip result…" if waiting else ("Superflip result unavailable" if failed else "No structure available"),
+                "Waiting for Superflip result…" if waiting else ("Superflip result unavailable" if failed else "No Superflip structure available"),
             ),
             (
                 "SharpED",
                 self.deblur_atoms_for_plot,
-                "Waiting for SharpED result…" if waiting else ("SharpED result unavailable" if failed else "No structure available"),
+                "Waiting for SharpED result…" if waiting else ("SharpED result unavailable" if failed else "No SharpED structure available"),
             ),
         ]
         has_interactive_structure = any(
@@ -12446,7 +12485,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     level="DETAIL",
                 )
             if use_superflip_xplor_modelfile:
-                self.log("Next-cycle XPLOR modelfile uses the raw Superflip map; SharpED is not required for cycling.", level="DETAIL")
+                self.log("Next-cycle XPLOR modelfile uses the Superflip map; SharpED is not required for cycling.", level="DETAIL")
             if use_cif_modelfile:
                 self.log("CIF modelfiles are written without an explicit CIF format keyword; Superflip infers CIF from the .cif extension.", level="DETAIL")
             self.log(f"Superflip perform: {cfg.perform_algorithm.upper()}")
@@ -12820,7 +12859,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             else:
                 shutil.copy2(sf_map, deblur_map)
                 if use_superflip_xplor_modelfile:
-                    self.log("SharpED skipped; raw Superflip XPLOR is used for the next-cycle modelfile.")
+                    self.log("SharpED skipped; the Superflip map (XPLOR) is used for the next-cycle modelfile.")
                 else:
                     self.log(f"SharpED disabled; the {result_map_label('deblurred')} is a copy of the Superflip map.")
             self.log(f"{result_map_label('deblurred')}: {deblur_map}")
@@ -12892,7 +12931,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_edma_cif = deblur_edma_dir / f"{deblur_prefix}_edma.cif"
                 write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
                 if use_superflip_xplor_modelfile:
-                    self.log(f"EDMA after {result_map_label('deblurred').lower()} skipped for raw Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
+                    self.log(f"EDMA after {result_map_label('deblurred').lower()} skipped for Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
                 else:
                     self.log(f"EDMA after {result_map_label('deblurred').lower()} disabled; empty placeholder CIF/XYZ/PDB written.")
             deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None

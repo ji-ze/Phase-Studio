@@ -242,7 +242,7 @@ class SharpEDServerClient:
             normalized_status = str(status.status or "<empty>").strip().lower()
             if log and normalized_status != last_logged_status:
                 if normalized_status in {"processing", "running", "queued", "pending"}:
-                    log("[SharpED] Processing...")
+                    log("[SharpED] Processing…")
                 elif normalized_status in {"completed", "complete", "done", "ready", "finished", "success", "succeeded"}:
                     log("[SharpED] Completed")
                 else:
@@ -255,7 +255,7 @@ class SharpEDServerClient:
             probe = self._probe_download(job_token, bearer_token)
             if probe is not None:
                 if log:
-                    log("[SharpED] Result available · downloading...")
+                    log("[SharpED] Result available · downloading…")
                     log(
                         "SharpED protocol detail: result became downloadable while status still reported "
                         f"{status.status or 'processing'}."
