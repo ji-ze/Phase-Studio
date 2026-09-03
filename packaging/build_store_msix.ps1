@@ -8,20 +8,21 @@
       2. build PhaseStudio and the Jana2020 wrapper by running
          packaging\build_windows.ps1 -- the exact same known-working
          "python -m PyInstaller --clean --noconfirm superflip.spec" build
-         used for plain developer builds. This script does not reimplement a
-         second, separately frozen Jana wrapper: the payload staged into the
-         MSIX below is bit-for-bit what build_windows.ps1 produces,
-      3. copy dist\PhaseStudio\ -> MSIX layout PhaseStudio\, and
-         dist\superflip\ -> MSIX layout JanaIntegration\ (the rename to
-         "JanaIntegration" happens only in this staging copy, not by giving
-         PyInstaller a different output name),
+         used for plain developer builds. That script also stages the Jana
+         wrapper into dist\PhaseStudio\JanaIntegration\ (a plain post-build
+         file copy of dist\superflip\, never a second PyInstaller build), so
+         this script does not reimplement a second, separately frozen Jana
+         wrapper: the payload staged into the MSIX below is bit-for-bit what
+         build_windows.ps1 already produced,
+      3. copy the already-staged dist\PhaseStudio\ (JanaIntegration\
+         included) -> MSIX layout PhaseStudio\ as a single directory copy,
       4. generate the MSIX staging layout,
       5. generate AppxManifest.xml from the template + store identity + the
          single Phase Studio version source (phase_studio\version.py),
       6. validate required visual assets exist,
-      7. optionally Authenticode-sign JanaIntegration\superflip.exe (it is
-         copied OUT of the MSIX package later by Phase Studio itself, so the
-         MSIX package signature alone does not cover it -- see
+      7. optionally Authenticode-sign PhaseStudio\JanaIntegration\superflip.exe
+         (it is copied OUT of the MSIX package later by Phase Studio itself,
+         so the MSIX package signature alone does not cover it -- see
          phase_studio\jana_integration.py and Part I of the integration
          design notes),
       8. call MakeAppx.exe,
@@ -49,9 +50,9 @@
 
 .PARAMETER JanaSigningCertificate
     Optional path to a .pfx used to Authenticode-sign
-    JanaIntegration\superflip.exe before it is added to the MSIX payload.
-    If omitted, the wrapper is left unsigned and this is reported clearly
-    (never silently).
+    PhaseStudio\JanaIntegration\superflip.exe before it is added to the MSIX
+    payload. If omitted, the wrapper is left unsigned and this is reported
+    clearly (never silently).
 
 .PARAMETER JanaSigningPassword
     Password for -JanaSigningCertificate, as a SecureString. Never pass a
@@ -153,34 +154,35 @@ New-Item -ItemType Directory -Force -Path $storeDistDir | Out-Null
 #    Jana wrapper with the exact known-working
 #    "python -m PyInstaller --clean --noconfirm superflip.spec" command
 #    against the repository's root-level superflip.spec -- the same command
-#    already verified against a real Jana2020 installation. This script
-#    never gives PyInstaller a different spec or a different output name for
-#    that build; it only stages (copies/renames) the resulting dist\
-#    directories below.
+#    already verified against a real Jana2020 installation -- and then
+#    stages a complete copy of its dist\superflip\ output into
+#    dist\PhaseStudio\JanaIntegration\ itself (a plain file copy, not a
+#    second PyInstaller build). This script never gives PyInstaller a
+#    different spec or a different output name for that build; it only
+#    copies the already-staged dist\PhaseStudio\ directory below.
 # ---------------------------------------------------------------------------
 Write-Step "Building PhaseStudio and the Jana2020 wrapper (packaging\build_windows.ps1)"
 & (Join-Path $PSScriptRoot "build_windows.ps1")
 
 $builtPhaseStudioDir = Join-Path $RepoRoot "dist\PhaseStudio"
-$builtJanaDir = Join-Path $RepoRoot "dist\superflip"
 Assert-PathExists (Join-Path $builtPhaseStudioDir "PhaseStudio.exe") "Built PhaseStudio.exe"
-Assert-PathExists (Join-Path $builtJanaDir "superflip.exe") "Built superflip.exe"
+Assert-PathExists (Join-Path $builtPhaseStudioDir "JanaIntegration\superflip.exe") "Built (staged) PhaseStudio\JanaIntegration\superflip.exe"
 
 Write-Step "Staging build output into the MSIX layout"
 Copy-Item $builtPhaseStudioDir (Join-Path $layoutDir "PhaseStudio") -Recurse -Force
-Copy-Item $builtJanaDir (Join-Path $layoutDir "JanaIntegration") -Recurse -Force
 
 Assert-PathExists (Join-Path $layoutDir "PhaseStudio\PhaseStudio.exe") "Staged PhaseStudio.exe"
-Assert-PathExists (Join-Path $layoutDir "JanaIntegration\superflip.exe") "Staged JanaIntegration\superflip.exe"
+Assert-PathExists (Join-Path $layoutDir "PhaseStudio\JanaIntegration\superflip.exe") "Staged PhaseStudio\JanaIntegration\superflip.exe"
+Assert-PathExists (Join-Path $layoutDir "PhaseStudio\JanaIntegration\_internal") "Staged PhaseStudio\JanaIntegration\_internal"
 
 # ---------------------------------------------------------------------------
 # 5. Optional: Authenticode-sign the Jana wrapper BEFORE it goes into the
 #    MSIX payload. The MSIX package signature does not cover this file once
 #    Phase Studio later copies it out to a Jana2020 installation.
 # ---------------------------------------------------------------------------
-$janaExePath = Join-Path $layoutDir "JanaIntegration\superflip.exe"
+$janaExePath = Join-Path $layoutDir "PhaseStudio\JanaIntegration\superflip.exe"
 if ($JanaSigningCertificate) {
-    Write-Step "Signing JanaIntegration\superflip.exe"
+    Write-Step "Signing PhaseStudio\JanaIntegration\superflip.exe"
     Assert-PathExists $JanaSigningCertificate "Jana wrapper signing certificate"
     $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
         Where-Object { $_.FullName -match "\\x64\\" } | Sort-Object FullName -Descending | Select-Object -First 1
@@ -198,9 +200,9 @@ if ($JanaSigningCertificate) {
     $signArgs += $janaExePath
     & $signTool.FullName @signArgs
     if ($LASTEXITCODE -ne 0) {
-        throw "Signing JanaIntegration\superflip.exe failed (SignTool exit code $LASTEXITCODE)."
+        throw "Signing PhaseStudio\JanaIntegration\superflip.exe failed (SignTool exit code $LASTEXITCODE)."
     }
-    Write-Host "JanaIntegration\superflip.exe signed." -ForegroundColor Green
+    Write-Host "PhaseStudio\JanaIntegration\superflip.exe signed." -ForegroundColor Green
 } else {
     Write-Host "Jana integration wrapper is unsigned." -ForegroundColor Yellow
 }
@@ -214,7 +216,7 @@ $payloadMarker = @{
     version  = $Version.Substring(0, $Version.LastIndexOf("."))
     wrapper  = "superflip.exe"
 } | ConvertTo-Json
-Set-Content -Path (Join-Path $layoutDir "JanaIntegration\phase_studio_integration_payload.json") -Value $payloadMarker -Encoding utf8
+Set-Content -Path (Join-Path $layoutDir "PhaseStudio\JanaIntegration\phase_studio_integration_payload.json") -Value $payloadMarker -Encoding utf8
 
 # ---------------------------------------------------------------------------
 # 7. Assets

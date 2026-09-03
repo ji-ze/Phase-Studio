@@ -36,15 +36,18 @@ frozen Jana wrapper spec.
 - **PhaseStudio.exe** -- the actual Store application entry point. Runs
   standalone; Jana2020 is entirely optional.
 - **superflip.exe** (repository root `superflip.spec`, ONEDIR) -- a separate,
-  dedicated PyInstaller build of `phase_studio/jana_superflip.py`. In the
-  developer build this lives at `dist\superflip\`. When staged into the
-  MSIX (`build_store_msix.ps1`), the whole directory is copied and renamed to
-  `JanaIntegration\` -- this rename happens only during staging, never by
-  giving PyInstaller a different spec or output name. It is bundled *inside*
-  the MSIX package as an application resource, but it is never the package's
-  entry point and Windows never launches it directly. Phase Studio itself
-  copies it out to a user-selected `Jana2020\SUPERFLIP` folder only when the
-  user explicitly runs "Install to Jana2020" -- see
+  dedicated PyInstaller build of `phase_studio/jana_superflip.py`. The
+  authoritative build output is `dist\superflip\`. `build_windows.ps1` then
+  stages a complete copy of it into `dist\PhaseStudio\JanaIntegration\` --
+  directly beside `PhaseStudio.exe` -- as a plain post-build file copy, never
+  by giving PyInstaller a different spec or output name. `build_store_msix.ps1`
+  carries that same already-staged `dist\PhaseStudio\` directory (including
+  `JanaIntegration\`) into the MSIX layout unchanged, so the installed MSIX
+  has the identical `PhaseStudio\JanaIntegration\` layout. It is bundled
+  *inside* the package as an application resource, but it is never the
+  package's entry point and Windows never launches it directly. Phase Studio
+  itself copies it out to a user-selected `Jana2020\SUPERFLIP` folder only
+  when the user explicitly runs "Install to Jana2020" -- see
   `phase_studio/jana_integration.py`.
 
 Do not copy `PhaseStudio.exe` and rename it `superflip.exe`; always build and
@@ -56,10 +59,12 @@ ship the dedicated Jana wrapper.
 powershell -File packaging\build_windows.ps1
 ```
 
-Produces `dist\PhaseStudio\` and `dist\superflip\` (both ONEDIR, the latter
-via the root `superflip.spec`). This is the fastest way to test changes
-locally, including the Jana2020 integration dialog itself (which looks for
-`dist\superflip\` when running from a non-frozen Python environment).
+Produces `dist\PhaseStudio\` (with `JanaIntegration\` staged inside it) and
+`dist\superflip\` (both ONEDIR, the latter via the root `superflip.spec`).
+This is the fastest way to test changes locally, including the Jana2020
+integration dialog itself, and running `dist\PhaseStudio\PhaseStudio.exe`
+directly needs no further copying -- the Jana wrapper is already staged
+beside it.
 
 ## Store MSIX build
 
@@ -69,15 +74,16 @@ powershell -File packaging\build_store_msix.ps1
 
 1. Cleans `build\store\` and `dist\store\`.
 2. Builds `PhaseStudio` and the Jana2020 wrapper by running
-   `build_windows.ps1` (same known-working build, no separate Jana spec).
-3. Copies `dist\PhaseStudio\` -> layout `PhaseStudio\` and `dist\superflip\`
-   -> layout `JanaIntegration\` under `build\store\layout\`.
+   `build_windows.ps1` (same known-working build, no separate Jana spec;
+   this also stages `JanaIntegration\` inside `dist\PhaseStudio\`).
+3. Copies the already-staged `dist\PhaseStudio\` (with `JanaIntegration\`)
+   -> layout `PhaseStudio\` under `build\store\layout\`.
 4. Generates `AppxManifest.xml` from the template, the local
    `packaging\msix\store_identity.json`, and the single version source
    (`phase_studio\version.py`).
 5. Validates the required visual assets exist.
-6. Optionally Authenticode-signs `JanaIntegration\superflip.exe` (see
-   below).
+6. Optionally Authenticode-signs `PhaseStudio\JanaIntegration\superflip.exe`
+   (see below).
 7. Calls `MakeAppx.exe pack` (auto-located under the installed Windows SDK).
 8. Produces `dist\store\PhaseStudio-<version>-x64.msix`.
 
@@ -153,8 +159,9 @@ password to this repository.
 
 ### The Jana2020 wrapper is signed separately
 
-`JanaIntegration\superflip.exe` is later **copied out of the installed MSIX
-package** by Phase Studio itself, into a `Jana2020\SUPERFLIP` folder. At that
+`PhaseStudio\JanaIntegration\superflip.exe` is later **copied out of the
+installed MSIX package** by Phase Studio itself, into a `Jana2020\SUPERFLIP`
+folder. At that
 point it is a plain, separately deployed `.exe` from Windows' perspective --
 the MSIX package signature does not travel with it. `build_store_msix.ps1`
 therefore supports an independent, optional Authenticode signing step for

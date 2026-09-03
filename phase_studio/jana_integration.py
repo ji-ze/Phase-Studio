@@ -232,29 +232,37 @@ def bundled_integration_version() -> str:
 def resolve_bundled_jana_payload_dir() -> Optional[Path]:
     """Locate the pre-built JanaIntegration payload (superflip.exe + its
     runtime directory) bundled alongside the running Phase Studio
-    application. Covers every supported layout -- normal Python development,
-    PyInstaller ONEDIR, and an MSIX-packaged ONEDIR -- without ever
-    hard-coding a development-machine or WindowsApps path (sections 14, 59).
-    Returns None if no payload is available (e.g. running from source with
-    no local JanaIntegration build)."""
+    application.
+
+    Release layout (both a plain developer ONEDIR build and an
+    MSIX-installed layout) always places the payload directly beside the
+    running executable -- packaging/build_windows.ps1 stages the known-working
+    root superflip.spec's output into dist/PhaseStudio/JanaIntegration/ as a
+    plain post-build file copy, and build_store_msix.ps1 carries that same
+    already-staged dist/PhaseStudio/ (JanaIntegration included) into the MSIX
+    package unchanged -- so a single frozen candidate covers both (sections
+    14, 59). Returns None if no payload is available (e.g. running from
+    source with no local build)."""
     candidates: List[Path] = []
     if getattr(sys, "frozen", False):
         # PyInstaller ONEDIR: sys.executable is .../PhaseStudio/PhaseStudio.exe.
-        # The payload is a sibling application resource (see packaging's MSIX
-        # layout), never inside PhaseStudio's own _internal.
         exe_dir = Path(sys.executable).resolve().parent
         candidates.append(exe_dir / "JanaIntegration")
-        candidates.append(exe_dir.parent / "JanaIntegration")
-    # Development: a locally built payload from packaging/build_windows.ps1,
-    # which builds the Jana wrapper via the known-working
-    # "python -m PyInstaller --clean --noconfirm superflip.spec" against the
-    # repository's root-level superflip.spec -- its real output directory is
-    # dist/superflip (COLLECT(..., name="superflip") in that spec), not
-    # dist/JanaIntegration. "JanaIntegration" is only the staging name used
-    # once the payload is copied into an MSIX layout (build_store_msix.ps1).
-    module_dir = Path(__file__).resolve().parent.parent
-    candidates.append(module_dir / "dist" / "superflip")
-    candidates.append(module_dir / "build" / "store" / "layout" / "JanaIntegration")
+        # Development convenience only -- e.g. a fresh build_windows.ps1 run
+        # whose JanaIntegration staging step has not (re)run yet. Release
+        # operation never depends on this sibling dist/superflip existing.
+        candidates.append(exe_dir.parent / "superflip")
+    else:
+        # Running from source: the local build_windows.ps1 output, which
+        # builds the Jana wrapper via the known-working
+        # "python -m PyInstaller --clean --noconfirm superflip.spec" against
+        # the repository's root-level superflip.spec -- its real output
+        # directory is dist/superflip (COLLECT(..., name="superflip") in
+        # that spec). Also check an already-staged MSIX layout checked out
+        # directly, for the same reason.
+        module_dir = Path(__file__).resolve().parent.parent
+        candidates.append(module_dir / "dist" / "superflip")
+        candidates.append(module_dir / "build" / "store" / "layout" / "PhaseStudio" / "JanaIntegration")
     for candidate in candidates:
         if (candidate / WRAPPER_EXE_NAME).is_file():
             return candidate

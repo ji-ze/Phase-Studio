@@ -11021,7 +11021,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         from phase_studio import jana_integration as ji
 
         dialog = QDialog(self)
-        dialog.setWindowTitle("Jana2020 integration")
+        dialog.setWindowTitle("Jana2020 Integration")
         outer = QVBoxLayout(dialog)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
@@ -11041,7 +11041,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         scroll_area.setWidget(content)
         outer.addWidget(scroll_area, 1)
 
-        path_group = QGroupBox("Jana2020 installation")
+        path_group = QGroupBox("Jana2020 Installation")
         path_group_layout = QVBoxLayout(path_group)
         path_row = QHBoxLayout()
         path_edit = QLineEdit()
@@ -11057,7 +11057,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         path_group_layout.addWidget(path_hint)
         content_layout.addWidget(path_group)
 
-        status_group = QGroupBox("Detection status")
+        status_group = QGroupBox("Detection Status")
         status_layout = QVBoxLayout(status_group)
         content_layout.addWidget(status_group)
 
@@ -11074,6 +11074,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         signature_label = QLabel("")
         signature_label.setWordWrap(True)
+        signature_label.setTextFormat(Qt.RichText)
         signature_label.setStyleSheet("color: #52658b;")
         content_layout.addWidget(signature_label)
 
@@ -11097,6 +11098,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         remove_btn = QPushButton("Remove integration")
         primary_btn = QPushButton("Install integration")
         primary_btn.setObjectName("primaryButton")
+        # Disabled from construction, before the first refresh() has run --
+        # never rely on Qt's default-enabled state for a button whose real
+        # state depends on detecting a payload/writable directory first.
+        remove_btn.setEnabled(False)
+        primary_btn.setEnabled(False)
         footer_layout.addWidget(close_btn)
         footer_layout.addStretch(1)
         footer_layout.addWidget(remove_btn)
@@ -11179,10 +11185,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
             payload_dir = ji.resolve_bundled_jana_payload_dir()
             if payload_dir is None:
-                signature_label.setText("Phase Studio launcher: bundled integration payload not found.")
+                signature_label.setText(
+                    "<b>Integration package: Not available</b><br>"
+                    "The Jana2020 integration package is not available in this Phase Studio build."
+                )
             else:
                 sig = ji.authenticode_signature_status(payload_dir / ji.WRAPPER_EXE_NAME)
-                signature_label.setText(f"Phase Studio launcher: {sig.capitalize()}" if sig != "unknown" else "Phase Studio launcher: signature status unknown")
+                sig_text = {"signed": "Signed", "unsigned": "Unsigned"}.get(sig, "Unknown")
+                signature_label.setText(f"<b>Integration package: Ready</b><br>Wrapper signature: {sig_text}")
 
             can_write = report is not None and report.exists and report.is_writable
             primary_btn.setText({
@@ -11217,20 +11227,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             superflip_dir = state.get("superflip_dir")
             if not superflip_dir:
                 return
-            payload_dir = ji.resolve_bundled_jana_payload_dir()
-            if payload_dir is None:
-                show_result(ji.OperationResult(False, "error", "Bundled Jana2020 integration payload was not found in this Phase Studio installation."))
-                return
-            result = ji.install_or_update_integration(superflip_dir, payload_dir, bundled_version=ji.bundled_integration_version())
-            success_detail = ""
-            if result.success:
-                success_detail = (
-                    f"Jana2020:<br>{html.escape(str(state['jana_root']))}<br><br>"
-                    f"Original Superflip:<br>{html.escape(str(Path(superflip_dir) / ji.ORIGINAL_EXE_NAME))}<br><br>"
-                    f"Phase Studio launcher:<br>{html.escape(str(Path(superflip_dir) / ji.WRAPPER_EXE_NAME))}"
-                )
-            show_result(result, success_detail)
-            refresh(state["jana_root"])
+            # A failed (or unexpectedly raised) attempt must never leave the
+            # dialog's buttons out of sync with the real on-disk state --
+            # refresh() always runs in `finally`, whatever happened above.
+            try:
+                payload_dir = ji.resolve_bundled_jana_payload_dir()
+                if payload_dir is None:
+                    show_result(ji.OperationResult(False, "error", "Bundled Jana2020 integration payload was not found in this Phase Studio installation."))
+                    return
+                result = ji.install_or_update_integration(superflip_dir, payload_dir, bundled_version=ji.bundled_integration_version())
+                success_detail = ""
+                if result.success:
+                    success_detail = (
+                        f"Jana2020:<br>{html.escape(str(state['jana_root']))}<br><br>"
+                        f"Original Superflip:<br>{html.escape(str(Path(superflip_dir) / ji.ORIGINAL_EXE_NAME))}<br><br>"
+                        f"Phase Studio launcher:<br>{html.escape(str(Path(superflip_dir) / ji.WRAPPER_EXE_NAME))}"
+                    )
+                show_result(result, success_detail)
+            finally:
+                refresh(state["jana_root"])
 
         def remove_clicked() -> None:
             superflip_dir = state.get("superflip_dir")
@@ -11238,16 +11253,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 return
             confirmation = QMessageBox.question(
                 dialog,
-                "Remove Jana2020 integration",
+                "Remove Jana2020 Integration",
                 "Restore the original Superflip executable and remove the Phase Studio launcher?",
                 QMessageBox.Yes | QMessageBox.No,
                 QMessageBox.No,
             )
             if confirmation != QMessageBox.Yes:
                 return
-            result = ji.remove_integration(superflip_dir)
-            show_result(result)
-            refresh(state["jana_root"])
+            try:
+                result = ji.remove_integration(superflip_dir)
+                show_result(result)
+            finally:
+                refresh(state["jana_root"])
 
         browse_btn.clicked.connect(browse_clicked)
         primary_btn.clicked.connect(install_clicked)

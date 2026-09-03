@@ -20,14 +20,17 @@
     Output:
         dist\PhaseStudio\PhaseStudio.exe
         dist\PhaseStudio\_internal\...
-        dist\superflip\superflip.exe
-        dist\superflip\_internal\...
+        dist\PhaseStudio\JanaIntegration\superflip.exe       (staged copy)
+        dist\PhaseStudio\JanaIntegration\_internal\...        (staged copy)
+        dist\superflip\superflip.exe                          (authoritative)
+        dist\superflip\_internal\...                           (authoritative)
 
-    dist\superflip is exactly where phase_studio.jana_integration's
-    resolve_bundled_jana_payload_dir() looks for a locally built payload when
-    running Phase Studio from a normal (non-frozen) Python environment, so a
-    developer build here is directly usable by "Install to Jana2020" without
-    any extra copying.
+    dist\superflip\ remains the authoritative Jana wrapper build (produced
+    directly by the repository's root superflip.spec). This script then
+    stages a complete copy of it into dist\PhaseStudio\JanaIntegration\, which
+    is where the running standalone PhaseStudio.exe (frozen,
+    phase_studio.jana_integration.resolve_bundled_jana_payload_dir()) looks
+    for it -- directly beside itself, matching the MSIX-installed layout too.
 
 .PARAMETER Clean
     Remove the two specific output directories below before building
@@ -198,11 +201,31 @@ Assert-PathExists $phaseStudioExe "Generated PhaseStudio.exe"
 Assert-PathExists $janaExe "Generated superflip.exe"
 Assert-PathExists $janaRuntime "Generated superflip runtime (_internal)"
 
+# ---------------------------------------------------------------------------
+# Stage the Jana2020 wrapper INTO the standalone PhaseStudio distribution so
+# "Install to Jana2020" can find it (phase_studio.jana_integration's
+# resolve_bundled_jana_payload_dir() looks for a sibling JanaIntegration\
+# folder next to PhaseStudio.exe) without any separate manual step. This is
+# a plain file copy performed after both PyInstaller builds above have
+# already completed -- it does not change either build.
+# ---------------------------------------------------------------------------
+Write-Step "Staging the Jana2020 wrapper into dist\PhaseStudio\JanaIntegration"
+$stagedJanaDir = Join-Path $distDir "PhaseStudio\JanaIntegration"
+if (Test-Path $stagedJanaDir) { Remove-Item -Recurse -Force $stagedJanaDir }
+Copy-Item (Join-Path $distDir "superflip") $stagedJanaDir -Recurse -Force
+
+$stagedJanaExe = Join-Path $stagedJanaDir "superflip.exe"
+$stagedJanaRuntime = Join-Path $stagedJanaDir "_internal"
+Assert-PathExists $stagedJanaExe "Staged dist\PhaseStudio\JanaIntegration\superflip.exe"
+Assert-PathExists $stagedJanaRuntime "Staged dist\PhaseStudio\JanaIntegration\_internal"
+
 Write-Host ""
 Write-Host "Developer build complete." -ForegroundColor Green
 Write-Host "  PhaseStudio: $phaseStudioExe"
-Write-Host "  Jana wrapper (dist\superflip\, ONEDIR): $janaExe"
+Write-Host "  Jana wrapper (dist\superflip\, ONEDIR, authoritative build): $janaExe"
+Write-Host "  Staged into the standalone app: $stagedJanaExe"
 Write-Host ""
 Write-Host "Run dist\PhaseStudio\PhaseStudio.exe directly, or 'python -m phase_studio'." -ForegroundColor DarkGray
-Write-Host "The complete dist\superflip\ directory (superflip.exe + _internal\) is the" -ForegroundColor DarkGray
-Write-Host "Jana2020 integration payload; copy the whole directory, not just the .exe." -ForegroundColor DarkGray
+Write-Host "dist\superflip\ (superflip.exe + _internal\) remains the authoritative Jana" -ForegroundColor DarkGray
+Write-Host "wrapper build; dist\PhaseStudio\JanaIntegration\ is a staged copy of it for" -ForegroundColor DarkGray
+Write-Host "the standalone application to find and install from." -ForegroundColor DarkGray
