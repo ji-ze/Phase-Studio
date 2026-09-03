@@ -527,28 +527,39 @@ def remove_integration(jana_superflip_dir: Path, *, log: Optional[Callable[[str]
 
 def authenticode_signature_status(exe_path: Path, *, timeout: float = 5.0) -> str:
     """Best-effort Authenticode status for a Windows executable: "signed",
-    "unsigned", or "unknown" (non-Windows, powershell unavailable, or the
-    file does not exist). Never raises. Section 57: shown in the
+    "unsigned", or "unknown". Never raises. Section 57: shown in the
     integration dialog for diagnosis only -- installation is never blocked
-    on this by Phase Studio itself."""
+    on this by Phase Studio itself.
+
+    "unsigned" is returned only when Windows definitively reports no
+    Authenticode signature at all (Get-AuthenticodeSignature's Status is
+    exactly "NotSigned"). Any other outcome -- a signature that is present
+    but not trusted or does not match the file's hash (NotTrusted,
+    HashMismatch, ...), a PowerShell/verification error, a non-Windows
+    platform, or a missing file -- genuinely cannot be reduced to a plain
+    signed/unsigned answer, so it is reported as "unknown" rather than
+    guessed at."""
     exe_path = Path(exe_path)
     if sys.platform != "win32" or not exe_path.is_file():
         return "unknown"
     try:
         import subprocess
 
-        ps = (
-            "$sig = Get-AuthenticodeSignature -LiteralPath $args[0]; "
-            "if ($sig.Status -eq 'Valid') { 'Signed' } else { 'Unsigned' }"
-        )
+        # Must be an explicit script BLOCK invocation ("& { ... }"), not a
+        # bare command string -- PowerShell only binds trailing -Command
+        # arguments to $args for a script-block invocation. Passed as a
+        # plain string, the path argument was silently re-parsed as
+        # PowerShell syntax instead (a parser error for almost any real
+        # Windows path), and every call fell through to "unknown".
+        ps = "& { (Get-AuthenticodeSignature -LiteralPath $args[0]).Status.ToString() }"
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps, str(exe_path)],
             capture_output=True, text=True, timeout=timeout,
         )
-        output = (proc.stdout or "").strip()
-        if "Signed" in output and "Unsigned" not in output:
+        status = (proc.stdout or "").strip()
+        if status == "Valid":
             return "signed"
-        if "Unsigned" in output:
+        if status == "NotSigned":
             return "unsigned"
     except Exception:
         pass

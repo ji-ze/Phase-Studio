@@ -11197,10 +11197,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             can_write = report is not None and report.exists and report.is_writable
             primary_btn.setText({
                 ji.IntegrationState.UPDATE_AVAILABLE: "Update integration",
-                ji.IntegrationState.REPAIR_REQUIRED: "Repair",
+                ji.IntegrationState.REPAIR_REQUIRED: "Repair integration",
+                ji.IntegrationState.INSTALLED_CURRENT: "Repair integration",
             }.get(install_state, "Install integration"))
             primary_btn.setEnabled(can_write and install_state != ji.IntegrationState.CONFLICT and payload_dir is not None)
-            remove_btn.setEnabled(can_write and install_state in (ji.IntegrationState.INSTALLED_CURRENT, ji.IntegrationState.UPDATE_AVAILABLE, ji.IntegrationState.REPAIR_REQUIRED))
+
+            # Remove is only ever safe when a verified Phase Studio marker
+            # proves ownership of the installed integration AND a valid
+            # (non-empty) original Superflip backup still exists to restore
+            # -- not merely "some state other than not-installed/conflict",
+            # since REPAIR_REQUIRED can itself mean the backup went missing.
+            owns_installation = report is not None and report.has_marker and report.marker is not None
+            original_backup_path = report.directory / ji.ORIGINAL_EXE_NAME if report is not None else None
+            has_valid_backup = False
+            if owns_installation and original_backup_path is not None:
+                try:
+                    has_valid_backup = original_backup_path.stat().st_size > 0
+                except OSError:
+                    has_valid_backup = False
+            remove_btn.setEnabled(can_write and owns_installation and has_valid_backup)
             apply_safe_dialog_geometry(dialog, 640, 640)
 
         def browse_clicked() -> None:
