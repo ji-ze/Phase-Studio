@@ -585,6 +585,11 @@ def verify_installed(directory: Path, *, edma_hash_before: Optional[str] = None)
         try:
             if _sha256_file(edma_path) != edma_hash_before:
                 problems.append(f"{EDMA_EXE_NAME} changed unexpectedly during installation.")
-        except Exception:
-            pass
+        except Exception as exc:
+            # Every other check in this function reports a problem string
+            # rather than silently passing on failure; a hashing error here
+            # (e.g. a permissions/IO problem on a file the report says
+            # exists) is exactly as worth surfacing as those, since it
+            # means EDMA.exe's integrity genuinely could not be verified.
+            problems.append(f"{EDMA_EXE_NAME} could not be verified: {exc}")
     return problems
