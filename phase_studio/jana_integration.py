@@ -193,7 +193,12 @@ def classify_install_state(report: JanaDirectoryReport, bundled_version: str = P
     """Sections 19-23, 75: never guess. A verified Phase Studio marker is
     the ONLY basis for treating an installation as Phase-Studio-owned; an
     unmarked superflip_original.exe is always a conflict, never assumed to
-    be a stale/manual Phase Studio artifact."""
+    be a stale/manual Phase Studio artifact. Likewise, an unmarked
+    RUNTIME_DIR_NAME (e.g. _internal) is always a conflict too -- ownership
+    of that directory cannot be verified either, and silently merging the
+    install into it would be exactly the collision this guards against
+    (some other, unrelated frozen application happening to place its own
+    _internal next to Jana2020's Superflip)."""
     if not report.exists:
         return IntegrationState.NOT_INSTALLED
     if report.has_marker and report.marker is not None:
@@ -202,9 +207,12 @@ def classify_install_state(report: JanaDirectoryReport, bundled_version: str = P
         if report.marker.version != bundled_version:
             return IntegrationState.UPDATE_AVAILABLE
         return IntegrationState.INSTALLED_CURRENT
+    if report.has_runtime_dir:
+        return IntegrationState.CONFLICT
     if not report.has_original_exe:
         # Clean Jana2020 SUPERFLIP directory (with or without its own
-        # superflip.exe) -- nothing has ever been renamed here.
+        # superflip.exe, and confirmed above to have no runtime directory
+        # either) -- nothing has ever been renamed or installed here.
         return IntegrationState.NOT_INSTALLED
     # superflip_original.exe exists but no marker: ownership cannot be
     # verified. This also covers a directory Phase Studio itself renamed but
@@ -303,9 +311,13 @@ def install_or_update_integration(
     report = inspect_jana_superflip_dir(directory)
     state = classify_install_state(report, bundled_version)
     if state == IntegrationState.CONFLICT:
+        if report.has_original_exe:
+            conflict_detail = "Existing Superflip backup detected"
+        else:
+            conflict_detail = f"An existing {RUNTIME_DIR_NAME} folder was found"
         return OperationResult(
             False, state,
-            "Existing Superflip backup detected. Phase Studio did not modify this installation because its "
+            f"{conflict_detail}. Phase Studio did not modify this installation because its "
             "ownership could not be verified.",
             lines,
         )

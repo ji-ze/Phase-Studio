@@ -31,6 +31,12 @@ hiddenimports = [
     "phase_studio",
     "phase_studio.app",
     "phase_studio.jana_superflip",
+    # phase_studio.app's own "Install to Jana2020" dialog imports this
+    # lazily (function-scoped, not module-level); every window this wrapper
+    # constructs has launched_from_jana_wizard=True, so that code path is
+    # never actually reached from here, but PyInstaller's static analysis
+    # still needs it declared to bundle it safely regardless.
+    "phase_studio.jana_integration",
     "phase_studio.sharped_server_client",
     "phase_studio.ui_style",
     "matplotlib.backends.backend_qtagg",
