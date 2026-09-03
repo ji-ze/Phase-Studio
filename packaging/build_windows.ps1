@@ -52,16 +52,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Write-Step($Message) {
-    Write-Host ""
-    Write-Host "==> $Message" -ForegroundColor Cyan
-}
-
-function Assert-PathExists($Path, $Description) {
-    if (-not (Test-Path $Path)) {
-        throw "$Description not found: $Path"
-    }
-}
+. (Join-Path $PSScriptRoot "common.ps1")
 
 function Test-ExeRunningFrom($ExeName, $ExpectedPath) {
     # $true only if a currently running process named $ExeName has its

@@ -79,7 +79,12 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$StoreIdentityPath = (Join-Path $PSScriptRoot "msix\store_identity.json"),
+    # Resolved below, not here: $PSScriptRoot is not reliably populated yet
+    # while parameter defaults are being evaluated in every PowerShell
+    # context (confirmed empty here even for a plain `-File` invocation with
+    # no arguments -- this previously made the script fail immediately,
+    # before printing anything, exactly when run per its own .EXAMPLE).
+    [string]$StoreIdentityPath = "",
     [string]$Version,
     [string]$JanaSigningCertificate,
     [System.Security.SecureString]$JanaSigningPassword,
@@ -89,18 +94,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-Set-Location $RepoRoot
 
-function Write-Step($Message) {
-    Write-Host ""
-    Write-Host "==> $Message" -ForegroundColor Cyan
-}
+. (Join-Path $PSScriptRoot "common.ps1")
 
-function Assert-PathExists($Path, $Description) {
-    if (-not (Test-Path $Path)) {
-        throw "$Description was not found: $Path"
-    }
+# Plain string (not a PathInfo), matching build_windows.ps1's convention.
+$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if (-not $StoreIdentityPath) {
+    $StoreIdentityPath = Join-Path $PSScriptRoot "msix\store_identity.json"
 }
 
 # ---------------------------------------------------------------------------
