@@ -32,7 +32,6 @@ from __future__ import annotations
 import collections
 import csv
 import html
-import locale
 import math
 import os
 import queue
@@ -78,6 +77,11 @@ try:
     from phase_studio.sharped_server_client import SharpEDServerClient
 except Exception:
     from sharped_server_client import SharpEDServerClient
+
+try:
+    from phase_studio.process_utils import allow_external_process_foreground, text_encoding
+except Exception:
+    from process_utils import allow_external_process_foreground, text_encoding
 
 try:
     import gemmi
@@ -3921,8 +3925,7 @@ def define_m80_inflip_from_model(header_lines: Sequence[str], base_name: str, mo
 def write_text_lines_platform(path: Path, lines: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = "\r\n".join(str(line) for line in lines).rstrip("\r\n") + "\r\n"
-    encoding = "mbcs" if os.name == "nt" else (locale.getpreferredencoding(False) or "utf-8")
-    path.write_bytes(text.encode(encoding, errors="replace"))
+    path.write_bytes(text.encode(text_encoding(), errors="replace"))
 
 
 def return_phase_studio_result_to_jana(
@@ -4558,21 +4561,6 @@ def write_superflip_symmetry_input(
         if voxel_line:
             f.write(voxel_line + "\n")
 
-def _allow_external_process_foreground(process_id: int) -> bool:
-    """Let a newly launched Windows process use normal native foreground rules.
-
-    This grants permission once; it neither activates a window nor polls for one.
-    Other platforms deliberately keep their default window-manager behaviour.
-    """
-    if sys.platform != "win32" or int(process_id) <= 0:
-        return False
-    try:
-        import ctypes
-
-        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-        return bool(user32.AllowSetForegroundWindow(int(process_id)))
-    except Exception:
-        return False
 
 
 def run_command(
@@ -4617,7 +4605,7 @@ def run_command(
         try:
             proc = subprocess.Popen(list(cmd), cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
             if allow_foreground:
-                _allow_external_process_foreground(proc.pid)
+                allow_external_process_foreground(proc.pid)
         except OSError as exc:
             exe = str(cmd[0]) if cmd else "<empty command>"
             if getattr(exc, "winerror", None) == 4551:

@@ -10,7 +10,6 @@ expected next to it as superflip_original.exe.
 
 from __future__ import annotations
 
-import locale
 import os
 import queue
 import re
@@ -44,6 +43,11 @@ try:
     from phase_studio.ui_style import apply_phase_studio_style
 except Exception:
     from ui_style import apply_phase_studio_style
+
+try:
+    from phase_studio.process_utils import allow_external_process_foreground, text_encoding
+except Exception:
+    from process_utils import allow_external_process_foreground, text_encoding
 
 
 COMMENT_MARKERS = ("#", "!", ";")
@@ -309,12 +313,6 @@ def application_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
-
-
-def text_encoding() -> str:
-    if os.name == "nt":
-        return "mbcs"
-    return locale.getpreferredencoding(False) or "utf-8"
 
 
 def read_text_lines(path: Path) -> List[str]:
@@ -615,19 +613,6 @@ def resolve_original_superflip(exe_dir: Path) -> Path:
     if found:
         return Path(found)
     return candidates[0]
-
-
-def allow_external_process_foreground(process_id: int) -> bool:
-    """Grant the native Superflip process one-shot foreground permission on Windows."""
-    if sys.platform != "win32" or int(process_id) <= 0:
-        return False
-    try:
-        import ctypes
-
-        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-        return bool(user32.AllowSetForegroundWindow(int(process_id)))
-    except Exception:
-        return False
 
 
 def run_process(cmd: Sequence[str], cwd: Path, log: Callable[[str], None]) -> int:
