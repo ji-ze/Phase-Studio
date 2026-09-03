@@ -37,7 +37,7 @@
 .PARAMETER Version
     Override the package version (format A.B.C.D). Defaults to
     phase_studio\version.py's VERSION with a trailing ".0" component
-    (e.g. "1.0.7" -> "1.0.7.0") -- the single source of truth for the
+    (e.g. "1.0.8" -> "1.0.8.0") -- the single source of truth for the
     application version.
 
 .PARAMETER JanaSigningCertificate
@@ -225,10 +225,12 @@ if ($missingAssets.Count -gt 0) {
     throw @"
 Missing required MSIX visual assets: $($missingAssets -join ', ')
 
-Generate them from phase_studio\assets\phase_studio.ico into
-packaging\msix\Assets\ first (see packaging\README_STORE.md, "Store
-assets") -- Phase Studio's existing icon/branding, not a new visual
-identity, and not manually duplicated without a build step.
+Generate them first:
+    python packaging\generate_store_assets.py
+
+This renders each asset directly from Phase Studio's own vector brand mark
+(see packaging\README_STORE.md, "Store assets") -- the same navy/blue
+Phase Studio identity, not a new one, and not manually duplicated.
 "@
 }
 

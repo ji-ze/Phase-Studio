@@ -18,6 +18,7 @@ packaging/
     build_windows.ps1            developer/testing build (no MSIX)
     build_store_msix.ps1         Microsoft Store MSIX pipeline
     sign_test_msix.ps1           optional local test-signing of an MSIX
+    generate_store_assets.py     renders msix/Assets/*.png from the app's own vector logo
     README_STORE.md              this file
 ```
 
@@ -83,19 +84,27 @@ Copy-Item packaging\msix\store_identity.example.json packaging\msix\store_identi
 
 ### Version
 
-One source of truth: `phase_studio/version.py` (`VERSION = "1.0.7"`). The
+One source of truth: `phase_studio/version.py` (`VERSION = "1.0.8"`). The
 build script maps this to the MSIX four-part version automatically
-(`1.0.7` -> `1.0.7.0`). Do not edit the MSIX version independently of it.
+(`1.0.8` -> `1.0.8.0`). Do not edit the MSIX version independently of it --
+in particular, `packaging/msix/store_identity.json` deliberately has no
+version field of its own; only Package Identity Name/Publisher come from
+there.
 `phase_studio/jana_integration.py`'s installed-integration marker
 (`phase_studio_integration.json`) also reads this same source, so a Store
 update and its bundled Jana integration payload always agree on version.
 
 ### Store assets
 
-Generate the required MSIX PNG sizes from the existing
-`phase_studio/assets/phase_studio.ico` (same navy/blue Phase Studio identity
--- do not invent a new visual identity, and do not hand-duplicate images
-without a reproducible step) into `packaging\msix\Assets\`:
+```powershell
+python packaging\generate_store_assets.py
+```
+
+Generates the required MSIX PNG sizes directly from Phase Studio's own
+**vector** brand mark (`create_phase_studio_logo_pixmap`/
+`create_phase_studio_app_icon` in `phase_studio/app.py`, drawn procedurally
+with QPainter, not a fixed-resolution file) into `packaging\msix\Assets\`,
+rendering each one fresh at its own exact target size:
 
 - `StoreLogo.png` (50x50)
 - `Square44x44Logo.png` (44x44)
@@ -105,10 +114,13 @@ without a reproducible step) into `packaging\msix\Assets\`:
 - `Wide310x150Logo.png` (310x150)
 - `SplashScreen.png` (620x300)
 
-Any reproducible image tool (e.g. Pillow, ImageMagick, or the Windows SDK's
-own asset generator) can do this from the `.ico`; `build_store_msix.ps1`
-fails with a clear error listing exactly which assets are missing rather
-than silently packaging without them.
+Deliberately not sourced from `phase_studio/assets/phase_studio.ico`: that
+file is a small, fixed-resolution taskbar icon, and upscaling it would look
+soft at Store tile sizes (particularly the 310x310 and splash assets) even
+though the underlying mark is the same navy/blue Phase Studio identity
+either way. `build_store_msix.ps1` fails with a clear error listing exactly
+which assets are missing rather than silently packaging without them; it
+does not generate them itself.
 
 ## Signing
 

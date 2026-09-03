@@ -40,3 +40,8 @@ packaging/msix/store_identity.json
 *.p12
 *.msix
 *.msixbundle
+
+# Store visual assets are generated (reproducibly, from the app's own vector
+# logo) by packaging/generate_store_assets.py, not hand-authored -- keep the
+# generator, not its regenerable binary output. See packaging/msix/Assets/README.md.
+packaging/msix/Assets/*.png

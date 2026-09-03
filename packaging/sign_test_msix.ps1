@@ -28,7 +28,7 @@
 
 .EXAMPLE
     powershell -File packaging\sign_test_msix.ps1 `
-        -MsixPath dist\store\PhaseStudio-1.0.7-x64.msix `
+        -MsixPath dist\store\PhaseStudio-1.0.8-x64.msix `
         -TestCertificatePath C:\dev\phase_studio_test.pfx `
         -TestCertificatePassword (Read-Host -AsSecureString "Cert password")
 #>

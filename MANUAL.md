@@ -1,6 +1,6 @@
 # Phase Studio User Manual
 
-**Version 1.0.7**
+**Version 1.0.8**
 
 ## 1. Introduction
 
