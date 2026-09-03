@@ -94,6 +94,24 @@ class JanaRunOptions:
     # compute_omit_maps / compute_omit_rfree settings -- no new calculation.
     compute_omit_maps: bool = False
     compute_omit_rfree: bool = False
+    # Phase-recycling-only Map feedback page (Wizard PAGE 3); never shown or
+    # settable for either single-pass workflow, so these all stay at their
+    # off/default values for those. Map 1:1 onto the existing full-pipeline
+    # map_feedback_missing_*/map_feedback_intensity_*/redistribute_overlaps
+    # (powder_*) RunConfig fields -- no new map-feedback calculation, just
+    # another way to populate the same existing settings.
+    enable_missing_completion: bool = False
+    missing_start_cycle: int = 1
+    missing_max_added_percent: float = 0.0
+    enable_intensity_correction: bool = False
+    intensity_start_cycle: int = 1
+    intensity_damping: float = 0.0
+    intensity_sigma_threshold: float = 0.0
+    enable_powder_repartition: bool = False
+    powder_start_cycle: int = 1
+    powder_wavelength: float = 0.0
+    powder_separation_factor: float = 0.2
+    powder_map_ratio_mix: float = 1.0
 
 
 @dataclass
@@ -170,6 +188,22 @@ def build_jana_handoff_import(
         "hkl": explicit_hkl,
         "compute_omit_maps": "true" if options.compute_omit_maps else "false",
         "compute_omit_rfree": "true" if (options.compute_omit_maps and options.compute_omit_rfree) else "false",
+        # Wizard PAGE 3 (Map feedback, Phase-recycling only) -- these map 1:1
+        # onto the existing Basic -> Map feedback RunConfig fields; see
+        # JanaRunOptions for why they stay at their off/default values for
+        # either single-pass workflow.
+        "map_feedback_missing_enabled": "true" if options.enable_missing_completion else "false",
+        "map_feedback_missing_from_cycle": str(options.missing_start_cycle),
+        "map_feedback_missing_percent_limit": str(options.missing_max_added_percent),
+        "map_feedback_intensity_enabled": "true" if options.enable_intensity_correction else "false",
+        "map_feedback_intensity_from_cycle": str(options.intensity_start_cycle),
+        "map_feedback_intensity_damping": str(options.intensity_damping),
+        "map_feedback_intensity_max_i_over_sigma": str(options.intensity_sigma_threshold),
+        "redistribute_overlaps": "true" if options.enable_powder_repartition else "false",
+        "powder_redistribution_from_cycle": str(options.powder_start_cycle),
+        "powder_wavelength": str(options.powder_wavelength),
+        "powder_separation_factor": str(options.powder_separation_factor),
+        "powder_redistribution_mix": str(options.powder_map_ratio_mix),
     }
     if explicit_first_model:
         handoff_values["first_cycle_modelfile"] = explicit_first_model
@@ -944,6 +978,9 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         apply_safe_dialog_geometry,
         create_phase_studio_brand_header,
         create_phase_studio_context_banner,
+        format_reflection_data_mode,
+        reflection_mode_has_fwhm,
+        resolve_powder_wavelength,
     )
 
     settings = QSettings("PhaseStudio", "JanaSuperflipWrapper")
@@ -1630,6 +1667,286 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     sharped_map_radio.toggled.connect(lambda _checked=False: sync_map_choice())
     sync_map_choice()
 
+    # ----- Page 3: Map feedback (Phase recycling only) -- exposes and
+    # populates the existing Basic -> Map feedback controls/RunConfig
+    # fields (see build_jana_handoff_import); no new map-feedback algorithm
+    # is implemented here. Not added to Superflip only or Superflip +
+    # SharpED, which never reach this page. -----
+    page3 = QWidget()
+    page3_layout = QVBoxLayout(page3)
+    page3_layout.setContentsMargins(0, 0, 0, 0)
+    page3_layout.setSpacing(10)
+
+    reflection_data_group = QGroupBox("Reflection data")
+    reflection_data_form = QFormLayout(reflection_data_group)
+    reflection_data_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    reflection_type_value = QLabel("")
+    reflection_format_value = QLabel("")
+    reflection_data_form.addRow("Type", reflection_type_value)
+    reflection_data_form.addRow("Format", reflection_format_value)
+    page3_layout.addWidget(reflection_data_group)
+
+    page3_description = QLabel("")
+    page3_description.setWordWrap(True)
+    page3_description.setStyleSheet("color: #52658b;")
+    page3_layout.addWidget(page3_description)
+
+    # Same "Warning" message and icon+text presentation as the "Scientific
+    # validation" box above (and Basic -> Map feedback's settings_callout in
+    # the main GUI) -- always visible on this page, regardless of whether
+    # any option below is enabled.
+    map_feedback_warning_group = QGroupBox()
+    map_feedback_warning_layout = QHBoxLayout(map_feedback_warning_group)
+    map_feedback_warning_icon = QLabel()
+    map_feedback_warning_icon.setPixmap(dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
+    map_feedback_warning_icon.setAlignment(Qt.AlignTop)
+    map_feedback_warning_layout.addWidget(map_feedback_warning_icon, 0, Qt.AlignTop)
+    map_feedback_warning_text = QLabel(
+        "<b>Warning</b><br>"
+        "The operations on this page modify the reflection data supplied to subsequent cycles. "
+        "Results from these cycles should therefore be validated against the original measured data."
+    )
+    map_feedback_warning_text.setTextFormat(Qt.RichText)
+    map_feedback_warning_text.setWordWrap(True)
+    map_feedback_warning_layout.addWidget(map_feedback_warning_text, 1)
+    page3_layout.addWidget(map_feedback_warning_group)
+
+    # --- Single-crystal branch: Missing-reflection completion + Intensity
+    # correction, exactly Basic -> Map feedback's own controls/defaults/
+    # ranges/tooltips. ---
+    missing_group = QGroupBox("Missing-reflection completion")
+    missing_outer = QVBoxLayout(missing_group)
+    missing_enabled_checkbox = QCheckBox("Enable missing-reflection completion")
+    missing_outer.addWidget(missing_enabled_checkbox)
+    missing_form = QFormLayout()
+    missing_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    missing_start_cycle_spin = QSpinBox()
+    missing_start_cycle_spin.setRange(1, 999)
+    missing_start_cycle_spin.setValue(1)
+    missing_start_cycle_spin.setToolTip(
+        "First completed cycle whose final map is used to add missing reflections for the next cycle."
+    )
+    missing_form.addRow("Start after cycle", missing_start_cycle_spin)
+    missing_percent_spin = QDoubleSpinBox()
+    missing_percent_spin.setRange(0.0, 100.0)
+    missing_percent_spin.setSingleStep(1.0)
+    missing_percent_spin.setDecimals(3)
+    missing_percent_spin.setValue(0.0)
+    missing_percent_spin.setToolTip(
+        "Caps generated missing reflections as a percent of the current reflection count, "
+        "preventing feedback from overwhelming measured data."
+    )
+    missing_form.addRow("Maximum added reflections (%)", missing_percent_spin)
+    missing_outer.addLayout(missing_form)
+    page3_layout.addWidget(missing_group)
+
+    intensity_group = QGroupBox("Intensity correction")
+    intensity_outer = QVBoxLayout(intensity_group)
+    intensity_enabled_checkbox = QCheckBox("Enable intensity correction")
+    intensity_outer.addWidget(intensity_enabled_checkbox)
+    intensity_form = QFormLayout()
+    intensity_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    intensity_start_cycle_spin = QSpinBox()
+    intensity_start_cycle_spin.setRange(1, 999)
+    intensity_start_cycle_spin.setValue(1)
+    intensity_start_cycle_spin.setToolTip(
+        "First completed cycle whose final map is used to damp observed intensities for the next cycle."
+    )
+    intensity_form.addRow("Start after cycle", intensity_start_cycle_spin)
+    intensity_damping_spin = QDoubleSpinBox()
+    intensity_damping_spin.setRange(0.0, 1.0)
+    intensity_damping_spin.setSingleStep(0.05)
+    intensity_damping_spin.setDecimals(3)
+    intensity_damping_spin.setValue(0.0)
+    intensity_damping_spin.setToolTip(
+        "Damping factor for map-based intensity correction. 0 keeps observed data; "
+        "1 replaces them by scaled map-derived intensities."
+    )
+    intensity_form.addRow("Correction damping", intensity_damping_spin)
+    intensity_sigma_spin = QDoubleSpinBox()
+    intensity_sigma_spin.setRange(0.0, 1000.0)
+    intensity_sigma_spin.setSingleStep(0.5)
+    intensity_sigma_spin.setDecimals(3)
+    intensity_sigma_spin.setValue(0.0)
+    intensity_sigma_spin.setToolTip(
+        "Apply map-based intensity correction only to non-zero reflections with value/sigma "
+        "below this limit. Use 0 to correct all non-zero reflections -- including reflection "
+        "formats with no sigma column, since the value/sigma gate is then simply not applied."
+    )
+    intensity_form.addRow("Apply when value/σ <", intensity_sigma_spin)
+    intensity_outer.addLayout(intensity_form)
+    intensity_note = QLabel("Value/σ = 0 applies correction to all non-zero reflections.")
+    intensity_note.setWordWrap(True)
+    intensity_note.setStyleSheet("color: #52658b;")
+    intensity_outer.addWidget(intensity_note)
+    page3_layout.addWidget(intensity_group)
+
+    # --- Powder/FWHM branch: Powder overlap repartitioning, exactly Basic ->
+    # Map feedback's own controls/defaults/ranges/tooltips. ---
+    powder_group = QGroupBox("Powder overlap repartitioning")
+    powder_outer = QVBoxLayout(powder_group)
+    powder_enabled_checkbox = QCheckBox("Enable powder overlap repartitioning (FWHM data)")
+    powder_outer.addWidget(powder_enabled_checkbox)
+    powder_form = QFormLayout()
+    powder_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    powder_start_cycle_spin = QSpinBox()
+    powder_start_cycle_spin.setRange(1, 999)
+    powder_start_cycle_spin.setValue(1)
+    powder_start_cycle_spin.setToolTip(
+        "First completed cycle whose final map is used to redistribute overlapping reflections for the next cycle."
+    )
+    powder_form.addRow("Start after cycle", powder_start_cycle_spin)
+    powder_wavelength_spin = QDoubleSpinBox()
+    powder_wavelength_spin.setRange(0.0, 10.0)
+    powder_wavelength_spin.setSingleStep(0.01)
+    powder_wavelength_spin.setDecimals(5)
+    powder_wavelength_spin.setValue(0.0)
+    powder_wavelength_spin.setToolTip(
+        "Required to compute 2theta. Auto-detected -- when left at 0 -- from the Jana2020 .inflip "
+        "file, then the reference file; enter it manually if neither source has it."
+    )
+    powder_form.addRow("Wavelength (Å)", powder_wavelength_spin)
+    powder_separation_spin = QDoubleSpinBox()
+    powder_separation_spin.setRange(0.001, 100.0)
+    powder_separation_spin.setSingleStep(0.05)
+    powder_separation_spin.setDecimals(3)
+    powder_separation_spin.setValue(0.2)
+    powder_separation_spin.setToolTip(
+        "Overlap threshold as a fraction of the mean FWHM of two neighboring reflections "
+        "(Superflip's own fwhmseparation convention)."
+    )
+    powder_form.addRow("Separation factor", powder_separation_spin)
+    powder_mix_spin = QDoubleSpinBox()
+    powder_mix_spin.setRange(0.0, 1.0)
+    powder_mix_spin.setSingleStep(0.05)
+    powder_mix_spin.setDecimals(3)
+    powder_mix_spin.setValue(1.0)
+    powder_mix_spin.setToolTip(
+        "0 keeps the observed intensity split within each overlap group; 1 uses the "
+        "map-derived split fully. The group total is always conserved."
+    )
+    powder_form.addRow("Map ratio mix", powder_mix_spin)
+    powder_outer.addLayout(powder_form)
+    powder_note = QLabel(
+        "Only applies to reflections with an FWHM value (hkl I/F fwhm data)."
+    )
+    powder_note.setWordWrap(True)
+    powder_note.setStyleSheet("color: #52658b;")
+    powder_outer.addWidget(powder_note)
+    page3_layout.addWidget(powder_group)
+
+    page3_validation_label = QLabel("")
+    page3_validation_label.setWordWrap(True)
+    page3_validation_label.setObjectName("wizardValidationMessage")
+    page3_validation_label.setStyleSheet("color: #b42318;")
+    page3_validation_label.setVisible(False)
+    page3_layout.addWidget(page3_validation_label)
+
+    page3_layout.addStretch(1)
+    stack.addWidget(page3)
+
+    # Every fresh Wizard invocation starts every Map feedback checkbox OFF --
+    # deliberately NOT restored from QSettings (same reasoning as the Cross-
+    # validation checkboxes on page2: this is job-specific state, not
+    # something that should silently carry over from an unrelated previous
+    # Jana2020 job). The default-off state above already satisfies this; no
+    # settings.value(...) read is ever wired to these controls.
+
+    def sync_missing_dependency(_checked: bool = False) -> None:
+        enabled = missing_enabled_checkbox.isChecked()
+        missing_start_cycle_spin.setEnabled(enabled)
+        missing_percent_spin.setEnabled(enabled)
+
+    missing_enabled_checkbox.toggled.connect(sync_missing_dependency)
+    sync_missing_dependency()
+
+    def sync_intensity_dependency(_checked: bool = False) -> None:
+        enabled = intensity_enabled_checkbox.isChecked()
+        intensity_start_cycle_spin.setEnabled(enabled)
+        intensity_damping_spin.setEnabled(enabled)
+        intensity_sigma_spin.setEnabled(enabled)
+
+    intensity_enabled_checkbox.toggled.connect(sync_intensity_dependency)
+    sync_intensity_dependency()
+
+    def sync_powder_dependency(_checked: bool = False) -> None:
+        enabled = powder_enabled_checkbox.isChecked()
+        powder_start_cycle_spin.setEnabled(enabled)
+        powder_wavelength_spin.setEnabled(enabled)
+        powder_separation_spin.setEnabled(enabled)
+        powder_mix_spin.setEnabled(enabled)
+
+    powder_enabled_checkbox.toggled.connect(sync_powder_dependency)
+    sync_powder_dependency()
+
+    detected_data_mode_holder: dict = {"mode": None}
+
+    def detect_reflection_data_mode() -> str:
+        # The ACTUAL parsed reflection format (not filename/composition/space
+        # group) -- reuses the same backing window (and therefore the same
+        # HKL/.inflip parsing app.py itself uses) built for page1's summary.
+        if detected_data_mode_holder["mode"] is None:
+            try:
+                backing_win = get_backing_window()
+                detected_data_mode_holder["mode"] = backing_win._resolve_configured_data_mode_for_ui()
+            except Exception:
+                detected_data_mode_holder["mode"] = ""
+        return detected_data_mode_holder["mode"]
+
+    def sync_page3_for_data_type() -> None:
+        mode = detect_reflection_data_mode()
+        is_powder = reflection_mode_has_fwhm(mode)
+        reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal")
+        reflection_format_value.setText(format_reflection_data_mode(mode) if mode else "Not yet determined")
+        page3_description.setText(
+            "FWHM data detected. Powder overlap repartitioning is available."
+            if is_powder
+            else "Available feedback methods for single-crystal reflection data."
+        )
+        missing_group.setVisible(not is_powder)
+        intensity_group.setVisible(not is_powder)
+        powder_group.setVisible(is_powder)
+        if is_powder and powder_wavelength_spin.value() <= 0:
+            # Display default only (mirrors the main GUI's own
+            # resolve_powder_wavelength() called again at actual run time) --
+            # still fully editable, and 0 keeps its existing "auto" meaning
+            # for the underlying algorithm if left untouched.
+            try:
+                ref_text = reference_file.text().strip()
+                ref_path = Path(ref_text).expanduser() if ref_text else None
+                detected_wavelength, _source = resolve_powder_wavelength(0.0, inflip_path, ref_path)
+            except Exception:
+                detected_wavelength = 0.0
+            if detected_wavelength > 0:
+                powder_wavelength_spin.setValue(detected_wavelength)
+        adjust_dialog_size()
+
+    def check_page3_validity() -> Optional[str]:
+        # Map feedback only affects SUBSEQUENT cycles -- an enabled method
+        # whose "Start after cycle" leaves no later cycle to apply to would
+        # silently do nothing; block Run rather than accept a setting that
+        # can never take effect. Never auto-raises Cycles to fix this.
+        total_cycles = max(1, cycles.value())
+        for checkbox, spin in (
+            (missing_enabled_checkbox, missing_start_cycle_spin),
+            (intensity_enabled_checkbox, intensity_start_cycle_spin),
+            (powder_enabled_checkbox, powder_start_cycle_spin),
+        ):
+            if checkbox.isVisible() and checkbox.isChecked() and spin.value() >= total_cycles:
+                return "A subsequent cycle is required for map feedback."
+        return None
+
+    def refresh_page3_validation_message() -> None:
+        message = check_page3_validity()
+        page3_validation_label.setText(message or "")
+        page3_validation_label.setVisible(bool(message))
+
+    for _spin in (missing_start_cycle_spin, intensity_start_cycle_spin, powder_start_cycle_spin):
+        _spin.valueChanged.connect(lambda _value=0: refresh_page3_validation_message())
+    for _checkbox in (missing_enabled_checkbox, intensity_enabled_checkbox, powder_enabled_checkbox):
+        _checkbox.toggled.connect(lambda _checked=False: refresh_page3_validation_message())
+    cycles.valueChanged.connect(lambda _value=0: refresh_page3_validation_message())
+
     # ----- Fixed action footer: added to outer_root (NOT the scrollable
     # `root`/content_layout), so Back/Cancel/Open config/Run phasing always
     # stay visible above the taskbar regardless of how tall the scrollable
@@ -1734,11 +2051,18 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
     def go_to_page2() -> None:
         stack.setCurrentWidget(page2)
         back_button.setVisible(True)
-        primary_button.setText("Run phasing")
-        primary_button.setToolTip(
-            "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
-            "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
-        )
+        if current_workflow() == WORKFLOW_PHASE_RECYCLING:
+            # Phase recycling alone continues to a third page (Map feedback)
+            # before anything runs; Superflip + SharpED has no such page and
+            # keeps running directly from here.
+            primary_button.setText("Next ›")
+            primary_button.setToolTip("Continue to the Map feedback settings.")
+        else:
+            primary_button.setText("Run phasing")
+            primary_button.setToolTip(
+                "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
+                "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
+            )
         banner_title, banner_subtitle = PAGE2_BANNER_TEXT.get(
             current_workflow(), ("JANA2020 WORKFLOW", "")
         )
@@ -1746,7 +2070,27 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
         context_subtitle_label.setText(banner_subtitle)
         adjust_dialog_size()
 
-    back_button.clicked.connect(go_to_page1)
+    def go_to_page3() -> None:
+        sync_page3_for_data_type()
+        refresh_page3_validation_message()
+        stack.setCurrentWidget(page3)
+        back_button.setVisible(True)
+        primary_button.setText("Run phasing")
+        primary_button.setToolTip(
+            "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
+            "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
+        )
+        context_title_label.setText("PHASE RECYCLING · MAP FEEDBACK")
+        context_subtitle_label.setText("Optionally update reflection data between recycling cycles")
+        adjust_dialog_size()
+
+    def go_back() -> None:
+        if stack.currentWidget() is page3:
+            go_to_page2()
+        else:
+            go_to_page1()
+
+    back_button.clicked.connect(go_back)
     go_to_page1()
 
     result = {"action": "cancel"}
@@ -1776,6 +2120,11 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
     def effective_compute_omit_rfree() -> bool:
         return effective_compute_omit_maps() and rfree_checkbox.isChecked()
+
+    def effective_map_feedback_enabled() -> bool:
+        # PAGE 3 is Phase-recycling-only; its controls must never leak
+        # through for either single-pass workflow even if somehow toggled.
+        return current_workflow() == WORKFLOW_PHASE_RECYCLING
 
     def save_values() -> None:
         next_cycle_mode = effective_next_cycle_mode()
@@ -1818,11 +2167,32 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             first_cycle_modelfile=model_file.text().strip(),
             compute_omit_maps=effective_compute_omit_maps(),
             compute_omit_rfree=effective_compute_omit_rfree(),
+            enable_missing_completion=effective_map_feedback_enabled() and missing_enabled_checkbox.isChecked(),
+            missing_start_cycle=missing_start_cycle_spin.value(),
+            missing_max_added_percent=missing_percent_spin.value(),
+            enable_intensity_correction=effective_map_feedback_enabled() and intensity_enabled_checkbox.isChecked(),
+            intensity_start_cycle=intensity_start_cycle_spin.value(),
+            intensity_damping=intensity_damping_spin.value(),
+            intensity_sigma_threshold=intensity_sigma_spin.value(),
+            enable_powder_repartition=effective_map_feedback_enabled() and powder_enabled_checkbox.isChecked(),
+            powder_start_cycle=powder_start_cycle_spin.value(),
+            powder_wavelength=powder_wavelength_spin.value(),
+            powder_separation_factor=powder_separation_spin.value(),
+            powder_map_ratio_mix=powder_mix_spin.value(),
         )
 
     def attempt_run() -> None:
         if stack.currentWidget() is page1 and current_workflow() != WORKFLOW_SUPERFLIP_ONLY:
             go_to_page2()
+            return
+        if stack.currentWidget() is page3:
+            validation_message = check_page3_validity()
+            if validation_message:
+                refresh_page3_validation_message()
+                return
+            save_values()
+            result["action"] = "recycle"
+            dialog.accept()
             return
         token = api_token.text().strip() or os.environ.get("SHARPED_API_TOKEN", "").strip()
         if effective_next_cycle_mode() == "deblurred_xplor" and not token:
@@ -1832,12 +2202,16 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
             api_token.setFocus()
             _show_missing_token_warning(dialog, qt)
             return
+        if stack.currentWidget() is page2 and current_workflow() == WORKFLOW_PHASE_RECYCLING:
+            go_to_page3()
+            return
         save_values()
-        # Only Phase recycling opens the full Phase Studio main window. Both
-        # single-pass workflows (Superflip only, Superflip + SharpED) keep the
-        # original lightweight console/wrapper path below -- run_jana_superflip()
+        # Only Phase recycling opens the full Phase Studio main window (via
+        # PAGE 3 above, "Next ›" then "Run phasing"). Both single-pass
+        # workflows (Superflip only, Superflip + SharpED) keep the original
+        # lightweight console/wrapper path below -- run_jana_superflip()
         # called directly from main(), no main window at all.
-        result["action"] = "recycle" if current_workflow() == WORKFLOW_PHASE_RECYCLING else "run"
+        result["action"] = "run"
         dialog.accept()
 
     def edit_clicked() -> None:

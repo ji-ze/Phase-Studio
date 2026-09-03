@@ -12124,21 +12124,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"Superflip HKL data mode: {format_reflection_data_mode(configured_data_mode)}")
             if cfg.resolution_d_min > 0:
                 self.log(f"Superflip resolution cutoff: d >= {cfg.resolution_d_min:g} A")
-            if cfg.map_feedback_missing_enabled or cfg.map_feedback_intensity_enabled:
-                self.log(
-                    "Map feedback: "
-                    f"missing_enabled={cfg.map_feedback_missing_enabled}, missing_from_cycle={cfg.map_feedback_missing_from_cycle}, "
-                    f"missing_limit={cfg.map_feedback_missing_percent_limit:g}%, "
-                    f"intensity_enabled={cfg.map_feedback_intensity_enabled}, intensity_from_cycle={cfg.map_feedback_intensity_from_cycle}, "
-                    f"intensity_damping={cfg.map_feedback_intensity_damping:g}, "
-                    f"intensity_max_value_sigma={cfg.map_feedback_intensity_max_i_over_sigma:g}"
-                )
+            # One concise section at workflow start, never repeated per cycle --
+            # canonical user-facing method names only, never internal RunConfig
+            # field names (see Basic -> Map feedback for the same labels).
+            map_feedback_lines: List[str] = []
+            if cfg.map_feedback_missing_enabled:
+                map_feedback_lines.append(f"  Missing-reflection completion · from cycle {cfg.map_feedback_missing_from_cycle}")
+            if cfg.map_feedback_intensity_enabled:
+                map_feedback_lines.append(f"  Intensity correction · from cycle {cfg.map_feedback_intensity_from_cycle}")
             if cfg.redistribute_overlaps:
-                self.log(
-                    "Map feedback: powder overlap repartitioning enabled, "
-                    f"from_cycle={cfg.powder_redistribution_from_cycle}, wavelength={cfg.powder_wavelength:g} A, "
-                    f"separation_factor={cfg.powder_separation_factor:g}, mix={cfg.powder_redistribution_mix:g}"
-                )
+                map_feedback_lines.append(f"  Powder overlap repartitioning · from cycle {cfg.powder_redistribution_from_cycle}")
+                map_feedback_lines.append(f"  Wavelength: {cfg.powder_wavelength:g} Å")
+                map_feedback_lines.append(f"  Separation factor: {cfg.powder_separation_factor:g}")
+                map_feedback_lines.append(f"  Map ratio mix: {cfg.powder_redistribution_mix:g}")
+            if map_feedback_lines:
+                self.log("[Map feedback]\n" + "\n".join(map_feedback_lines))
+            else:
+                self.log("[Map feedback] Disabled")
             self.msg_queue.put(("progress_setup", cfg.cycles))
             data_modes_needed = {configured_data_mode}
             observed_hkls: Dict[str, Path] = {}
