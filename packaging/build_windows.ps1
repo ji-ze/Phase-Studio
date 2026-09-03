@@ -63,6 +63,55 @@ function Assert-PathExists($Path, $Description) {
     }
 }
 
+function Test-ExeRunningFrom($ExeName, $ExpectedPath) {
+    # $true only if a currently running process named $ExeName has its
+    # executable located at exactly $ExpectedPath (case-insensitive path
+    # comparison). Matching by name alone would risk flagging (or, if this
+    # were ever extended to kill anything, terminating) an unrelated
+    # PhaseStudio.exe/superflip.exe running from a different checkout or a
+    # real Jana2020\SUPERFLIP installation -- this never kills a process, it
+    # only refuses to delete out from under one still running the exact
+    # previous build output.
+    if (-not (Test-Path $ExpectedPath)) { return $false }
+    $expectedFull = (Resolve-Path $ExpectedPath).Path
+    try {
+        $procs = Get-CimInstance Win32_Process -Filter "Name = '$ExeName'" -ErrorAction Stop
+    } catch {
+        # WMI/CIM unavailable for some reason -- fail open (report nothing
+        # locked) rather than blocking every build; the UnauthorizedAccess/
+        # IOException catch around Remove-Item below is the real backstop.
+        return $false
+    }
+    foreach ($proc in $procs) {
+        if ($proc.ExecutablePath -and ($proc.ExecutablePath -ieq $expectedFull)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Remove-BuildOutputDir($Path) {
+    if (-not (Test-Path $Path)) { return }
+    try {
+        Remove-Item -Recurse -Force $Path -ErrorAction Stop
+    } catch [System.UnauthorizedAccessException], [System.IO.IOException] {
+        # Empirically, a file locked by another running process raises
+        # System.IO.IOException ("...because it is being used by another
+        # process"), not UnauthorizedAccessException -- both are caught here
+        # since either can surface depending on exactly which handle Windows
+        # is holding (a loaded DLL/PYD vs. a permissions-style denial).
+        throw @"
+Could not remove $Path
+  $($_.Exception.GetType().Name): $($_.Exception.Message)
+
+A DLL or .pyd from a previous build may still be loaded by a running Phase
+Studio (or Jana2020 Superflip wrapper) process, even one not detected by
+name above. Close Phase Studio and any Jana2020 session using the Superflip
+wrapper, then retry the build.
+"@
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Resolve every path from $PSScriptRoot (this script's own directory), never
 # from the caller's current directory. packaging\build_windows.ps1 lives at
@@ -152,14 +201,36 @@ if ($LASTEXITCODE -ne 0) {
 # Clean ONLY the two specific output directories this script produces --
 # never a blanket removal of dist\/build\, and never between the two builds
 # below (each --clean only clears its own spec's prior output/work cache).
+#
+# Before deleting, check whether the PREVIOUS build's own executables are
+# still running from those exact directories. This never kills a process --
+# Jana2020/Superflip may legitimately still be using the previously staged
+# wrapper -- it only stops with a clear message so the developer can close
+# it themselves before the old build output is removed out from under it.
 # ---------------------------------------------------------------------------
 if ($Clean) {
+    Write-Step "Checking for locked previous build artifacts"
+    $lockedTargets = @(
+        @{ Exe = "PhaseStudio.exe"; Path = Join-Path $distDir "PhaseStudio\PhaseStudio.exe" },
+        @{ Exe = "superflip.exe";   Path = Join-Path $distDir "superflip\superflip.exe" },
+        @{ Exe = "superflip.exe";   Path = Join-Path $distDir "PhaseStudio\JanaIntegration\superflip.exe" }
+    )
+    foreach ($target in $lockedTargets) {
+        if (Test-ExeRunningFrom $target.Exe $target.Path) {
+            throw @"
+$($target.Exe) is still running from the previous build:
+  $($target.Path)
+
+Close Phase Studio and retry the build.
+"@
+        }
+    }
+    Write-Host "[OK] No previous build executables are running"
+
     Write-Step "Cleaning prior output for PhaseStudio and superflip"
     foreach ($name in @("PhaseStudio", "superflip")) {
-        $distPath = Join-Path $distDir $name
-        if (Test-Path $distPath) { Remove-Item -Recurse -Force $distPath }
-        $workPath = Join-Path $buildDir $name
-        if (Test-Path $workPath) { Remove-Item -Recurse -Force $workPath }
+        Remove-BuildOutputDir (Join-Path $distDir $name)
+        Remove-BuildOutputDir (Join-Path $buildDir $name)
     }
 }
 
