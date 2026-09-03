@@ -33,3 +33,10 @@ metrics.csv
 *_phase_studio_cycle_*.sflog
 *_embedded_reflections.hkl
 *_embedded_reference.cif
+
+# Store/MSIX packaging secrets and real identity -- never commit these.
+packaging/msix/store_identity.json
+*.pfx
+*.p12
+*.msix
+*.msixbundle

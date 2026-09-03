@@ -1,0 +1,8 @@
+{
+  "name": "REPLACE_WITH_PARTNER_CENTER_IDENTITY",
+  "publisher": "REPLACE_WITH_PARTNER_CENTER_PUBLISHER",
+  "publisher_display_name": "Institute of Physics of the CAS",
+  "package_display_name": "Phase Studio",
+  "version": "1.0.7.0",
+  "description": "Phase Studio: iterative Superflip/SharpED/EDMA crystallographic phasing with Jana2020 integration."
+}

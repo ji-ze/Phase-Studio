@@ -2296,6 +2296,11 @@ def launch_phase_studio_from_jana(
             # manually and explicitly clicks Send to Jana2020 once a run
             # completes -- no auto-selected map source, no auto-start.
             win.jana_wizard_context.launch_mode = "full_configuration"
+        # The third primary button defaults to standalone's "Install to
+        # Jana2020" at construction; both Wizard launch paths above just
+        # changed jana_wizard_context, so re-sync it to "Send to Jana2020"
+        # immediately rather than waiting for the next unrelated state change.
+        win._sync_jana_action_button()
         if inflip_path is not None and handoff_import is not None:
             splash.set_status("Loading Jana2020 workflow…")
             app.processEvents()
