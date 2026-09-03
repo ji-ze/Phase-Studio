@@ -22,7 +22,21 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
-project_dir = Path(SPECPATH).resolve().parent.parent.parent
+# SPECPATH (supplied by PyInstaller) is the directory CONTAINING this spec
+# file: <RepoRoot>\packaging\pyinstaller. Two .parent steps reach the repo
+# root (pyinstaller -> packaging -> RepoRoot) -- a THIRD .parent was the
+# actual bug behind "script ...\phase_studio\app.py not found" during the
+# first real Windows build (it resolved one directory above the repo root).
+# Verified with an assertion below rather than trusting the arithmetic alone.
+project_dir = Path(SPECPATH).resolve().parent.parent
+
+entry_point = project_dir / "phase_studio" / "app.py"
+if not entry_point.is_file():
+    raise FileNotFoundError(
+        f"Phase Studio entry point not found: {entry_point}\n"
+        f"Resolved project root: {project_dir}\n"
+        f"SPECPATH was: {Path(SPECPATH).resolve()}"
+    )
 
 hiddenimports = [
     "phase_studio",
@@ -51,7 +65,7 @@ except Exception:
 
 
 a = Analysis(
-    [str(project_dir / "phase_studio" / "app.py")],
+    [str(entry_point)],
     pathex=[str(project_dir)],
     binaries=[],
     datas=datas,

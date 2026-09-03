@@ -5,10 +5,17 @@
 .DESCRIPTION
     Reproducible pipeline:
       1. clean prior Store staging (build\store\, dist\store\),
-      2. build PhaseStudio ONEDIR (packaging\pyinstaller\PhaseStudio.spec),
-      3. build the JanaIntegration Superflip wrapper ONEDIR
-         (packaging\pyinstaller\JanaSuperflip.spec),
-      4. copy both into an MSIX staging layout,
+      2. build PhaseStudio and the Jana2020 wrapper by running
+         packaging\build_windows.ps1 -- the exact same known-working
+         "python -m PyInstaller --clean --noconfirm superflip.spec" build
+         used for plain developer builds. This script does not reimplement a
+         second, separately frozen Jana wrapper: the payload staged into the
+         MSIX below is bit-for-bit what build_windows.ps1 produces,
+      3. copy dist\PhaseStudio\ -> MSIX layout PhaseStudio\, and
+         dist\superflip\ -> MSIX layout JanaIntegration\ (the rename to
+         "JanaIntegration" happens only in this staging copy, not by giving
+         PyInstaller a different output name),
+      4. generate the MSIX staging layout,
       5. generate AppxManifest.xml from the template + store identity + the
          single Phase Studio version source (phase_studio\version.py),
       6. validate required visual assets exist,
@@ -141,22 +148,30 @@ New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
 New-Item -ItemType Directory -Force -Path $storeDistDir | Out-Null
 
 # ---------------------------------------------------------------------------
-# 4. Build PhaseStudio + JanaIntegration ONEDIR
+# 4. Build PhaseStudio + the Jana2020 wrapper by delegating to the canonical
+#    developer build (packaging\build_windows.ps1). That script builds the
+#    Jana wrapper with the exact known-working
+#    "python -m PyInstaller --clean --noconfirm superflip.spec" command
+#    against the repository's root-level superflip.spec -- the same command
+#    already verified against a real Jana2020 installation. This script
+#    never gives PyInstaller a different spec or a different output name for
+#    that build; it only stages (copies/renames) the resulting dist\
+#    directories below.
 # ---------------------------------------------------------------------------
-$pyInstallerWork = Join-Path $storeBuildDir "pyinstaller_work"
-function Invoke-PyInstaller($SpecPath, $Label) {
-    Write-Step "Building $Label (PyInstaller ONEDIR)"
-    Assert-PathExists $SpecPath "$Label spec file"
-    & pyinstaller --noconfirm --distpath $layoutDir --workpath $pyInstallerWork $SpecPath
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label build failed (PyInstaller exit code $LASTEXITCODE)."
-    }
-}
-Invoke-PyInstaller (Join-Path $PSScriptRoot "pyinstaller\PhaseStudio.spec") "PhaseStudio"
-Invoke-PyInstaller (Join-Path $PSScriptRoot "pyinstaller\JanaSuperflip.spec") "JanaIntegration"
+Write-Step "Building PhaseStudio and the Jana2020 wrapper (packaging\build_windows.ps1)"
+& (Join-Path $PSScriptRoot "build_windows.ps1")
 
-Assert-PathExists (Join-Path $layoutDir "PhaseStudio\PhaseStudio.exe") "Built PhaseStudio.exe"
-Assert-PathExists (Join-Path $layoutDir "JanaIntegration\superflip.exe") "Built JanaIntegration\superflip.exe"
+$builtPhaseStudioDir = Join-Path $RepoRoot "dist\PhaseStudio"
+$builtJanaDir = Join-Path $RepoRoot "dist\superflip"
+Assert-PathExists (Join-Path $builtPhaseStudioDir "PhaseStudio.exe") "Built PhaseStudio.exe"
+Assert-PathExists (Join-Path $builtJanaDir "superflip.exe") "Built superflip.exe"
+
+Write-Step "Staging build output into the MSIX layout"
+Copy-Item $builtPhaseStudioDir (Join-Path $layoutDir "PhaseStudio") -Recurse -Force
+Copy-Item $builtJanaDir (Join-Path $layoutDir "JanaIntegration") -Recurse -Force
+
+Assert-PathExists (Join-Path $layoutDir "PhaseStudio\PhaseStudio.exe") "Staged PhaseStudio.exe"
+Assert-PathExists (Join-Path $layoutDir "JanaIntegration\superflip.exe") "Staged JanaIntegration\superflip.exe"
 
 # ---------------------------------------------------------------------------
 # 5. Optional: Authenticode-sign the Jana wrapper BEFORE it goes into the

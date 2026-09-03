@@ -245,9 +245,15 @@ def resolve_bundled_jana_payload_dir() -> Optional[Path]:
         exe_dir = Path(sys.executable).resolve().parent
         candidates.append(exe_dir / "JanaIntegration")
         candidates.append(exe_dir.parent / "JanaIntegration")
-    # Development: a locally built payload from packaging/build_windows.ps1.
+    # Development: a locally built payload from packaging/build_windows.ps1,
+    # which builds the Jana wrapper via the known-working
+    # "python -m PyInstaller --clean --noconfirm superflip.spec" against the
+    # repository's root-level superflip.spec -- its real output directory is
+    # dist/superflip (COLLECT(..., name="superflip") in that spec), not
+    # dist/JanaIntegration. "JanaIntegration" is only the staging name used
+    # once the payload is copied into an MSIX layout (build_store_msix.ps1).
     module_dir = Path(__file__).resolve().parent.parent
-    candidates.append(module_dir / "dist" / "JanaIntegration")
+    candidates.append(module_dir / "dist" / "superflip")
     candidates.append(module_dir / "build" / "store" / "layout" / "JanaIntegration")
     for candidate in candidates:
         if (candidate / WRAPPER_EXE_NAME).is_file():
