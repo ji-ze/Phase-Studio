@@ -5678,7 +5678,7 @@ INPUT_TOOLTIPS = {
     "input_source_mode": "Choose whether reflections come from Jana2020 .inflip, selected overrides, or an external HKL file.",
     "jana_inflip": "Jana2020 Superflip input file. In Jana modes its fbegin/endf reflection block is the default HKL source, and its cell/space-group/composition keywords can provide the reference metadata.",
     "hkl": "External reflection file. In Jana override mode it replaces only the fbegin/endf reflection block; in external mode it is the required reflection source.",
-    "metadata_source": "Authoritative source for unit cell, space group and composition.",
+    "metadata_source": "Selects the authoritative source for unit-cell, space-group and composition metadata, independently of the reflection-data source -- for example, External HKL input with metadata taken from a Jana2020 .inflip or reference structure.",
     "manual_cell_a": "Manual unit-cell length a in angstrom.",
     "manual_cell_b": "Manual unit-cell length b in angstrom.",
     "manual_cell_c": "Manual unit-cell length c in angstrom.",
@@ -6867,7 +6867,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
             basic_contents_row.addWidget(link)
         basic_help_tab.addLayout(basic_contents_row)
-        setup_help_layout = self._add_help_section(basic_help_tab, "setup", "Systematic setup guide", """
+        setup_help_layout = self._add_help_section(basic_help_tab, "setup", "Phase Studio guide", """
             <h3>1. Select the input</h3>
             <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
             <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana2020 .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
@@ -7354,12 +7354,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # Secondary, subordinate line for Superflip's own live repeatmode
         # progress (e.g. "Superflip repeat 17 of 50"). Hidden whenever there
         # is nothing live to show: repeatmode==1, a non-Superflip stage, or
-        # between cycles -- see _apply_cycle_progress_state().
+        # between cycles -- see _apply_cycle_progress_state(). Grouped into
+        # its own tight sub-layout (1px) so the label reads as visually
+        # attached to its bar, distinct from the normal 3px spacing between
+        # otherwise-unrelated Run Status rows.
+        self.superflip_repeat_group = QWidget()
+        superflip_repeat_layout = QVBoxLayout(self.superflip_repeat_group)
+        superflip_repeat_layout.setContentsMargins(0, 0, 0, 0)
+        superflip_repeat_layout.setSpacing(1)
         self.superflip_repeat_detail = QLabel("")
         self.superflip_repeat_detail.setObjectName("superflipRepeatDetail")
         self.superflip_repeat_detail.setWordWrap(True)
-        self.superflip_repeat_detail.setVisible(False)
-        run_status_layout.addWidget(self.superflip_repeat_detail)
+        superflip_repeat_layout.addWidget(self.superflip_repeat_detail)
         self.superflip_repeat_progress = QProgressBar()
         self.superflip_repeat_progress.setObjectName("superflipRepeatProgress")
         self.superflip_repeat_progress.setRange(0, 1)
@@ -7367,8 +7373,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.superflip_repeat_progress.setTextVisible(False)
         self.superflip_repeat_progress.setFixedHeight(6)
         self.superflip_repeat_progress.setToolTip("Superflip's own repeatmode attempt counter for the running Superflip stage -- subordinate to the stage progress above.")
-        self.superflip_repeat_progress.setVisible(False)
-        run_status_layout.addWidget(self.superflip_repeat_progress)
+        superflip_repeat_layout.addWidget(self.superflip_repeat_progress)
+        self.superflip_repeat_group.setVisible(False)
+        run_status_layout.addWidget(self.superflip_repeat_group)
         self.current_cycle_progress = QProgressBar()
         self.current_cycle_progress.setObjectName("currentCycleProgress")
         self.current_cycle_progress.setRange(0, 1)
@@ -7754,6 +7761,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metadata_form.addRow("", self.metadata_error_panel)
 
         reference_form = self._add_form_group(input_tab, "Reference and initial model")
+        # Slightly tighter top margin than the shared subsection default so
+        # this section's heading is visible sooner below Crystal metadata's
+        # summary in a normal 1080p window -- scoped to this one group via a
+        # dynamic property, not a change to every subsection's spacing.
+        reference_form.parentWidget().setProperty("tightTop", True)
         self._add_path(reference_form, "reference_cif", "Reference structure", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
         self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
         self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
@@ -7809,6 +7821,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "Next-cycle model determines how subsequent cycles are initialized. Selecting None "
             "limits the workflow to a single cycle. XPLOR damping applies only to XPLOR-based recycling."
         )
+        workflow_note.setProperty("compactPadding", True)
         workflow_form.addRow("", workflow_note)
         self.recycle_note = self._settings_callout(
             "Phasing method",
@@ -7828,9 +7841,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
         self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
         model_form.addRow("", self.refresh_models_btn)
-        model_form.addRow("", self._secondary_help(
-            "Connection: Advanced → Setup\nInference and transfer: Advanced → SharpED"
-        ))
+        settings_links_row = QHBoxLayout()
+        settings_links_row.setSpacing(10)
+        connection_settings_link = QToolButton()
+        connection_settings_link.setObjectName("settingsNavLink")
+        connection_settings_link.setText("Connection settings →")
+        connection_settings_link.setCursor(Qt.PointingHandCursor)
+        connection_settings_link.setToolTip("Open Advanced → Setup (server URL, API token).")
+        connection_settings_link.clicked.connect(lambda _checked=False: self._open_configuration_page("Setup", advanced=True))
+        inference_settings_link = QToolButton()
+        inference_settings_link.setObjectName("settingsNavLink")
+        inference_settings_link.setText("Inference settings →")
+        inference_settings_link.setCursor(Qt.PointingHandCursor)
+        inference_settings_link.setToolTip("Open Advanced → SharpED (elements, output resolution, network/upload settings).")
+        inference_settings_link.clicked.connect(lambda _checked=False: self._open_configuration_page("SharpED", advanced=True))
+        settings_links_row.addWidget(connection_settings_link)
+        settings_links_row.addWidget(inference_settings_link)
+        settings_links_row.addStretch(1)
+        model_form.addRow("", settings_links_row)
 
         optional_form = self._add_form_group(workflow_tab, "Optional processing")
         self._optional_form = optional_form
@@ -7865,12 +7893,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_path(output_form, "work_dir", "Working directory", str(cwd / "iterative_superflip_qt_run"), "dir")
         self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana", "HKL reflections with phases", "ShelX (fcf)"], "xplor")
         self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
-        output_form.addRow("", self._secondary_help(
-            "Internal files: XPLOR maps and CIF structures required by the workflow are retained automatically, "
-            "regardless of the selected export formats."
-        ))
-        output_form.addRow("", self._secondary_help(
-            "Export formats: the selections above control additional files intended for external use. "
+        output_form.addRow("", self._settings_callout(
+            "Note",
+            "Internal XPLOR maps and CIF structures required by the workflow are retained automatically. "
+            "The selected formats control additional files for external use. "
             "HKL reflections with phases and ShelX (fcf) save reflection data instead of an extra map."
         ))
         output_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
@@ -7895,7 +7921,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 1, 1, 999, 1)
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply when value/σ <", 0.0, 0.0, 1000.0, 0.5, 3)
-        intensity_feedback_form.addRow("", self._settings_callout("Note", "Value/σ = 0 applies correction to all non-zero reflections."))
+        intensity_feedback_form.addRow("", self._settings_callout("Note", "At 0, correction applies to all non-zero reflections."))
 
         powder_feedback_form = self._add_form_group(feedback_tab, "Powder overlap repartitioning")
         self._add_checkbox(powder_feedback_form, "redistribute_overlaps", "Enable powder overlap repartitioning (FWHM data)", False, align_with_fields=True)
@@ -9940,16 +9966,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         block_format.setLineHeight(112.0, QTextBlockFormat.ProportionalHeight.value)
         cursor.setBlockFormat(block_format)
         text_format = QTextCharFormat()
-        colors = {
-            "INFO": "#14204a",
-            "STEP": "#001170",
-            "SUCCESS": "#2264b8",
-            "WARNING": "#8a5a00",
-            "ERROR": "#b42318",
-            "COMMAND": "#52658b",
-            "DETAIL": "#7183a6",
-        }
-        text_format.setForeground(QColor(colors.get(record.level, "#001170")))
+        # Three visual levels, not one color per log level: NORMAL (INFO,
+        # STEP, SUCCESS, COMMAND -- day-to-day output), DETAIL (secondary,
+        # de-emphasized), WARNING/ERROR (always prominent). The underlying
+        # level is unchanged and still written in full to the on-disk log;
+        # this only simplifies the on-screen color scheme.
+        prominent_colors = {"WARNING": "#8a5a00", "ERROR": "#b42318"}
+        if record.level in prominent_colors:
+            log_color = prominent_colors[record.level]
+        elif record.level == "DETAIL":
+            log_color = "#7183a6"
+        else:
+            log_color = "#14204a"
+        text_format.setForeground(QColor(log_color))
         workflow_subsystem = record.subsystem.casefold() in {"superflip", "sharped", "edma"}
         workflow_heading = (
             record.level not in {"DETAIL", "COMMAND"}
@@ -10026,16 +10055,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sub_total = None if state is None else state.sub_total
         sub_index = None if state is None else state.sub_index
         if state is None or state.complete or sub_total is None or sub_index is None or int(sub_total) <= 1:
-            self.superflip_repeat_detail.setVisible(False)
-            self.superflip_repeat_progress.setVisible(False)
+            self.superflip_repeat_group.setVisible(False)
             return
         sub_total = int(sub_total)
         sub_index = max(1, min(int(sub_index), sub_total))
         self.superflip_repeat_detail.setText(f"Superflip repeat {sub_index} of {sub_total}")
-        self.superflip_repeat_detail.setVisible(True)
         self.superflip_repeat_progress.setRange(0, sub_total)
         self.superflip_repeat_progress.setValue(sub_index)
-        self.superflip_repeat_progress.setVisible(True)
+        self.superflip_repeat_group.setVisible(True)
 
     def _annotate_cycle_progress(self, detail: str) -> None:
         state = self._cycle_progress_state
@@ -12032,8 +12059,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._structure_depth_artists.append(depth_artists)
         self._update_structure_depth_artist(depth_artists, self.structure_elev, self.structure_azim)
         shown = len(plot_atoms)
-        suffix = "" if shown == len(non_h_atoms) else f" · displaying {shown:,} heaviest"
-        return f"{len(non_h_atoms):,} non-H/He atoms{suffix}"
+        # "atoms shown" (not "non-H/He atoms") since the viewer header
+        # already explains hydrogen/helium are hidden -- no need to repeat
+        # the exclusion rule here. When only the heaviest subset is actually
+        # drawn, say so explicitly instead, rather than call the full count
+        # "shown".
+        if shown == len(non_h_atoms):
+            return f"{len(non_h_atoms):,} atoms shown"
+        return f"{len(non_h_atoms):,} atoms · displaying {shown:,} heaviest"
 
     def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
         atom_fade = structure_depth_fade(

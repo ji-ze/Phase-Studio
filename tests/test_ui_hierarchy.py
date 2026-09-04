@@ -34,7 +34,7 @@ def check(name, cond):
 
 
 def main():
-    from PySide6.QtWidgets import QApplication, QLabel, QToolButton, QTabWidget
+    from PySide6.QtWidgets import QApplication, QLabel, QToolButton, QTabWidget, QGroupBox
     app = QApplication.instance() or QApplication([sys.argv[0]])
 
     import phase_studio.ui_style as ui_style
@@ -175,6 +175,68 @@ def main():
     if edma_row is not None:
         tip = edma_row.toolTip()
         check("EDMA executable tooltip is wrapped as width-capped rich text", tip.startswith('<div style="max-width:'))
+
+    # =========================================================================
+    # 2026 micro-polish pass: settings nav links, run-status sub-progress
+    # grouping, execution-log color tiers, Help page heading, merged Output
+    # note, metadata-source tooltip clarity.
+    # =========================================================================
+    nav_links = {w.text(): w for w in workflow_page.findChildren(QToolButton) if w.objectName() == "settingsNavLink"}
+    check("SharpED model section has exactly 2 settings-nav links (Connection/Inference), not doc-style text",
+          set(nav_links) == {"Connection settings →", "Inference settings →"})
+    if "Connection settings →" in nav_links:
+        nav_links["Connection settings →"].click()
+        check("Connection settings link navigates to Advanced/Setup", win.category_tabs.currentIndex() == 1 and win.advanced_tabs.tabText(win.advanced_tabs.currentIndex()) == "Setup")
+    if "Inference settings →" in nav_links:
+        nav_links["Inference settings →"].click()
+        check("Inference settings link navigates to Advanced/SharpED", win.category_tabs.currentIndex() == 1 and win.advanced_tabs.tabText(win.advanced_tabs.currentIndex()) == "SharpED")
+    check("No stray guideLink-named button hides inside the SharpED model section (settings nav links use their own object name)",
+          not any(w.objectName() == "guideLink" for w in workflow_page.findChildren(QToolButton) if w.text() in ("Connection settings →", "Inference settings →")))
+
+    check("superflip_repeat_group exists and groups label+bar", hasattr(win, "superflip_repeat_group"))
+    if hasattr(win, "superflip_repeat_group"):
+        inner_spacing = win.superflip_repeat_group.layout().spacing()
+        outer_spacing = win.run_status_panel.layout().spacing()
+        check("Superflip-repeat label/bar spacing is tighter than unrelated Run Status rows", inner_spacing < outer_spacing)
+
+    from phase_studio.app import CycleProgressState
+    win._apply_superflip_repeat_state(CycleProgressState(
+        cycle_index=1, cycle_total=5, stage_name="Superflip", stage_index=2, stage_total=4,
+        sub_index=17, sub_total=50, complete=False,
+    ))
+    check("Superflip repeat state sets the expected text and unhides the group",
+          not win.superflip_repeat_group.isHidden() and win.superflip_repeat_detail.text() == "Superflip repeat 17 of 50")
+
+    win._append_execution_log("Micro-polish test: normal info line.", level="INFO")
+    win._append_execution_log("Micro-polish test: detail line.", level="DETAIL")
+    win._append_execution_log("Micro-polish test: warning line.", level="WARNING")
+    win._append_execution_log("Micro-polish test: error line.", level="ERROR")
+    log_doc = win.log_text.document()
+    log_colors = {}
+    block = log_doc.firstBlock()
+    while block.isValid():
+        it = block.begin()
+        if not it.atEnd():
+            log_colors[block.text()] = it.fragment().charFormat().foreground().color().name()
+        block = block.next()
+    check("Execution log NORMAL tier color", log_colors.get("Micro-polish test: normal info line.") == "#14204a")
+    check("Execution log DETAIL tier is a distinct, lighter secondary color", log_colors.get("Micro-polish test: detail line.") == "#7183a6")
+    check("Execution log WARNING tier stays visually prominent (distinct color)", log_colors.get("Micro-polish test: warning line.") == "#8a5a00")
+    check("Execution log ERROR tier stays visually prominent (distinct color)", log_colors.get("Micro-polish test: error line.") == "#b42318")
+
+    help_page = page_widget("Basic", "Help")
+    guide_headings = [w for w in help_page.findChildren(QGroupBox) if w.title() in ("Systematic setup guide", "Phase Studio guide")]
+    check("Help page's first section heading reads 'Phase Studio guide' (was 'Systematic setup guide')",
+          any(w.title() == "Phase Studio guide" for w in guide_headings) and not any(w.title() == "Systematic setup guide" for w in guide_headings))
+
+    output_page = page_widget("Basic", "Output")
+    output_callouts = [w for w in output_page.findChildren(QLabel) if w.objectName() == "settingsCallout"]
+    check("Output page has exactly one merged information callout (was two separate paragraphs)", len(output_callouts) == 1)
+    if output_callouts:
+        check("Output callout keeps the ShelX/fcf behavior sentence", "ShelX" in output_callouts[0].text())
+
+    metadata_tip = win.inputs["metadata_source"].toolTip()
+    check("Metadata source tooltip explains independence from the reflection-data source", "independently" in metadata_tip)
 
     failed = [n for n, ok in results_log if not ok]
     print()

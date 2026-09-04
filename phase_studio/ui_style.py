@@ -257,6 +257,9 @@ QGroupBox#guidedSettingsGroup {
     margin-top: 0;
     padding: 6px 8px 6px 8px;
 }
+QGroupBox#settingsGroup[tightTop="true"] {
+    margin-top: 0.6em;
+}
 QHeaderView::section {
     background-color: #f2f4f9;
     color: #001170;
@@ -699,6 +702,9 @@ QToolButton#metadataErrorDetails {
 QLabel#settingsCallout {
     padding: 6px 8px;
 }
+QLabel#settingsCallout[compactPadding="true"] {
+    padding: 3px 8px;
+}
 QLabel#configurationLockHint {
     font-size: 9pt;
     padding: 5px 8px;
@@ -725,7 +731,7 @@ QLabel#helpContentsLabel {
     font-weight: 800;
     padding: 2px 8px 2px 0;
 }
-QToolButton#helpNavLink, QToolButton#guideLink {
+QToolButton#helpNavLink, QToolButton#guideLink, QToolButton#settingsNavLink {
     color: #2264b8;
     background-color: #ffffff;
     border: none;
@@ -746,7 +752,7 @@ QToolButton#externalLink:pressed {
     background-color: #e2f4ff;
     border: none;
 }
-QToolButton#helpNavLink:hover, QToolButton#guideLink:hover {
+QToolButton#helpNavLink:hover, QToolButton#guideLink:hover, QToolButton#settingsNavLink:hover {
     color: #001170;
     background-color: #f2f4f9;
     border-bottom: 1px solid #44b7ff;
