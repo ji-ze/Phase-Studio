@@ -953,6 +953,212 @@ class _JanaWorkflowWizard:
     methods next); no behavior changes.
     """
 
+    def _shared_or_legacy_value(self, shared_key: str, legacy_key: str, fallback: str) -> str:
+        shared_value = str(self.shared_settings.value(f"inputs/{shared_key}", "") or "").strip()
+        if shared_value:
+            return shared_value
+        legacy_value = str(self.settings.value(legacy_key, "") or "").strip()
+        return legacy_value or fallback
+
+    def _adjust_dialog_size(self) -> None:
+        from phase_studio.app import apply_safe_dialog_geometry
+        # dialog.adjustSize() alone under-sizes the window here: QScrollArea's
+        # own sizeHint() does not reliably grow to match its contained page's
+        # actual sizeHint (Qt quirk), so relying on it can leave the dialog
+        # shorter than the current page truly needs -- forcing an unwanted
+        # vertical scrollbar even though the page would otherwise fit
+        # entirely. Compute the target size explicitly instead, from the
+        # fixed chrome (brand header + context banner + footer) plus the
+        # scrollable content's own required height, then let
+        # apply_safe_dialog_geometry cap BOTH size and position to
+        # availableGeometry() (excludes the taskbar) and re-center within it,
+        # so the title bar can never end up unreachable as content grows.
+        # Only the scrollable central content area (never this top-level
+        # window) may still exceed the screen's usable height, for a page
+        # taller than the whole screen can show at once.
+        # Deliberately NOT max()'d against dialog.width()/height(): the
+        # dialog must be able to shrink back down again too (e.g. going from
+        # the taller page2 back to page1, or collapsing an expanded SharpED
+        # disclosure) -- always resize from a fresh measurement of what the
+        # CURRENT page actually needs, not whatever the dialog happened to be
+        # sized to from an earlier call.
+        self.dialog.adjustSize()
+        footer_widget = self.chrome_holder["footer"]
+        chrome_height = (
+            self.brand_header.sizeHint().height()
+            + self.context_banner.sizeHint().height()
+            + (footer_widget.sizeHint().height() if footer_widget is not None else 0)
+        )
+        target_width = self.content.sizeHint().width() + 8
+        # content.sizeHint() alone is unreliable here: it is computed at some
+        # narrower candidate width, so word-wrapped labels (workflow card
+        # descriptions, the Cell row, etc.) end up wrapping to more lines
+        # than they actually will at target_width, overstating the needed
+        # height by 100+ px. heightForWidth(target_width) asks for the real
+        # answer at the width the dialog will actually use.
+        content_height = (
+            self.content.heightForWidth(target_width) if self.content.hasHeightForWidth()
+            else self.content.sizeHint().height()
+        )
+        target_height = chrome_height + content_height + 8
+        apply_safe_dialog_geometry(self.dialog, target_width, target_height)
+
+    def _get_backing_window(self):
+        win = self.backing_window_holder.get("win")
+        if win is not None:
+            return win
+        from phase_studio.app import IterativeSuperflipPipelineQtGUI, parse_inflip_settings
+
+        win = IterativeSuperflipPipelineQtGUI()
+        if inflip_path is not None:
+            try:
+                parsed = parse_inflip_settings(inflip_path)
+                handoff_import = build_jana_handoff_import(inflip_path, JanaRunOptions(action="edit"), parsed)
+                for key, value in handoff_import.values.items():
+                    widget = win.inputs.get(key)
+                    if widget is not None:
+                        win._set_widget_value_from_string(widget, value)
+                win._input_mode_user_changed()
+                win._sync_input_source_mode_widgets()
+            except Exception:
+                pass
+        self.backing_window_holder["win"] = win
+        return win
+
+    def _sync_map_choice(self) -> None:
+        self.validation_group.setVisible(self.sharped_map_radio.isChecked())
+        self._adjust_dialog_size()
+
+    def _detect_reflection_data_mode(self) -> str:
+        # The ACTUAL parsed reflection format (not filename/composition/space
+        # group) -- reuses the same backing window (and therefore the same
+        # HKL/.inflip parsing app.py itself uses) built for page1's summary.
+        if self.detected_data_mode_holder["mode"] is None:
+            try:
+                backing_win = self._get_backing_window()
+                self.detected_data_mode_holder["mode"] = backing_win._resolve_configured_data_mode_for_ui()
+            except Exception:
+                self.detected_data_mode_holder["mode"] = ""
+        return self.detected_data_mode_holder["mode"]
+
+    def _sync_page3_for_data_type(self) -> None:
+        from phase_studio.app import (
+            format_reflection_data_mode,
+            reflection_mode_has_fwhm,
+            resolve_powder_wavelength,
+        )
+        mode = self._detect_reflection_data_mode()
+        is_powder = reflection_mode_has_fwhm(mode)
+        self.reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal")
+        self.reflection_format_value.setText(format_reflection_data_mode(mode) if mode else "Not yet determined")
+        self.page3_description.setText(
+            "FWHM data detected. Powder overlap repartitioning is available."
+            if is_powder
+            else "Available feedback methods for single-crystal reflection data."
+        )
+        self.missing_group.setVisible(not is_powder)
+        self.intensity_group.setVisible(not is_powder)
+        self.powder_group.setVisible(is_powder)
+        if is_powder and self.powder_wavelength_spin.value() <= 0:
+            # Display default only (mirrors the main GUI's own
+            # resolve_powder_wavelength() called again at actual run time) --
+            # still fully editable, and 0 keeps its existing "auto" meaning
+            # for the underlying algorithm if left untouched.
+            try:
+                ref_text = self.reference_file.text().strip()
+                ref_path = Path(ref_text).expanduser() if ref_text else None
+                detected_wavelength, _source = resolve_powder_wavelength(0.0, inflip_path, ref_path)
+            except Exception:
+                detected_wavelength = 0.0
+            if detected_wavelength > 0:
+                self.powder_wavelength_spin.setValue(detected_wavelength)
+        self._adjust_dialog_size()
+
+    def _check_page3_validity(self) -> Optional[str]:
+        # Map feedback only affects SUBSEQUENT cycles -- an enabled method
+        # whose "Start after cycle" leaves no later cycle to apply to would
+        # silently do nothing; block Run rather than accept a setting that
+        # can never take effect. Never auto-raises Cycles to fix this.
+        total_cycles = max(1, self.cycles.value())
+        for checkbox, spin in (
+            (self.missing_enabled_checkbox, self.missing_start_cycle_spin),
+            (self.intensity_enabled_checkbox, self.intensity_start_cycle_spin),
+            (self.powder_enabled_checkbox, self.powder_start_cycle_spin),
+        ):
+            if checkbox.isVisible() and checkbox.isChecked() and spin.value() >= total_cycles:
+                return "A subsequent cycle is required for map feedback."
+        return None
+
+    def _refresh_page3_validation_message(self) -> None:
+        message = self._check_page3_validity()
+        self.page3_validation_label.setText(message or "")
+        self.page3_validation_label.setVisible(bool(message))
+
+    def _current_workflow(self) -> str:
+        return self.workflow_state["key"]
+
+    def _apply_workflow_cycle_default(self, key: str) -> None:
+        # "Superflip + SharpED" is always a single Superflip call followed by one
+        # SharpED pass; only "Phase recycling" repeats that pair over several cycles.
+        self.cycles.setEnabled(key == WORKFLOW_PHASE_RECYCLING)
+        recompute_default = not (self.cycles_user_edited["value"] and key == WORKFLOW_PHASE_RECYCLING)
+        self.cycles.blockSignals(True)
+        try:
+            # A single cycle never feeds a map back into a next cycle, so it
+            # isn't actually "recycling" -- the spinbox's own minimum (not
+            # just its default value) is raised to 2 for this workflow so the
+            # control itself can't be turned down to a non-recycling value.
+            self.cycles.setMinimum(2 if key == WORKFLOW_PHASE_RECYCLING else 1)
+            if recompute_default:
+                if key == WORKFLOW_PHASE_RECYCLING:
+                    self.cycles.setValue(max(int(self.settings.value("cycles", 5)) or 5, 2))
+                else:
+                    self.cycles.setValue(1)
+        finally:
+            self.cycles.blockSignals(False)
+
+    def _sync_primary_button_for_page1(self) -> None:
+        # Selecting a workflow card never runs or navigates by itself; the
+        # bottom-right button is the one clear place that either advances to the
+        # workflow's extra settings or, for Superflip only, runs it directly.
+        if self._current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
+            self.primary_button.setText("Run phasing")
+            self.primary_button.setToolTip(
+                "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper."
+            )
+        else:
+            self.primary_button.setText("Next ›")
+            self.primary_button.setToolTip("Continue to the SharpED and cycle settings.")
+
+    def _workflow_changed(self) -> None:
+        key = self._current_workflow()
+        for card_key, card in self.workflow_cards.items():
+            card.set_selected(card_key == key)
+        cycles_visible = key == WORKFLOW_PHASE_RECYCLING
+        self.cycles.setVisible(cycles_visible)
+        if self.cycles_label is not None:
+            self.cycles_label.setVisible(cycles_visible)
+        if key != WORKFLOW_SUPERFLIP_ONLY:
+            self._apply_workflow_cycle_default(key)
+            self.map_group.setTitle(
+                "Map used for phase recycling and Jana2020 handoff"
+                if key == WORKFLOW_PHASE_RECYCLING
+                else "Map used for Jana2020 handoff"
+            )
+            # The raw-vs-SharpED map choice is only meaningful for Phase
+            # recycling; "Superflip + SharpED" always uses the SharpED map
+            # (see effective_next_cycle_mode()), so offering it as a live
+            # choice there would be misleading. Force the radio to match
+            # before hiding it, so it reflects the truth if ever shown again.
+            self.map_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
+            if key == WORKFLOW_SUPERFLIP_SHARPED:
+                self.sharped_map_radio.setChecked(True)
+                self._sync_map_choice()
+            self._adjust_dialog_size()
+        self.cross_validation_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
+        if self.stack.currentWidget() is self.page1:
+            self._sync_primary_button_for_page1()
+
     def _build_and_run(self, args: Sequence[str], inflip_path: Optional[Path]) -> JanaRunOptions:
         qt = _qt_imports()
         QApplication = qt["QApplication"]
@@ -1004,12 +1210,6 @@ class _JanaWorkflowWizard:
         # overwrites the other's token the next time either app saves its settings.
         self.shared_settings = QSettings("PhaseStudio", "PhaseStudio")
 
-        def shared_or_legacy_value(shared_key: str, legacy_key: str, fallback: str) -> str:
-            shared_value = str(self.shared_settings.value(f"inputs/{shared_key}", "") or "").strip()
-            if shared_value:
-                return shared_value
-            legacy_value = str(self.settings.value(legacy_key, "") or "").strip()
-            return legacy_value or fallback
 
         saved_workflow = str(self.settings.value("workflow", WORKFLOW_SUPERFLIP_ONLY))
         if saved_workflow not in WORKFLOW_LABELS:
@@ -1072,47 +1272,6 @@ class _JanaWorkflowWizard:
         # footer is available, so an early, footer-less estimate here is harmless.
         self.chrome_holder: dict = {"footer": None}
 
-        def adjust_dialog_size() -> None:
-            # dialog.adjustSize() alone under-sizes the window here: QScrollArea's
-            # own sizeHint() does not reliably grow to match its contained page's
-            # actual sizeHint (Qt quirk), so relying on it can leave the dialog
-            # shorter than the current page truly needs -- forcing an unwanted
-            # vertical scrollbar even though the page would otherwise fit
-            # entirely. Compute the target size explicitly instead, from the
-            # fixed chrome (brand header + context banner + footer) plus the
-            # scrollable content's own required height, then let
-            # apply_safe_dialog_geometry cap BOTH size and position to
-            # availableGeometry() (excludes the taskbar) and re-center within it,
-            # so the title bar can never end up unreachable as content grows.
-            # Only the scrollable central content area (never this top-level
-            # window) may still exceed the screen's usable height, for a page
-            # taller than the whole screen can show at once.
-            # Deliberately NOT max()'d against dialog.width()/height(): the
-            # dialog must be able to shrink back down again too (e.g. going from
-            # the taller page2 back to page1, or collapsing an expanded SharpED
-            # disclosure) -- always resize from a fresh measurement of what the
-            # CURRENT page actually needs, not whatever the dialog happened to be
-            # sized to from an earlier call.
-            self.dialog.adjustSize()
-            footer_widget = self.chrome_holder["footer"]
-            chrome_height = (
-                self.brand_header.sizeHint().height()
-                + self.context_banner.sizeHint().height()
-                + (footer_widget.sizeHint().height() if footer_widget is not None else 0)
-            )
-            target_width = self.content.sizeHint().width() + 8
-            # content.sizeHint() alone is unreliable here: it is computed at some
-            # narrower candidate width, so word-wrapped labels (workflow card
-            # descriptions, the Cell row, etc.) end up wrapping to more lines
-            # than they actually will at target_width, overstating the needed
-            # height by 100+ px. heightForWidth(target_width) asks for the real
-            # answer at the width the dialog will actually use.
-            content_height = (
-                self.content.heightForWidth(target_width) if self.content.hasHeightForWidth()
-                else self.content.sizeHint().height()
-            )
-            target_height = chrome_height + content_height + 8
-            apply_safe_dialog_geometry(self.dialog, target_width, target_height)
 
         self.outer_root = QVBoxLayout(self.dialog)
         self.outer_root.setContentsMargins(0, 0, 0, 0)
@@ -1170,27 +1329,6 @@ class _JanaWorkflowWizard:
         # wizard's first page still appears immediately.
         self.backing_window_holder: dict = {"win": None}
 
-        def get_backing_window():
-            win = self.backing_window_holder.get("win")
-            if win is not None:
-                return win
-            from phase_studio.app import IterativeSuperflipPipelineQtGUI, parse_inflip_settings
-
-            win = IterativeSuperflipPipelineQtGUI()
-            if inflip_path is not None:
-                try:
-                    parsed = parse_inflip_settings(inflip_path)
-                    handoff_import = build_jana_handoff_import(inflip_path, JanaRunOptions(action="edit"), parsed)
-                    for key, value in handoff_import.values.items():
-                        widget = win.inputs.get(key)
-                        if widget is not None:
-                            win._set_widget_value_from_string(widget, value)
-                    win._input_mode_user_changed()
-                    win._sync_input_source_mode_widgets()
-                except Exception:
-                    pass
-            self.backing_window_holder["win"] = win
-            return win
 
         def build_page1_section(title: str, helper_text: str = "") -> tuple:
             # A plain QGroupBox's title/border/padding chrome (shared app-wide via
@@ -1280,7 +1418,7 @@ class _JanaWorkflowWizard:
                 self.analyze_completeness_button.setToolTip(no_inflip_tip)
                 return
             try:
-                win = get_backing_window()
+                win = self._get_backing_window()
                 from phase_studio.app import compact_spacegroup_symbol, format_reflection_data_mode
                 request = win._collect_hkl_analysis_request()
                 result = win._build_hkl_load_result(request)
@@ -1313,14 +1451,14 @@ class _JanaWorkflowWizard:
 
         def validate_hkl_clicked() -> None:
             try:
-                get_backing_window().test_hkl_load_dialog()
+                self._get_backing_window().test_hkl_load_dialog()
             except Exception as exc:
                 report = build_error_report(exc, subsystem="HKL", operation="HKL validation")
                 show_phase_studio_error(self.dialog, report)
 
         def analyze_completeness_clicked() -> None:
             try:
-                get_backing_window().open_hkl_completeness_dialog()
+                self._get_backing_window().open_hkl_completeness_dialog()
             except Exception as exc:
                 report = build_error_report(exc, subsystem="HKL", operation="HKL completeness")
                 show_phase_studio_error(self.dialog, report)
@@ -1410,7 +1548,7 @@ class _JanaWorkflowWizard:
 
         def workflow_card_clicked(key: str) -> None:
             self.workflow_state["key"] = key
-            workflow_changed()
+            self._workflow_changed()
 
         # Workflow is the single most important choice on this page (it decides
         # the whole execution path) and must not blend in as one more same-weight
@@ -1517,7 +1655,7 @@ class _JanaWorkflowWizard:
         self.sharped_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.sharped_form.setContentsMargins(18, 4, 0, 0)
 
-        self.server_url = QLineEdit(shared_or_legacy_value("sharped_base_url", "server_url", DEFAULT_SERVER_URL))
+        self.server_url = QLineEdit(self._shared_or_legacy_value("sharped_base_url", "server_url", DEFAULT_SERVER_URL))
         self.server_url.setPlaceholderText(DEFAULT_SERVER_URL)
         self.server_url.setToolTip(
             "Base URL of the SharpED service used for model discovery and map processing. "
@@ -1526,7 +1664,7 @@ class _JanaWorkflowWizard:
         self.sharped_form.addRow("Server URL", self.server_url)
 
         self.api_token = QLineEdit(
-            shared_or_legacy_value("sharped_api_token", "api_token", os.environ.get("SHARPED_API_TOKEN", ""))
+            self._shared_or_legacy_value("sharped_api_token", "api_token", os.environ.get("SHARPED_API_TOKEN", ""))
         )
         self.api_token.setEchoMode(QLineEdit.Password)
         self.api_token.setPlaceholderText("Enter API token")
@@ -1549,7 +1687,7 @@ class _JanaWorkflowWizard:
         def sync_sharped_disclosure(opened: bool) -> None:
             self.sharped_body.setVisible(bool(opened))
             self.sharped_toggle.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
-            adjust_dialog_size()
+            self._adjust_dialog_size()
 
         self.sharped_toggle.toggled.connect(sync_sharped_disclosure)
         self.page2_layout.addWidget(self.sharped_group)
@@ -1680,12 +1818,9 @@ class _JanaWorkflowWizard:
         self.page2_layout.addStretch(1)
         self.stack.addWidget(self.page2)
 
-        def sync_map_choice() -> None:
-            self.validation_group.setVisible(self.sharped_map_radio.isChecked())
-            adjust_dialog_size()
 
-        self.sharped_map_radio.toggled.connect(lambda _checked=False: sync_map_choice())
-        sync_map_choice()
+        self.sharped_map_radio.toggled.connect(lambda _checked=False: self._sync_map_choice())
+        self._sync_map_choice()
 
         # ----- Page 3: Map feedback (Phase recycling only) -- exposes and
         # populates the existing Basic -> Map feedback controls/RunConfig
@@ -1901,71 +2036,15 @@ class _JanaWorkflowWizard:
 
         self.detected_data_mode_holder: dict = {"mode": None}
 
-        def detect_reflection_data_mode() -> str:
-            # The ACTUAL parsed reflection format (not filename/composition/space
-            # group) -- reuses the same backing window (and therefore the same
-            # HKL/.inflip parsing app.py itself uses) built for page1's summary.
-            if self.detected_data_mode_holder["mode"] is None:
-                try:
-                    backing_win = get_backing_window()
-                    self.detected_data_mode_holder["mode"] = backing_win._resolve_configured_data_mode_for_ui()
-                except Exception:
-                    self.detected_data_mode_holder["mode"] = ""
-            return self.detected_data_mode_holder["mode"]
 
-        def sync_page3_for_data_type() -> None:
-            mode = detect_reflection_data_mode()
-            is_powder = reflection_mode_has_fwhm(mode)
-            self.reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal")
-            self.reflection_format_value.setText(format_reflection_data_mode(mode) if mode else "Not yet determined")
-            self.page3_description.setText(
-                "FWHM data detected. Powder overlap repartitioning is available."
-                if is_powder
-                else "Available feedback methods for single-crystal reflection data."
-            )
-            self.missing_group.setVisible(not is_powder)
-            self.intensity_group.setVisible(not is_powder)
-            self.powder_group.setVisible(is_powder)
-            if is_powder and self.powder_wavelength_spin.value() <= 0:
-                # Display default only (mirrors the main GUI's own
-                # resolve_powder_wavelength() called again at actual run time) --
-                # still fully editable, and 0 keeps its existing "auto" meaning
-                # for the underlying algorithm if left untouched.
-                try:
-                    ref_text = self.reference_file.text().strip()
-                    ref_path = Path(ref_text).expanduser() if ref_text else None
-                    detected_wavelength, _source = resolve_powder_wavelength(0.0, inflip_path, ref_path)
-                except Exception:
-                    detected_wavelength = 0.0
-                if detected_wavelength > 0:
-                    self.powder_wavelength_spin.setValue(detected_wavelength)
-            adjust_dialog_size()
 
-        def check_page3_validity() -> Optional[str]:
-            # Map feedback only affects SUBSEQUENT cycles -- an enabled method
-            # whose "Start after cycle" leaves no later cycle to apply to would
-            # silently do nothing; block Run rather than accept a setting that
-            # can never take effect. Never auto-raises Cycles to fix this.
-            total_cycles = max(1, self.cycles.value())
-            for checkbox, spin in (
-                (self.missing_enabled_checkbox, self.missing_start_cycle_spin),
-                (self.intensity_enabled_checkbox, self.intensity_start_cycle_spin),
-                (self.powder_enabled_checkbox, self.powder_start_cycle_spin),
-            ):
-                if checkbox.isVisible() and checkbox.isChecked() and spin.value() >= total_cycles:
-                    return "A subsequent cycle is required for map feedback."
-            return None
 
-        def refresh_page3_validation_message() -> None:
-            message = check_page3_validity()
-            self.page3_validation_label.setText(message or "")
-            self.page3_validation_label.setVisible(bool(message))
 
         for _spin in (self.missing_start_cycle_spin, self.intensity_start_cycle_spin, self.powder_start_cycle_spin):
-            _spin.valueChanged.connect(lambda _value=0: refresh_page3_validation_message())
+            _spin.valueChanged.connect(lambda _value=0: self._refresh_page3_validation_message())
         for _checkbox in (self.missing_enabled_checkbox, self.intensity_enabled_checkbox, self.powder_enabled_checkbox):
-            _checkbox.toggled.connect(lambda _checked=False: refresh_page3_validation_message())
-        self.cycles.valueChanged.connect(lambda _value=0: refresh_page3_validation_message())
+            _checkbox.toggled.connect(lambda _checked=False: self._refresh_page3_validation_message())
+        self.cycles.valueChanged.connect(lambda _value=0: self._refresh_page3_validation_message())
 
         # ----- Fixed action footer: added to outer_root (NOT the scrollable
         # `root`/content_layout), so Back/Cancel/Open config/Run phasing always
@@ -1998,72 +2077,11 @@ class _JanaWorkflowWizard:
         self.outer_root.addWidget(self.footer)
         self.chrome_holder["footer"] = self.footer
 
-        def current_workflow() -> str:
-            return self.workflow_state["key"]
 
-        def apply_workflow_cycle_default(key: str) -> None:
-            # "Superflip + SharpED" is always a single Superflip call followed by one
-            # SharpED pass; only "Phase recycling" repeats that pair over several cycles.
-            self.cycles.setEnabled(key == WORKFLOW_PHASE_RECYCLING)
-            recompute_default = not (self.cycles_user_edited["value"] and key == WORKFLOW_PHASE_RECYCLING)
-            self.cycles.blockSignals(True)
-            try:
-                # A single cycle never feeds a map back into a next cycle, so it
-                # isn't actually "recycling" -- the spinbox's own minimum (not
-                # just its default value) is raised to 2 for this workflow so the
-                # control itself can't be turned down to a non-recycling value.
-                self.cycles.setMinimum(2 if key == WORKFLOW_PHASE_RECYCLING else 1)
-                if recompute_default:
-                    if key == WORKFLOW_PHASE_RECYCLING:
-                        self.cycles.setValue(max(int(self.settings.value("cycles", 5)) or 5, 2))
-                    else:
-                        self.cycles.setValue(1)
-            finally:
-                self.cycles.blockSignals(False)
 
-        def sync_primary_button_for_page1() -> None:
-            # Selecting a workflow card never runs or navigates by itself; the
-            # bottom-right button is the one clear place that either advances to the
-            # workflow's extra settings or, for Superflip only, runs it directly.
-            if current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
-                self.primary_button.setText("Run phasing")
-                self.primary_button.setToolTip(
-                    "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper."
-                )
-            else:
-                self.primary_button.setText("Next ›")
-                self.primary_button.setToolTip("Continue to the SharpED and cycle settings.")
 
-        def workflow_changed() -> None:
-            key = current_workflow()
-            for card_key, card in self.workflow_cards.items():
-                card.set_selected(card_key == key)
-            cycles_visible = key == WORKFLOW_PHASE_RECYCLING
-            self.cycles.setVisible(cycles_visible)
-            if self.cycles_label is not None:
-                self.cycles_label.setVisible(cycles_visible)
-            if key != WORKFLOW_SUPERFLIP_ONLY:
-                apply_workflow_cycle_default(key)
-                self.map_group.setTitle(
-                    "Map used for phase recycling and Jana2020 handoff"
-                    if key == WORKFLOW_PHASE_RECYCLING
-                    else "Map used for Jana2020 handoff"
-                )
-                # The raw-vs-SharpED map choice is only meaningful for Phase
-                # recycling; "Superflip + SharpED" always uses the SharpED map
-                # (see effective_next_cycle_mode()), so offering it as a live
-                # choice there would be misleading. Force the radio to match
-                # before hiding it, so it reflects the truth if ever shown again.
-                self.map_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
-                if key == WORKFLOW_SUPERFLIP_SHARPED:
-                    self.sharped_map_radio.setChecked(True)
-                    sync_map_choice()
-                adjust_dialog_size()
-            self.cross_validation_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
-            if self.stack.currentWidget() is self.page1:
-                sync_primary_button_for_page1()
 
-        workflow_changed()
+        self._workflow_changed()
 
         self.PAGE2_BANNER_TEXT = {
             WORKFLOW_SUPERFLIP_SHARPED: ("SUPERFLIP + SHARPED", "Configure the map returned to Jana2020"),
@@ -2073,15 +2091,15 @@ class _JanaWorkflowWizard:
         def go_to_page1() -> None:
             self.stack.setCurrentWidget(self.page1)
             self.back_button.setVisible(False)
-            sync_primary_button_for_page1()
+            self._sync_primary_button_for_page1()
             self.context_title_label.setText("JANA2020 WORKFLOW")
             self.context_subtitle_label.setText("Review the incoming crystallographic data and choose a workflow")
-            adjust_dialog_size()
+            self._adjust_dialog_size()
 
         def go_to_page2() -> None:
             self.stack.setCurrentWidget(self.page2)
             self.back_button.setVisible(True)
-            if current_workflow() == WORKFLOW_PHASE_RECYCLING:
+            if self._current_workflow() == WORKFLOW_PHASE_RECYCLING:
                 # Phase recycling alone continues to a third page (Map feedback)
                 # before anything runs; Superflip + SharpED has no such page and
                 # keeps running directly from here.
@@ -2094,15 +2112,15 @@ class _JanaWorkflowWizard:
                     "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
                 )
             banner_title, banner_subtitle = self.PAGE2_BANNER_TEXT.get(
-                current_workflow(), ("JANA2020 WORKFLOW", "")
+                self._current_workflow(), ("JANA2020 WORKFLOW", "")
             )
             self.context_title_label.setText(banner_title)
             self.context_subtitle_label.setText(banner_subtitle)
-            adjust_dialog_size()
+            self._adjust_dialog_size()
 
         def go_to_page3() -> None:
-            sync_page3_for_data_type()
-            refresh_page3_validation_message()
+            self._sync_page3_for_data_type()
+            self._refresh_page3_validation_message()
             self.stack.setCurrentWidget(self.page3)
             self.back_button.setVisible(True)
             self.primary_button.setText("Run phasing")
@@ -2112,7 +2130,7 @@ class _JanaWorkflowWizard:
             )
             self.context_title_label.setText("PHASE RECYCLING · MAP FEEDBACK")
             self.context_subtitle_label.setText("Optionally update reflection data between recycling cycles")
-            adjust_dialog_size()
+            self._adjust_dialog_size()
 
         def go_back() -> None:
             if self.stack.currentWidget() is self.page3:
@@ -2126,9 +2144,9 @@ class _JanaWorkflowWizard:
         self.result = {"action": "cancel"}
 
         def effective_next_cycle_mode() -> str:
-            if current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
+            if self._current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
                 return "none"
-            if current_workflow() == WORKFLOW_SUPERFLIP_SHARPED:
+            if self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED:
                 # This workflow always runs SharpED and hands its (deblurred)
                 # map off to Jana2020 -- the raw-vs-SharpED map choice only has
                 # real meaning for Phase recycling, where each cycle genuinely
@@ -2139,14 +2157,14 @@ class _JanaWorkflowWizard:
             return "superflip_xplor" if self.superflip_map_radio.isChecked() else "deblurred_xplor"
 
         def effective_cycles() -> int:
-            return 1 if current_workflow() == WORKFLOW_SUPERFLIP_ONLY else self.cycles.value()
+            return 1 if self._current_workflow() == WORKFLOW_SUPERFLIP_ONLY else self.cycles.value()
 
         def effective_elements() -> str:
-            return shared_or_legacy_value("sharped_elements", "elements", "C N O")
+            return self._shared_or_legacy_value("sharped_elements", "elements", "C N O")
 
         def effective_outres() -> float:
             try:
-                return float(shared_or_legacy_value("sharped_outres", "outres", "0.2"))
+                return float(self._shared_or_legacy_value("sharped_outres", "outres", "0.2"))
             except ValueError:
                 return 0.2
 
@@ -2154,7 +2172,7 @@ class _JanaWorkflowWizard:
             # Cross-validation is Phase-recycling-only; the checkboxes are hidden
             # (never even shown) for either single-pass workflow, and their value
             # must not leak through in that case regardless of prior state.
-            return current_workflow() == WORKFLOW_PHASE_RECYCLING and self.omit_checkbox.isChecked()
+            return self._current_workflow() == WORKFLOW_PHASE_RECYCLING and self.omit_checkbox.isChecked()
 
         def effective_compute_omit_rfree() -> bool:
             return effective_compute_omit_maps() and self.rfree_checkbox.isChecked()
@@ -2162,11 +2180,11 @@ class _JanaWorkflowWizard:
         def effective_map_feedback_enabled() -> bool:
             # PAGE 3 is Phase-recycling-only; its controls must never leak
             # through for either single-pass workflow even if somehow toggled.
-            return current_workflow() == WORKFLOW_PHASE_RECYCLING
+            return self._current_workflow() == WORKFLOW_PHASE_RECYCLING
 
         def save_values() -> None:
             next_cycle_mode = effective_next_cycle_mode()
-            self.settings.setValue("workflow", current_workflow())
+            self.settings.setValue("workflow", self._current_workflow())
             self.settings.setValue("cycles", effective_cycles())
             self.settings.setValue("next_cycle_modelfile", next_cycle_mode)
             self.settings.setValue("use_deblurred_map", next_cycle_mode == "deblurred_xplor")
@@ -2220,13 +2238,13 @@ class _JanaWorkflowWizard:
             )
 
         def attempt_run() -> None:
-            if self.stack.currentWidget() is self.page1 and current_workflow() != WORKFLOW_SUPERFLIP_ONLY:
+            if self.stack.currentWidget() is self.page1 and self._current_workflow() != WORKFLOW_SUPERFLIP_ONLY:
                 go_to_page2()
                 return
             if self.stack.currentWidget() is self.page3:
-                validation_message = check_page3_validity()
+                validation_message = self._check_page3_validity()
                 if validation_message:
-                    refresh_page3_validation_message()
+                    self._refresh_page3_validation_message()
                     return
                 save_values()
                 self.result["action"] = "recycle"
@@ -2240,7 +2258,7 @@ class _JanaWorkflowWizard:
                 self.api_token.setFocus()
                 _show_missing_token_warning(self.dialog, qt)
                 return
-            if self.stack.currentWidget() is self.page2 and current_workflow() == WORKFLOW_PHASE_RECYCLING:
+            if self.stack.currentWidget() is self.page2 and self._current_workflow() == WORKFLOW_PHASE_RECYCLING:
                 go_to_page3()
                 return
             save_values()
@@ -2267,7 +2285,7 @@ class _JanaWorkflowWizard:
         # above can overstate the needed height. A second pass once the dialog's
         # event loop has actually started (same deferred-refit pattern used for
         # the HKL Completeness dialog in app.py) settles it accurately.
-        QTimer.singleShot(0, adjust_dialog_size)
+        QTimer.singleShot(0, self._adjust_dialog_size)
 
         accepted = self.dialog.exec()
         self.refresh_timer.stop()
