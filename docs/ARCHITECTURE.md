@@ -199,17 +199,61 @@ string (window titles, splash screen, Jana2020 integration marker,
 `pyproject.toml`'s package version, the MSIX four-part version in
 `build_store_msix.ps1`) derives from it already.
 
-## Known size/coupling issues (intentionally not restructured)
+## Main-window and Jana Wizard construction
 
-`app.py`'s `_build_ui()` (~1,250 lines) and `jana_superflip.py`'s
-`show_jana_dialog()` (~1,300 lines) are each a single flat function
-building an entire window/dialog's worth of widgets, with dozens of nested
-closures sharing one mutable scope. They mix GUI construction with
-workflow/validation logic and (in `show_jana_dialog()`'s case) `.inflip`
-parsing and handoff-building. Splitting either of these safely would
-require extensive manual UI verification this project's current test
-suite cannot provide (no visual/DPI testing exists yet); they were
-deliberately left alone in the 2026 refactor pass rather than risk a
-behavior change that couldn't be fully verified. See that pass's
-engineering report for the full list of what was and wasn't touched, and
-why.
+`app.py`'s `IterativeSuperflipPipelineQtGUI._build_ui()` and
+`jana_superflip.py`'s Jana2020 Wizard were each originally a single flat
+function (~1,250 and ~1,300 lines respectively) building an entire
+window/dialog's worth of widgets, with dozens of nested closures sharing one
+mutable scope. A 2026 maintainability pass decomposed both, purely as code
+motion (zero behavior change, verified via construction tests, click-driven
+tests exercising real widget interaction, and the full regression suite at
+every step):
+
+- `_build_ui()` is now ~95 lines that call 14 focused builder methods, one
+  per Basic/Advanced tab plus the run-controls/metrics/structure-comparison/
+  execution-log sections (`_build_input_tab`, `_build_workflow_tab`, ...,
+  `_build_metrics_section`, etc.). 7 shared closures used across several of
+  them (`_add_settings_tab`, `_add_form_group`, `_add_help_section`, ...)
+  became ordinary bound methods.
+- `show_jana_dialog()` is now a 2-line wrapper around a
+  `_JanaWorkflowWizard(args, inflip_path).run()` controller class. Its
+  ~50 nested closures were converted in three verified stages: (1) every
+  name shared across more than one closure was promoted to a `self.*`
+  attribute (scope-checked so the one genuine local shadow was left alone);
+  (2) the dozen closures actually called from a different "page" than the
+  one they were defined in (e.g. selecting a workflow card on page 1 needs
+  to update page 2's widgets) were promoted to real methods
+  (`_workflow_changed`, `_adjust_dialog_size`, `_get_backing_window`, ...);
+  (3) the remaining flat body was split into `__init__` (chrome/settings
+  setup), `_build_page1`/`_build_page2`/`_build_page3`, and `run()` (footer,
+  navigation, `dialog.exec()`). The four execution paths (Superflip only /
+  Superflip + SharpED / Phase recycling / Open full configuration) and
+  Cancel are each covered by a headless test that clicks through the real
+  widgets (`QTest.mouseClick`/`.click()`), not just constructs the dialog.
+
+Both were deliberately pure "extract method" passes -- no widget default,
+object name, tooltip, signal connection, or layout hierarchy changed:
+`app.py`/`jana_superflip.py`'s own module-level scientific/parsing functions
+were untouched throughout.
+
+## The Jana Wizard's shared HKL analysis
+
+The Wizard's page 1 input summary and its reflection-data-mode detection
+(gates whether page 3 shows single-crystal or powder/FWHM map-feedback
+controls) call `resolve_hkl_analysis_inputs()` / `build_hkl_load_result()` /
+`build_hkl_analysis_request_from_inflip()` -- plain module-level functions
+in `app.py`, not methods, since the actual HKL-parsing/completeness
+computation never touched `self` to begin with. This is the same
+computation the main GUI's own `_collect_hkl_analysis_request()` /
+`test_hkl_load_dialog()` / `open_hkl_completeness_dialog()` use for its
+"Jana2020 .inflip" input mode -- one implementation, reachable without
+constructing a window.
+
+The Wizard's "Validate HKL" / "Analyze completeness" buttons still construct
+a hidden, never-shown `IterativeSuperflipPipelineQtGUI()` (`_get_backing_
+window()`) -- but now *only* to reuse those two methods' actual dialog
+presentation (plots, diagnostic-dialog chrome shared with the main app), not
+for computation. Eliminating that hidden window too would mean duplicating
+substantial dialog UI code, not just computation, so it's deliberately left
+as-is; see that pass's engineering report for the full reasoning.
