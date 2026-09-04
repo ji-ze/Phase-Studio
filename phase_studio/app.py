@@ -3862,6 +3862,87 @@ def resolve_reflection_data_mode_from_sources(
     return resolve_reflection_data_mode(hkl_path, mode)
 
 
+def resolve_hkl_analysis_inputs(request: HklAnalysisRequest) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
+    """Resolve an HklAnalysisRequest into the concrete HKL file/cell/symmetry/
+    data-mode a load or completeness analysis needs. Plain function operating
+    only on its request argument (no QMainWindow/self needed) so any caller
+    -- the main GUI's own Validate HKL/Analyze completeness, or the Jana
+    Wizard's input summary/data-mode detection -- can call it directly."""
+    work_dir = Path(request.work_text).expanduser().resolve() if request.work_text else Path.cwd()
+    jana_path = Path(request.jana_text).expanduser().resolve() if request.jana_text else None
+    use_inflip_hkl = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
+    if use_inflip_hkl:
+        if jana_path is None or not jana_path.is_file():
+            raise FileNotFoundError("Jana2020 .inflip is required to test or analyze embedded HKL data.")
+        hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
+        source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
+    else:
+        if not request.hkl_text:
+            raise FileNotFoundError("Select an external HKL file or a Jana2020 .inflip with embedded reflections.")
+        hkl_path = Path(request.hkl_text).expanduser().resolve()
+        if not hkl_path.is_file():
+            raise FileNotFoundError(f"HKL file not found: {hkl_path}")
+        source_note = f"HKL source: {hkl_path}"
+    metadata = request.metadata
+    if metadata is None:
+        raise ValueError("Crystal metadata is incomplete. Provide unit-cell, symmetry and composition information.")
+    cell = metadata.cell
+    sg = metadata.spacegroup
+    hm = metadata.spacegroup_hm
+    metadata_name = metadata.source_path if metadata.source_path is not None else "manual input"
+    source_note += f"; cell/symmetry source: {metadata_name}"
+    if use_inflip_hkl:
+        data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
+    else:
+        data_mode = resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
+    return hkl_path, data_mode, cell, sg, hm, source_note
+
+
+def build_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResult:
+    """Plain-function equivalent of resolve_hkl_analysis_inputs() that also
+    reads and merges the reflections -- see resolve_hkl_analysis_inputs()."""
+    hkl_path, data_mode, cell, sg, hm, source_note = resolve_hkl_analysis_inputs(request)
+    value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
+    reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
+    unique = merge_duplicate_reflections(reflections)
+    return HklLoadResult(
+        hkl_path=hkl_path,
+        data_mode=data_mode,
+        cell=cell,
+        spacegroup=sg,
+        spacegroup_hm=hm,
+        source_note=source_note,
+        value_col=value_col,
+        sigma_col=sigma_col,
+        include_000=include_000,
+        reflections=reflections,
+        unique_reflections=unique,
+    )
+
+
+def build_hkl_analysis_request_from_inflip(
+    inflip_path: Path,
+    reference_file: Optional[Path] = None,
+    work_dir: Optional[Path] = None,
+) -> HklAnalysisRequest:
+    """Build the HklAnalysisRequest a Jana2020-.inflip-only caller (the Jana
+    Wizard) needs, without requiring a full IterativeSuperflipPipelineQtGUI
+    instance. Mirrors what the main GUI's _collect_hkl_analysis_request()
+    computes for its own "Jana2020 .inflip" input mode: crystal metadata is
+    always resolved from the .inflip itself (never manual entry or a
+    reference-file override, since the Wizard has no such controls)."""
+    metadata = resolve_crystal_metadata(METADATA_SOURCE_INFLIP, jana_inflip=inflip_path)
+    return HklAnalysisRequest(
+        INPUT_MODE_INFLIP,
+        "",
+        str(inflip_path),
+        str(reference_file) if reference_file is not None else "",
+        str(work_dir) if work_dir is not None else "",
+        REFLECTION_DATA_MODE_AUTO,
+        metadata,
+    )
+
+
 def write_reference_cif_from_inflip(inflip_path: Path, output_cif: Path) -> Path:
     cell, sg, hm, composition = parse_inflip_crystallography(inflip_path)
     output_cif.parent.mkdir(parents=True, exist_ok=True)
@@ -8667,55 +8748,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metadata = self._resolve_crystal_metadata_from_inputs()
         return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode, metadata)
 
-    def _resolve_hkl_analysis_inputs(self, request: HklAnalysisRequest) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
-        work_dir = Path(request.work_text).expanduser().resolve() if request.work_text else Path.cwd()
-        jana_path = Path(request.jana_text).expanduser().resolve() if request.jana_text else None
-        use_inflip_hkl = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
-        if use_inflip_hkl:
-            if jana_path is None or not jana_path.is_file():
-                raise FileNotFoundError("Jana2020 .inflip is required to test or analyze embedded HKL data.")
-            hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
-            source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
-        else:
-            if not request.hkl_text:
-                raise FileNotFoundError("Select an external HKL file or a Jana2020 .inflip with embedded reflections.")
-            hkl_path = Path(request.hkl_text).expanduser().resolve()
-            if not hkl_path.is_file():
-                raise FileNotFoundError(f"HKL file not found: {hkl_path}")
-            source_note = f"HKL source: {hkl_path}"
-        metadata = request.metadata
-        if metadata is None:
-            raise ValueError("Crystal metadata is incomplete. Provide unit-cell, symmetry and composition information.")
-        cell = metadata.cell
-        sg = metadata.spacegroup
-        hm = metadata.spacegroup_hm
-        metadata_name = metadata.source_path if metadata.source_path is not None else "manual input"
-        source_note += f"; cell/symmetry source: {metadata_name}"
-        if use_inflip_hkl:
-            data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
-        else:
-            data_mode = resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
-        return hkl_path, data_mode, cell, sg, hm, source_note
-
-    def _build_hkl_load_result(self, request: HklAnalysisRequest) -> HklLoadResult:
-        hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
-        value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
-        reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
-        unique = merge_duplicate_reflections(reflections)
-        return HklLoadResult(
-            hkl_path=hkl_path,
-            data_mode=data_mode,
-            cell=cell,
-            spacegroup=sg,
-            spacegroup_hm=hm,
-            source_note=source_note,
-            value_col=value_col,
-            sigma_col=sigma_col,
-            include_000=include_000,
-            reflections=reflections,
-            unique_reflections=unique,
-        )
-
     def _set_hkl_task_running(self, running: bool) -> None:
         for button_name in ("test_hkl_btn", "analyze_hkl_btn"):
             button = getattr(self, button_name, None)
@@ -8770,7 +8802,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
 
         def worker() -> object:
-            return self._build_hkl_load_result(request)
+            return build_hkl_load_result(request)
 
         self._start_hkl_background_task("HKL validation", worker, "hkl_load_result")
 
@@ -9140,7 +9172,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
 
         def worker() -> object:
-            hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
+            hkl_path, data_mode, cell, sg, hm, source_note = resolve_hkl_analysis_inputs(request)
             analysis = analyze_hkl_data(hkl_path, data_mode, cell, sg, hm, source_note)
             return analysis
 

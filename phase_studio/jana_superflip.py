@@ -1031,14 +1031,23 @@ class _JanaWorkflowWizard:
 
     def _detect_reflection_data_mode(self) -> str:
         # The ACTUAL parsed reflection format (not filename/composition/space
-        # group) -- reuses the same backing window (and therefore the same
-        # HKL/.inflip parsing app.py itself uses) built for page1's summary.
+        # group) -- calls the same shared resolver app.py's own
+        # _resolve_configured_data_mode_for_ui() uses for its "Jana2020
+        # .inflip" input mode (configured mode AUTO, no separate HKL
+        # override -- the Wizard never has one), without needing a hidden
+        # backing window just to reach it.
         if self.detected_data_mode_holder["mode"] is None:
+            from phase_studio.app import (
+                REFLECTION_DATA_MODE_AUTO,
+                normalize_reflection_data_mode,
+                resolve_reflection_data_mode_from_sources,
+            )
             try:
-                backing_win = self._get_backing_window()
-                self.detected_data_mode_holder["mode"] = backing_win._resolve_configured_data_mode_for_ui()
+                self.detected_data_mode_holder["mode"] = resolve_reflection_data_mode_from_sources(
+                    Path(""), REFLECTION_DATA_MODE_AUTO, self.inflip_path
+                )
             except Exception:
-                self.detected_data_mode_holder["mode"] = ""
+                self.detected_data_mode_holder["mode"] = normalize_reflection_data_mode(REFLECTION_DATA_MODE_AUTO)
         return self.detected_data_mode_holder["mode"]
 
     def _sync_page3_for_data_type(self) -> None:
@@ -1397,10 +1406,32 @@ class _JanaWorkflowWizard:
                 self.analyze_completeness_button.setToolTip(no_inflip_tip)
                 return
             try:
-                win = self._get_backing_window()
-                from phase_studio.app import compact_spacegroup_symbol, format_reflection_data_mode
-                request = win._collect_hkl_analysis_request()
-                result = win._build_hkl_load_result(request)
+                from phase_studio.app import (
+                    build_hkl_analysis_request_from_inflip,
+                    build_hkl_load_result,
+                    compact_spacegroup_symbol,
+                    format_reflection_data_mode,
+                    parse_inflip_settings,
+                )
+                # Computed directly from this Wizard's own state (no hidden
+                # backing IterativeSuperflipPipelineQtGUI needed for this --
+                # unlike validate_hkl_clicked()/analyze_completeness_clicked()
+                # below, this only needs the shared HKL-analysis computation,
+                # not the main GUI's dialog presentation). work_dir is
+                # resolved via the same build_jana_handoff_import() call the
+                # backing window itself would apply to its own widgets, so
+                # the embedded-HKL cache file lands in the same place a real
+                # run would put it.
+                ref_text = self.reference_file.text().strip()
+                reference_file = Path(ref_text).expanduser() if ref_text else None
+                parsed = parse_inflip_settings(self.inflip_path)
+                handoff_import = build_jana_handoff_import(self.inflip_path, JanaRunOptions(action="edit"), parsed)
+                work_dir_text = handoff_import.values.get("work_dir", "")
+                work_dir = Path(work_dir_text) if work_dir_text else None
+                request = build_hkl_analysis_request_from_inflip(
+                    self.inflip_path, reference_file=reference_file, work_dir=work_dir
+                )
+                result = build_hkl_load_result(request)
             except Exception:
                 # Per spec: never show a raw exception in this summary. The
                 # existing structured error dialog still covers Validate HKL /
