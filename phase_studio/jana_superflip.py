@@ -1010,10 +1010,10 @@ class _JanaWorkflowWizard:
         from phase_studio.app import IterativeSuperflipPipelineQtGUI, parse_inflip_settings
 
         win = IterativeSuperflipPipelineQtGUI()
-        if inflip_path is not None:
+        if self.inflip_path is not None:
             try:
-                parsed = parse_inflip_settings(inflip_path)
-                handoff_import = build_jana_handoff_import(inflip_path, JanaRunOptions(action="edit"), parsed)
+                parsed = parse_inflip_settings(self.inflip_path)
+                handoff_import = build_jana_handoff_import(self.inflip_path, JanaRunOptions(action="edit"), parsed)
                 for key, value in handoff_import.values.items():
                     widget = win.inputs.get(key)
                     if widget is not None:
@@ -1067,7 +1067,7 @@ class _JanaWorkflowWizard:
             try:
                 ref_text = self.reference_file.text().strip()
                 ref_path = Path(ref_text).expanduser() if ref_text else None
-                detected_wavelength, _source = resolve_powder_wavelength(0.0, inflip_path, ref_path)
+                detected_wavelength, _source = resolve_powder_wavelength(0.0, self.inflip_path, ref_path)
             except Exception:
                 detected_wavelength = 0.0
             if detected_wavelength > 0:
@@ -1159,8 +1159,10 @@ class _JanaWorkflowWizard:
         if self.stack.currentWidget() is self.page1:
             self._sync_primary_button_for_page1()
 
-    def _build_and_run(self, args: Sequence[str], inflip_path: Optional[Path]) -> JanaRunOptions:
+    def __init__(self, args: Sequence[str], inflip_path: Optional[Path]) -> None:
+        self.inflip_path = inflip_path
         qt = _qt_imports()
+        self.qt = qt
         QApplication = qt["QApplication"]
         QButtonGroup = qt["QButtonGroup"]
         QComboBox = qt["QComboBox"]
@@ -1215,49 +1217,6 @@ class _JanaWorkflowWizard:
         if saved_workflow not in WORKFLOW_LABELS:
             saved_workflow = WORKFLOW_SUPERFLIP_ONLY
         self.workflow_state = {"key": saved_workflow}
-
-        class _WorkflowCard(QFrame):
-            """A selectable workflow row: bold title, one description line, no
-            execution on click -- selecting a workflow only updates which card is
-            highlighted; the dialog's own "Run phasing" / "Next" action decides
-            whether and when anything actually runs."""
-
-            def __init__(self, key: str, title: str, description: str, on_click) -> None:
-                super().__init__()
-                self._key = key
-                self._on_click = on_click
-                self.setObjectName("workflowCard")
-                self.setFrameShape(QFrame.NoFrame)
-                self.setCursor(Qt.PointingHandCursor)
-                # Selected/hover states are driven entirely by the "selected" dynamic
-                # property + the shared QSS rules for QFrame#workflowCard (ui_style.py),
-                # mirroring the statusBadge[runState=...] pattern used elsewhere in
-                # Phase Studio, instead of swapping the whole stylesheet in Python.
-                # WA_Hover is required for a plain QFrame to actually repaint on
-                # mouse-enter/leave -- QAbstractButton gets this for free, QFrame does not.
-                self.setAttribute(Qt.WA_Hover, True)
-                layout = QVBoxLayout(self)
-                layout.setContentsMargins(12, 8, 12, 8)
-                layout.setSpacing(2)
-                title_label = QLabel(title)
-                title_font = title_label.font()
-                title_font.setBold(True)
-                title_label.setFont(title_font)
-                desc_label = QLabel(description)
-                desc_label.setWordWrap(True)
-                desc_label.setObjectName("workflowCardDescription")
-                layout.addWidget(title_label)
-                layout.addWidget(desc_label)
-                self.set_selected(False)
-
-            def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
-                super().mousePressEvent(event)
-                self._on_click(self._key)
-
-            def set_selected(self, selected: bool) -> None:
-                self.setProperty("selected", bool(selected))
-                self.style().unpolish(self)
-                self.style().polish(self)
 
         self.dialog = QDialog()
         self.dialog.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
@@ -1314,7 +1273,27 @@ class _JanaWorkflowWizard:
         self.stack = QStackedWidget()
         self.root.addWidget(self.stack, 1)
 
-        # ----- Page 1: input summary, reference/model files, then the 3 primary workflow actions -----
+        self._build_page1()
+        self._build_page2()
+        self._build_page3()
+
+    # ----- Page 1: input summary, reference/model files, then the 3 primary workflow actions -----
+    def _build_page1(self) -> None:
+        qt = self.qt
+        QFileDialog = qt["QFileDialog"]
+        QFormLayout = qt["QFormLayout"]
+        QFrame = qt["QFrame"]
+        QGroupBox = qt["QGroupBox"]
+        QHBoxLayout = qt["QHBoxLayout"]
+        QLabel = qt["QLabel"]
+        QLineEdit = qt["QLineEdit"]
+        QPushButton = qt["QPushButton"]
+        Qt = qt["Qt"]
+        QTimer = qt["QTimer"]
+        QVBoxLayout = qt["QVBoxLayout"]
+        QWidget = qt["QWidget"]
+        from phase_studio.app import format_reflection_data_mode
+
         self.page1 = QWidget()
         self.page1_layout = QVBoxLayout(self.page1)
         self.page1_layout.setContentsMargins(0, 0, 0, 0)
@@ -1411,7 +1390,7 @@ class _JanaWorkflowWizard:
 
         def refresh_input_summary() -> None:
             no_inflip_tip = "No incoming Jana2020 .inflip was supplied."
-            if inflip_path is None:
+            if self.inflip_path is None:
                 self.validate_hkl_button.setEnabled(False)
                 self.analyze_completeness_button.setEnabled(False)
                 self.validate_hkl_button.setToolTip(no_inflip_tip)
@@ -1516,10 +1495,10 @@ class _JanaWorkflowWizard:
             # Deliberately not persisted across runs: these fields reflect what the
             # incoming Jana2020 .inflip already declares, not a remembered value from
             # an unrelated previous job.
-            if inflip_path is None:
+            if self.inflip_path is None:
                 return ""
             try:
-                found = inflip_keyword_path(inflip_path, keyword)
+                found = inflip_keyword_path(self.inflip_path, keyword)
             except Exception:
                 return ""
             return str(found) if found is not None else ""
@@ -1546,6 +1525,49 @@ class _JanaWorkflowWizard:
         )
         self.page1_layout.addWidget(self.files_section)
 
+        class _WorkflowCard(QFrame):
+            """A selectable workflow row: bold title, one description line, no
+            execution on click -- selecting a workflow only updates which card is
+            highlighted; the dialog's own "Run phasing" / "Next" action decides
+            whether and when anything actually runs."""
+
+            def __init__(self, key: str, title: str, description: str, on_click) -> None:
+                super().__init__()
+                self._key = key
+                self._on_click = on_click
+                self.setObjectName("workflowCard")
+                self.setFrameShape(QFrame.NoFrame)
+                self.setCursor(Qt.PointingHandCursor)
+                # Selected/hover states are driven entirely by the "selected" dynamic
+                # property + the shared QSS rules for QFrame#workflowCard (ui_style.py),
+                # mirroring the statusBadge[runState=...] pattern used elsewhere in
+                # Phase Studio, instead of swapping the whole stylesheet in Python.
+                # WA_Hover is required for a plain QFrame to actually repaint on
+                # mouse-enter/leave -- QAbstractButton gets this for free, QFrame does not.
+                self.setAttribute(Qt.WA_Hover, True)
+                layout = QVBoxLayout(self)
+                layout.setContentsMargins(12, 8, 12, 8)
+                layout.setSpacing(2)
+                title_label = QLabel(title)
+                title_font = title_label.font()
+                title_font.setBold(True)
+                title_label.setFont(title_font)
+                desc_label = QLabel(description)
+                desc_label.setWordWrap(True)
+                desc_label.setObjectName("workflowCardDescription")
+                layout.addWidget(title_label)
+                layout.addWidget(desc_label)
+                self.set_selected(False)
+
+            def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+                super().mousePressEvent(event)
+                self._on_click(self._key)
+
+            def set_selected(self, selected: bool) -> None:
+                self.setProperty("selected", bool(selected))
+                self.style().unpolish(self)
+                self.style().polish(self)
+
         def workflow_card_clicked(key: str) -> None:
             self.workflow_state["key"] = key
             self._workflow_changed()
@@ -1568,7 +1590,29 @@ class _JanaWorkflowWizard:
         self.page1_layout.addStretch(1)
         self.stack.addWidget(self.page1)
 
-        # ----- Page 2: SharpED / phase-recycling settings (workflows 2 and 3 only) -----
+    # ----- Page 2: SharpED / phase-recycling settings (workflows 2 and 3 only) -----
+    def _build_page2(self) -> None:
+        qt = self.qt
+        QButtonGroup = qt["QButtonGroup"]
+        QComboBox = qt["QComboBox"]
+        QFormLayout = qt["QFormLayout"]
+        QGroupBox = qt["QGroupBox"]
+        QHBoxLayout = qt["QHBoxLayout"]
+        QLabel = qt["QLabel"]
+        QLineEdit = qt["QLineEdit"]
+        QPushButton = qt["QPushButton"]
+        QCheckBox = qt["QCheckBox"]
+        QRadioButton = qt["QRadioButton"]
+        QSettings = qt["QSettings"]
+        QSizePolicy = qt["QSizePolicy"]
+        QSpinBox = qt["QSpinBox"]
+        QStyle = qt["QStyle"]
+        QTimer = qt["QTimer"]
+        QToolButton = qt["QToolButton"]
+        Qt = qt["Qt"]
+        QVBoxLayout = qt["QVBoxLayout"]
+        QWidget = qt["QWidget"]
+
         self.page2 = QWidget()
         self.page2_layout = QVBoxLayout(self.page2)
         self.page2_layout.setContentsMargins(0, 0, 0, 0)
@@ -1822,11 +1866,25 @@ class _JanaWorkflowWizard:
         self.sharped_map_radio.toggled.connect(lambda _checked=False: self._sync_map_choice())
         self._sync_map_choice()
 
-        # ----- Page 3: Map feedback (Phase recycling only) -- exposes and
-        # populates the existing Basic -> Map feedback controls/RunConfig
-        # fields (see build_jana_handoff_import); no new map-feedback algorithm
-        # is implemented here. Not added to Superflip only or Superflip +
-        # SharpED, which never reach this page. -----
+    # ----- Page 3: Map feedback (Phase recycling only) -- exposes and
+    # populates the existing Basic -> Map feedback controls/RunConfig
+    # fields (see build_jana_handoff_import); no new map-feedback algorithm
+    # is implemented here. Not added to Superflip only or Superflip +
+    # SharpED, which never reach this page. -----
+    def _build_page3(self) -> None:
+        qt = self.qt
+        QDoubleSpinBox = qt["QDoubleSpinBox"]
+        QFormLayout = qt["QFormLayout"]
+        QGroupBox = qt["QGroupBox"]
+        QHBoxLayout = qt["QHBoxLayout"]
+        QLabel = qt["QLabel"]
+        QCheckBox = qt["QCheckBox"]
+        QSpinBox = qt["QSpinBox"]
+        QStyle = qt["QStyle"]
+        Qt = qt["Qt"]
+        QVBoxLayout = qt["QVBoxLayout"]
+        QWidget = qt["QWidget"]
+
         self.page3 = QWidget()
         self.page3_layout = QVBoxLayout(self.page3)
         self.page3_layout.setContentsMargins(0, 0, 0, 0)
@@ -2045,6 +2103,13 @@ class _JanaWorkflowWizard:
         for _checkbox in (self.missing_enabled_checkbox, self.intensity_enabled_checkbox, self.powder_enabled_checkbox):
             _checkbox.toggled.connect(lambda _checked=False: self._refresh_page3_validation_message())
         self.cycles.valueChanged.connect(lambda _value=0: self._refresh_page3_validation_message())
+
+    def run(self) -> JanaRunOptions:
+        qt = self.qt
+        QHBoxLayout = qt["QHBoxLayout"]
+        QPushButton = qt["QPushButton"]
+        QTimer = qt["QTimer"]
+        QWidget = qt["QWidget"]
 
         # ----- Fixed action footer: added to outer_root (NOT the scrollable
         # `root`/content_layout), so Back/Cancel/Open config/Run phasing always
@@ -2295,7 +2360,7 @@ class _JanaWorkflowWizard:
 
 
 def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRunOptions:
-    return _JanaWorkflowWizard()._build_and_run(args, inflip_path)
+    return _JanaWorkflowWizard(args, inflip_path).run()
 
 
 def launch_phase_studio_from_jana(
