@@ -944,1327 +944,1340 @@ WORKFLOW_DESCRIPTIONS = {
 }
 
 
-def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRunOptions:
-    qt = _qt_imports()
-    QApplication = qt["QApplication"]
-    QButtonGroup = qt["QButtonGroup"]
-    QComboBox = qt["QComboBox"]
-    QDialog = qt["QDialog"]
-    QDoubleSpinBox = qt["QDoubleSpinBox"]
-    QFileDialog = qt["QFileDialog"]
-    QFormLayout = qt["QFormLayout"]
-    QFrame = qt["QFrame"]
-    QGroupBox = qt["QGroupBox"]
-    QHBoxLayout = qt["QHBoxLayout"]
-    QLabel = qt["QLabel"]
-    QLineEdit = qt["QLineEdit"]
-    QPushButton = qt["QPushButton"]
-    QCheckBox = qt["QCheckBox"]
-    QRadioButton = qt["QRadioButton"]
-    QScrollArea = qt["QScrollArea"]
-    QSettings = qt["QSettings"]
-    QSizePolicy = qt["QSizePolicy"]
-    QSpinBox = qt["QSpinBox"]
-    QStackedWidget = qt["QStackedWidget"]
-    QStyle = qt["QStyle"]
-    QTimer = qt["QTimer"]
-    QToolButton = qt["QToolButton"]
-    Qt = qt["Qt"]
-    QVBoxLayout = qt["QVBoxLayout"]
-    QWidget = qt["QWidget"]
+class _JanaWorkflowWizard:
+    """Explicit-state controller for the Jana2020 Wizard dialog shown by
+    show_jana_dialog() -- extracted from what was a single ~1,300-line free
+    function full of nested closures sharing one mutable scope. This first
+    pass keeps the exact original body as one method (with every top-level
+    local promoted to a self.* attribute so it can be split into per-page
+    methods next); no behavior changes.
+    """
 
-    app = QApplication.instance() or QApplication([sys.argv[0], *args])
-    apply_phase_studio_style(app)
-    # Load after PySide6/style setup, same ordering as the other phase_studio.app
-    # imports in this module: shares the exact header/banner widgets the main
-    # window uses, so the Wizard reads as the same application, not a generic
-    # Qt dialog.
-    from phase_studio.app import (
-        apply_safe_dialog_geometry,
-        create_phase_studio_brand_header,
-        create_phase_studio_context_banner,
-        format_reflection_data_mode,
-        reflection_mode_has_fwhm,
-        resolve_powder_wavelength,
-    )
+    def _build_and_run(self, args: Sequence[str], inflip_path: Optional[Path]) -> JanaRunOptions:
+        qt = _qt_imports()
+        QApplication = qt["QApplication"]
+        QButtonGroup = qt["QButtonGroup"]
+        QComboBox = qt["QComboBox"]
+        QDialog = qt["QDialog"]
+        QDoubleSpinBox = qt["QDoubleSpinBox"]
+        QFileDialog = qt["QFileDialog"]
+        QFormLayout = qt["QFormLayout"]
+        QFrame = qt["QFrame"]
+        QGroupBox = qt["QGroupBox"]
+        QHBoxLayout = qt["QHBoxLayout"]
+        QLabel = qt["QLabel"]
+        QLineEdit = qt["QLineEdit"]
+        QPushButton = qt["QPushButton"]
+        QCheckBox = qt["QCheckBox"]
+        QRadioButton = qt["QRadioButton"]
+        QScrollArea = qt["QScrollArea"]
+        QSettings = qt["QSettings"]
+        QSizePolicy = qt["QSizePolicy"]
+        QSpinBox = qt["QSpinBox"]
+        QStackedWidget = qt["QStackedWidget"]
+        QStyle = qt["QStyle"]
+        QTimer = qt["QTimer"]
+        QToolButton = qt["QToolButton"]
+        Qt = qt["Qt"]
+        QVBoxLayout = qt["QVBoxLayout"]
+        QWidget = qt["QWidget"]
 
-    settings = QSettings("PhaseStudio", "JanaSuperflipWrapper")
-    # SharpED connection credentials (server URL, API token) are shared with the
-    # full Phase Studio application's own QSettings store, not kept as a second,
-    # independent copy here -- otherwise whichever one launched last silently
-    # overwrites the other's token the next time either app saves its settings.
-    shared_settings = QSettings("PhaseStudio", "PhaseStudio")
-
-    def shared_or_legacy_value(shared_key: str, legacy_key: str, fallback: str) -> str:
-        shared_value = str(shared_settings.value(f"inputs/{shared_key}", "") or "").strip()
-        if shared_value:
-            return shared_value
-        legacy_value = str(settings.value(legacy_key, "") or "").strip()
-        return legacy_value or fallback
-
-    saved_workflow = str(settings.value("workflow", WORKFLOW_SUPERFLIP_ONLY))
-    if saved_workflow not in WORKFLOW_LABELS:
-        saved_workflow = WORKFLOW_SUPERFLIP_ONLY
-    workflow_state = {"key": saved_workflow}
-
-    class _WorkflowCard(QFrame):
-        """A selectable workflow row: bold title, one description line, no
-        execution on click -- selecting a workflow only updates which card is
-        highlighted; the dialog's own "Run phasing" / "Next" action decides
-        whether and when anything actually runs."""
-
-        def __init__(self, key: str, title: str, description: str, on_click) -> None:
-            super().__init__()
-            self._key = key
-            self._on_click = on_click
-            self.setObjectName("workflowCard")
-            self.setFrameShape(QFrame.NoFrame)
-            self.setCursor(Qt.PointingHandCursor)
-            # Selected/hover states are driven entirely by the "selected" dynamic
-            # property + the shared QSS rules for QFrame#workflowCard (ui_style.py),
-            # mirroring the statusBadge[runState=...] pattern used elsewhere in
-            # Phase Studio, instead of swapping the whole stylesheet in Python.
-            # WA_Hover is required for a plain QFrame to actually repaint on
-            # mouse-enter/leave -- QAbstractButton gets this for free, QFrame does not.
-            self.setAttribute(Qt.WA_Hover, True)
-            layout = QVBoxLayout(self)
-            layout.setContentsMargins(12, 8, 12, 8)
-            layout.setSpacing(2)
-            title_label = QLabel(title)
-            title_font = title_label.font()
-            title_font.setBold(True)
-            title_label.setFont(title_font)
-            desc_label = QLabel(description)
-            desc_label.setWordWrap(True)
-            desc_label.setObjectName("workflowCardDescription")
-            layout.addWidget(title_label)
-            layout.addWidget(desc_label)
-            self.set_selected(False)
-
-        def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
-            super().mousePressEvent(event)
-            self._on_click(self._key)
-
-        def set_selected(self, selected: bool) -> None:
-            self.setProperty("selected", bool(selected))
-            self.style().unpolish(self)
-            self.style().polish(self)
-
-    dialog = QDialog()
-    dialog.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
-    dialog.setMinimumWidth(640)
-
-    # footer is only constructed later (after page1/page2), but
-    # adjust_dialog_size() is also invoked by callbacks wired up during page2
-    # construction, before it exists -- this mutable holder (same pattern as
-    # backing_window_holder below) lets adjust_dialog_size() reference
-    # whatever footer currently exists (or none yet) without a NameError; the
-    # final go_to_page1() call after construction recomputes the size once
-    # footer is available, so an early, footer-less estimate here is harmless.
-    chrome_holder: dict = {"footer": None}
-
-    def adjust_dialog_size() -> None:
-        # dialog.adjustSize() alone under-sizes the window here: QScrollArea's
-        # own sizeHint() does not reliably grow to match its contained page's
-        # actual sizeHint (Qt quirk), so relying on it can leave the dialog
-        # shorter than the current page truly needs -- forcing an unwanted
-        # vertical scrollbar even though the page would otherwise fit
-        # entirely. Compute the target size explicitly instead, from the
-        # fixed chrome (brand header + context banner + footer) plus the
-        # scrollable content's own required height, then let
-        # apply_safe_dialog_geometry cap BOTH size and position to
-        # availableGeometry() (excludes the taskbar) and re-center within it,
-        # so the title bar can never end up unreachable as content grows.
-        # Only the scrollable central content area (never this top-level
-        # window) may still exceed the screen's usable height, for a page
-        # taller than the whole screen can show at once.
-        # Deliberately NOT max()'d against dialog.width()/height(): the
-        # dialog must be able to shrink back down again too (e.g. going from
-        # the taller page2 back to page1, or collapsing an expanded SharpED
-        # disclosure) -- always resize from a fresh measurement of what the
-        # CURRENT page actually needs, not whatever the dialog happened to be
-        # sized to from an earlier call.
-        dialog.adjustSize()
-        footer_widget = chrome_holder["footer"]
-        chrome_height = (
-            brand_header.sizeHint().height()
-            + context_banner.sizeHint().height()
-            + (footer_widget.sizeHint().height() if footer_widget is not None else 0)
+        app = QApplication.instance() or QApplication([sys.argv[0], *args])
+        apply_phase_studio_style(app)
+        # Load after PySide6/style setup, same ordering as the other phase_studio.app
+        # imports in this module: shares the exact header/banner widgets the main
+        # window uses, so the Wizard reads as the same application, not a generic
+        # Qt dialog.
+        from phase_studio.app import (
+            apply_safe_dialog_geometry,
+            create_phase_studio_brand_header,
+            create_phase_studio_context_banner,
+            format_reflection_data_mode,
+            reflection_mode_has_fwhm,
+            resolve_powder_wavelength,
         )
-        target_width = content.sizeHint().width() + 8
-        # content.sizeHint() alone is unreliable here: it is computed at some
-        # narrower candidate width, so word-wrapped labels (workflow card
-        # descriptions, the Cell row, etc.) end up wrapping to more lines
-        # than they actually will at target_width, overstating the needed
-        # height by 100+ px. heightForWidth(target_width) asks for the real
-        # answer at the width the dialog will actually use.
-        content_height = (
-            content.heightForWidth(target_width) if content.hasHeightForWidth()
-            else content.sizeHint().height()
+
+        self.settings = QSettings("PhaseStudio", "JanaSuperflipWrapper")
+        # SharpED connection credentials (server URL, API token) are shared with the
+        # full Phase Studio application's own QSettings store, not kept as a second,
+        # independent copy here -- otherwise whichever one launched last silently
+        # overwrites the other's token the next time either app saves its settings.
+        self.shared_settings = QSettings("PhaseStudio", "PhaseStudio")
+
+        def shared_or_legacy_value(shared_key: str, legacy_key: str, fallback: str) -> str:
+            shared_value = str(self.shared_settings.value(f"inputs/{shared_key}", "") or "").strip()
+            if shared_value:
+                return shared_value
+            legacy_value = str(self.settings.value(legacy_key, "") or "").strip()
+            return legacy_value or fallback
+
+        saved_workflow = str(self.settings.value("workflow", WORKFLOW_SUPERFLIP_ONLY))
+        if saved_workflow not in WORKFLOW_LABELS:
+            saved_workflow = WORKFLOW_SUPERFLIP_ONLY
+        self.workflow_state = {"key": saved_workflow}
+
+        class _WorkflowCard(QFrame):
+            """A selectable workflow row: bold title, one description line, no
+            execution on click -- selecting a workflow only updates which card is
+            highlighted; the dialog's own "Run phasing" / "Next" action decides
+            whether and when anything actually runs."""
+
+            def __init__(self, key: str, title: str, description: str, on_click) -> None:
+                super().__init__()
+                self._key = key
+                self._on_click = on_click
+                self.setObjectName("workflowCard")
+                self.setFrameShape(QFrame.NoFrame)
+                self.setCursor(Qt.PointingHandCursor)
+                # Selected/hover states are driven entirely by the "selected" dynamic
+                # property + the shared QSS rules for QFrame#workflowCard (ui_style.py),
+                # mirroring the statusBadge[runState=...] pattern used elsewhere in
+                # Phase Studio, instead of swapping the whole stylesheet in Python.
+                # WA_Hover is required for a plain QFrame to actually repaint on
+                # mouse-enter/leave -- QAbstractButton gets this for free, QFrame does not.
+                self.setAttribute(Qt.WA_Hover, True)
+                layout = QVBoxLayout(self)
+                layout.setContentsMargins(12, 8, 12, 8)
+                layout.setSpacing(2)
+                title_label = QLabel(title)
+                title_font = title_label.font()
+                title_font.setBold(True)
+                title_label.setFont(title_font)
+                desc_label = QLabel(description)
+                desc_label.setWordWrap(True)
+                desc_label.setObjectName("workflowCardDescription")
+                layout.addWidget(title_label)
+                layout.addWidget(desc_label)
+                self.set_selected(False)
+
+            def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+                super().mousePressEvent(event)
+                self._on_click(self._key)
+
+            def set_selected(self, selected: bool) -> None:
+                self.setProperty("selected", bool(selected))
+                self.style().unpolish(self)
+                self.style().polish(self)
+
+        self.dialog = QDialog()
+        self.dialog.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
+        self.dialog.setMinimumWidth(640)
+
+        # footer is only constructed later (after page1/page2), but
+        # adjust_dialog_size() is also invoked by callbacks wired up during page2
+        # construction, before it exists -- this mutable holder (same pattern as
+        # backing_window_holder below) lets adjust_dialog_size() reference
+        # whatever footer currently exists (or none yet) without a NameError; the
+        # final go_to_page1() call after construction recomputes the size once
+        # footer is available, so an early, footer-less estimate here is harmless.
+        self.chrome_holder: dict = {"footer": None}
+
+        def adjust_dialog_size() -> None:
+            # dialog.adjustSize() alone under-sizes the window here: QScrollArea's
+            # own sizeHint() does not reliably grow to match its contained page's
+            # actual sizeHint (Qt quirk), so relying on it can leave the dialog
+            # shorter than the current page truly needs -- forcing an unwanted
+            # vertical scrollbar even though the page would otherwise fit
+            # entirely. Compute the target size explicitly instead, from the
+            # fixed chrome (brand header + context banner + footer) plus the
+            # scrollable content's own required height, then let
+            # apply_safe_dialog_geometry cap BOTH size and position to
+            # availableGeometry() (excludes the taskbar) and re-center within it,
+            # so the title bar can never end up unreachable as content grows.
+            # Only the scrollable central content area (never this top-level
+            # window) may still exceed the screen's usable height, for a page
+            # taller than the whole screen can show at once.
+            # Deliberately NOT max()'d against dialog.width()/height(): the
+            # dialog must be able to shrink back down again too (e.g. going from
+            # the taller page2 back to page1, or collapsing an expanded SharpED
+            # disclosure) -- always resize from a fresh measurement of what the
+            # CURRENT page actually needs, not whatever the dialog happened to be
+            # sized to from an earlier call.
+            self.dialog.adjustSize()
+            footer_widget = self.chrome_holder["footer"]
+            chrome_height = (
+                self.brand_header.sizeHint().height()
+                + self.context_banner.sizeHint().height()
+                + (footer_widget.sizeHint().height() if footer_widget is not None else 0)
+            )
+            target_width = self.content.sizeHint().width() + 8
+            # content.sizeHint() alone is unreliable here: it is computed at some
+            # narrower candidate width, so word-wrapped labels (workflow card
+            # descriptions, the Cell row, etc.) end up wrapping to more lines
+            # than they actually will at target_width, overstating the needed
+            # height by 100+ px. heightForWidth(target_width) asks for the real
+            # answer at the width the dialog will actually use.
+            content_height = (
+                self.content.heightForWidth(target_width) if self.content.hasHeightForWidth()
+                else self.content.sizeHint().height()
+            )
+            target_height = chrome_height + content_height + 8
+            apply_safe_dialog_geometry(self.dialog, target_width, target_height)
+
+        self.outer_root = QVBoxLayout(self.dialog)
+        self.outer_root.setContentsMargins(0, 0, 0, 0)
+        self.outer_root.setSpacing(0)
+
+        self.brand_header = create_phase_studio_brand_header()
+        self.outer_root.addWidget(self.brand_header)
+
+        self.context_banner = create_phase_studio_context_banner(
+            "JANA2020 WORKFLOW", "Review the incoming crystallographic data and choose a workflow"
         )
-        target_height = chrome_height + content_height + 8
-        apply_safe_dialog_geometry(dialog, target_width, target_height)
+        self.context_title_label = self.context_banner.findChild(QLabel, "dashboardTitle")
+        self.context_subtitle_label = self.context_banner.findChild(QLabel, "dashboardSubtitle")
+        self.outer_root.addWidget(self.context_banner)
 
-    outer_root = QVBoxLayout(dialog)
-    outer_root.setContentsMargins(0, 0, 0, 0)
-    outer_root.setSpacing(0)
+        # Only this central area scrolls (spec: "WIZARD WINDOW SIZING" section 5) --
+        # the branded header/banner above and the action footer added at the very
+        # end of this function (via outer_root, not `root`) always stay fixed and
+        # visible, however tall an expanded page's content gets.
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setObjectName("wizardScrollArea")
+        self.scroll_area.setFrameShape(QFrame.NoFrame)
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.content = QWidget()
+        self.content_layout = QVBoxLayout(self.content)
+        self.content_layout.setContentsMargins(14, 10, 14, 10)
+        self.content_layout.setSpacing(10)
+        self.scroll_area.setWidget(self.content)
+        self.outer_root.addWidget(self.scroll_area, 1)
+        self.root = self.content_layout
 
-    brand_header = create_phase_studio_brand_header()
-    outer_root.addWidget(brand_header)
+        self.inflip_info = QLabel(
+            f"Jana2020 input: {inflip_path.name}" if inflip_path else "No .inflip argument was detected."
+        )
+        self.inflip_info.setToolTip(str(inflip_path) if inflip_path else "")
+        self.root.addWidget(self.inflip_info)
 
-    context_banner = create_phase_studio_context_banner(
-        "JANA2020 WORKFLOW", "Review the incoming crystallographic data and choose a workflow"
-    )
-    context_title_label = context_banner.findChild(QLabel, "dashboardTitle")
-    context_subtitle_label = context_banner.findChild(QLabel, "dashboardSubtitle")
-    outer_root.addWidget(context_banner)
+        self.stack = QStackedWidget()
+        self.root.addWidget(self.stack, 1)
 
-    # Only this central area scrolls (spec: "WIZARD WINDOW SIZING" section 5) --
-    # the branded header/banner above and the action footer added at the very
-    # end of this function (via outer_root, not `root`) always stay fixed and
-    # visible, however tall an expanded page's content gets.
-    scroll_area = QScrollArea()
-    scroll_area.setObjectName("wizardScrollArea")
-    scroll_area.setFrameShape(QFrame.NoFrame)
-    scroll_area.setWidgetResizable(True)
-    scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-    content = QWidget()
-    content_layout = QVBoxLayout(content)
-    content_layout.setContentsMargins(14, 10, 14, 10)
-    content_layout.setSpacing(10)
-    scroll_area.setWidget(content)
-    outer_root.addWidget(scroll_area, 1)
-    root = content_layout
+        # ----- Page 1: input summary, reference/model files, then the 3 primary workflow actions -----
+        self.page1 = QWidget()
+        self.page1_layout = QVBoxLayout(self.page1)
+        self.page1_layout.setContentsMargins(0, 0, 0, 0)
+        self.page1_layout.setSpacing(8)
 
-    inflip_info = QLabel(
-        f"Jana2020 input: {inflip_path.name}" if inflip_path else "No .inflip argument was detected."
-    )
-    inflip_info.setToolTip(str(inflip_path) if inflip_path else "")
-    root.addWidget(inflip_info)
+        # A hidden, never-shown full Phase Studio window used purely as a dialog
+        # factory: it reuses the exact same HKL parsing/validation/completeness
+        # implementation (and diagnostic dialog styling) as the main application,
+        # seeded from THIS incoming .inflip via the same hand-off mechanism used
+        # for "Open full Phase Studio" / "Phase recycling" -- not from whatever a
+        # previous, unrelated Phase Studio session had saved. Built lazily so the
+        # wizard's first page still appears immediately.
+        self.backing_window_holder: dict = {"win": None}
 
-    stack = QStackedWidget()
-    root.addWidget(stack, 1)
+        def get_backing_window():
+            win = self.backing_window_holder.get("win")
+            if win is not None:
+                return win
+            from phase_studio.app import IterativeSuperflipPipelineQtGUI, parse_inflip_settings
 
-    # ----- Page 1: input summary, reference/model files, then the 3 primary workflow actions -----
-    page1 = QWidget()
-    page1_layout = QVBoxLayout(page1)
-    page1_layout.setContentsMargins(0, 0, 0, 0)
-    page1_layout.setSpacing(8)
-
-    # A hidden, never-shown full Phase Studio window used purely as a dialog
-    # factory: it reuses the exact same HKL parsing/validation/completeness
-    # implementation (and diagnostic dialog styling) as the main application,
-    # seeded from THIS incoming .inflip via the same hand-off mechanism used
-    # for "Open full Phase Studio" / "Phase recycling" -- not from whatever a
-    # previous, unrelated Phase Studio session had saved. Built lazily so the
-    # wizard's first page still appears immediately.
-    backing_window_holder: dict = {"win": None}
-
-    def get_backing_window():
-        win = backing_window_holder.get("win")
-        if win is not None:
+            win = IterativeSuperflipPipelineQtGUI()
+            if inflip_path is not None:
+                try:
+                    parsed = parse_inflip_settings(inflip_path)
+                    handoff_import = build_jana_handoff_import(inflip_path, JanaRunOptions(action="edit"), parsed)
+                    for key, value in handoff_import.values.items():
+                        widget = win.inputs.get(key)
+                        if widget is not None:
+                            win._set_widget_value_from_string(widget, value)
+                    win._input_mode_user_changed()
+                    win._sync_input_source_mode_widgets()
+                except Exception:
+                    pass
+            self.backing_window_holder["win"] = win
             return win
-        from phase_studio.app import IterativeSuperflipPipelineQtGUI, parse_inflip_settings
 
-        win = IterativeSuperflipPipelineQtGUI()
-        if inflip_path is not None:
+        def build_page1_section(title: str, helper_text: str = "") -> tuple:
+            # A plain QGroupBox's title/border/padding chrome (shared app-wide via
+            # ui_style.py, so not something this single-page pass may change)
+            # costs roughly 35-40px of pure vertical overhead per section on top
+            # of its actual content -- with three stacked sections on this page,
+            # that alone can be the difference between fitting on screen at
+            # 150% Windows scaling and needing a scrollbar. Using the same
+            # lightweight sectionLabel-plus-rule heading for all three of this
+            # page's sections (Input summary / Reference and initial model /
+            # Workflow) instead keeps them visually distinct and on-brand while
+            # recovering that space; this only affects page1 of the Wizard, not
+            # QGroupBox elsewhere in the app.
+            section = QWidget()
+            section_layout = QVBoxLayout(section)
+            section_layout.setContentsMargins(0, 0, 0, 0)
+            section_layout.setSpacing(4)
+            heading_row = QHBoxLayout()
+            heading_row.setSpacing(8)
+            heading_label = QLabel(title.upper())
+            heading_label.setObjectName("sectionLabel")
+            heading_row.addWidget(heading_label)
+            heading_row.addStretch(1)
+            if helper_text:
+                helper_label = QLabel(helper_text)
+                helper_label.setStyleSheet("color: #7183a6; font-style: italic;")
+                heading_row.addWidget(helper_label)
+            section_layout.addLayout(heading_row)
+            separator = QFrame()
+            separator.setFixedHeight(2)
+            separator.setFrameShape(QFrame.NoFrame)
+            separator.setStyleSheet("background-color: #2264b8;")
+            section_layout.addWidget(separator)
+            body = QWidget()
+            body_layout = QVBoxLayout(body)
+            body_layout.setContentsMargins(0, 6, 0, 0)
+            body_layout.setSpacing(4)
+            section_layout.addWidget(body)
+            return section, body_layout
+
+        # Compact single-row-per-field summary with the diagnostic actions
+        # (Validate HKL / Analyze completeness) as a small button column on the
+        # right rather than a third row underneath the metadata -- keeps the
+        # whole section short enough that it, the Reference/model section and
+        # all three Workflow cards fit on the first page without scrolling.
+        self.input_summary_section, self.input_summary_body = build_page1_section("Input summary")
+        self.input_summary_outer = QHBoxLayout()
+        self.input_summary_outer.setSpacing(14)
+        self.input_summary_body.addLayout(self.input_summary_outer)
+
+        self.input_summary_fields = QWidget()
+        self.input_summary_layout = QFormLayout(self.input_summary_fields)
+        self.input_summary_layout.setContentsMargins(0, 0, 0, 0)
+        self.input_summary_layout.setVerticalSpacing(3)
+        self.input_summary_layout.setHorizontalSpacing(10)
+        self.input_summary_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.reflections_value = QLabel("Not available")
+        self.format_value = QLabel("Not available")
+        self.cell_value = QLabel("Not available")
+        self.spacegroup_value = QLabel("Not available")
+        self.composition_value = QLabel("Not available")
+        for summary_label in (self.reflections_value, self.format_value, self.cell_value, self.spacegroup_value, self.composition_value):
+            summary_label.setWordWrap(True)
+        self.input_summary_layout.addRow("Reflections", self.reflections_value)
+        self.input_summary_layout.addRow("Format", self.format_value)
+        self.input_summary_layout.addRow("Cell", self.cell_value)
+        self.input_summary_layout.addRow("Space group", self.spacegroup_value)
+        self.input_summary_layout.addRow("Composition", self.composition_value)
+        self.input_summary_outer.addWidget(self.input_summary_fields, 1)
+
+        self.hkl_buttons_column = QVBoxLayout()
+        self.hkl_buttons_column.setSpacing(4)
+        self.validate_hkl_button = QPushButton("Validate HKL")
+        self.analyze_completeness_button = QPushButton("Analyze completeness")
+        self.hkl_buttons_column.addWidget(self.validate_hkl_button)
+        self.hkl_buttons_column.addWidget(self.analyze_completeness_button)
+        self.hkl_buttons_column.addStretch(1)
+        self.input_summary_outer.addLayout(self.hkl_buttons_column)
+        self.page1_layout.addWidget(self.input_summary_section)
+
+        def refresh_input_summary() -> None:
+            no_inflip_tip = "No incoming Jana2020 .inflip was supplied."
+            if inflip_path is None:
+                self.validate_hkl_button.setEnabled(False)
+                self.analyze_completeness_button.setEnabled(False)
+                self.validate_hkl_button.setToolTip(no_inflip_tip)
+                self.analyze_completeness_button.setToolTip(no_inflip_tip)
+                return
             try:
-                parsed = parse_inflip_settings(inflip_path)
-                handoff_import = build_jana_handoff_import(inflip_path, JanaRunOptions(action="edit"), parsed)
-                for key, value in handoff_import.values.items():
-                    widget = win.inputs.get(key)
-                    if widget is not None:
-                        win._set_widget_value_from_string(widget, value)
-                win._input_mode_user_changed()
-                win._sync_input_source_mode_widgets()
+                win = get_backing_window()
+                from phase_studio.app import compact_spacegroup_symbol, format_reflection_data_mode
+                request = win._collect_hkl_analysis_request()
+                result = win._build_hkl_load_result(request)
             except Exception:
-                pass
-        backing_window_holder["win"] = win
-        return win
+                # Per spec: never show a raw exception in this summary. The
+                # existing structured error dialog still covers Validate HKL /
+                # Analyze completeness themselves if the reflection block truly
+                # cannot be analyzed.
+                return
+            self.reflections_value.setText(f"{len(result.reflections):,} parsed · {len(result.unique_reflections):,} unique")
+            self.format_value.setText(format_reflection_data_mode(result.data_mode))
+            rcell = result.cell
+            self.cell_value.setText(
+                f"{rcell.a:.5g} × {rcell.b:.5g} × {rcell.c:.5g} Å\n"
+                f"{rcell.alpha:.4g}° × {rcell.beta:.4g}° × {rcell.gamma:.4g}°"
+            )
+            self.spacegroup_value.setText(f"{compact_spacegroup_symbol(result.spacegroup)} (#{result.spacegroup.number})")
+            metadata = request.metadata
+            self.composition_value.setText(metadata.composition if metadata is not None and metadata.composition else "—")
+            self.validate_hkl_button.setEnabled(True)
+            self.analyze_completeness_button.setEnabled(True)
+            self.validate_hkl_button.setToolTip(
+                "Parse the incoming Jana2020 .inflip reflection block and show which h, k, l, "
+                "value, sigma and phase fields were read. Uses the same parser as Basic → Input."
+            )
+            self.analyze_completeness_button.setToolTip(
+                "Open completeness and data-statistics plots for the incoming Jana2020 .inflip "
+                "reflection data. Uses the same analysis as Basic → Input."
+            )
 
-    def build_page1_section(title: str, helper_text: str = "") -> tuple:
-        # A plain QGroupBox's title/border/padding chrome (shared app-wide via
-        # ui_style.py, so not something this single-page pass may change)
-        # costs roughly 35-40px of pure vertical overhead per section on top
-        # of its actual content -- with three stacked sections on this page,
-        # that alone can be the difference between fitting on screen at
-        # 150% Windows scaling and needing a scrollbar. Using the same
-        # lightweight sectionLabel-plus-rule heading for all three of this
-        # page's sections (Input summary / Reference and initial model /
-        # Workflow) instead keeps them visually distinct and on-brand while
-        # recovering that space; this only affects page1 of the Wizard, not
-        # QGroupBox elsewhere in the app.
-        section = QWidget()
-        section_layout = QVBoxLayout(section)
-        section_layout.setContentsMargins(0, 0, 0, 0)
-        section_layout.setSpacing(4)
-        heading_row = QHBoxLayout()
-        heading_row.setSpacing(8)
-        heading_label = QLabel(title.upper())
-        heading_label.setObjectName("sectionLabel")
-        heading_row.addWidget(heading_label)
-        heading_row.addStretch(1)
-        if helper_text:
-            helper_label = QLabel(helper_text)
-            helper_label.setStyleSheet("color: #7183a6; font-style: italic;")
-            heading_row.addWidget(helper_label)
-        section_layout.addLayout(heading_row)
-        separator = QFrame()
-        separator.setFixedHeight(2)
-        separator.setFrameShape(QFrame.NoFrame)
-        separator.setStyleSheet("background-color: #2264b8;")
-        section_layout.addWidget(separator)
-        body = QWidget()
-        body_layout = QVBoxLayout(body)
-        body_layout.setContentsMargins(0, 6, 0, 0)
-        body_layout.setSpacing(4)
-        section_layout.addWidget(body)
-        return section, body_layout
+        def validate_hkl_clicked() -> None:
+            try:
+                get_backing_window().test_hkl_load_dialog()
+            except Exception as exc:
+                report = build_error_report(exc, subsystem="HKL", operation="HKL validation")
+                show_phase_studio_error(self.dialog, report)
 
-    # Compact single-row-per-field summary with the diagnostic actions
-    # (Validate HKL / Analyze completeness) as a small button column on the
-    # right rather than a third row underneath the metadata -- keeps the
-    # whole section short enough that it, the Reference/model section and
-    # all three Workflow cards fit on the first page without scrolling.
-    input_summary_section, input_summary_body = build_page1_section("Input summary")
-    input_summary_outer = QHBoxLayout()
-    input_summary_outer.setSpacing(14)
-    input_summary_body.addLayout(input_summary_outer)
+        def analyze_completeness_clicked() -> None:
+            try:
+                get_backing_window().open_hkl_completeness_dialog()
+            except Exception as exc:
+                report = build_error_report(exc, subsystem="HKL", operation="HKL completeness")
+                show_phase_studio_error(self.dialog, report)
 
-    input_summary_fields = QWidget()
-    input_summary_layout = QFormLayout(input_summary_fields)
-    input_summary_layout.setContentsMargins(0, 0, 0, 0)
-    input_summary_layout.setVerticalSpacing(3)
-    input_summary_layout.setHorizontalSpacing(10)
-    input_summary_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    reflections_value = QLabel("Not available")
-    format_value = QLabel("Not available")
-    cell_value = QLabel("Not available")
-    spacegroup_value = QLabel("Not available")
-    composition_value = QLabel("Not available")
-    for summary_label in (reflections_value, format_value, cell_value, spacegroup_value, composition_value):
-        summary_label.setWordWrap(True)
-    input_summary_layout.addRow("Reflections", reflections_value)
-    input_summary_layout.addRow("Format", format_value)
-    input_summary_layout.addRow("Cell", cell_value)
-    input_summary_layout.addRow("Space group", spacegroup_value)
-    input_summary_layout.addRow("Composition", composition_value)
-    input_summary_outer.addWidget(input_summary_fields, 1)
+        self.validate_hkl_button.setEnabled(False)
+        self.analyze_completeness_button.setEnabled(False)
+        self.validate_hkl_button.clicked.connect(validate_hkl_clicked)
+        self.analyze_completeness_button.clicked.connect(analyze_completeness_clicked)
+        # Deferred so the wizard's first page paints immediately; the summary
+        # (and the one-time backing-window construction it triggers) fills in
+        # right after, once the dialog's event loop actually starts.
+        QTimer.singleShot(0, refresh_input_summary)
 
-    hkl_buttons_column = QVBoxLayout()
-    hkl_buttons_column.setSpacing(4)
-    validate_hkl_button = QPushButton("Validate HKL")
-    analyze_completeness_button = QPushButton("Analyze completeness")
-    hkl_buttons_column.addWidget(validate_hkl_button)
-    hkl_buttons_column.addWidget(analyze_completeness_button)
-    hkl_buttons_column.addStretch(1)
-    input_summary_outer.addLayout(hkl_buttons_column)
-    page1_layout.addWidget(input_summary_section)
+        self.files_section, self.files_body = build_page1_section("Reference and initial model")
+        self.files_form_widget = QWidget()
+        self.files_form = QFormLayout(self.files_form_widget)
+        self.files_form.setContentsMargins(0, 0, 0, 0)
+        self.files_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.files_form.setVerticalSpacing(4)
+        self.files_body.addWidget(self.files_form_widget)
 
-    def refresh_input_summary() -> None:
-        no_inflip_tip = "No incoming Jana2020 .inflip was supplied."
-        if inflip_path is None:
-            validate_hkl_button.setEnabled(False)
-            analyze_completeness_button.setEnabled(False)
-            validate_hkl_button.setToolTip(no_inflip_tip)
-            analyze_completeness_button.setToolTip(no_inflip_tip)
-            return
-        try:
-            win = get_backing_window()
-            from phase_studio.app import compact_spacegroup_symbol, format_reflection_data_mode
-            request = win._collect_hkl_analysis_request()
-            result = win._build_hkl_load_result(request)
-        except Exception:
-            # Per spec: never show a raw exception in this summary. The
-            # existing structured error dialog still covers Validate HKL /
-            # Analyze completeness themselves if the reflection block truly
-            # cannot be analyzed.
-            return
-        reflections_value.setText(f"{len(result.reflections):,} parsed · {len(result.unique_reflections):,} unique")
-        format_value.setText(format_reflection_data_mode(result.data_mode))
-        rcell = result.cell
-        cell_value.setText(
-            f"{rcell.a:.5g} × {rcell.b:.5g} × {rcell.c:.5g} Å\n"
-            f"{rcell.alpha:.4g}° × {rcell.beta:.4g}° × {rcell.gamma:.4g}°"
+        def add_file_row(label_text: str, file_filter: str, tooltip: str, placeholder: str, initial: str):
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            edit = QLineEdit(initial)
+            from_inflip = bool(initial)
+            edit.setPlaceholderText(placeholder)
+            edit.setToolTip(
+                (tooltip + "\n\nCurrently set from the incoming .inflip.") if from_inflip else tooltip
+            )
+            browse = QPushButton("Browse…")
+            browse.setToolTip(f"Select {label_text.lower()}.")
+
+            source_note = QLabel("From .inflip")
+            source_note.setStyleSheet("color: #7183a6; font-style: italic;")
+            source_note.setVisible(from_inflip)
+
+            def browse_file() -> None:
+                selected = QFileDialog.getOpenFileName(self.dialog, f"Select {label_text}", edit.text(), file_filter)[0]
+                if selected:
+                    edit.setText(selected)
+                    # A manual replacement is no longer "from the .inflip".
+                    source_note.setVisible(False)
+                    edit.setToolTip(tooltip)
+
+            browse.clicked.connect(browse_file)
+            row_layout.addWidget(edit, 1)
+            row_layout.addWidget(source_note)
+            row_layout.addWidget(browse)
+            self.files_form.addRow(label_text, row_widget)
+            return edit
+
+        def _inflip_keyword_default(keyword: str) -> str:
+            # Deliberately not persisted across runs: these fields reflect what the
+            # incoming Jana2020 .inflip already declares, not a remembered value from
+            # an unrelated previous job.
+            if inflip_path is None:
+                return ""
+            try:
+                found = inflip_keyword_path(inflip_path, keyword)
+            except Exception:
+                return ""
+            return str(found) if found is not None else ""
+
+        self.reference_file = add_file_row(
+            "Reference (optional)",
+            "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)",
+            "Reference CIF structure or XPLOR density map, used together with the "
+            "incoming Jana2020 .inflip without replacing its embedded reflections or metadata. "
+            "When supplied, Superflip also reports how well each cycle matches this reference, "
+            "which is used to recommend the best map for the Jana2020 handoff. Pre-filled from "
+            "the incoming .inflip's own referencefile keyword, if it declares one.",
+            "No external reference",
+            _inflip_keyword_default("referencefile"),
         )
-        spacegroup_value.setText(f"{compact_spacegroup_symbol(result.spacegroup)} (#{result.spacegroup.number})")
-        metadata = request.metadata
-        composition_value.setText(metadata.composition if metadata is not None and metadata.composition else "—")
-        validate_hkl_button.setEnabled(True)
-        analyze_completeness_button.setEnabled(True)
-        validate_hkl_button.setToolTip(
-            "Parse the incoming Jana2020 .inflip reflection block and show which h, k, l, "
-            "value, sigma and phase fields were read. Uses the same parser as Basic → Input."
+        self.model_file = add_file_row(
+            "Initial model (optional)",
+            "Model/map files (*.xplor *.ccp4 *.cif);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4);;CIF structures (*.cif);;All files (*)",
+            "Model or density map to seed the first Superflip cycle. If supplied, "
+            "cycle 1 is model-seeded: repeatmode is forced to 1 and randomseed is omitted. "
+            "Pre-filled from the incoming .inflip's own modelfile keyword, if it declares one.",
+            "No first-cycle model",
+            _inflip_keyword_default("modelfile"),
         )
-        analyze_completeness_button.setToolTip(
-            "Open completeness and data-statistics plots for the incoming Jana2020 .inflip "
-            "reflection data. Uses the same analysis as Basic → Input."
+        self.page1_layout.addWidget(self.files_section)
+
+        def workflow_card_clicked(key: str) -> None:
+            self.workflow_state["key"] = key
+            workflow_changed()
+
+        # Workflow is the single most important choice on this page (it decides
+        # the whole execution path) and must not blend in as one more same-weight
+        # section -- it gets the same lightweight sectionLabel heading as Input
+        # summary / Reference and initial model above, plus the explicit
+        # "Choose one of three workflows." helper text called for in the spec.
+        self.workflow_section, self.workflow_body = build_page1_section("Workflow", "Choose one of three workflows.")
+        self.workflow_body.setSpacing(5)
+        self.workflow_cards: dict[str, "_WorkflowCard"] = {}
+        for key in (WORKFLOW_SUPERFLIP_ONLY, WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING):
+            card = _WorkflowCard(key, WORKFLOW_LABELS[key], WORKFLOW_DESCRIPTIONS[key], workflow_card_clicked)
+            card.setToolTip("Select this workflow, then use Run phasing / Next below to proceed.")
+            self.workflow_body.addWidget(card)
+            self.workflow_cards[key] = card
+
+        self.page1_layout.addWidget(self.workflow_section)
+        self.page1_layout.addStretch(1)
+        self.stack.addWidget(self.page1)
+
+        # ----- Page 2: SharpED / phase-recycling settings (workflows 2 and 3 only) -----
+        self.page2 = QWidget()
+        self.page2_layout = QVBoxLayout(self.page2)
+        self.page2_layout.setContentsMargins(0, 0, 0, 0)
+        self.page2_layout.setSpacing(10)
+
+        self.map_group = QGroupBox("Map used for Jana2020 handoff")
+        self.map_group_layout = QVBoxLayout(self.map_group)
+        self.map_buttons = QButtonGroup(self.dialog)
+        self.sharped_map_radio = QRadioButton("SharpED map")
+        self.superflip_map_radio = QRadioButton("Superflip map")
+        self.sharped_map_radio.setToolTip(
+            "Use the SharpED map for the next phase-recycling cycle and for the Jana2020 handoff."
         )
-
-    def validate_hkl_clicked() -> None:
-        try:
-            get_backing_window().test_hkl_load_dialog()
-        except Exception as exc:
-            report = build_error_report(exc, subsystem="HKL", operation="HKL validation")
-            show_phase_studio_error(dialog, report)
-
-    def analyze_completeness_clicked() -> None:
-        try:
-            get_backing_window().open_hkl_completeness_dialog()
-        except Exception as exc:
-            report = build_error_report(exc, subsystem="HKL", operation="HKL completeness")
-            show_phase_studio_error(dialog, report)
-
-    validate_hkl_button.setEnabled(False)
-    analyze_completeness_button.setEnabled(False)
-    validate_hkl_button.clicked.connect(validate_hkl_clicked)
-    analyze_completeness_button.clicked.connect(analyze_completeness_clicked)
-    # Deferred so the wizard's first page paints immediately; the summary
-    # (and the one-time backing-window construction it triggers) fills in
-    # right after, once the dialog's event loop actually starts.
-    QTimer.singleShot(0, refresh_input_summary)
-
-    files_section, files_body = build_page1_section("Reference and initial model")
-    files_form_widget = QWidget()
-    files_form = QFormLayout(files_form_widget)
-    files_form.setContentsMargins(0, 0, 0, 0)
-    files_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    files_form.setVerticalSpacing(4)
-    files_body.addWidget(files_form_widget)
-
-    def add_file_row(label_text: str, file_filter: str, tooltip: str, placeholder: str, initial: str):
-        row_widget = QWidget()
-        row_layout = QHBoxLayout(row_widget)
-        row_layout.setContentsMargins(0, 0, 0, 0)
-        edit = QLineEdit(initial)
-        from_inflip = bool(initial)
-        edit.setPlaceholderText(placeholder)
-        edit.setToolTip(
-            (tooltip + "\n\nCurrently set from the incoming .inflip.") if from_inflip else tooltip
+        self.superflip_map_radio.setToolTip(
+            "Use the Superflip map for the next phase-recycling cycle and for the Jana2020 handoff."
         )
-        browse = QPushButton("Browse…")
-        browse.setToolTip(f"Select {label_text.lower()}.")
+        self.map_buttons.addButton(self.sharped_map_radio)
+        self.map_buttons.addButton(self.superflip_map_radio)
+        self.map_group_layout.addWidget(self.sharped_map_radio)
+        self.map_group_layout.addWidget(self.superflip_map_radio)
+        saved_next_cycle = str(self.settings.value("next_cycle_modelfile", "deblurred_xplor")).strip().lower()
+        if saved_next_cycle == "superflip_xplor":
+            self.superflip_map_radio.setChecked(True)
+        else:
+            self.sharped_map_radio.setChecked(True)
+        self.page2_layout.addWidget(self.map_group)
 
-        source_note = QLabel("From .inflip")
-        source_note.setStyleSheet("color: #7183a6; font-style: italic;")
-        source_note.setVisible(from_inflip)
+        self.processing_form = QFormLayout()
+        self.processing_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
 
-        def browse_file() -> None:
-            selected = QFileDialog.getOpenFileName(dialog, f"Select {label_text}", edit.text(), file_filter)[0]
-            if selected:
-                edit.setText(selected)
-                # A manual replacement is no longer "from the .inflip".
-                source_note.setVisible(False)
-                edit.setToolTip(tooltip)
+        self.cycles = QSpinBox()
+        self.cycles.setRange(1, 999)
+        self.cycles.setValue(int(self.settings.value("cycles", 1)) or 1)
+        self.cycles.setToolTip("Number of Superflip/SharpED phase-recycling cycles.")
+        self.processing_form.addRow("Recycling cycles", self.cycles)
+        self.cycles_label = self.processing_form.labelForField(self.cycles)
 
-        browse.clicked.connect(browse_file)
-        row_layout.addWidget(edit, 1)
-        row_layout.addWidget(source_note)
-        row_layout.addWidget(browse)
-        files_form.addRow(label_text, row_widget)
-        return edit
+        self.cycles_user_edited = {"value": False}
 
-    def _inflip_keyword_default(keyword: str) -> str:
-        # Deliberately not persisted across runs: these fields reflect what the
-        # incoming Jana2020 .inflip already declares, not a remembered value from
-        # an unrelated previous job.
-        if inflip_path is None:
-            return ""
-        try:
-            found = inflip_keyword_path(inflip_path, keyword)
-        except Exception:
-            return ""
-        return str(found) if found is not None else ""
+        def mark_cycles_user_edited(_value: int = 0) -> None:
+            self.cycles_user_edited["value"] = True
 
-    reference_file = add_file_row(
-        "Reference (optional)",
-        "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)",
-        "Reference CIF structure or XPLOR density map, used together with the "
-        "incoming Jana2020 .inflip without replacing its embedded reflections or metadata. "
-        "When supplied, Superflip also reports how well each cycle matches this reference, "
-        "which is used to recommend the best map for the Jana2020 handoff. Pre-filled from "
-        "the incoming .inflip's own referencefile keyword, if it declares one.",
-        "No external reference",
-        _inflip_keyword_default("referencefile"),
-    )
-    model_file = add_file_row(
-        "Initial model (optional)",
-        "Model/map files (*.xplor *.ccp4 *.cif);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4);;CIF structures (*.cif);;All files (*)",
-        "Model or density map to seed the first Superflip cycle. If supplied, "
-        "cycle 1 is model-seeded: repeatmode is forced to 1 and randomseed is omitted. "
-        "Pre-filled from the incoming .inflip's own modelfile keyword, if it declares one.",
-        "No first-cycle model",
-        _inflip_keyword_default("modelfile"),
-    )
-    page1_layout.addWidget(files_section)
+        self.cycles.valueChanged.connect(mark_cycles_user_edited)
 
-    def workflow_card_clicked(key: str) -> None:
-        workflow_state["key"] = key
+        self.model = QComboBox()
+        self.model.setEditable(True)
+        saved_model = str(self.settings.value("model", "default")).strip() or "default"
+        self.model.addItem(saved_model)
+        if saved_model != "default":
+            self.model.insertItem(0, "default")
+        self.model.setCurrentText(saved_model)
+        self.model.setToolTip(
+            "SharpED inference model. Select a model returned by the server or enter an "
+            "explicit model identifier. The value 'default' requests the server default."
+        )
+        self.processing_form.addRow("Model", self.model)
+        self.page2_layout.addLayout(self.processing_form)
+
+        self.refresh_row = QWidget()
+        self.refresh_layout = QHBoxLayout(self.refresh_row)
+        self.refresh_layout.setContentsMargins(0, 0, 0, 0)
+        self.refresh_models_button = QPushButton("Refresh models")
+        self.refresh_models_button.setToolTip("Query the SharpED server for its currently available models.")
+        self.model_status = QLabel("Model list not loaded.")
+        self.model_status.setWordWrap(True)
+        self.model_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.refresh_layout.addWidget(self.refresh_models_button)
+        self.refresh_layout.addWidget(self.model_status, 1)
+        self.page2_layout.addWidget(self.refresh_row)
+
+        self.sharped_group = QGroupBox()
+        self.sharped_outer = QVBoxLayout(self.sharped_group)
+        self.sharped_toggle = QToolButton()
+        self.sharped_toggle.setObjectName("disclosureToggle")
+        self.sharped_toggle.setText("SharpED settings")
+        self.sharped_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.sharped_toggle.setArrowType(Qt.RightArrow)
+        self.sharped_toggle.setCheckable(True)
+        self.sharped_toggle.setChecked(False)
+        self.sharped_toggle.setToolTip("Expand or collapse the SharpED server connection settings.")
+        self.sharped_outer.addWidget(self.sharped_toggle)
+        self.sharped_body = QWidget()
+        self.sharped_form = QFormLayout(self.sharped_body)
+        self.sharped_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.sharped_form.setContentsMargins(18, 4, 0, 0)
+
+        self.server_url = QLineEdit(shared_or_legacy_value("sharped_base_url", "server_url", DEFAULT_SERVER_URL))
+        self.server_url.setPlaceholderText(DEFAULT_SERVER_URL)
+        self.server_url.setToolTip(
+            "Base URL of the SharpED service used for model discovery and map processing. "
+            "Shared with the full Phase Studio application's own Advanced → Setup value."
+        )
+        self.sharped_form.addRow("Server URL", self.server_url)
+
+        self.api_token = QLineEdit(
+            shared_or_legacy_value("sharped_api_token", "api_token", os.environ.get("SHARPED_API_TOKEN", ""))
+        )
+        self.api_token.setEchoMode(QLineEdit.Password)
+        self.api_token.setPlaceholderText("Enter API token")
+        self.api_token.setToolTip(
+            "Bearer token used to authorize SharpED processing. The token is masked in "
+            "the interface, may alternatively be supplied through SHARPED_API_TOKEN, and "
+            "is shared with the full Phase Studio application's own API token -- saving it "
+            "here also updates that copy, and vice versa."
+        )
+        self.sharped_form.addRow("API token", self.api_token)
+
+        # Elements and Output resolution are deliberately not exposed here: they
+        # are shared with the full Phase Studio application's own Advanced ->
+        # SharpED values (auto-detected from composition there), the same way
+        # Server URL / API token are shared above -- see effective_elements()/
+        # effective_outres() below.
+        self.sharped_outer.addWidget(self.sharped_body)
+        self.sharped_body.setVisible(False)
+
+        def sync_sharped_disclosure(opened: bool) -> None:
+            self.sharped_body.setVisible(bool(opened))
+            self.sharped_toggle.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
+            adjust_dialog_size()
+
+        self.sharped_toggle.toggled.connect(sync_sharped_disclosure)
+        self.page2_layout.addWidget(self.sharped_group)
+
+        self.refresh_results: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        self.refresh_timer = QTimer(self.dialog)
+        self.refresh_timer.setInterval(100)
+
+        def refresh_available_models() -> None:
+            base_url = self.server_url.text().strip() or DEFAULT_SERVER_URL
+            self.refresh_models_button.setEnabled(False)
+            self.model_status.setText("Contacting the SharpED server…")
+
+            def worker() -> None:
+                try:
+                    client = SharpEDServerClient(base_url=base_url, timeout=30.0)
+                    models_result = client.get_models()
+                    self.refresh_results.put(("ok", models_result))
+                except Exception as exc:
+                    self.refresh_results.put(("error", str(exc)))
+
+            threading.Thread(target=worker, daemon=True).start()
+            if not self.refresh_timer.isActive():
+                self.refresh_timer.start()
+
+        def poll_model_refresh() -> None:
+            try:
+                state, payload = self.refresh_results.get_nowait()
+            except queue.Empty:
+                return
+
+            self.refresh_timer.stop()
+            self.refresh_models_button.setEnabled(True)
+            if state == "error":
+                self.model_status.setText("Unable to retrieve the model list.")
+                self.model_status.setToolTip(
+                    "Model discovery failed. Verify the server URL and network connection; "
+                    "a model identifier may still be entered manually.\n\n"
+                    + sanitize_error_details(payload)
+                )
+                return
+
+            models_result = payload
+            current = self.model.currentText().strip() or "default"
+            values: List[str] = ["default"]
+            default_model = str(getattr(models_result, "default_model", "") or "").strip()
+            if default_model and default_model not in values:
+                values.append(default_model)
+            for available in list(getattr(models_result, "models", []) or []):
+                value = str(available).strip()
+                if value and value not in values:
+                    values.append(value)
+
+            self.model.blockSignals(True)
+            self.model.clear()
+            self.model.addItems(values)
+            self.model.setCurrentText(current if current in values else "default")
+            self.model.blockSignals(False)
+            if default_model:
+                self.model_status.setText(f"{len(values) - 1} models available · Default: {default_model}")
+            else:
+                self.model_status.setText(f"{len(values) - 1} models available")
+
+        self.refresh_models_button.clicked.connect(refresh_available_models)
+        self.refresh_timer.timeout.connect(poll_model_refresh)
+
+        self.validation_group = QGroupBox("Scientific validation")
+        self.validation_layout = QHBoxLayout(self.validation_group)
+        self.warning_icon = QLabel()
+        self.warning_icon.setPixmap(self.dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
+        self.warning_icon.setAlignment(Qt.AlignTop)
+        self.validation_layout.addWidget(self.warning_icon, 0, Qt.AlignTop)
+        self.warning_text = QLabel(
+            "SharpED uses a neural-network density-processing model. Its output may "
+            "contain artifacts and should be validated against the measured "
+            "diffraction data and an independent crystallographic refinement."
+        )
+        self.warning_text.setWordWrap(True)
+        self.validation_layout.addWidget(self.warning_text, 1)
+        self.page2_layout.addWidget(self.validation_group)
+
+        # Phase recycling only: maps directly onto the existing full-pipeline
+        # compute_omit_maps / compute_omit_rfree settings (see build_jana_handoff_import).
+        # Not shown for either single-pass workflow, which never reaches that pipeline.
+        self.cross_validation_group = QGroupBox("Cross-validation")
+        self.cross_validation_layout = QVBoxLayout(self.cross_validation_group)
+        self.omit_checkbox = QCheckBox("Compute OMIT validation maps")
+        self.omit_checkbox.setToolTip(
+            "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed "
+            "random 5% holdout of reflections excluded from the input, for cross-validation. "
+            "Feeds the phase-recycling result selector's Selection score, helping identify the "
+            "most suitable map among the recycling cycles. Roughly doubles Superflip/SharpED "
+            "time per cycle."
+        )
+        self.rfree_checkbox = QCheckBox("Calculate R_free")
+        self.rfree_checkbox.setToolTip(
+            "Compute R_free (the crystallographic R-factor between the excluded holdout "
+            "reflections' observed |F| and |F| calculated by FFT from the omit map) for each "
+            "cycle. Feeds the phase-recycling result selector's Selection score alongside OMIT "
+            "correlation, helping rank cycles and choose the most suitable map. Requires "
+            "'Compute OMIT validation maps'."
+        )
+        self.cross_validation_layout.addWidget(self.omit_checkbox)
+        self.cross_validation_layout.addWidget(self.rfree_checkbox)
+        self.cross_validation_help = QLabel(
+            "Optional. Excludes a random 5% of reflections each cycle to compute OMIT / R_free "
+            "validation metrics, which help rank the recycling cycles and select the most "
+            "suitable map."
+        )
+        self.cross_validation_help.setWordWrap(True)
+        self.cross_validation_help.setStyleSheet("color: #52658b;")
+        self.cross_validation_layout.addWidget(self.cross_validation_help)
+        self.page2_layout.addWidget(self.cross_validation_group)
+
+        # Deliberately not persisted/restored from QSettings: cross-validation is
+        # an expensive, per-job opt-in and must not be silently inherited from an
+        # unrelated previous Jana2020 job. Every fresh invocation starts unchecked.
+
+        def sync_rfree_dependency(_checked: bool = False) -> None:
+            omit_enabled = self.omit_checkbox.isChecked()
+            self.rfree_checkbox.setEnabled(omit_enabled)
+            if not omit_enabled and self.rfree_checkbox.isChecked():
+                self.rfree_checkbox.setChecked(False)
+
+        self.omit_checkbox.toggled.connect(sync_rfree_dependency)
+        sync_rfree_dependency()
+
+        self.page2_layout.addStretch(1)
+        self.stack.addWidget(self.page2)
+
+        def sync_map_choice() -> None:
+            self.validation_group.setVisible(self.sharped_map_radio.isChecked())
+            adjust_dialog_size()
+
+        self.sharped_map_radio.toggled.connect(lambda _checked=False: sync_map_choice())
+        sync_map_choice()
+
+        # ----- Page 3: Map feedback (Phase recycling only) -- exposes and
+        # populates the existing Basic -> Map feedback controls/RunConfig
+        # fields (see build_jana_handoff_import); no new map-feedback algorithm
+        # is implemented here. Not added to Superflip only or Superflip +
+        # SharpED, which never reach this page. -----
+        self.page3 = QWidget()
+        self.page3_layout = QVBoxLayout(self.page3)
+        self.page3_layout.setContentsMargins(0, 0, 0, 0)
+        self.page3_layout.setSpacing(10)
+
+        self.reflection_data_group = QGroupBox("Reflection data")
+        self.reflection_data_form = QFormLayout(self.reflection_data_group)
+        self.reflection_data_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.reflection_type_value = QLabel("")
+        self.reflection_format_value = QLabel("")
+        self.reflection_data_form.addRow("Type", self.reflection_type_value)
+        self.reflection_data_form.addRow("Format", self.reflection_format_value)
+        self.page3_layout.addWidget(self.reflection_data_group)
+
+        self.page3_description = QLabel("")
+        self.page3_description.setWordWrap(True)
+        self.page3_description.setStyleSheet("color: #52658b;")
+        self.page3_layout.addWidget(self.page3_description)
+
+        # Same "Warning" message and icon+text presentation as the "Scientific
+        # validation" box above (and Basic -> Map feedback's settings_callout in
+        # the main GUI) -- always visible on this page, regardless of whether
+        # any option below is enabled.
+        self.map_feedback_warning_group = QGroupBox()
+        self.map_feedback_warning_layout = QHBoxLayout(self.map_feedback_warning_group)
+        self.map_feedback_warning_icon = QLabel()
+        self.map_feedback_warning_icon.setPixmap(self.dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
+        self.map_feedback_warning_icon.setAlignment(Qt.AlignTop)
+        self.map_feedback_warning_layout.addWidget(self.map_feedback_warning_icon, 0, Qt.AlignTop)
+        self.map_feedback_warning_text = QLabel(
+            "<b>Warning</b><br>"
+            "The operations on this page modify the reflection data supplied to subsequent cycles. "
+            "Results from these cycles should therefore be validated against the original measured data."
+        )
+        self.map_feedback_warning_text.setTextFormat(Qt.RichText)
+        self.map_feedback_warning_text.setWordWrap(True)
+        self.map_feedback_warning_layout.addWidget(self.map_feedback_warning_text, 1)
+        self.page3_layout.addWidget(self.map_feedback_warning_group)
+
+        # --- Single-crystal branch: Missing-reflection completion + Intensity
+        # correction, exactly Basic -> Map feedback's own controls/defaults/
+        # ranges/tooltips. ---
+        self.missing_group = QGroupBox("Missing-reflection completion")
+        self.missing_outer = QVBoxLayout(self.missing_group)
+        self.missing_enabled_checkbox = QCheckBox("Enable missing-reflection completion")
+        self.missing_outer.addWidget(self.missing_enabled_checkbox)
+        self.missing_form = QFormLayout()
+        self.missing_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.missing_start_cycle_spin = QSpinBox()
+        self.missing_start_cycle_spin.setRange(1, 999)
+        self.missing_start_cycle_spin.setValue(1)
+        self.missing_start_cycle_spin.setToolTip(
+            "First completed cycle whose map is used to add missing reflections for the next cycle."
+        )
+        self.missing_form.addRow("Start after cycle", self.missing_start_cycle_spin)
+        self.missing_percent_spin = QDoubleSpinBox()
+        self.missing_percent_spin.setRange(0.0, 100.0)
+        self.missing_percent_spin.setSingleStep(1.0)
+        self.missing_percent_spin.setDecimals(3)
+        self.missing_percent_spin.setValue(0.0)
+        self.missing_percent_spin.setToolTip(
+            "Caps generated missing reflections as a percent of the current reflection count, "
+            "preventing feedback from overwhelming measured data."
+        )
+        self.missing_form.addRow("Maximum added reflections (%)", self.missing_percent_spin)
+        self.missing_outer.addLayout(self.missing_form)
+        self.page3_layout.addWidget(self.missing_group)
+
+        self.intensity_group = QGroupBox("Intensity correction")
+        self.intensity_outer = QVBoxLayout(self.intensity_group)
+        self.intensity_enabled_checkbox = QCheckBox("Enable intensity correction")
+        self.intensity_outer.addWidget(self.intensity_enabled_checkbox)
+        self.intensity_form = QFormLayout()
+        self.intensity_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.intensity_start_cycle_spin = QSpinBox()
+        self.intensity_start_cycle_spin.setRange(1, 999)
+        self.intensity_start_cycle_spin.setValue(1)
+        self.intensity_start_cycle_spin.setToolTip(
+            "First completed cycle whose map is used to damp observed intensities for the next cycle."
+        )
+        self.intensity_form.addRow("Start after cycle", self.intensity_start_cycle_spin)
+        self.intensity_damping_spin = QDoubleSpinBox()
+        self.intensity_damping_spin.setRange(0.0, 1.0)
+        self.intensity_damping_spin.setSingleStep(0.05)
+        self.intensity_damping_spin.setDecimals(3)
+        self.intensity_damping_spin.setValue(0.0)
+        self.intensity_damping_spin.setToolTip(
+            "Damping factor for map-based intensity correction. 0 keeps observed data; "
+            "1 replaces them by scaled map-derived intensities."
+        )
+        self.intensity_form.addRow("Correction damping", self.intensity_damping_spin)
+        self.intensity_sigma_spin = QDoubleSpinBox()
+        self.intensity_sigma_spin.setRange(0.0, 1000.0)
+        self.intensity_sigma_spin.setSingleStep(0.5)
+        self.intensity_sigma_spin.setDecimals(3)
+        self.intensity_sigma_spin.setValue(0.0)
+        self.intensity_sigma_spin.setToolTip(
+            "Apply map-based intensity correction only to non-zero reflections with value/sigma "
+            "below this limit. Use 0 to correct all non-zero reflections -- including reflection "
+            "formats with no sigma column, since the value/sigma gate is then simply not applied."
+        )
+        self.intensity_form.addRow("Apply when value/σ <", self.intensity_sigma_spin)
+        self.intensity_outer.addLayout(self.intensity_form)
+        self.intensity_note = QLabel("Value/σ = 0 applies correction to all non-zero reflections.")
+        self.intensity_note.setWordWrap(True)
+        self.intensity_note.setStyleSheet("color: #52658b;")
+        self.intensity_outer.addWidget(self.intensity_note)
+        self.page3_layout.addWidget(self.intensity_group)
+
+        # --- Powder/FWHM branch: Powder overlap repartitioning, exactly Basic ->
+        # Map feedback's own controls/defaults/ranges/tooltips. ---
+        self.powder_group = QGroupBox("Powder overlap repartitioning")
+        self.powder_outer = QVBoxLayout(self.powder_group)
+        self.powder_enabled_checkbox = QCheckBox("Enable powder overlap repartitioning (FWHM data)")
+        self.powder_outer.addWidget(self.powder_enabled_checkbox)
+        self.powder_form = QFormLayout()
+        self.powder_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.powder_start_cycle_spin = QSpinBox()
+        self.powder_start_cycle_spin.setRange(1, 999)
+        self.powder_start_cycle_spin.setValue(1)
+        self.powder_start_cycle_spin.setToolTip(
+            "First completed cycle whose map is used to redistribute overlapping reflections for the next cycle."
+        )
+        self.powder_form.addRow("Start after cycle", self.powder_start_cycle_spin)
+        self.powder_wavelength_spin = QDoubleSpinBox()
+        self.powder_wavelength_spin.setRange(0.0, 10.0)
+        self.powder_wavelength_spin.setSingleStep(0.01)
+        self.powder_wavelength_spin.setDecimals(5)
+        self.powder_wavelength_spin.setValue(0.0)
+        self.powder_wavelength_spin.setToolTip(
+            "Required to compute 2θ. Auto-detected -- when left at 0 -- from the Jana2020 .inflip "
+            "file, then the reference file; enter it manually if neither source has it."
+        )
+        self.powder_form.addRow("Wavelength (Å)", self.powder_wavelength_spin)
+        self.powder_separation_spin = QDoubleSpinBox()
+        self.powder_separation_spin.setRange(0.001, 100.0)
+        self.powder_separation_spin.setSingleStep(0.05)
+        self.powder_separation_spin.setDecimals(3)
+        self.powder_separation_spin.setValue(0.2)
+        self.powder_separation_spin.setToolTip(
+            "Overlap threshold as a fraction of the mean FWHM of two neighboring reflections "
+            "(Superflip's own fwhmseparation convention)."
+        )
+        self.powder_form.addRow("Separation factor", self.powder_separation_spin)
+        self.powder_mix_spin = QDoubleSpinBox()
+        self.powder_mix_spin.setRange(0.0, 1.0)
+        self.powder_mix_spin.setSingleStep(0.05)
+        self.powder_mix_spin.setDecimals(3)
+        self.powder_mix_spin.setValue(1.0)
+        self.powder_mix_spin.setToolTip(
+            "0 keeps the observed intensity split within each overlap group; 1 uses the "
+            "map-derived split fully. The group total is always conserved."
+        )
+        self.powder_form.addRow("Map ratio mix", self.powder_mix_spin)
+        self.powder_outer.addLayout(self.powder_form)
+        self.powder_note = QLabel(
+            "Only applies to reflections with an FWHM value (hkl I/F fwhm data)."
+        )
+        self.powder_note.setWordWrap(True)
+        self.powder_note.setStyleSheet("color: #52658b;")
+        self.powder_outer.addWidget(self.powder_note)
+        self.page3_layout.addWidget(self.powder_group)
+
+        self.page3_validation_label = QLabel("")
+        self.page3_validation_label.setWordWrap(True)
+        self.page3_validation_label.setObjectName("wizardValidationMessage")
+        self.page3_validation_label.setStyleSheet("color: #b42318;")
+        self.page3_validation_label.setVisible(False)
+        self.page3_layout.addWidget(self.page3_validation_label)
+
+        self.page3_layout.addStretch(1)
+        self.stack.addWidget(self.page3)
+
+        # Every fresh Wizard invocation starts every Map feedback checkbox OFF --
+        # deliberately NOT restored from QSettings (same reasoning as the Cross-
+        # validation checkboxes on page2: this is job-specific state, not
+        # something that should silently carry over from an unrelated previous
+        # Jana2020 job). The default-off state above already satisfies this; no
+        # settings.value(...) read is ever wired to these controls.
+
+        def sync_missing_dependency(_checked: bool = False) -> None:
+            enabled = self.missing_enabled_checkbox.isChecked()
+            self.missing_start_cycle_spin.setEnabled(enabled)
+            self.missing_percent_spin.setEnabled(enabled)
+
+        self.missing_enabled_checkbox.toggled.connect(sync_missing_dependency)
+        sync_missing_dependency()
+
+        def sync_intensity_dependency(_checked: bool = False) -> None:
+            enabled = self.intensity_enabled_checkbox.isChecked()
+            self.intensity_start_cycle_spin.setEnabled(enabled)
+            self.intensity_damping_spin.setEnabled(enabled)
+            self.intensity_sigma_spin.setEnabled(enabled)
+
+        self.intensity_enabled_checkbox.toggled.connect(sync_intensity_dependency)
+        sync_intensity_dependency()
+
+        def sync_powder_dependency(_checked: bool = False) -> None:
+            enabled = self.powder_enabled_checkbox.isChecked()
+            self.powder_start_cycle_spin.setEnabled(enabled)
+            self.powder_wavelength_spin.setEnabled(enabled)
+            self.powder_separation_spin.setEnabled(enabled)
+            self.powder_mix_spin.setEnabled(enabled)
+
+        self.powder_enabled_checkbox.toggled.connect(sync_powder_dependency)
+        sync_powder_dependency()
+
+        self.detected_data_mode_holder: dict = {"mode": None}
+
+        def detect_reflection_data_mode() -> str:
+            # The ACTUAL parsed reflection format (not filename/composition/space
+            # group) -- reuses the same backing window (and therefore the same
+            # HKL/.inflip parsing app.py itself uses) built for page1's summary.
+            if self.detected_data_mode_holder["mode"] is None:
+                try:
+                    backing_win = get_backing_window()
+                    self.detected_data_mode_holder["mode"] = backing_win._resolve_configured_data_mode_for_ui()
+                except Exception:
+                    self.detected_data_mode_holder["mode"] = ""
+            return self.detected_data_mode_holder["mode"]
+
+        def sync_page3_for_data_type() -> None:
+            mode = detect_reflection_data_mode()
+            is_powder = reflection_mode_has_fwhm(mode)
+            self.reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal")
+            self.reflection_format_value.setText(format_reflection_data_mode(mode) if mode else "Not yet determined")
+            self.page3_description.setText(
+                "FWHM data detected. Powder overlap repartitioning is available."
+                if is_powder
+                else "Available feedback methods for single-crystal reflection data."
+            )
+            self.missing_group.setVisible(not is_powder)
+            self.intensity_group.setVisible(not is_powder)
+            self.powder_group.setVisible(is_powder)
+            if is_powder and self.powder_wavelength_spin.value() <= 0:
+                # Display default only (mirrors the main GUI's own
+                # resolve_powder_wavelength() called again at actual run time) --
+                # still fully editable, and 0 keeps its existing "auto" meaning
+                # for the underlying algorithm if left untouched.
+                try:
+                    ref_text = self.reference_file.text().strip()
+                    ref_path = Path(ref_text).expanduser() if ref_text else None
+                    detected_wavelength, _source = resolve_powder_wavelength(0.0, inflip_path, ref_path)
+                except Exception:
+                    detected_wavelength = 0.0
+                if detected_wavelength > 0:
+                    self.powder_wavelength_spin.setValue(detected_wavelength)
+            adjust_dialog_size()
+
+        def check_page3_validity() -> Optional[str]:
+            # Map feedback only affects SUBSEQUENT cycles -- an enabled method
+            # whose "Start after cycle" leaves no later cycle to apply to would
+            # silently do nothing; block Run rather than accept a setting that
+            # can never take effect. Never auto-raises Cycles to fix this.
+            total_cycles = max(1, self.cycles.value())
+            for checkbox, spin in (
+                (self.missing_enabled_checkbox, self.missing_start_cycle_spin),
+                (self.intensity_enabled_checkbox, self.intensity_start_cycle_spin),
+                (self.powder_enabled_checkbox, self.powder_start_cycle_spin),
+            ):
+                if checkbox.isVisible() and checkbox.isChecked() and spin.value() >= total_cycles:
+                    return "A subsequent cycle is required for map feedback."
+            return None
+
+        def refresh_page3_validation_message() -> None:
+            message = check_page3_validity()
+            self.page3_validation_label.setText(message or "")
+            self.page3_validation_label.setVisible(bool(message))
+
+        for _spin in (self.missing_start_cycle_spin, self.intensity_start_cycle_spin, self.powder_start_cycle_spin):
+            _spin.valueChanged.connect(lambda _value=0: refresh_page3_validation_message())
+        for _checkbox in (self.missing_enabled_checkbox, self.intensity_enabled_checkbox, self.powder_enabled_checkbox):
+            _checkbox.toggled.connect(lambda _checked=False: refresh_page3_validation_message())
+        self.cycles.valueChanged.connect(lambda _value=0: refresh_page3_validation_message())
+
+        # ----- Fixed action footer: added to outer_root (NOT the scrollable
+        # `root`/content_layout), so Back/Cancel/Open config/Run phasing always
+        # stay visible above the taskbar regardless of how tall the scrollable
+        # page content above them gets (spec: "WIZARD WINDOW SIZING" sections
+        # 5/8). A prominent "Run" action on page 2 plus the less prominent
+        # Back / Cancel / Open full Phase Studio actions. -----
+        self.footer = QWidget()
+        self.footer.setObjectName("wizardFooter")
+        self.button_row = QHBoxLayout(self.footer)
+        self.button_row.setContentsMargins(14, 8, 14, 12)
+        self.back_button = QPushButton("‹ Back")
+        self.back_button.setToolTip("Return to the workflow selection.")
+        self.cancel_button = QPushButton("Cancel")
+        self.cancel_button.setToolTip("Close the launcher without starting or modifying the Jana2020 job.")
+        self.edit_button = QPushButton("Open full configuration")
+        self.edit_button.setToolTip(
+            "Open the complete Phase Studio workspace with parameters imported from the "
+            "Jana2020 .inflip file. Embedded reflections are exported to a working HKL file "
+            "unless an external HKL override is selected there."
+        )
+        self.primary_button = QPushButton("Run phasing")
+        self.primary_button.setObjectName("primaryButton")
+        self.primary_button.setDefault(True)
+        self.button_row.addWidget(self.back_button)
+        self.button_row.addStretch(1)
+        self.button_row.addWidget(self.cancel_button)
+        self.button_row.addWidget(self.edit_button)
+        self.button_row.addWidget(self.primary_button)
+        self.outer_root.addWidget(self.footer)
+        self.chrome_holder["footer"] = self.footer
+
+        def current_workflow() -> str:
+            return self.workflow_state["key"]
+
+        def apply_workflow_cycle_default(key: str) -> None:
+            # "Superflip + SharpED" is always a single Superflip call followed by one
+            # SharpED pass; only "Phase recycling" repeats that pair over several cycles.
+            self.cycles.setEnabled(key == WORKFLOW_PHASE_RECYCLING)
+            recompute_default = not (self.cycles_user_edited["value"] and key == WORKFLOW_PHASE_RECYCLING)
+            self.cycles.blockSignals(True)
+            try:
+                # A single cycle never feeds a map back into a next cycle, so it
+                # isn't actually "recycling" -- the spinbox's own minimum (not
+                # just its default value) is raised to 2 for this workflow so the
+                # control itself can't be turned down to a non-recycling value.
+                self.cycles.setMinimum(2 if key == WORKFLOW_PHASE_RECYCLING else 1)
+                if recompute_default:
+                    if key == WORKFLOW_PHASE_RECYCLING:
+                        self.cycles.setValue(max(int(self.settings.value("cycles", 5)) or 5, 2))
+                    else:
+                        self.cycles.setValue(1)
+            finally:
+                self.cycles.blockSignals(False)
+
+        def sync_primary_button_for_page1() -> None:
+            # Selecting a workflow card never runs or navigates by itself; the
+            # bottom-right button is the one clear place that either advances to the
+            # workflow's extra settings or, for Superflip only, runs it directly.
+            if current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
+                self.primary_button.setText("Run phasing")
+                self.primary_button.setToolTip(
+                    "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper."
+                )
+            else:
+                self.primary_button.setText("Next ›")
+                self.primary_button.setToolTip("Continue to the SharpED and cycle settings.")
+
+        def workflow_changed() -> None:
+            key = current_workflow()
+            for card_key, card in self.workflow_cards.items():
+                card.set_selected(card_key == key)
+            cycles_visible = key == WORKFLOW_PHASE_RECYCLING
+            self.cycles.setVisible(cycles_visible)
+            if self.cycles_label is not None:
+                self.cycles_label.setVisible(cycles_visible)
+            if key != WORKFLOW_SUPERFLIP_ONLY:
+                apply_workflow_cycle_default(key)
+                self.map_group.setTitle(
+                    "Map used for phase recycling and Jana2020 handoff"
+                    if key == WORKFLOW_PHASE_RECYCLING
+                    else "Map used for Jana2020 handoff"
+                )
+                # The raw-vs-SharpED map choice is only meaningful for Phase
+                # recycling; "Superflip + SharpED" always uses the SharpED map
+                # (see effective_next_cycle_mode()), so offering it as a live
+                # choice there would be misleading. Force the radio to match
+                # before hiding it, so it reflects the truth if ever shown again.
+                self.map_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
+                if key == WORKFLOW_SUPERFLIP_SHARPED:
+                    self.sharped_map_radio.setChecked(True)
+                    sync_map_choice()
+                adjust_dialog_size()
+            self.cross_validation_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
+            if self.stack.currentWidget() is self.page1:
+                sync_primary_button_for_page1()
+
         workflow_changed()
 
-    # Workflow is the single most important choice on this page (it decides
-    # the whole execution path) and must not blend in as one more same-weight
-    # section -- it gets the same lightweight sectionLabel heading as Input
-    # summary / Reference and initial model above, plus the explicit
-    # "Choose one of three workflows." helper text called for in the spec.
-    workflow_section, workflow_body = build_page1_section("Workflow", "Choose one of three workflows.")
-    workflow_body.setSpacing(5)
-    workflow_cards: dict[str, "_WorkflowCard"] = {}
-    for key in (WORKFLOW_SUPERFLIP_ONLY, WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING):
-        card = _WorkflowCard(key, WORKFLOW_LABELS[key], WORKFLOW_DESCRIPTIONS[key], workflow_card_clicked)
-        card.setToolTip("Select this workflow, then use Run phasing / Next below to proceed.")
-        workflow_body.addWidget(card)
-        workflow_cards[key] = card
+        self.PAGE2_BANNER_TEXT = {
+            WORKFLOW_SUPERFLIP_SHARPED: ("SUPERFLIP + SHARPED", "Configure the map returned to Jana2020"),
+            WORKFLOW_PHASE_RECYCLING: ("PHASE RECYCLING", "Configure iterative reconstruction and validation"),
+        }
 
-    page1_layout.addWidget(workflow_section)
-    page1_layout.addStretch(1)
-    stack.addWidget(page1)
-
-    # ----- Page 2: SharpED / phase-recycling settings (workflows 2 and 3 only) -----
-    page2 = QWidget()
-    page2_layout = QVBoxLayout(page2)
-    page2_layout.setContentsMargins(0, 0, 0, 0)
-    page2_layout.setSpacing(10)
-
-    map_group = QGroupBox("Map used for Jana2020 handoff")
-    map_group_layout = QVBoxLayout(map_group)
-    map_buttons = QButtonGroup(dialog)
-    sharped_map_radio = QRadioButton("SharpED map")
-    superflip_map_radio = QRadioButton("Superflip map")
-    sharped_map_radio.setToolTip(
-        "Use the SharpED map for the next phase-recycling cycle and for the Jana2020 handoff."
-    )
-    superflip_map_radio.setToolTip(
-        "Use the Superflip map for the next phase-recycling cycle and for the Jana2020 handoff."
-    )
-    map_buttons.addButton(sharped_map_radio)
-    map_buttons.addButton(superflip_map_radio)
-    map_group_layout.addWidget(sharped_map_radio)
-    map_group_layout.addWidget(superflip_map_radio)
-    saved_next_cycle = str(settings.value("next_cycle_modelfile", "deblurred_xplor")).strip().lower()
-    if saved_next_cycle == "superflip_xplor":
-        superflip_map_radio.setChecked(True)
-    else:
-        sharped_map_radio.setChecked(True)
-    page2_layout.addWidget(map_group)
-
-    processing_form = QFormLayout()
-    processing_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-
-    cycles = QSpinBox()
-    cycles.setRange(1, 999)
-    cycles.setValue(int(settings.value("cycles", 1)) or 1)
-    cycles.setToolTip("Number of Superflip/SharpED phase-recycling cycles.")
-    processing_form.addRow("Recycling cycles", cycles)
-    cycles_label = processing_form.labelForField(cycles)
-
-    cycles_user_edited = {"value": False}
-
-    def mark_cycles_user_edited(_value: int = 0) -> None:
-        cycles_user_edited["value"] = True
-
-    cycles.valueChanged.connect(mark_cycles_user_edited)
-
-    model = QComboBox()
-    model.setEditable(True)
-    saved_model = str(settings.value("model", "default")).strip() or "default"
-    model.addItem(saved_model)
-    if saved_model != "default":
-        model.insertItem(0, "default")
-    model.setCurrentText(saved_model)
-    model.setToolTip(
-        "SharpED inference model. Select a model returned by the server or enter an "
-        "explicit model identifier. The value 'default' requests the server default."
-    )
-    processing_form.addRow("Model", model)
-    page2_layout.addLayout(processing_form)
-
-    refresh_row = QWidget()
-    refresh_layout = QHBoxLayout(refresh_row)
-    refresh_layout.setContentsMargins(0, 0, 0, 0)
-    refresh_models_button = QPushButton("Refresh models")
-    refresh_models_button.setToolTip("Query the SharpED server for its currently available models.")
-    model_status = QLabel("Model list not loaded.")
-    model_status.setWordWrap(True)
-    model_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-    refresh_layout.addWidget(refresh_models_button)
-    refresh_layout.addWidget(model_status, 1)
-    page2_layout.addWidget(refresh_row)
-
-    sharped_group = QGroupBox()
-    sharped_outer = QVBoxLayout(sharped_group)
-    sharped_toggle = QToolButton()
-    sharped_toggle.setObjectName("disclosureToggle")
-    sharped_toggle.setText("SharpED settings")
-    sharped_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-    sharped_toggle.setArrowType(Qt.RightArrow)
-    sharped_toggle.setCheckable(True)
-    sharped_toggle.setChecked(False)
-    sharped_toggle.setToolTip("Expand or collapse the SharpED server connection settings.")
-    sharped_outer.addWidget(sharped_toggle)
-    sharped_body = QWidget()
-    sharped_form = QFormLayout(sharped_body)
-    sharped_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    sharped_form.setContentsMargins(18, 4, 0, 0)
-
-    server_url = QLineEdit(shared_or_legacy_value("sharped_base_url", "server_url", DEFAULT_SERVER_URL))
-    server_url.setPlaceholderText(DEFAULT_SERVER_URL)
-    server_url.setToolTip(
-        "Base URL of the SharpED service used for model discovery and map processing. "
-        "Shared with the full Phase Studio application's own Advanced → Setup value."
-    )
-    sharped_form.addRow("Server URL", server_url)
-
-    api_token = QLineEdit(
-        shared_or_legacy_value("sharped_api_token", "api_token", os.environ.get("SHARPED_API_TOKEN", ""))
-    )
-    api_token.setEchoMode(QLineEdit.Password)
-    api_token.setPlaceholderText("Enter API token")
-    api_token.setToolTip(
-        "Bearer token used to authorize SharpED processing. The token is masked in "
-        "the interface, may alternatively be supplied through SHARPED_API_TOKEN, and "
-        "is shared with the full Phase Studio application's own API token -- saving it "
-        "here also updates that copy, and vice versa."
-    )
-    sharped_form.addRow("API token", api_token)
-
-    # Elements and Output resolution are deliberately not exposed here: they
-    # are shared with the full Phase Studio application's own Advanced ->
-    # SharpED values (auto-detected from composition there), the same way
-    # Server URL / API token are shared above -- see effective_elements()/
-    # effective_outres() below.
-    sharped_outer.addWidget(sharped_body)
-    sharped_body.setVisible(False)
-
-    def sync_sharped_disclosure(opened: bool) -> None:
-        sharped_body.setVisible(bool(opened))
-        sharped_toggle.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
-        adjust_dialog_size()
-
-    sharped_toggle.toggled.connect(sync_sharped_disclosure)
-    page2_layout.addWidget(sharped_group)
-
-    refresh_results: "queue.Queue[tuple[str, object]]" = queue.Queue()
-    refresh_timer = QTimer(dialog)
-    refresh_timer.setInterval(100)
-
-    def refresh_available_models() -> None:
-        base_url = server_url.text().strip() or DEFAULT_SERVER_URL
-        refresh_models_button.setEnabled(False)
-        model_status.setText("Contacting the SharpED server…")
-
-        def worker() -> None:
-            try:
-                client = SharpEDServerClient(base_url=base_url, timeout=30.0)
-                models_result = client.get_models()
-                refresh_results.put(("ok", models_result))
-            except Exception as exc:
-                refresh_results.put(("error", str(exc)))
-
-        threading.Thread(target=worker, daemon=True).start()
-        if not refresh_timer.isActive():
-            refresh_timer.start()
-
-    def poll_model_refresh() -> None:
-        try:
-            state, payload = refresh_results.get_nowait()
-        except queue.Empty:
-            return
-
-        refresh_timer.stop()
-        refresh_models_button.setEnabled(True)
-        if state == "error":
-            model_status.setText("Unable to retrieve the model list.")
-            model_status.setToolTip(
-                "Model discovery failed. Verify the server URL and network connection; "
-                "a model identifier may still be entered manually.\n\n"
-                + sanitize_error_details(payload)
-            )
-            return
-
-        models_result = payload
-        current = model.currentText().strip() or "default"
-        values: List[str] = ["default"]
-        default_model = str(getattr(models_result, "default_model", "") or "").strip()
-        if default_model and default_model not in values:
-            values.append(default_model)
-        for available in list(getattr(models_result, "models", []) or []):
-            value = str(available).strip()
-            if value and value not in values:
-                values.append(value)
-
-        model.blockSignals(True)
-        model.clear()
-        model.addItems(values)
-        model.setCurrentText(current if current in values else "default")
-        model.blockSignals(False)
-        if default_model:
-            model_status.setText(f"{len(values) - 1} models available · Default: {default_model}")
-        else:
-            model_status.setText(f"{len(values) - 1} models available")
-
-    refresh_models_button.clicked.connect(refresh_available_models)
-    refresh_timer.timeout.connect(poll_model_refresh)
-
-    validation_group = QGroupBox("Scientific validation")
-    validation_layout = QHBoxLayout(validation_group)
-    warning_icon = QLabel()
-    warning_icon.setPixmap(dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
-    warning_icon.setAlignment(Qt.AlignTop)
-    validation_layout.addWidget(warning_icon, 0, Qt.AlignTop)
-    warning_text = QLabel(
-        "SharpED uses a neural-network density-processing model. Its output may "
-        "contain artifacts and should be validated against the measured "
-        "diffraction data and an independent crystallographic refinement."
-    )
-    warning_text.setWordWrap(True)
-    validation_layout.addWidget(warning_text, 1)
-    page2_layout.addWidget(validation_group)
-
-    # Phase recycling only: maps directly onto the existing full-pipeline
-    # compute_omit_maps / compute_omit_rfree settings (see build_jana_handoff_import).
-    # Not shown for either single-pass workflow, which never reaches that pipeline.
-    cross_validation_group = QGroupBox("Cross-validation")
-    cross_validation_layout = QVBoxLayout(cross_validation_group)
-    omit_checkbox = QCheckBox("Compute OMIT validation maps")
-    omit_checkbox.setToolTip(
-        "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed "
-        "random 5% holdout of reflections excluded from the input, for cross-validation. "
-        "Feeds the phase-recycling result selector's Selection score, helping identify the "
-        "most suitable map among the recycling cycles. Roughly doubles Superflip/SharpED "
-        "time per cycle."
-    )
-    rfree_checkbox = QCheckBox("Calculate R_free")
-    rfree_checkbox.setToolTip(
-        "Compute R_free (the crystallographic R-factor between the excluded holdout "
-        "reflections' observed |F| and |F| calculated by FFT from the omit map) for each "
-        "cycle. Feeds the phase-recycling result selector's Selection score alongside OMIT "
-        "correlation, helping rank cycles and choose the most suitable map. Requires "
-        "'Compute OMIT validation maps'."
-    )
-    cross_validation_layout.addWidget(omit_checkbox)
-    cross_validation_layout.addWidget(rfree_checkbox)
-    cross_validation_help = QLabel(
-        "Optional. Excludes a random 5% of reflections each cycle to compute OMIT / R_free "
-        "validation metrics, which help rank the recycling cycles and select the most "
-        "suitable map."
-    )
-    cross_validation_help.setWordWrap(True)
-    cross_validation_help.setStyleSheet("color: #52658b;")
-    cross_validation_layout.addWidget(cross_validation_help)
-    page2_layout.addWidget(cross_validation_group)
-
-    # Deliberately not persisted/restored from QSettings: cross-validation is
-    # an expensive, per-job opt-in and must not be silently inherited from an
-    # unrelated previous Jana2020 job. Every fresh invocation starts unchecked.
-
-    def sync_rfree_dependency(_checked: bool = False) -> None:
-        omit_enabled = omit_checkbox.isChecked()
-        rfree_checkbox.setEnabled(omit_enabled)
-        if not omit_enabled and rfree_checkbox.isChecked():
-            rfree_checkbox.setChecked(False)
-
-    omit_checkbox.toggled.connect(sync_rfree_dependency)
-    sync_rfree_dependency()
-
-    page2_layout.addStretch(1)
-    stack.addWidget(page2)
-
-    def sync_map_choice() -> None:
-        validation_group.setVisible(sharped_map_radio.isChecked())
-        adjust_dialog_size()
-
-    sharped_map_radio.toggled.connect(lambda _checked=False: sync_map_choice())
-    sync_map_choice()
-
-    # ----- Page 3: Map feedback (Phase recycling only) -- exposes and
-    # populates the existing Basic -> Map feedback controls/RunConfig
-    # fields (see build_jana_handoff_import); no new map-feedback algorithm
-    # is implemented here. Not added to Superflip only or Superflip +
-    # SharpED, which never reach this page. -----
-    page3 = QWidget()
-    page3_layout = QVBoxLayout(page3)
-    page3_layout.setContentsMargins(0, 0, 0, 0)
-    page3_layout.setSpacing(10)
-
-    reflection_data_group = QGroupBox("Reflection data")
-    reflection_data_form = QFormLayout(reflection_data_group)
-    reflection_data_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    reflection_type_value = QLabel("")
-    reflection_format_value = QLabel("")
-    reflection_data_form.addRow("Type", reflection_type_value)
-    reflection_data_form.addRow("Format", reflection_format_value)
-    page3_layout.addWidget(reflection_data_group)
-
-    page3_description = QLabel("")
-    page3_description.setWordWrap(True)
-    page3_description.setStyleSheet("color: #52658b;")
-    page3_layout.addWidget(page3_description)
-
-    # Same "Warning" message and icon+text presentation as the "Scientific
-    # validation" box above (and Basic -> Map feedback's settings_callout in
-    # the main GUI) -- always visible on this page, regardless of whether
-    # any option below is enabled.
-    map_feedback_warning_group = QGroupBox()
-    map_feedback_warning_layout = QHBoxLayout(map_feedback_warning_group)
-    map_feedback_warning_icon = QLabel()
-    map_feedback_warning_icon.setPixmap(dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
-    map_feedback_warning_icon.setAlignment(Qt.AlignTop)
-    map_feedback_warning_layout.addWidget(map_feedback_warning_icon, 0, Qt.AlignTop)
-    map_feedback_warning_text = QLabel(
-        "<b>Warning</b><br>"
-        "The operations on this page modify the reflection data supplied to subsequent cycles. "
-        "Results from these cycles should therefore be validated against the original measured data."
-    )
-    map_feedback_warning_text.setTextFormat(Qt.RichText)
-    map_feedback_warning_text.setWordWrap(True)
-    map_feedback_warning_layout.addWidget(map_feedback_warning_text, 1)
-    page3_layout.addWidget(map_feedback_warning_group)
-
-    # --- Single-crystal branch: Missing-reflection completion + Intensity
-    # correction, exactly Basic -> Map feedback's own controls/defaults/
-    # ranges/tooltips. ---
-    missing_group = QGroupBox("Missing-reflection completion")
-    missing_outer = QVBoxLayout(missing_group)
-    missing_enabled_checkbox = QCheckBox("Enable missing-reflection completion")
-    missing_outer.addWidget(missing_enabled_checkbox)
-    missing_form = QFormLayout()
-    missing_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    missing_start_cycle_spin = QSpinBox()
-    missing_start_cycle_spin.setRange(1, 999)
-    missing_start_cycle_spin.setValue(1)
-    missing_start_cycle_spin.setToolTip(
-        "First completed cycle whose map is used to add missing reflections for the next cycle."
-    )
-    missing_form.addRow("Start after cycle", missing_start_cycle_spin)
-    missing_percent_spin = QDoubleSpinBox()
-    missing_percent_spin.setRange(0.0, 100.0)
-    missing_percent_spin.setSingleStep(1.0)
-    missing_percent_spin.setDecimals(3)
-    missing_percent_spin.setValue(0.0)
-    missing_percent_spin.setToolTip(
-        "Caps generated missing reflections as a percent of the current reflection count, "
-        "preventing feedback from overwhelming measured data."
-    )
-    missing_form.addRow("Maximum added reflections (%)", missing_percent_spin)
-    missing_outer.addLayout(missing_form)
-    page3_layout.addWidget(missing_group)
-
-    intensity_group = QGroupBox("Intensity correction")
-    intensity_outer = QVBoxLayout(intensity_group)
-    intensity_enabled_checkbox = QCheckBox("Enable intensity correction")
-    intensity_outer.addWidget(intensity_enabled_checkbox)
-    intensity_form = QFormLayout()
-    intensity_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    intensity_start_cycle_spin = QSpinBox()
-    intensity_start_cycle_spin.setRange(1, 999)
-    intensity_start_cycle_spin.setValue(1)
-    intensity_start_cycle_spin.setToolTip(
-        "First completed cycle whose map is used to damp observed intensities for the next cycle."
-    )
-    intensity_form.addRow("Start after cycle", intensity_start_cycle_spin)
-    intensity_damping_spin = QDoubleSpinBox()
-    intensity_damping_spin.setRange(0.0, 1.0)
-    intensity_damping_spin.setSingleStep(0.05)
-    intensity_damping_spin.setDecimals(3)
-    intensity_damping_spin.setValue(0.0)
-    intensity_damping_spin.setToolTip(
-        "Damping factor for map-based intensity correction. 0 keeps observed data; "
-        "1 replaces them by scaled map-derived intensities."
-    )
-    intensity_form.addRow("Correction damping", intensity_damping_spin)
-    intensity_sigma_spin = QDoubleSpinBox()
-    intensity_sigma_spin.setRange(0.0, 1000.0)
-    intensity_sigma_spin.setSingleStep(0.5)
-    intensity_sigma_spin.setDecimals(3)
-    intensity_sigma_spin.setValue(0.0)
-    intensity_sigma_spin.setToolTip(
-        "Apply map-based intensity correction only to non-zero reflections with value/sigma "
-        "below this limit. Use 0 to correct all non-zero reflections -- including reflection "
-        "formats with no sigma column, since the value/sigma gate is then simply not applied."
-    )
-    intensity_form.addRow("Apply when value/σ <", intensity_sigma_spin)
-    intensity_outer.addLayout(intensity_form)
-    intensity_note = QLabel("Value/σ = 0 applies correction to all non-zero reflections.")
-    intensity_note.setWordWrap(True)
-    intensity_note.setStyleSheet("color: #52658b;")
-    intensity_outer.addWidget(intensity_note)
-    page3_layout.addWidget(intensity_group)
-
-    # --- Powder/FWHM branch: Powder overlap repartitioning, exactly Basic ->
-    # Map feedback's own controls/defaults/ranges/tooltips. ---
-    powder_group = QGroupBox("Powder overlap repartitioning")
-    powder_outer = QVBoxLayout(powder_group)
-    powder_enabled_checkbox = QCheckBox("Enable powder overlap repartitioning (FWHM data)")
-    powder_outer.addWidget(powder_enabled_checkbox)
-    powder_form = QFormLayout()
-    powder_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-    powder_start_cycle_spin = QSpinBox()
-    powder_start_cycle_spin.setRange(1, 999)
-    powder_start_cycle_spin.setValue(1)
-    powder_start_cycle_spin.setToolTip(
-        "First completed cycle whose map is used to redistribute overlapping reflections for the next cycle."
-    )
-    powder_form.addRow("Start after cycle", powder_start_cycle_spin)
-    powder_wavelength_spin = QDoubleSpinBox()
-    powder_wavelength_spin.setRange(0.0, 10.0)
-    powder_wavelength_spin.setSingleStep(0.01)
-    powder_wavelength_spin.setDecimals(5)
-    powder_wavelength_spin.setValue(0.0)
-    powder_wavelength_spin.setToolTip(
-        "Required to compute 2θ. Auto-detected -- when left at 0 -- from the Jana2020 .inflip "
-        "file, then the reference file; enter it manually if neither source has it."
-    )
-    powder_form.addRow("Wavelength (Å)", powder_wavelength_spin)
-    powder_separation_spin = QDoubleSpinBox()
-    powder_separation_spin.setRange(0.001, 100.0)
-    powder_separation_spin.setSingleStep(0.05)
-    powder_separation_spin.setDecimals(3)
-    powder_separation_spin.setValue(0.2)
-    powder_separation_spin.setToolTip(
-        "Overlap threshold as a fraction of the mean FWHM of two neighboring reflections "
-        "(Superflip's own fwhmseparation convention)."
-    )
-    powder_form.addRow("Separation factor", powder_separation_spin)
-    powder_mix_spin = QDoubleSpinBox()
-    powder_mix_spin.setRange(0.0, 1.0)
-    powder_mix_spin.setSingleStep(0.05)
-    powder_mix_spin.setDecimals(3)
-    powder_mix_spin.setValue(1.0)
-    powder_mix_spin.setToolTip(
-        "0 keeps the observed intensity split within each overlap group; 1 uses the "
-        "map-derived split fully. The group total is always conserved."
-    )
-    powder_form.addRow("Map ratio mix", powder_mix_spin)
-    powder_outer.addLayout(powder_form)
-    powder_note = QLabel(
-        "Only applies to reflections with an FWHM value (hkl I/F fwhm data)."
-    )
-    powder_note.setWordWrap(True)
-    powder_note.setStyleSheet("color: #52658b;")
-    powder_outer.addWidget(powder_note)
-    page3_layout.addWidget(powder_group)
-
-    page3_validation_label = QLabel("")
-    page3_validation_label.setWordWrap(True)
-    page3_validation_label.setObjectName("wizardValidationMessage")
-    page3_validation_label.setStyleSheet("color: #b42318;")
-    page3_validation_label.setVisible(False)
-    page3_layout.addWidget(page3_validation_label)
-
-    page3_layout.addStretch(1)
-    stack.addWidget(page3)
-
-    # Every fresh Wizard invocation starts every Map feedback checkbox OFF --
-    # deliberately NOT restored from QSettings (same reasoning as the Cross-
-    # validation checkboxes on page2: this is job-specific state, not
-    # something that should silently carry over from an unrelated previous
-    # Jana2020 job). The default-off state above already satisfies this; no
-    # settings.value(...) read is ever wired to these controls.
-
-    def sync_missing_dependency(_checked: bool = False) -> None:
-        enabled = missing_enabled_checkbox.isChecked()
-        missing_start_cycle_spin.setEnabled(enabled)
-        missing_percent_spin.setEnabled(enabled)
-
-    missing_enabled_checkbox.toggled.connect(sync_missing_dependency)
-    sync_missing_dependency()
-
-    def sync_intensity_dependency(_checked: bool = False) -> None:
-        enabled = intensity_enabled_checkbox.isChecked()
-        intensity_start_cycle_spin.setEnabled(enabled)
-        intensity_damping_spin.setEnabled(enabled)
-        intensity_sigma_spin.setEnabled(enabled)
-
-    intensity_enabled_checkbox.toggled.connect(sync_intensity_dependency)
-    sync_intensity_dependency()
-
-    def sync_powder_dependency(_checked: bool = False) -> None:
-        enabled = powder_enabled_checkbox.isChecked()
-        powder_start_cycle_spin.setEnabled(enabled)
-        powder_wavelength_spin.setEnabled(enabled)
-        powder_separation_spin.setEnabled(enabled)
-        powder_mix_spin.setEnabled(enabled)
-
-    powder_enabled_checkbox.toggled.connect(sync_powder_dependency)
-    sync_powder_dependency()
-
-    detected_data_mode_holder: dict = {"mode": None}
-
-    def detect_reflection_data_mode() -> str:
-        # The ACTUAL parsed reflection format (not filename/composition/space
-        # group) -- reuses the same backing window (and therefore the same
-        # HKL/.inflip parsing app.py itself uses) built for page1's summary.
-        if detected_data_mode_holder["mode"] is None:
-            try:
-                backing_win = get_backing_window()
-                detected_data_mode_holder["mode"] = backing_win._resolve_configured_data_mode_for_ui()
-            except Exception:
-                detected_data_mode_holder["mode"] = ""
-        return detected_data_mode_holder["mode"]
-
-    def sync_page3_for_data_type() -> None:
-        mode = detect_reflection_data_mode()
-        is_powder = reflection_mode_has_fwhm(mode)
-        reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal")
-        reflection_format_value.setText(format_reflection_data_mode(mode) if mode else "Not yet determined")
-        page3_description.setText(
-            "FWHM data detected. Powder overlap repartitioning is available."
-            if is_powder
-            else "Available feedback methods for single-crystal reflection data."
-        )
-        missing_group.setVisible(not is_powder)
-        intensity_group.setVisible(not is_powder)
-        powder_group.setVisible(is_powder)
-        if is_powder and powder_wavelength_spin.value() <= 0:
-            # Display default only (mirrors the main GUI's own
-            # resolve_powder_wavelength() called again at actual run time) --
-            # still fully editable, and 0 keeps its existing "auto" meaning
-            # for the underlying algorithm if left untouched.
-            try:
-                ref_text = reference_file.text().strip()
-                ref_path = Path(ref_text).expanduser() if ref_text else None
-                detected_wavelength, _source = resolve_powder_wavelength(0.0, inflip_path, ref_path)
-            except Exception:
-                detected_wavelength = 0.0
-            if detected_wavelength > 0:
-                powder_wavelength_spin.setValue(detected_wavelength)
-        adjust_dialog_size()
-
-    def check_page3_validity() -> Optional[str]:
-        # Map feedback only affects SUBSEQUENT cycles -- an enabled method
-        # whose "Start after cycle" leaves no later cycle to apply to would
-        # silently do nothing; block Run rather than accept a setting that
-        # can never take effect. Never auto-raises Cycles to fix this.
-        total_cycles = max(1, cycles.value())
-        for checkbox, spin in (
-            (missing_enabled_checkbox, missing_start_cycle_spin),
-            (intensity_enabled_checkbox, intensity_start_cycle_spin),
-            (powder_enabled_checkbox, powder_start_cycle_spin),
-        ):
-            if checkbox.isVisible() and checkbox.isChecked() and spin.value() >= total_cycles:
-                return "A subsequent cycle is required for map feedback."
-        return None
-
-    def refresh_page3_validation_message() -> None:
-        message = check_page3_validity()
-        page3_validation_label.setText(message or "")
-        page3_validation_label.setVisible(bool(message))
-
-    for _spin in (missing_start_cycle_spin, intensity_start_cycle_spin, powder_start_cycle_spin):
-        _spin.valueChanged.connect(lambda _value=0: refresh_page3_validation_message())
-    for _checkbox in (missing_enabled_checkbox, intensity_enabled_checkbox, powder_enabled_checkbox):
-        _checkbox.toggled.connect(lambda _checked=False: refresh_page3_validation_message())
-    cycles.valueChanged.connect(lambda _value=0: refresh_page3_validation_message())
-
-    # ----- Fixed action footer: added to outer_root (NOT the scrollable
-    # `root`/content_layout), so Back/Cancel/Open config/Run phasing always
-    # stay visible above the taskbar regardless of how tall the scrollable
-    # page content above them gets (spec: "WIZARD WINDOW SIZING" sections
-    # 5/8). A prominent "Run" action on page 2 plus the less prominent
-    # Back / Cancel / Open full Phase Studio actions. -----
-    footer = QWidget()
-    footer.setObjectName("wizardFooter")
-    button_row = QHBoxLayout(footer)
-    button_row.setContentsMargins(14, 8, 14, 12)
-    back_button = QPushButton("‹ Back")
-    back_button.setToolTip("Return to the workflow selection.")
-    cancel_button = QPushButton("Cancel")
-    cancel_button.setToolTip("Close the launcher without starting or modifying the Jana2020 job.")
-    edit_button = QPushButton("Open full configuration")
-    edit_button.setToolTip(
-        "Open the complete Phase Studio workspace with parameters imported from the "
-        "Jana2020 .inflip file. Embedded reflections are exported to a working HKL file "
-        "unless an external HKL override is selected there."
-    )
-    primary_button = QPushButton("Run phasing")
-    primary_button.setObjectName("primaryButton")
-    primary_button.setDefault(True)
-    button_row.addWidget(back_button)
-    button_row.addStretch(1)
-    button_row.addWidget(cancel_button)
-    button_row.addWidget(edit_button)
-    button_row.addWidget(primary_button)
-    outer_root.addWidget(footer)
-    chrome_holder["footer"] = footer
-
-    def current_workflow() -> str:
-        return workflow_state["key"]
-
-    def apply_workflow_cycle_default(key: str) -> None:
-        # "Superflip + SharpED" is always a single Superflip call followed by one
-        # SharpED pass; only "Phase recycling" repeats that pair over several cycles.
-        cycles.setEnabled(key == WORKFLOW_PHASE_RECYCLING)
-        recompute_default = not (cycles_user_edited["value"] and key == WORKFLOW_PHASE_RECYCLING)
-        cycles.blockSignals(True)
-        try:
-            # A single cycle never feeds a map back into a next cycle, so it
-            # isn't actually "recycling" -- the spinbox's own minimum (not
-            # just its default value) is raised to 2 for this workflow so the
-            # control itself can't be turned down to a non-recycling value.
-            cycles.setMinimum(2 if key == WORKFLOW_PHASE_RECYCLING else 1)
-            if recompute_default:
-                if key == WORKFLOW_PHASE_RECYCLING:
-                    cycles.setValue(max(int(settings.value("cycles", 5)) or 5, 2))
-                else:
-                    cycles.setValue(1)
-        finally:
-            cycles.blockSignals(False)
-
-    def sync_primary_button_for_page1() -> None:
-        # Selecting a workflow card never runs or navigates by itself; the
-        # bottom-right button is the one clear place that either advances to the
-        # workflow's extra settings or, for Superflip only, runs it directly.
-        if current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
-            primary_button.setText("Run phasing")
-            primary_button.setToolTip(
-                "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper."
-            )
-        else:
-            primary_button.setText("Next ›")
-            primary_button.setToolTip("Continue to the SharpED and cycle settings.")
-
-    def workflow_changed() -> None:
-        key = current_workflow()
-        for card_key, card in workflow_cards.items():
-            card.set_selected(card_key == key)
-        cycles_visible = key == WORKFLOW_PHASE_RECYCLING
-        cycles.setVisible(cycles_visible)
-        if cycles_label is not None:
-            cycles_label.setVisible(cycles_visible)
-        if key != WORKFLOW_SUPERFLIP_ONLY:
-            apply_workflow_cycle_default(key)
-            map_group.setTitle(
-                "Map used for phase recycling and Jana2020 handoff"
-                if key == WORKFLOW_PHASE_RECYCLING
-                else "Map used for Jana2020 handoff"
-            )
-            # The raw-vs-SharpED map choice is only meaningful for Phase
-            # recycling; "Superflip + SharpED" always uses the SharpED map
-            # (see effective_next_cycle_mode()), so offering it as a live
-            # choice there would be misleading. Force the radio to match
-            # before hiding it, so it reflects the truth if ever shown again.
-            map_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
-            if key == WORKFLOW_SUPERFLIP_SHARPED:
-                sharped_map_radio.setChecked(True)
-                sync_map_choice()
-            adjust_dialog_size()
-        cross_validation_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
-        if stack.currentWidget() is page1:
+        def go_to_page1() -> None:
+            self.stack.setCurrentWidget(self.page1)
+            self.back_button.setVisible(False)
             sync_primary_button_for_page1()
+            self.context_title_label.setText("JANA2020 WORKFLOW")
+            self.context_subtitle_label.setText("Review the incoming crystallographic data and choose a workflow")
+            adjust_dialog_size()
 
-    workflow_changed()
+        def go_to_page2() -> None:
+            self.stack.setCurrentWidget(self.page2)
+            self.back_button.setVisible(True)
+            if current_workflow() == WORKFLOW_PHASE_RECYCLING:
+                # Phase recycling alone continues to a third page (Map feedback)
+                # before anything runs; Superflip + SharpED has no such page and
+                # keeps running directly from here.
+                self.primary_button.setText("Next ›")
+                self.primary_button.setToolTip("Continue to the Map feedback settings.")
+            else:
+                self.primary_button.setText("Run phasing")
+                self.primary_button.setToolTip(
+                    "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
+                    "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
+                )
+            banner_title, banner_subtitle = self.PAGE2_BANNER_TEXT.get(
+                current_workflow(), ("JANA2020 WORKFLOW", "")
+            )
+            self.context_title_label.setText(banner_title)
+            self.context_subtitle_label.setText(banner_subtitle)
+            adjust_dialog_size()
 
-    PAGE2_BANNER_TEXT = {
-        WORKFLOW_SUPERFLIP_SHARPED: ("SUPERFLIP + SHARPED", "Configure the map returned to Jana2020"),
-        WORKFLOW_PHASE_RECYCLING: ("PHASE RECYCLING", "Configure iterative reconstruction and validation"),
-    }
-
-    def go_to_page1() -> None:
-        stack.setCurrentWidget(page1)
-        back_button.setVisible(False)
-        sync_primary_button_for_page1()
-        context_title_label.setText("JANA2020 WORKFLOW")
-        context_subtitle_label.setText("Review the incoming crystallographic data and choose a workflow")
-        adjust_dialog_size()
-
-    def go_to_page2() -> None:
-        stack.setCurrentWidget(page2)
-        back_button.setVisible(True)
-        if current_workflow() == WORKFLOW_PHASE_RECYCLING:
-            # Phase recycling alone continues to a third page (Map feedback)
-            # before anything runs; Superflip + SharpED has no such page and
-            # keeps running directly from here.
-            primary_button.setText("Next ›")
-            primary_button.setToolTip("Continue to the Map feedback settings.")
-        else:
-            primary_button.setText("Run phasing")
-            primary_button.setToolTip(
+        def go_to_page3() -> None:
+            sync_page3_for_data_type()
+            refresh_page3_validation_message()
+            self.stack.setCurrentWidget(self.page3)
+            self.back_button.setVisible(True)
+            self.primary_button.setText("Run phasing")
+            self.primary_button.setToolTip(
                 "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
                 "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
             )
-        banner_title, banner_subtitle = PAGE2_BANNER_TEXT.get(
-            current_workflow(), ("JANA2020 WORKFLOW", "")
-        )
-        context_title_label.setText(banner_title)
-        context_subtitle_label.setText(banner_subtitle)
-        adjust_dialog_size()
+            self.context_title_label.setText("PHASE RECYCLING · MAP FEEDBACK")
+            self.context_subtitle_label.setText("Optionally update reflection data between recycling cycles")
+            adjust_dialog_size()
 
-    def go_to_page3() -> None:
-        sync_page3_for_data_type()
-        refresh_page3_validation_message()
-        stack.setCurrentWidget(page3)
-        back_button.setVisible(True)
-        primary_button.setText("Run phasing")
-        primary_button.setToolTip(
-            "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
-            "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
-        )
-        context_title_label.setText("PHASE RECYCLING · MAP FEEDBACK")
-        context_subtitle_label.setText("Optionally update reflection data between recycling cycles")
-        adjust_dialog_size()
+        def go_back() -> None:
+            if self.stack.currentWidget() is self.page3:
+                go_to_page2()
+            else:
+                go_to_page1()
 
-    def go_back() -> None:
-        if stack.currentWidget() is page3:
-            go_to_page2()
-        else:
-            go_to_page1()
+        self.back_button.clicked.connect(go_back)
+        go_to_page1()
 
-    back_button.clicked.connect(go_back)
-    go_to_page1()
+        self.result = {"action": "cancel"}
 
-    result = {"action": "cancel"}
+        def effective_next_cycle_mode() -> str:
+            if current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
+                return "none"
+            if current_workflow() == WORKFLOW_SUPERFLIP_SHARPED:
+                # This workflow always runs SharpED and hands its (deblurred)
+                # map off to Jana2020 -- the raw-vs-SharpED map choice only has
+                # real meaning for Phase recycling, where each cycle genuinely
+                # can feed forward either map. Never let a leftover radio
+                # selection from an earlier Phase-recycling session silently
+                # skip SharpED here even if somehow still checked.
+                return "deblurred_xplor"
+            return "superflip_xplor" if self.superflip_map_radio.isChecked() else "deblurred_xplor"
 
-    def effective_next_cycle_mode() -> str:
-        if current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
-            return "none"
-        if current_workflow() == WORKFLOW_SUPERFLIP_SHARPED:
-            # This workflow always runs SharpED and hands its (deblurred)
-            # map off to Jana2020 -- the raw-vs-SharpED map choice only has
-            # real meaning for Phase recycling, where each cycle genuinely
-            # can feed forward either map. Never let a leftover radio
-            # selection from an earlier Phase-recycling session silently
-            # skip SharpED here even if somehow still checked.
-            return "deblurred_xplor"
-        return "superflip_xplor" if superflip_map_radio.isChecked() else "deblurred_xplor"
+        def effective_cycles() -> int:
+            return 1 if current_workflow() == WORKFLOW_SUPERFLIP_ONLY else self.cycles.value()
 
-    def effective_cycles() -> int:
-        return 1 if current_workflow() == WORKFLOW_SUPERFLIP_ONLY else cycles.value()
+        def effective_elements() -> str:
+            return shared_or_legacy_value("sharped_elements", "elements", "C N O")
 
-    def effective_elements() -> str:
-        return shared_or_legacy_value("sharped_elements", "elements", "C N O")
+        def effective_outres() -> float:
+            try:
+                return float(shared_or_legacy_value("sharped_outres", "outres", "0.2"))
+            except ValueError:
+                return 0.2
 
-    def effective_outres() -> float:
-        try:
-            return float(shared_or_legacy_value("sharped_outres", "outres", "0.2"))
-        except ValueError:
-            return 0.2
+        def effective_compute_omit_maps() -> bool:
+            # Cross-validation is Phase-recycling-only; the checkboxes are hidden
+            # (never even shown) for either single-pass workflow, and their value
+            # must not leak through in that case regardless of prior state.
+            return current_workflow() == WORKFLOW_PHASE_RECYCLING and self.omit_checkbox.isChecked()
 
-    def effective_compute_omit_maps() -> bool:
-        # Cross-validation is Phase-recycling-only; the checkboxes are hidden
-        # (never even shown) for either single-pass workflow, and their value
-        # must not leak through in that case regardless of prior state.
-        return current_workflow() == WORKFLOW_PHASE_RECYCLING and omit_checkbox.isChecked()
+        def effective_compute_omit_rfree() -> bool:
+            return effective_compute_omit_maps() and self.rfree_checkbox.isChecked()
 
-    def effective_compute_omit_rfree() -> bool:
-        return effective_compute_omit_maps() and rfree_checkbox.isChecked()
+        def effective_map_feedback_enabled() -> bool:
+            # PAGE 3 is Phase-recycling-only; its controls must never leak
+            # through for either single-pass workflow even if somehow toggled.
+            return current_workflow() == WORKFLOW_PHASE_RECYCLING
 
-    def effective_map_feedback_enabled() -> bool:
-        # PAGE 3 is Phase-recycling-only; its controls must never leak
-        # through for either single-pass workflow even if somehow toggled.
-        return current_workflow() == WORKFLOW_PHASE_RECYCLING
+        def save_values() -> None:
+            next_cycle_mode = effective_next_cycle_mode()
+            self.settings.setValue("workflow", current_workflow())
+            self.settings.setValue("cycles", effective_cycles())
+            self.settings.setValue("next_cycle_modelfile", next_cycle_mode)
+            self.settings.setValue("use_deblurred_map", next_cycle_mode == "deblurred_xplor")
+            # SharpED server URL / API token are the shared credentials also used by
+            # the full Phase Studio application; write them there, not to a second,
+            # independent copy under this wrapper's own settings (see shared_settings
+            # above for why: two copies drift and silently overwrite one another).
+            self.shared_settings.setValue("inputs/sharped_base_url", self.server_url.text())
+            self.shared_settings.setValue("inputs/sharped_api_token", self.api_token.text())
+            self.shared_settings.sync()
+            self.settings.setValue("model", self.model.currentText())
+            # Elements and Output resolution have no control of their own here
+            # any more -- they come from the shared full-application settings (see
+            # effective_elements()/effective_outres()) and are not re-persisted.
+            # Reference file / model file are deliberately not persisted: they should
+            # reflect the incoming .inflip (or be blank), never a leftover value from
+            # an unrelated previous Jana2020 job.
+            self.settings.sync()
 
-    def save_values() -> None:
-        next_cycle_mode = effective_next_cycle_mode()
-        settings.setValue("workflow", current_workflow())
-        settings.setValue("cycles", effective_cycles())
-        settings.setValue("next_cycle_modelfile", next_cycle_mode)
-        settings.setValue("use_deblurred_map", next_cycle_mode == "deblurred_xplor")
-        # SharpED server URL / API token are the shared credentials also used by
-        # the full Phase Studio application; write them there, not to a second,
-        # independent copy under this wrapper's own settings (see shared_settings
-        # above for why: two copies drift and silently overwrite one another).
-        shared_settings.setValue("inputs/sharped_base_url", server_url.text())
-        shared_settings.setValue("inputs/sharped_api_token", api_token.text())
-        shared_settings.sync()
-        settings.setValue("model", model.currentText())
-        # Elements and Output resolution have no control of their own here
-        # any more -- they come from the shared full-application settings (see
-        # effective_elements()/effective_outres()) and are not re-persisted.
-        # Reference file / model file are deliberately not persisted: they should
-        # reflect the incoming .inflip (or be blank), never a leftover value from
-        # an unrelated previous Jana2020 job.
-        settings.sync()
+        def build_options(action: str) -> JanaRunOptions:
+            next_cycle_mode = effective_next_cycle_mode()
+            return JanaRunOptions(
+                action=action,
+                cycles=effective_cycles(),
+                use_deblurred_map=next_cycle_mode == "deblurred_xplor",
+                next_cycle_modelfile=next_cycle_mode,
+                api_token=self.api_token.text().strip(),
+                server_url=self.server_url.text().strip() or DEFAULT_SERVER_URL,
+                model=self.model.currentText().strip() or "default",
+                elements=effective_elements(),
+                outres=effective_outres(),
+                input_mode=INPUT_MODE_INFLIP,
+                hkl_override="",
+                reference_override="",
+                superflip_referencefile=self.reference_file.text().strip(),
+                first_cycle_modelfile=self.model_file.text().strip(),
+                compute_omit_maps=effective_compute_omit_maps(),
+                compute_omit_rfree=effective_compute_omit_rfree(),
+                enable_missing_completion=effective_map_feedback_enabled() and self.missing_enabled_checkbox.isChecked(),
+                missing_start_cycle=self.missing_start_cycle_spin.value(),
+                missing_max_added_percent=self.missing_percent_spin.value(),
+                enable_intensity_correction=effective_map_feedback_enabled() and self.intensity_enabled_checkbox.isChecked(),
+                intensity_start_cycle=self.intensity_start_cycle_spin.value(),
+                intensity_damping=self.intensity_damping_spin.value(),
+                intensity_sigma_threshold=self.intensity_sigma_spin.value(),
+                enable_powder_repartition=effective_map_feedback_enabled() and self.powder_enabled_checkbox.isChecked(),
+                powder_start_cycle=self.powder_start_cycle_spin.value(),
+                powder_wavelength=self.powder_wavelength_spin.value(),
+                powder_separation_factor=self.powder_separation_spin.value(),
+                powder_map_ratio_mix=self.powder_mix_spin.value(),
+            )
 
-    def build_options(action: str) -> JanaRunOptions:
-        next_cycle_mode = effective_next_cycle_mode()
-        return JanaRunOptions(
-            action=action,
-            cycles=effective_cycles(),
-            use_deblurred_map=next_cycle_mode == "deblurred_xplor",
-            next_cycle_modelfile=next_cycle_mode,
-            api_token=api_token.text().strip(),
-            server_url=server_url.text().strip() or DEFAULT_SERVER_URL,
-            model=model.currentText().strip() or "default",
-            elements=effective_elements(),
-            outres=effective_outres(),
-            input_mode=INPUT_MODE_INFLIP,
-            hkl_override="",
-            reference_override="",
-            superflip_referencefile=reference_file.text().strip(),
-            first_cycle_modelfile=model_file.text().strip(),
-            compute_omit_maps=effective_compute_omit_maps(),
-            compute_omit_rfree=effective_compute_omit_rfree(),
-            enable_missing_completion=effective_map_feedback_enabled() and missing_enabled_checkbox.isChecked(),
-            missing_start_cycle=missing_start_cycle_spin.value(),
-            missing_max_added_percent=missing_percent_spin.value(),
-            enable_intensity_correction=effective_map_feedback_enabled() and intensity_enabled_checkbox.isChecked(),
-            intensity_start_cycle=intensity_start_cycle_spin.value(),
-            intensity_damping=intensity_damping_spin.value(),
-            intensity_sigma_threshold=intensity_sigma_spin.value(),
-            enable_powder_repartition=effective_map_feedback_enabled() and powder_enabled_checkbox.isChecked(),
-            powder_start_cycle=powder_start_cycle_spin.value(),
-            powder_wavelength=powder_wavelength_spin.value(),
-            powder_separation_factor=powder_separation_spin.value(),
-            powder_map_ratio_mix=powder_mix_spin.value(),
-        )
-
-    def attempt_run() -> None:
-        if stack.currentWidget() is page1 and current_workflow() != WORKFLOW_SUPERFLIP_ONLY:
-            go_to_page2()
-            return
-        if stack.currentWidget() is page3:
-            validation_message = check_page3_validity()
-            if validation_message:
-                refresh_page3_validation_message()
+        def attempt_run() -> None:
+            if self.stack.currentWidget() is self.page1 and current_workflow() != WORKFLOW_SUPERFLIP_ONLY:
+                go_to_page2()
+                return
+            if self.stack.currentWidget() is self.page3:
+                validation_message = check_page3_validity()
+                if validation_message:
+                    refresh_page3_validation_message()
+                    return
+                save_values()
+                self.result["action"] = "recycle"
+                self.dialog.accept()
+                return
+            token = self.api_token.text().strip() or os.environ.get("SHARPED_API_TOKEN", "").strip()
+            if effective_next_cycle_mode() == "deblurred_xplor" and not token:
+                if self.stack.currentWidget() is not self.page2:
+                    go_to_page2()
+                self.sharped_toggle.setChecked(True)
+                self.api_token.setFocus()
+                _show_missing_token_warning(self.dialog, qt)
+                return
+            if self.stack.currentWidget() is self.page2 and current_workflow() == WORKFLOW_PHASE_RECYCLING:
+                go_to_page3()
                 return
             save_values()
-            result["action"] = "recycle"
-            dialog.accept()
-            return
-        token = api_token.text().strip() or os.environ.get("SHARPED_API_TOKEN", "").strip()
-        if effective_next_cycle_mode() == "deblurred_xplor" and not token:
-            if stack.currentWidget() is not page2:
-                go_to_page2()
-            sharped_toggle.setChecked(True)
-            api_token.setFocus()
-            _show_missing_token_warning(dialog, qt)
-            return
-        if stack.currentWidget() is page2 and current_workflow() == WORKFLOW_PHASE_RECYCLING:
-            go_to_page3()
-            return
-        save_values()
-        # Only Phase recycling opens the full Phase Studio main window (via
-        # PAGE 3 above, "Next ›" then "Run phasing"). Both single-pass
-        # workflows (Superflip only, Superflip + SharpED) keep the original
-        # lightweight console/wrapper path below -- run_jana_superflip()
-        # called directly from main(), no main window at all.
-        result["action"] = "run"
-        dialog.accept()
+            # Only Phase recycling opens the full Phase Studio main window (via
+            # PAGE 3 above, "Next ›" then "Run phasing"). Both single-pass
+            # workflows (Superflip only, Superflip + SharpED) keep the original
+            # lightweight console/wrapper path below -- run_jana_superflip()
+            # called directly from main(), no main window at all.
+            self.result["action"] = "run"
+            self.dialog.accept()
 
-    def edit_clicked() -> None:
-        save_values()
-        result["action"] = "edit"
-        dialog.accept()
+        def edit_clicked() -> None:
+            save_values()
+            self.result["action"] = "edit"
+            self.dialog.accept()
 
-    primary_button.clicked.connect(attempt_run)
-    edit_button.clicked.connect(edit_clicked)
-    cancel_button.clicked.connect(dialog.reject)
+        self.primary_button.clicked.connect(attempt_run)
+        self.edit_button.clicked.connect(edit_clicked)
+        self.cancel_button.clicked.connect(self.dialog.reject)
 
-    # Word-wrapped labels' heightForWidth() is not fully trustworthy until
-    # the widget tree has actually been laid out and polished at least once,
-    # so the synchronous adjust_dialog_size() calls made during construction
-    # above can overstate the needed height. A second pass once the dialog's
-    # event loop has actually started (same deferred-refit pattern used for
-    # the HKL Completeness dialog in app.py) settles it accurately.
-    QTimer.singleShot(0, adjust_dialog_size)
+        # Word-wrapped labels' heightForWidth() is not fully trustworthy until
+        # the widget tree has actually been laid out and polished at least once,
+        # so the synchronous adjust_dialog_size() calls made during construction
+        # above can overstate the needed height. A second pass once the dialog's
+        # event loop has actually started (same deferred-refit pattern used for
+        # the HKL Completeness dialog in app.py) settles it accurately.
+        QTimer.singleShot(0, adjust_dialog_size)
 
-    accepted = dialog.exec()
-    refresh_timer.stop()
-    if not accepted:
-        return JanaRunOptions(action="cancel")
-    return build_options(result["action"])
+        accepted = self.dialog.exec()
+        self.refresh_timer.stop()
+        if not accepted:
+            return JanaRunOptions(action="cancel")
+        return build_options(self.result["action"])
+
+
+def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRunOptions:
+    return _JanaWorkflowWizard()._build_and_run(args, inflip_path)
 
 
 def launch_phase_studio_from_jana(
