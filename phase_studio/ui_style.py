@@ -671,6 +671,14 @@ QLabel#helpCallout, QLabel#settingsCallout, QLabel#configurationLockHint {
     border-left: 3px solid #8fb6da;
     padding: 8px 10px;
 }
+QLabel#helpCallout[calloutKind="warning"], QLabel#settingsCallout[calloutKind="warning"] {
+    background-color: #e7f0fb;
+    border-left: 4px solid #2264b8;
+}
+QLabel#helpCallout[calloutKind="tip"], QLabel#settingsCallout[calloutKind="tip"] {
+    background-color: #f7f9fc;
+    border-left: 2px solid #b7cbe8;
+}
 QWidget#metadataErrorPanel {
     background-color: #f7f9fc;
     border: none;
@@ -694,6 +702,16 @@ QLabel#settingsCallout {
 QLabel#configurationLockHint {
     font-size: 9pt;
     padding: 5px 8px;
+}
+QLabel#pageHeading {
+    color: #001170;
+    font-size: 12pt;
+    font-weight: 700;
+    background-color: #ffffff;
+}
+QFrame#pageHeadingRule {
+    background-color: #2264b8;
+    border: none;
 }
 QLabel#inlineGroupTitle {
     color: #001170;
@@ -995,8 +1013,54 @@ a { color: #2264b8; }
 """
 
 
+_TOOLTIP_WRAP_PREFIX = '<div style="max-width:'
+
+
+def _wrap_tooltip_html(text: str, max_width: int = 380) -> str:
+    """Cap a tooltip's rendered width. A plain-text QToolTip never wraps, so
+    a single long sentence can otherwise span most of the screen; wrapping
+    it as rich text inside a width-capped div fixes that regardless of how
+    long the underlying sentence is. Blank-line-separated parts (e.g. a
+    PathRow's description plus its live "Path: ..." line) become separate
+    paragraphs; ordinary internal whitespace/newlines within each part
+    collapse to a single space, matching plain-text tooltip conventions.
+    Already-wrapped text (e.g. a tooltip copied from one widget to another
+    via .toolTip()) is returned unchanged rather than wrapped again."""
+    if text.startswith(_TOOLTIP_WRAP_PREFIX):
+        return text
+    import html as _html
+    parts = [part.strip() for part in text.split("\n\n") if part.strip()]
+    if not parts:
+        return ""
+    body = "<br><br>".join(_html.escape(" ".join(part.split())) for part in parts)
+    return f'{_TOOLTIP_WRAP_PREFIX}{max_width}px;">{body}</div>'
+
+
+def _install_tooltip_width_cap(app: object) -> None:
+    """Monkey-patch QWidget.setToolTip once per process so every tooltip set
+    anywhere in the app -- present call sites and any added later -- is
+    automatically capped to a readable width, instead of auditing and
+    wrapping each call site by hand. Idempotent: safe if
+    apply_phase_studio_style() runs more than once in the same process."""
+    from PySide6.QtWidgets import QWidget
+
+    if getattr(QWidget.setToolTip, "_phase_studio_wraps_tooltips", False):
+        return
+    original_set_tooltip = QWidget.setToolTip
+
+    def _phase_studio_set_tooltip(self, text=""):
+        original_set_tooltip(self, _wrap_tooltip_html(str(text or "")))
+
+    _phase_studio_set_tooltip._phase_studio_wraps_tooltips = True
+    QWidget.setToolTip = _phase_studio_set_tooltip
+
+
 def apply_phase_studio_style(app: object) -> None:
     """Apply the SharpED logo palette and Phase Studio visual system."""
+    try:
+        _install_tooltip_width_cap(app)
+    except Exception:
+        pass
     try:
         from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
         from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen

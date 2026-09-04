@@ -99,7 +99,7 @@ try:
     from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (
         QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
-        QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox,
+        QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow, QMessageBox,
         QDialog, QDialogButtonBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QSplashScreen, QToolButton,
         QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QTextEdit, QVBoxLayout, QWidget
     )
@@ -5534,6 +5534,79 @@ class MiddleElidedLabel(QLabel):
         self._update_elided_text()
 
 
+class FlowLayout(QLayout):
+    """A left-to-right row that wraps to additional lines instead of
+    shrinking its children -- used for the Help navigation link row, whose
+    settings page is deliberately width-flexible (QSizePolicy.Ignored) and
+    can otherwise end up narrower than the full "Setup / Input / Workflow /
+    ... " link row needs, silently eliding several link labels at once.
+    Wrapping guarantees every label always renders in full. Standard Qt
+    FlowLayout recipe (Qt's own "Flow Layout" example), trimmed to what this
+    app needs."""
+
+    def __init__(self, parent: Optional[QWidget] = None, margin: int = 0, spacing: int = 4) -> None:
+        super().__init__(parent)
+        self._items: List[object] = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+
+    def addItem(self, item) -> None:  # noqa: N802 - Qt override
+        self._items.append(item)
+
+    def count(self) -> int:  # noqa: N802 - Qt override
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802 - Qt override
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):  # noqa: N802 - Qt override
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):  # noqa: N802 - Qt override
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect) -> None:  # noqa: N802 - Qt override
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):  # noqa: N802 - Qt override
+        return self.minimumSize()
+
+    def minimumSize(self):  # noqa: N802 - Qt override
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        left, top, right, bottom = self.getContentsMargins()
+        size += QSize(left + right, top + bottom)
+        return size
+
+    def _do_layout(self, rect, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        effective_rect = rect.adjusted(left, top, -right, -bottom)
+        x, y = effective_rect.x(), effective_rect.y()
+        line_height = 0
+        spacing = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + spacing
+            if next_x - spacing > effective_rect.right() and line_height > 0:
+                x = effective_rect.x()
+                y += line_height + spacing
+                next_x = x + hint.width() + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + bottom
+
+
 class PathRow(QWidget):
     def __init__(self, label: str, default: str = "", mode: str = "file", file_filter: str = "All files (*)") -> None:
         super().__init__()
@@ -6778,14 +6851,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_basic_help_tab(self) -> None:
         basic_help_tab = self._add_settings_tab("Help")
-        basic_contents_row = QHBoxLayout()
-        basic_contents_row.setSpacing(4)
+        basic_contents_row = FlowLayout(spacing=4)
         basic_contents_label = QLabel("CONTENTS")
         basic_contents_label.setObjectName("helpContentsLabel")
         basic_contents_row.addWidget(basic_contents_label)
         for link_text, anchor in (
             ("Setup", "setup"), ("Input", "input"), ("Workflow", "workflow"),
-            ("Output", "output"), ("Feedback", "map_feedback"), ("Jana2020", "jana_integration"), ("About", "about"),
+            ("Output", "output"), ("Map feedback", "map_feedback"), ("Jana2020", "jana_integration"), ("About", "about"),
         ):
             link = QToolButton()
             link.setObjectName("helpNavLink")
@@ -6794,7 +6866,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             link.setCursor(Qt.PointingHandCursor)
             link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
             basic_contents_row.addWidget(link)
-        basic_contents_row.addStretch(1)
         basic_help_tab.addLayout(basic_contents_row)
         setup_help_layout = self._add_help_section(basic_help_tab, "setup", "Systematic setup guide", """
             <h3>1. Select the input</h3>
@@ -6820,7 +6891,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>After a successful run, <b>Send to Jana2020</b> lets you select a completed cycle and map source. Final interpretation and refinement remain in Jana2020.</p>
         """)
         setup_help_layout.insertWidget(1, WorkflowDiagram())
-        self._add_help_callout(setup_help_layout, "Tip", "Validate the reflection interpretation and review the selected preset values before starting a run.")
+        self._add_help_callout(setup_help_layout, "Tip", "Validate the reflection interpretation and review the selected preset values before starting a run.", kind="tip")
         self._add_back_to_contents(setup_help_layout)
         input_help_layout = self._add_help_section(basic_help_tab, "input", "Input reference", """
             <h3>Data input</h3>
@@ -6883,7 +6954,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Powder overlap repartitioning</h3>
             <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
-        self._add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.")
+        self._add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.", kind="warning")
         self._add_back_to_contents(map_feedback_layout)
         jana_integration_layout = self._add_help_section(basic_help_tab, "jana_integration", "Jana2020 integration", """
             <p>Phase Studio can install itself as Jana2020's active Superflip launcher, so that Jana2020's own
@@ -6942,6 +7013,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_advanced_setup_tab(self) -> None:
         setup_tab = self._add_settings_tab("Setup", advanced=True)
+        self._create_settings_page_header(setup_tab, "Setup", "adv_setup")
         programs_form = self._add_form_group(setup_tab, "External programs")
         self._add_path(programs_form, "superflip_exe", "Superflip executable", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
         self._add_path(programs_form, "edma_exe", "EDMA executable", r"C:\Jana2020\SUPERFLIP\EDMA.exe", "file", "Executables (*.exe);;All files (*)")
@@ -6986,7 +7058,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_advanced_superflip_tab(self) -> None:
         superflip_tab = self._add_settings_tab("Superflip", advanced=True)
-        calculation_form = self._add_form_group(superflip_tab, "Calculation", "superflip")
+        self._create_settings_page_header(superflip_tab, "Superflip", "superflip")
+        calculation_form = self._add_form_group(superflip_tab, "Calculation")
         self._add_combo(calculation_form, "perform_algorithm", "Algorithm", ["CF", "AAR", "lde", "general", "fourier", "symmetry"], "CF")
         self.inputs["perform_algorithm"].setToolTip(
             INPUT_TOOLTIPS["perform_algorithm"]
@@ -7039,7 +7112,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_advanced_edma_tab(self) -> None:
         edma_tab = self._add_settings_tab("EDMA", advanced=True)
-        peak_form = self._add_form_group(edma_tab, "Peak extraction", "edma")
+        self._create_settings_page_header(edma_tab, "EDMA", "edma")
+        peak_form = self._add_form_group(edma_tab, "Peak extraction")
         self._add_dspin(peak_form, "plimit_superflip", "Superflip threshold", 0.5, 0.0, 100.0, 0.1, 3)
         self._add_dspin(peak_form, "plimit_deblur", "SharpED threshold (σ)", 0.5, 0.0, 100.0, 0.1, 3)
         self._add_text(peak_form, "edma_maxima", "Maxima selection", "all")
@@ -7061,6 +7135,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_advanced_sharped_tab(self) -> None:
         sharped_advanced_tab = self._add_settings_tab("SharpED", advanced=True)
+        self._create_settings_page_header(sharped_advanced_tab, "SharpED", "sharped")
         inference_form = self._add_form_group(sharped_advanced_tab, "Inference")
         self._add_text(inference_form, "sharped_elements", "Elements", "")
         self.inputs["sharped_elements"].setPlaceholderText("Auto from composition")  # type: ignore[attr-defined]
@@ -7079,8 +7154,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_advanced_help_tab(self) -> None:
         advanced_help_tab = self._add_settings_tab("Help", advanced=True)
-        advanced_contents_row = QHBoxLayout()
-        advanced_contents_row.setSpacing(4)
+        advanced_contents_row = FlowLayout(spacing=4)
         advanced_contents_label = QLabel("CONTENTS")
         advanced_contents_label.setObjectName("helpContentsLabel")
         advanced_contents_row.addWidget(advanced_contents_label)
@@ -7095,7 +7169,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             link.setCursor(Qt.PointingHandCursor)
             link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
             advanced_contents_row.addWidget(link)
-        advanced_contents_row.addStretch(1)
         advanced_help_tab.addLayout(advanced_contents_row)
         adv_setup_help_layout = self._add_help_section(advanced_help_tab, "adv_setup", "Setup reference", """
             <h3>External programs</h3>
@@ -7126,7 +7199,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Output</h3>
             <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Basic &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020.</p>
         """, advanced=True)
-        self._add_help_callout(superflip_help_layout, "Starting point", "CF and the supplied preset values are initial settings only; choose parameters appropriate for the dataset and intended method.")
+        self._add_help_callout(superflip_help_layout, "Starting point", "CF and the supplied preset values are initial settings only; choose parameters appropriate for the dataset and intended method.", kind="tip")
         self._add_back_to_contents(superflip_help_layout, advanced=True)
         edma_help_layout = self._add_help_section(advanced_help_tab, "edma", "EDMA guide", """
             <h3>What EDMA does in Phase Studio</h3>
@@ -7140,7 +7213,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Additional keywords</h3>
             <p><b>Extra EDMA keywords</b> appends documented EDMA options not represented by a dedicated control.</p>
         """, advanced=True)
-        self._add_help_callout(edma_help_layout, "Important", "Select each EDMA threshold for its map and assess the resulting peaks; there is no universal threshold.")
+        self._add_help_callout(edma_help_layout, "Important", "Select each EDMA threshold for its map and assess the resulting peaks; there is no universal threshold.", kind="warning")
         self._add_back_to_contents(edma_help_layout, advanced=True)
         sharped_help_layout = self._add_help_section(advanced_help_tab, "sharped", "SharpED guide", """
             <h3>What SharpED does</h3>
@@ -7164,7 +7237,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
         sharped_link_row.addStretch(1)
         sharped_help_layout.addLayout(sharped_link_row)
-        self._add_help_callout(sharped_help_layout, "Important", "SharpED processing requires a valid API token and network access.")
+        self._add_help_callout(sharped_help_layout, "Important", "SharpED processing requires a valid API token and network access.", kind="warning")
         self._add_back_to_contents(sharped_help_layout, advanced=True)
         keyword_html = html.escape(SUPERFLIP_KEYWORD_REFERENCE).replace("\n", "<br>")
         keyword_help_layout = self._add_help_section(
@@ -7314,6 +7387,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metrics_section, metrics_layout = self._make_result_section("WORKFLOW METRICS")
         self.metrics_tabs = QTabWidget()
         self.metrics_tabs.setObjectName("metricsTabs")
+        # Some tab names are genuinely long ("Powder repartitioning"); scroll
+        # rather than silently elide several of them at once when the panel
+        # is narrow.
+        self.metrics_tabs.setUsesScrollButtons(True)
+        self.metrics_tabs.tabBar().setElideMode(Qt.ElideNone)
         self.metrics_figures: Dict[str, Figure] = {}
         self.metrics_axes: Dict[str, object] = {}
         self.metrics_canvases: Dict[str, FigureCanvas] = {}
@@ -7394,26 +7472,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 on_state_changed=self._on_metrics_view_changed,
                 request_rerender=(lambda k=key: self._replay_metrics_tab(k)),
             )
-        metrics_layout.addWidget(self.metrics_tabs, 1)
-
-        # ----- Shared interaction control strip: lives in the tab bar's own
-        # corner (same horizontal strip as the Superflip/SharpED/... tabs, not
-        # a second row that eats into the plot) and always acts on whichever
-        # tab is currently selected. -----
-        metrics_corner = QWidget()
-        metrics_corner_layout = QHBoxLayout(metrics_corner)
-        metrics_corner_layout.setContentsMargins(6, 0, 4, 0)
-        metrics_corner_layout.setSpacing(6)
+        # ----- Shared interaction control strip: its own row, ABOVE the tab
+        # bar, rather than a QTabWidget corner widget sharing the tab bar's
+        # own horizontal strip -- 6 scientific tab names (some, like "Powder
+        # repartitioning", genuinely long) need that whole strip for
+        # themselves, or Qt silently elides several of them at once. Always
+        # acts on whichever tab is currently selected. -----
+        metrics_toolbar = QWidget()
+        metrics_toolbar_layout = QHBoxLayout(metrics_toolbar)
+        metrics_toolbar_layout.setContentsMargins(6, 0, 4, 4)
+        metrics_toolbar_layout.setSpacing(6)
         self.metrics_hint_label = QLabel("Wheel zoom · Drag pan · Double-click reset")
         self.metrics_hint_label.setObjectName("metricsHintLabel")
-        metrics_corner_layout.addWidget(self.metrics_hint_label)
+        metrics_toolbar_layout.addWidget(self.metrics_hint_label)
+        metrics_toolbar_layout.addStretch(1)
         self.metrics_full_range_btn = QPushButton("Full range")
         self.metrics_detail_btn = QPushButton("Detail")
         for btn in (self.metrics_full_range_btn, self.metrics_detail_btn):
             btn.setObjectName("metricsViewToggle")
             btn.setCheckable(True)
             btn.setCursor(Qt.PointingHandCursor)
-        metrics_mode_group = QButtonGroup(metrics_corner)
+        metrics_mode_group = QButtonGroup(metrics_toolbar)
         metrics_mode_group.setExclusive(True)
         metrics_mode_group.addButton(self.metrics_full_range_btn)
         metrics_mode_group.addButton(self.metrics_detail_btn)
@@ -7425,16 +7504,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         self.metrics_full_range_btn.clicked.connect(lambda _checked=False: self._set_metrics_view_mode(self._current_metrics_key(), "full"))
         self.metrics_detail_btn.clicked.connect(lambda _checked=False: self._set_metrics_view_mode(self._current_metrics_key(), "detail"))
-        metrics_corner_layout.addWidget(self.metrics_full_range_btn)
-        metrics_corner_layout.addWidget(self.metrics_detail_btn)
+        metrics_toolbar_layout.addWidget(self.metrics_full_range_btn)
+        metrics_toolbar_layout.addWidget(self.metrics_detail_btn)
         self.metrics_reset_btn = QPushButton("Reset view")
         self.metrics_reset_btn.setObjectName("metricsControlButton")
         self.metrics_reset_btn.setCursor(Qt.PointingHandCursor)
         self.metrics_reset_btn.setToolTip("Return to the automatically calculated full-data view.")
         self.metrics_reset_btn.setEnabled(False)
         self.metrics_reset_btn.clicked.connect(lambda _checked=False: self._reset_metrics_view(self._current_metrics_key()))
-        metrics_corner_layout.addWidget(self.metrics_reset_btn)
-        self.metrics_tabs.setCornerWidget(metrics_corner, Qt.TopRightCorner)
+        metrics_toolbar_layout.addWidget(self.metrics_reset_btn)
+        metrics_layout.addWidget(metrics_toolbar)
+        metrics_layout.addWidget(self.metrics_tabs, 1)
         self.metrics_tabs.currentChanged.connect(self._on_metrics_tab_changed)
         self._on_metrics_tab_changed(self.metrics_tabs.currentIndex())
         self.result_splitter.addWidget(metrics_section)
@@ -7482,7 +7562,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_input_tab(self) -> None:
         input_tab = self._add_settings_tab("Input")
-        data_input_form = self._add_form_group(input_tab, "Data input")
+        self._create_settings_page_header(input_tab, "Data input", "input")
+        data_input_form = self._add_form_group(input_tab, "")
         self._add_combo(
             data_input_form,
             "input_source_mode",
@@ -7682,7 +7763,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_workflow_tab(self) -> None:
         workflow_tab = self._add_settings_tab("Workflow")
-        workflow_form = self._add_form_group(workflow_tab, "Reconstruction", "setup")
+        self._create_settings_page_header(workflow_tab, "Reconstruction", "workflow")
+        workflow_form = self._add_form_group(workflow_tab, "")
         self._workflow_form = workflow_form
         self._add_combo(workflow_form, "workflow_preset", "Workflow preset", ["Recommended", "Custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "Recommended")
         try:
@@ -7698,7 +7780,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.inputs["reconstruction_mode"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self.reconstruction_mode_warning = self._settings_callout("", "")
+        self.reconstruction_mode_warning = self._settings_callout("", "", kind="warning")
         self.reconstruction_mode_warning.setVisible(False)
         workflow_form.addRow("", self.reconstruction_mode_warning)
         self.single_cycle_note = self._settings_callout("Single-cycle run", "Next-cycle settings are inactive.")
@@ -7724,22 +7806,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_text(workflow_form, "exclude_atoms", "Excluded atoms", "none")
         workflow_note = self._settings_callout(
             "Note",
-            "Next-cycle model controls how subsequent reconstruction cycles are initialized. Selecting None "
-            "limits the workflow to a single cycle. XPLOR damping applies only to XPLOR-based recycling. "
-            "Method-specific recycling settings take precedence when Phasing method is not Superflip."
+            "Next-cycle model determines how subsequent cycles are initialized. Selecting None "
+            "limits the workflow to a single cycle. XPLOR damping applies only to XPLOR-based recycling."
         )
         workflow_form.addRow("", workflow_note)
         self.recycle_note = self._settings_callout(
             "Phasing method",
-            "Superflip is the standard iterative charge-flipping cycle (unchanged). "
-            "1st Superflip, then SharpED (beta) runs Superflip only once, then each cycle deblurs the previous map with "
-            "SharpED, calculates phi_calc by FFT from that SharpED map for every measured hkl, and recomposes a map "
-            "from |Fobs| + phi_calc for the next cycle's SharpED input. "
-            "SharpED (experimental) skips Superflip entirely: cycle 1 starts from |Fobs| with independent random phases instead."
+            "Beta/experimental methods recycle phases through SharpED instead of iterative Superflip cycling. "
+            "See Open guide above for exactly how each method differs."
         )
         workflow_form.addRow("", self.recycle_note)
 
-        model_form = self._add_form_group(workflow_tab, "SharpED model", "sharped")
+        model_form = self._add_form_group(workflow_tab, "SharpED model")
         self._add_combo(model_form, "sharped_model", "Model", ["koala 2.0"], "koala 2.0")
         try:
             self.inputs["sharped_model"].lineEdit().setReadOnly(False)  # type: ignore[attr-defined]
@@ -7782,36 +7860,32 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # construction, to seed the default working-directory text.
         cwd = Path.cwd()
         output_tab = self._add_settings_tab("Output")
-        output_form = self._add_form_group(output_tab, "Output")
+        self._create_settings_page_header(output_tab, "Output", "output")
+        output_form = self._add_form_group(output_tab, "")
         self._add_path(output_form, "work_dir", "Working directory", str(cwd / "iterative_superflip_qt_run"), "dir")
         self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana", "HKL reflections with phases", "ShelX (fcf)"], "xplor")
         self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
         output_form.addRow("", self._secondary_help(
-            "Internal processing: XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle "
-            "modelfiles, regardless of the formats selected below."
+            "Internal files: XPLOR maps and CIF structures required by the workflow are retained automatically, "
+            "regardless of the selected export formats."
         ))
         output_form.addRow("", self._secondary_help(
-            "Export behavior: ccp4/jana additionally save one extra density map for external use or Jana2020, "
-            "while HKL reflections with phases and ShelX (fcf) instead save, for each cycle's Superflip map, the "
-            "observed reflections together with phases read by FFT from that map, in place of an extra density map."
+            "Export formats: the selections above control additional files intended for external use. "
+            "HKL reflections with phases and ShelX (fcf) save reflection data instead of an extra map."
         ))
         output_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         output_tab.addStretch(1)
 
     def _build_map_feedback_tab(self) -> None:
         feedback_tab = self._add_settings_tab("Map feedback")
-        # Every other page's first section is a QGroupBox, which carries its
-        # own ~1.25em top margin from the shared QGroupBox QSS -- this page's
-        # Warning callout has no such margin of its own, so without an
-        # explicit spacer here it sits noticeably closer to the sub-tab row
-        # than any other page's first section does.
-        feedback_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
+        self._create_settings_page_header(feedback_tab, "Map feedback", "map_feedback")
         feedback_tab.addWidget(self._settings_callout(
             "Warning",
             "The operations on this page modify the reflection data supplied to subsequent cycles. "
             "Results from these cycles should therefore be validated against the original measured data.",
+            kind="warning",
         ))
-        missing_feedback_form = self._add_form_group(feedback_tab, "Missing-reflection completion", "map_feedback")
+        missing_feedback_form = self._add_form_group(feedback_tab, "Missing-reflection completion")
         self._add_checkbox(missing_feedback_form, "map_feedback_missing_enabled", "Enable missing-reflection completion", False, align_with_fields=True)
         self._add_spin(missing_feedback_form, "map_feedback_missing_from_cycle", "Start after cycle", 1, 1, 999, 1)
         self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Maximum added reflections (%)", 0.0, 0.0, 100.0, 1.0, 3)
@@ -7831,13 +7905,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_dspin(powder_feedback_form, "powder_redistribution_mix", "Map ratio mix", 1.0, 0.0, 1.0, 0.05, 3)
         powder_feedback_form.addRow("", self._settings_callout(
             "Note",
-            "Only applies to reflections with an FWHM value (hkl I/F fwhm data). Wavelength is auto-detected -- if "
-            "left at 0 -- from the Jana2020 .inflip file (dataformat's lambda/wavelength line), or otherwise from the "
-            "reference file's _diffrn_radiation_wavelength; enter it manually if neither is available. Reflections "
-            "whose Bragg peaks overlap -- delta(2θ) below Separation factor times the mean of their FWHM -- "
-            "have their combined observed intensity redistributed between them using intensities calculated by FFT "
-            "from that cycle's processed map, blended by Map ratio mix (0 keeps the observed split, 1 uses the map "
-            "split fully); the group total is always conserved.",
+            "Available only for FWHM reflection data. Wavelength is detected automatically when possible. "
+            "Repartitioning preserves the total observed intensity of each overlap group."
         ))
         for key in ("map_feedback_missing_enabled", "map_feedback_intensity_enabled", "redistribute_overlaps"):
             try:
@@ -7887,29 +7956,46 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.help_page_basic = page
         return layout
 
-    def _add_form_group(self, page_layout: QVBoxLayout, title: str, guide_anchor: Optional[str] = None) -> QFormLayout:
-        if guide_anchor:
-            box = QGroupBox()
-            box.setObjectName("guidedSettingsGroup")
-            box_layout = QVBoxLayout(box)
-            box_layout.setContentsMargins(*CONFIG_GUIDED_GROUP_MARGINS)
-            box_layout.setSpacing(CONFIG_GUIDED_GROUP_SPACING)
-            heading_row = QHBoxLayout()
-            heading = QLabel(title)
-            heading.setObjectName("inlineGroupTitle")
+    def _create_settings_page_header(self, page_layout: QVBoxLayout, title: str, guide_target: Optional[str] = None) -> None:
+        """The one consistent LEVEL 1 heading every Basic/Advanced
+        configuration subpage uses: page title on the left, exactly one
+        "Open guide" action on the right when this page has corresponding
+        Help content, with a subtle separator below (2026 UI hierarchy
+        pass). Subsections within the page (_add_form_group) no longer
+        carry their own guide links -- a page has at most one."""
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        heading = QLabel(title)
+        heading.setObjectName("pageHeading")
+        header_row.addWidget(heading, 1)
+        if guide_target:
             guide = QToolButton()
             guide.setObjectName("guideLink")
             guide.setText("Open guide")
             guide.setCursor(Qt.PointingHandCursor)
             guide.setToolTip("Open the relevant section in Help (F1).")
-            guide.clicked.connect(lambda _checked=False, target=guide_anchor: self._open_help_section(target))
-            heading_row.addWidget(heading, 1)
-            heading_row.addWidget(guide)
+            guide.clicked.connect(lambda _checked=False, target=guide_target: self._open_help_section(target))
+            header_row.addWidget(guide)
+        page_layout.addLayout(header_row)
+        rule = QFrame()
+        rule.setObjectName("pageHeadingRule")
+        rule.setFixedHeight(2)
+        rule.setFrameShape(QFrame.NoFrame)
+        page_layout.addWidget(rule)
+
+    def _add_form_group(self, page_layout: QVBoxLayout, title: str) -> QFormLayout:
+        """One consistent LEVEL 2 subsection heading (bold navy title, plain
+        separator via QGroupBox's own QSS chrome) -- or, when title is empty,
+        a bare form with no heading/border at all, for a page's own leading
+        fields that already sit directly under that page's LEVEL 1 heading
+        (_create_settings_page_header) and so need no heading of their own.
+        No subsection carries its own "Open guide" link any more -- a page
+        has exactly one, in its LEVEL 1 heading."""
+        if not title:
             form_widget = QWidget()
+            form_widget.setObjectName("bareSettingsGroup")
             form = self._configure_form(QFormLayout(form_widget))
-            box_layout.addLayout(heading_row)
-            box_layout.addWidget(form_widget)
-            page_layout.addWidget(box)
+            page_layout.addWidget(form_widget)
             return form
         box = QGroupBox(title)
         box.setObjectName("settingsGroup")
@@ -7917,9 +8003,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         page_layout.addWidget(box)
         return form
 
-    def _settings_callout(self, title: str, text: str) -> QLabel:
-        label = QLabel(f"<b>{title}</b><br>{text}")
+    def _settings_callout(self, title: str, text: str, kind: str = "note") -> QLabel:
+        """kind is one of "warning" (scientific caveat, always prominent),
+        "note" (concise operational clarification, the default) or "tip"
+        (optional workflow advice, visually the lightest) -- see
+        QLabel#settingsCallout's kind-specific QSS rules in ui_style.py.
+        Callers that mutate the label's text later via setText() (e.g. the
+        Phasing-method warning, whose message depends on the selected
+        method) keep whatever kind was set here at construction."""
+        label = QLabel(f"<b>{title}</b><br>{text}" if title else text)
         label.setObjectName("settingsCallout")
+        label.setProperty("calloutKind", kind)
         label.setTextFormat(Qt.RichText)
         label.setWordWrap(True)
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -7954,9 +8048,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.help_section_advanced[anchor] = advanced
         return box_layout
 
-    def _add_help_callout(self, section_layout: QVBoxLayout, label: str, text: str) -> None:
+    def _add_help_callout(self, section_layout: QVBoxLayout, label: str, text: str, kind: str = "note") -> None:
+        """Same warning/note/tip kind system as _settings_callout(), applied
+        to Help-page callouts -- Basic and Advanced Help intentionally share
+        this one callout style rather than each having its own."""
         callout = QLabel(f"<b>{label}</b><br>{text}")
         callout.setObjectName("helpCallout")
+        callout.setProperty("calloutKind", kind)
         callout.setTextFormat(Qt.RichText)
         callout.setWordWrap(True)
         section_layout.addWidget(callout)
