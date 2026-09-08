@@ -24,6 +24,16 @@ for every file, checking the exit code) without any additional tooling.
   `docs/ARCHITECTURE.md` for the "same input, same result" rule this
   applies to project-wide.
 
+- `test_sharped_map_scaling.py` -- the reversible signed power transform
+  applied to map voxel values around a SharpED request
+  (`phase_studio/sharped_map_scaling.py`). Covers the pure maths for the
+  pinned input set at every documented exponent, the exact-identity
+  behavior at the default `a = 1.0` and at the `a = 0` bypass, and two
+  mocked server round trips through the real `run_sharped_deblur()` (an
+  identity server, which must recover the original map, and a
+  value-changing server, which proves the inverse is applied to the
+  server's actual output rather than to a cached copy of the upload).
+
 ## Adding a new golden regression test
 
 1. Build a small, fully hand-verifiable fixture (few reflections/cycles,

@@ -41,6 +41,7 @@ its own explicit review -- never bundled with anything else.
 | `phase_studio/process_utils.py` | Small, dependency-free process helpers (`text_encoding`, `allow_external_process_foreground`) shared by `app.py` and `jana_superflip.py`. Stdlib-only by design -- both the heavy full-GUI path and the lightweight single-pass wrapper path import it without paying any extra import cost. |
 | `phase_studio/error_reporting.py` | `ErrorReport`/`build_error_report()`/`show_phase_studio_error()`: the one translation point from a raised exception to a structured, non-raw-traceback user-facing dialog (title/summary/guidance + collapsible technical details). |
 | `phase_studio/sharped_server_client.py` | HTTP client for the SharpED deblurring service (upload, poll, download). |
+| `phase_studio/sharped_map_scaling.py` | Pure NumPy helpers for the reversible signed power transform applied to map voxel values around a SharpED request (`apply_signed_power` / `invert_signed_power`). No Qt, no I/O; unit-tested by `tests/test_sharped_map_scaling.py`. |
 | `phase_studio/ui_style.py` | The application's QSS/visual style (dark navy + medium blue, flat scientific desktop look) and a `QProxyStyle` for custom combo/spin-box arrows. Pure Qt styling, no business logic. |
 | `phase_studio/version.py` | The single source of truth for the application version (`VERSION`). Everything else (window titles, splash screen, Jana2020 integration marker, `pyproject.toml`'s dynamic version, the MSIX package version) derives from this one string -- see "How to bump the version" below. |
 
@@ -118,6 +119,23 @@ Both use the same background-thread + `queue.Queue` + `QTimer`-poll
 pattern independently (200 ms interval in `app.py`, 100 ms in the Wizard)
 -- this is an accepted, intentional duplication of a small pattern for two
 genuinely different purposes, not a bug.
+
+### Map value scaling around a SharpED request
+
+`run_sharped_deblur()` is the single choke point for every SharpED request
+the pipeline makes (full map, omit map, and both phase-recycling methods),
+so the optional `sharped_map_value_exponent` transform lives there and
+nowhere else: exactly one forward `sign(x)*|x|**a` on the last file handed
+to `SharpEDServerClient.execute()`, and exactly one inverse
+`sign(y)*|y|**(1/a)` on the file the server returned, before any downstream
+stage reads it. Retries, status polling and the client's download probing
+all sit *inside* `execute()` and therefore cannot double-apply either half.
+The maths itself is in `sharped_map_scaling.py`.
+
+The default exponent `1.0` (and the explicit `0.0` bypass) take an exact
+identity fast path: the map file is neither read nor rewritten, so the
+default workflow uploads byte-for-byte the same file it always did. This is
+the "same input, same result" rule applied to a new optional parameter.
 
 ## Where UI formatting belongs
 

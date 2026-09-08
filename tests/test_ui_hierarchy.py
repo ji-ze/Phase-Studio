@@ -41,6 +41,11 @@ def main():
     ui_style.apply_phase_studio_style(app)
 
     import phase_studio.app as appmod
+    # Kept so the settings-persistence section further down can exercise the
+    # real save/load against a throwaway INI file instead of the user's own
+    # QSettings, while every other check runs against the stubs.
+    real_save_settings = appmod.IterativeSuperflipPipelineQtGUI.save_settings
+    real_load_settings = appmod.IterativeSuperflipPipelineQtGUI.load_settings
     appmod.IterativeSuperflipPipelineQtGUI.save_settings = lambda self: None
     appmod.IterativeSuperflipPipelineQtGUI.load_settings = lambda self: None
 
@@ -237,6 +242,105 @@ def main():
 
     metadata_tip = win.inputs["metadata_source"].toolTip()
     check("Metadata source tooltip explains independence from the reflection-data source", "independently" in metadata_tip)
+
+    # =========================================================================
+    # Advanced -> SharpED: the reversible map value exponent control.
+    # Default 1.000 is the exact-identity setting that keeps the pre-existing
+    # scientific behavior; 0 is the documented bypass.
+    # =========================================================================
+    from PySide6.QtWidgets import QDoubleSpinBox
+    exponent_widget = win.inputs.get("sharped_map_value_exponent")
+    check("Advanced -> SharpED exposes a 'sharped_map_value_exponent' input", exponent_widget is not None)
+    if exponent_widget is not None:
+        sharped_page = page_widget("Advanced", "SharpED")
+        check("Map value exponent lives on the Advanced -> SharpED page",
+              sharped_page is not None and exponent_widget in sharped_page.findChildren(QDoubleSpinBox))
+        outres_widget = win.inputs.get("sharped_outres")
+        check("Map value exponent sits in the same Inference group as Output resolution",
+              outres_widget is not None and exponent_widget.parentWidget() is outres_widget.parentWidget())
+
+        exponent_label = win.input_labels.get("sharped_map_value_exponent")
+        check("Map value exponent has a form label", exponent_label is not None)
+        if exponent_label is not None:
+            check("Map value exponent label text is the compact 'Map value exponent'",
+                  exponent_label.text().rstrip(":") == "Map value exponent")
+            check("Map value exponent label is not horizontally clipped (fits its own sizeHint)",
+                  exponent_label.sizeHint().width() >= exponent_label.minimumSizeHint().width())
+
+        check("Map value exponent is a QDoubleSpinBox, matching the other numeric SharpED controls",
+              isinstance(exponent_widget, QDoubleSpinBox))
+        check("Map value exponent default is exactly 1.0", exponent_widget.value() == 1.0)
+        check("Map value exponent renders 3 decimals ('1.000')", exponent_widget.decimals() == 3)
+        check("Map value exponent minimum is 0.0", exponent_widget.minimum() == 0.0)
+        check("Map value exponent maximum is a practical 10.0, not an artificially small cap",
+              exponent_widget.maximum() == 10.0)
+        check("Map value exponent step follows the existing SharpED numeric convention (0.05)",
+              abs(exponent_widget.singleStep() - 0.05) < 1e-12)
+        check("Map value exponent control height matches the other configuration controls",
+              outres_widget is not None and exponent_widget.minimumHeight() == outres_widget.minimumHeight())
+
+        # 0.0 must be accepted by the control, not clamped away.
+        exponent_widget.setValue(0.0)
+        check("Map value exponent accepts 0.0 (the documented bypass value)", exponent_widget.value() == 0.0)
+        exponent_widget.setValue(1.0)
+
+        tip = exponent_widget.toolTip()
+        check("Map value exponent tooltip is width-capped rich text like the other tooltips",
+              tip.startswith('<div style="max-width:'))
+        check("Map value exponent tooltip states the signed power transform", "sign(x)" in tip)
+        check("Map value exponent tooltip states that the inverse is applied automatically", "inverted automatically" in tip)
+        check("Map value exponent tooltip documents 1.0 as unchanged and 0 as disabled",
+              "1.0 leaves values unchanged" in tip and "0 disables the transform" in tip)
+
+        # ---------------------------------------------------------------------
+        # Persistence through the existing QSettings mechanism, exercised
+        # against a throwaway INI file.
+        # ---------------------------------------------------------------------
+        import tempfile
+        from PySide6.QtCore import QSettings
+        settings_dir = Path(tempfile.mkdtemp())
+        original_settings = win.settings
+        win.settings = QSettings(str(settings_dir / "phase_studio_test.ini"), QSettings.IniFormat)
+        try:
+            exponent_widget.setValue(0.750)
+            real_save_settings(win)
+            check("Map value exponent is written by the existing save_settings() path",
+                  str(win.settings.value("inputs/sharped_map_value_exponent", "")).startswith("0.75"))
+            exponent_widget.setValue(1.0)
+            real_load_settings(win)
+            check("Map value exponent is restored by the existing load_settings() path (survives a restart)",
+                  abs(exponent_widget.value() - 0.750) < 1e-9)
+            exponent_widget.setValue(0.0)
+            real_save_settings(win)
+            exponent_widget.setValue(1.0)
+            real_load_settings(win)
+            check("The 0.0 bypass value also persists and is restored, not reset to the default",
+                  exponent_widget.value() == 0.0)
+        finally:
+            win.settings = original_settings
+            exponent_widget.setValue(1.0)
+            import shutil as _shutil
+            _shutil.rmtree(settings_dir, ignore_errors=True)
+
+        # ---------------------------------------------------------------------
+        # Configuration locking while a calculation is running.
+        # ---------------------------------------------------------------------
+        win._set_configuration_locked(True)
+        check("Map value exponent is disabled while the configuration is locked", not exponent_widget.isEnabled())
+        check("Map value exponent carries the shared configurationLocked style property",
+              exponent_widget.property("configurationLocked") is True)
+        if exponent_label is not None:
+            check("Map value exponent label is locked with its field", not exponent_label.isEnabled())
+        win._set_configuration_locked(False)
+        check("Map value exponent is re-enabled once the configuration unlocks", exponent_widget.isEnabled())
+        check("Map value exponent configurationLocked property is cleared on unlock",
+              exponent_widget.property("configurationLocked") is False)
+        check("Map value exponent value survives the lock/unlock cycle unchanged", exponent_widget.value() == 1.0)
+
+    # The simplified Jana2020 Wizard must not gain this Advanced-only setting.
+    import phase_studio.jana_superflip as jana_superflip
+    check("Jana2020 Wizard's JanaRunOptions does not expose the Advanced-only map value exponent",
+          "map_value_exponent" not in getattr(jana_superflip.JanaRunOptions, "__annotations__", {}))
 
     failed = [n for n, ok in results_log if not ok]
     print()

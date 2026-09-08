@@ -437,7 +437,7 @@ These settings affect which EDMA maxima are exported.
 
 ## 9. SharpED configuration
 
-The SharpED model selector is on the **Basic → Workflow** page. Server connection lives on **Advanced → Setup**; elements, output resolution and transfer/network settings live on **Advanced → SharpED**.
+The SharpED model selector is on the **Basic → Workflow** page. Server connection lives on **Advanced → Setup**; elements, output resolution, map value exponent and transfer/network settings live on **Advanced → SharpED**.
 
 ### 9.1 Server connection
 
@@ -477,7 +477,33 @@ This value is sent to the SharpED server as the output-map sampling request.
 
 The manual intentionally does not assign physical units beyond what is established by the current application/server contract.
 
-### 9.5 Transfer and network
+### 9.5 Map value exponent
+
+**Map value exponent** *a* (default `1.000`, range `0.0`–`10.0`) applies a reversible signed power transform to the voxel values of the map uploaded to SharpED, and the exact inverse transform to the map SharpED returns:
+
+```text
+forward:  y = sign(x) * |x|^a
+inverse:  x = sign(y) * |y|^(1/a)
+```
+
+The transform is signed because density maps legitimately contain negative voxel values, for which a plain `x^a` is not real-valued for a non-integer `a`.
+
+- `a < 1` compresses the dynamic range of the absolute map values.
+- `a = 1` (the default) leaves the map unchanged; the workflow is bit-for-bit the pre-existing one, and no power operation is evaluated at all.
+- `a > 1` expands the dynamic range of the absolute map values.
+- `a = 0` disables the transform. `x^0` discards the original magnitude and cannot be inverted, so this value is treated as a bypass rather than as a transform.
+
+Zero voxels stay exactly zero for every exponent, and negative voxels stay negative.
+
+Only voxel values are affected. The voxel grid, origin, cell, symmetry, map dimensions, map format, metadata and the SharpED request parameters are all unchanged. The inverse transform is applied to the map the server actually returned, before EDMA, map symmetrization, structure extraction, metrics, phase recycling, visualization, export and the Jana2020 hand-off see it — everything downstream works in the original map-value domain. No normalization, shifting, clipping or rescaling is added.
+
+The configured value is recorded once per run in the execution log (as a detailed diagnostic when it is left at the default), so a completed calculation always shows which exponent produced it.
+
+This is an experimental preprocessing option. Phase Studio makes no claim that any particular exponent improves crystallographic results.
+
+The simplified Jana2020 Wizard does not expose this setting; a Wizard run uses whatever value is stored in the normal Phase Studio configuration, which is `1.000` unless it has been changed on **Advanced → SharpED**.
+
+### 9.6 Transfer and network
 
 Current controls include:
 

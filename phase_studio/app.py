@@ -79,6 +79,29 @@ except Exception:
     from sharped_server_client import SharpEDServerClient
 
 try:
+    from phase_studio.sharped_map_scaling import (
+        SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
+        SHARPED_MAP_VALUE_EXPONENT_MAX,
+        SHARPED_MAP_VALUE_EXPONENT_MIN,
+        apply_signed_power,
+        describe_map_value_exponent,
+        invert_signed_power,
+        map_value_scaling_is_identity,
+        normalize_map_value_exponent,
+    )
+except Exception:
+    from sharped_map_scaling import (  # type: ignore[no-redef]
+        SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
+        SHARPED_MAP_VALUE_EXPONENT_MAX,
+        SHARPED_MAP_VALUE_EXPONENT_MIN,
+        apply_signed_power,
+        describe_map_value_exponent,
+        invert_signed_power,
+        map_value_scaling_is_identity,
+        normalize_map_value_exponent,
+    )
+
+try:
     from phase_studio.process_utils import allow_external_process_foreground, text_encoding
 except Exception:
     from process_utils import allow_external_process_foreground, text_encoding
@@ -666,6 +689,7 @@ class RunConfig:
     sharped_model: str
     sharped_elements: str
     sharped_outres: float
+    sharped_map_value_exponent: float
     sharped_max_upload_mb: float
     sharped_timeout_seconds: int
     sharped_poll_seconds: int
@@ -4996,6 +5020,7 @@ def run_sharped_deblur(
     log: Callable[[str], None],
     stop_event: Optional[threading.Event] = None,
     progress: Optional[Callable[[str], None]] = None,
+    map_value_exponent: float = SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
 ) -> Path:
     output_map.parent.mkdir(parents=True, exist_ok=True)
     log_path = output_map.parent / f"{output_map.stem}.sharped.log"
@@ -5037,6 +5062,42 @@ def run_sharped_deblur(
     upload_map = prepare_xplor_for_sharped_upload(input_map, output_map.parent, max_upload_mb, log_both)
     if upload_map != input_map:
         log_both(f"SharpED upload map: {upload_map}")
+
+    # Reversible map-value scaling. Exactly one forward transform happens here,
+    # on the very last file handed to the client, and exactly one inverse
+    # transform happens below on the file the server actually returned -- once
+    # per SharpED request, regardless of retries, polling or download probing
+    # inside SharpEDServerClient.execute(). For the default exponent 1.0 (and
+    # for the explicit 0.0 bypass) nothing at all runs and `upload_map` stays
+    # the untouched file the pre-feature workflow uploaded.
+    exponent = normalize_map_value_exponent(map_value_exponent)
+    scaling_active = not map_value_scaling_is_identity(exponent)
+    exponent_note = describe_map_value_exponent(exponent)
+    if exponent_note:
+        log_both(exponent_note)
+    if scaling_active:
+        # Written to a separate file: `input_map` is the Superflip/recycled map
+        # the rest of the workflow still needs in its original value domain.
+        scaled_upload_map = output_map.parent / f"{output_map.stem}.sharped_input.xplor"
+        source_map = read_xplor_map(upload_map)
+        write_xplor_map(
+            scaled_upload_map,
+            XplorMap(
+                title=source_map.title,
+                grid=source_map.grid,
+                cell=source_map.cell,
+                axis_order=source_map.axis_order,
+                data=apply_signed_power(source_map.data, exponent),
+            ),
+            title=source_map.title,
+        )
+        del source_map
+        # The size check above ran on the pre-transform file; re-run the very
+        # same existing check on the file that is actually uploaded, so a
+        # re-serialized map cannot slip past the configured upload limit.
+        upload_map = prepare_xplor_for_sharped_upload(scaled_upload_map, output_map.parent, max_upload_mb, log_both)
+        log_both(f"SharpED map value detail: exponent {exponent:.3f} applied to {scaled_upload_map.name}")
+
     client = SharpEDServerClient(base_url=base_url, timeout=float(timeout))
     selected_model = model.strip()
     if not selected_model or selected_model.lower() in {"default", "server default", "sharped default"}:
@@ -5061,6 +5122,23 @@ def run_sharped_deblur(
     if not output_map.is_file() or output_map.stat().st_size == 0:
         raise RuntimeError(f"SharpED did not create output map: {output_map}")
     log_both(f"[SharpED] Downloaded {output_map.name}")
+    if scaling_active:
+        # Read back what the server produced (never a cached copy of the
+        # upload) and undo the transform in place, before EDMA, symmetrization,
+        # metrics, phase recycling, export or the Jana2020 hand-off see it.
+        returned_map = read_xplor_map(output_map)
+        write_xplor_map(
+            output_map,
+            XplorMap(
+                title=returned_map.title,
+                grid=returned_map.grid,
+                cell=returned_map.cell,
+                axis_order=returned_map.axis_order,
+                data=invert_signed_power(returned_map.data, exponent),
+            ),
+            title=returned_map.title,
+        )
+        log_both(f"SharpED map value detail: inverse exponent 1/{exponent:.3f} applied to {output_map.name}")
     return output_map
 
 def parse_edma_coo(coo_file: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -5761,6 +5839,7 @@ INPUT_TOOLTIPS = {
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
     "sharped_elements": "Chemical elements sent to the SharpED server. Leave blank to derive unique non-H elements from the reference composition.",
     "sharped_outres": "Requested output sampling/resolution of the SharpED density map.",
+    "sharped_map_value_exponent": "Reversible signed power transform sign(x)·|x|^a applied to map values before SharpED and inverted automatically on the returned SharpED map; 1.0 leaves values unchanged and 0 disables the transform. Only voxel values are affected — grid, cell, symmetry, format and the SharpED request itself are untouched.",
     "sharped_max_upload_mb": "Maximum XPLOR map size uploaded to the SharpED server in megabytes. Use 100 MB for the current public server limit. If voxel is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits. Set 0 to disable this check.",
     "sharped_timeout_seconds": "HTTP timeout in seconds for SharpED model query, upload, status and download requests. Phase Studio enforces at least 600 seconds for large XPLOR uploads.",
     "sharped_poll_seconds": "Seconds between status polling requests.",
@@ -6923,7 +7002,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>XPLOR damping (1/x)</b> (Superflip phasing method, XPLOR next-cycle models only) is the inverse damping factor: 1.0 means no damping, 0.5 is equivalent to the previous factor 2.0, 0.25 to factor 4.0.</p>
             <p><b>Excluded atoms</b> removes selected atom labels from CIF modelfiles before the next Superflip cycle (comma/semicolon/whitespace-separated); it does not apply to XPLOR-only model paths.</p>
             <h3>SharpED model</h3>
-            <p><b>Model</b> is the SharpED server model name sent with every deblurring request; <b>Refresh models</b> fetches the current list from the configured server and updates this selector. Server URL and API token are on Advanced &rarr; Setup; elements, output resolution and network/upload settings are on Advanced &rarr; SharpED.</p>
+            <p><b>Model</b> is the SharpED server model name sent with every deblurring request; <b>Refresh models</b> fetches the current list from the configured server and updates this selector. Server URL and API token are on Advanced &rarr; Setup; elements, output resolution, map value exponent and network/upload settings are on Advanced &rarr; SharpED.</p>
             <h3>Optional processing</h3>
             <p>Under <b>Superflip cycle</b> (used when Phasing method is Superflip):</p>
             <ul>
@@ -7140,6 +7219,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_text(inference_form, "sharped_elements", "Elements", "")
         self.inputs["sharped_elements"].setPlaceholderText("Auto from composition")  # type: ignore[attr-defined]
         self._add_dspin(inference_form, "sharped_outres", "Output resolution (Å)", 0.2, 0.001, 10.0, 0.05, 4)
+        self._add_dspin(
+            inference_form, "sharped_map_value_exponent", "Map value exponent",
+            SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
+            SHARPED_MAP_VALUE_EXPONENT_MIN, SHARPED_MAP_VALUE_EXPONENT_MAX, 0.05, 3,
+        )
 
         network_form = self._add_form_group(sharped_advanced_tab, "Transfer and network")
         self._add_dspin(network_form, "sharped_max_upload_mb", "Upload limit (MB)", 100.0, 0.0, 100000.0, 10.0, 1)
@@ -7218,18 +7302,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_help_layout = self._add_help_section(advanced_help_tab, "sharped", "SharpED guide", """
             <h3>What SharpED does</h3>
             <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
-            <p><b>Model</b> selection is on Basic &rarr; Workflow. Server connection is on Advanced &rarr; Setup (server URL/API token); elements, output resolution and upload/network settings are on Advanced &rarr; SharpED (everything else below).</p>
+            <p><b>Model</b> selection is on Basic &rarr; Workflow. Server connection is on Advanced &rarr; Setup (server URL/API token); elements, output resolution, map value exponent and upload/network settings are on Advanced &rarr; SharpED (everything else below).</p>
             <h3>1. Server connection</h3>
             <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
             <h3>2. Model and elements</h3>
             <p><b>Model</b> (Basic &rarr; Workflow) is sent to the server; <b>Refresh models</b> updates the selector; <code>default</code> uses the server default. <b>Elements</b> are sent to SharpED; when blank, Phase Studio derives unique non-hydrogen elements from the reference composition.</p>
             <h3>3. Output resolution</h3>
             <p><b>Output resolution (&Aring;)</b> is the requested sampling/resolution of the SharpED density map.</p>
-            <h3>4. Upload and network</h3>
+            <h3>4. Map value exponent</h3>
+            <p><b>Map value exponent</b> <i>a</i> applies a reversible signed power transform to the voxel values of the map sent to SharpED, and the exact inverse transform to the map SharpED returns. Forward: <code>sign(x)&middot;|x|<sup>a</sup></code>. Inverse: <code>sign(x)&middot;|x|<sup>1/a</sup></code>. The transform is signed because density maps contain negative voxel values, for which a plain <code>x<sup>a</sup></code> is not real-valued.</p>
+            <p>Qualitatively, <i>a</i> &lt; 1 compresses the dynamic range of the absolute map values, <i>a</i> = 1 (the default) leaves the map unchanged, and <i>a</i> &gt; 1 expands the dynamic range. <i>a</i> = 0 disables the transform entirely &mdash; <code>x<sup>0</sup></code> discards the magnitude and cannot be inverted, so it is treated as a bypass rather than as a transform.</p>
+            <p>Only voxel values are affected. Grid, origin, cell, symmetry, map dimensions, map format, metadata and the SharpED request parameters are all unchanged, and everything downstream of SharpED (EDMA, symmetrization, metrics, phase recycling, visualization, export and the Jana2020 hand-off) always sees values in the original map-value domain. No normalization, shifting, clipping or rescaling of any kind is added.</p>
+            <p>This is an experimental preprocessing option offered for exploration. Phase Studio makes no claim that any particular exponent improves crystallographic results; the default of 1.000 reproduces the standard workflow exactly.</p>
+            <h3>5. Upload and network</h3>
             <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check (confirm the actual limit with the configured service). If Voxel grid is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits under this limit. <b>HTTP timeout</b> covers model queries, upload, status and download requests and is enforced at 600 seconds minimum. <b>Polling interval</b> sets the delay between status checks. <b>Maximum polls</b> limits those checks; <b>-1</b> means no fixed polling limit.</p>
-            <h3>5. SharpED in iterative workflows</h3>
+            <h3>6. SharpED in iterative workflows</h3>
             <p><b>Run SharpED</b> (Basic &rarr; Workflow &rarr; Optional processing) enables server processing; if disabled, the SharpED map used downstream is a copy of the Superflip map. <b>Symmetrize SharpED map with Superflip (beta)</b> performs symmetry averaging, not another charge-flipping reconstruction. Next-cycle model's <b>SharpED map (XPLOR)</b> option feeds the SharpED map into the next cycle; <b>SharpED structure (EDMA CIF)</b> feeds its EDMA structure instead.</p>
-            <h3>6. Phase-recycling methods (beta/experimental)</h3>
+            <h3>7. Phase-recycling methods (beta/experimental)</h3>
             <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features</b> (Advanced &rarr; Setup) to select them. Neither is production-ready.</p>
         """, advanced=True)
         sharped_link_row = QHBoxLayout()
@@ -7853,7 +7942,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         inference_settings_link.setObjectName("settingsNavLink")
         inference_settings_link.setText("Inference settings →")
         inference_settings_link.setCursor(Qt.PointingHandCursor)
-        inference_settings_link.setToolTip("Open Advanced → SharpED (elements, output resolution, network/upload settings).")
+        inference_settings_link.setToolTip("Open Advanced → SharpED (elements, output resolution, map value exponent, network/upload settings).")
         inference_settings_link.clicked.connect(lambda _checked=False: self._open_configuration_page("SharpED", advanced=True))
         settings_links_row.addWidget(connection_settings_link)
         settings_links_row.addWidget(inference_settings_link)
@@ -12360,6 +12449,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sharped_model=self._combo_value("sharped_model") or "default",
             sharped_elements=self._line_value("sharped_elements"),
             sharped_outres=self._dspin_value("sharped_outres"),
+            sharped_map_value_exponent=normalize_map_value_exponent(self._dspin_value("sharped_map_value_exponent")),
             sharped_max_upload_mb=self._dspin_value("sharped_max_upload_mb"),
             sharped_timeout_seconds=self._spin_value("sharped_timeout_seconds"),
             sharped_poll_seconds=self._spin_value("sharped_poll_seconds"),
@@ -12666,6 +12756,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"  Server: {cfg.sharped_base_url}")
             self.log(f"  Model: {cfg.sharped_model or 'default'}")
             self.log(f"  Elements: {sharped_elements}")
+            # Provenance: a finished run's log must always say which map value
+            # exponent produced it. Non-default values are reported at the
+            # normal tier; the default stays a detailed diagnostic so a default
+            # run's log reads exactly as it did before this setting existed.
+            sharped_exponent = normalize_map_value_exponent(cfg.sharped_map_value_exponent)
+            if sharped_exponent == 0.0:
+                self.log("  Map value scaling: disabled (exponent 0)")
+            elif map_value_scaling_is_identity(sharped_exponent):
+                self.log(f"  Map value exponent: {sharped_exponent:.3f} (map values unchanged)", level="DETAIL")
+            else:
+                self.log(f"  Map value exponent: {sharped_exponent:.3f}")
 
             self.log(f"EDMA plimit after Superflip: {cfg.plimit_superflip:g} sigma multiplier", level="DETAIL")
             self.log(f"EDMA plimit after SharpED: {cfg.plimit_deblur:g} sigma multiplier", level="DETAIL")
@@ -13047,6 +13148,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         detail=detail,
                         busy=detail != "completed",
                     ),
+                    map_value_exponent=cfg.sharped_map_value_exponent,
                 )
             else:
                 shutil.copy2(sf_map, deblur_map)
@@ -13069,6 +13171,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
                         cycle, cfg.cycles, progress_stages, "SharpED", detail=f"omit map · {detail}", busy=detail != "completed",
                     ),
+                    map_value_exponent=cfg.sharped_map_value_exponent,
                 )
                 self.log(f"Omit {result_map_label('deblurred')}: {omit_deblur_map}")
                 omit_deblur_correlation = xplor_map_correlation(deblur_map, omit_deblur_map)
@@ -13340,6 +13443,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
                     cycle, cfg.cycles, progress_stages, "SharpED", detail=detail, busy=detail != "completed",
                 ),
+                map_value_exponent=cfg.sharped_map_value_exponent,
             )
             self.log(f"{result_map_label('deblurred')}: {deblur_map}")
             if self.stop_now.is_set():
