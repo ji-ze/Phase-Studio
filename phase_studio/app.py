@@ -6554,10 +6554,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.deblur_atoms_for_plot: List[AtomSite] = []
         self.structure_cell: Optional[gemmi.UnitCell] = None
         self.structure_axes: List[object] = []
+        self._structure_interactive_axes: List[object] = []
         self._structure_depth_artists: List[StructureDepthArtists] = []
         self.structure_elev = 20.0
         self.structure_azim = 35.0
-        self._structure_rotation_source: Optional[object] = None
+        # Zoom/pan is shared by the panels exactly like rotation is, and like
+        # elev/azim it survives a re-render. Matplotlib's 3D zoom (right drag)
+        # and pan (middle drag) both work by rewriting the axes' 3D limits, so
+        # one pair of remembered limit triples covers both: the base limits the
+        # cell geometry produces, and the limits currently displayed. The base
+        # acts as a fingerprint -- when a new cell makes it change, the stored
+        # view is stale and is dropped instead of being applied to a different
+        # crystal.
+        self.structure_view_base_limits: Optional[Tuple[Tuple[float, float], ...]] = None
+        self.structure_view_limits: Optional[Tuple[Tuple[float, float], ...]] = None
+        self._structure_view_drag_source: Optional[object] = None
         self._configuration_locked = False
         self.jana_wizard_context = JanaWizardContext()
         self._run_status = "READY"
@@ -7617,7 +7628,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_structure_comparison_section(self) -> None:
         structure_section, structure_layout = self._make_result_section("STRUCTURE COMPARISON")
-        self.structure_rotation_hint = QLabel("Drag to rotate all views · Hydrogen and helium atoms hidden")
+        self.structure_rotation_hint = QLabel(
+            "Drag to rotate · right-drag to zoom · middle-drag to pan — all views stay in sync"
+            " · Hydrogen and helium atoms hidden"
+        )
         self.structure_rotation_hint.setObjectName("structureRotationHint")
         self.structure_rotation_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.structure_rotation_hint.setVisible(False)
@@ -7628,9 +7642,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.setMinimumHeight(260)
         self.structure_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.structure_canvas.setToolTip("")
-        self.structure_canvas.mpl_connect("button_press_event", self._begin_structure_rotation)
+        self.structure_canvas.mpl_connect("button_press_event", self._begin_structure_view_drag)
         self.structure_canvas.mpl_connect("motion_notify_event", self._sync_structure_view_from_event)
-        self.structure_canvas.mpl_connect("button_release_event", self._finish_structure_rotation)
+        self.structure_canvas.mpl_connect("button_release_event", self._finish_structure_view_drag)
         self.structure_canvas.mpl_connect("resize_event", lambda _event: self._layout_structure_figure())
         structure_layout.addWidget(self.structure_canvas, 1)
         self.result_splitter.addWidget(structure_section)
@@ -10769,10 +10783,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             _plot_structure_atoms = IterativeSuperflipPipelineQtGUI._plot_structure_atoms
             _update_structure_depth_artist = IterativeSuperflipPipelineQtGUI._update_structure_depth_artist
             _update_structure_depth_cue = IterativeSuperflipPipelineQtGUI._update_structure_depth_cue
-            _begin_structure_rotation = IterativeSuperflipPipelineQtGUI._begin_structure_rotation
-            _apply_structure_rotation = IterativeSuperflipPipelineQtGUI._apply_structure_rotation
+            _structure_axis_limits = IterativeSuperflipPipelineQtGUI._structure_axis_limits
+            _apply_structure_axis_limits = IterativeSuperflipPipelineQtGUI._apply_structure_axis_limits
+            _begin_structure_view_drag = IterativeSuperflipPipelineQtGUI._begin_structure_view_drag
+            _apply_structure_view = IterativeSuperflipPipelineQtGUI._apply_structure_view
             _sync_structure_view_from_event = IterativeSuperflipPipelineQtGUI._sync_structure_view_from_event
-            _finish_structure_rotation = IterativeSuperflipPipelineQtGUI._finish_structure_rotation
+            _finish_structure_view_drag = IterativeSuperflipPipelineQtGUI._finish_structure_view_drag
 
             def __init__(self, cell, elev: float, azim: float) -> None:
                 self.structure_cell = cell
@@ -10780,7 +10796,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.structure_azim = azim
                 self._structure_depth_artists: List[StructureDepthArtists] = []
                 self.structure_axes: List[object] = []
-                self._structure_rotation_source = None
+                self._structure_interactive_axes: List[object] = []
+                self.structure_view_base_limits = None
+                self.structure_view_limits = None
+                self._structure_view_drag_source = None
                 self.structure_canvas = None
 
         preview_host = _PreviewHost(self.structure_cell, self.structure_elev, self.structure_azim)
@@ -11169,6 +11188,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 preview_figure.clear()
                 preview_figure.patch.set_facecolor("#ffffff")
                 preview_host.structure_axes = []
+                preview_host._structure_interactive_axes = []
                 preview_host._structure_depth_artists = []
                 panels = [(
                     f"{source_title} · Cycle {int(result.cycle)}",
@@ -11202,9 +11222,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 preview_figure.subplots_adjust(left=0.01, right=0.99, bottom=0.09, top=0.90, wspace=0.04)
                 preview_canvas.draw_idle()
 
-            preview_canvas.mpl_connect("button_press_event", preview_host._begin_structure_rotation)
+            preview_canvas.mpl_connect("button_press_event", preview_host._begin_structure_view_drag)
             preview_canvas.mpl_connect("motion_notify_event", preview_host._sync_structure_view_from_event)
-            preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_rotation)
+            preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_view_drag)
 
             def on_selection_changed() -> None:
                 result = result_for_table_row(table.currentRow())
@@ -12094,11 +12114,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         bounds_max = np.max(cell_corners, axis=0)
         spans = np.maximum(bounds_max - bounds_min, 1.0e-6)
         padding = spans * 0.025
-        ax.set_xlim(bounds_min[0] - padding[0], bounds_max[0] + padding[0])
-        ax.set_ylim(bounds_min[1] - padding[1], bounds_max[1] + padding[1])
-        ax.set_zlim(bounds_min[2] - padding[2], bounds_max[2] + padding[2])
+        base_limits = tuple(
+            (float(bounds_min[i] - padding[i]), float(bounds_max[i] + padding[i]))
+            for i in range(3)
+        )
         display_aspect = spans / max(float(np.max(spans)), 1.0e-6)
         ax.set_box_aspect(display_aspect, zoom=1.18)
+        # Restore the shared zoom/pan, but only while it belongs to this same
+        # cell geometry -- a different structure resets the view rather than
+        # inheriting a zoom framed around the previous crystal.
+        if self.structure_view_base_limits != base_limits:
+            self.structure_view_base_limits = base_limits
+            self.structure_view_limits = None
+        self._apply_structure_axis_limits(ax, self.structure_view_limits or base_limits)
+        self._structure_interactive_axes.append(ax)
 
         cell_edges = (
             (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
@@ -12220,37 +12249,78 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._append_execution_log(report.diagnostic_block(), level="DETAIL", subsystem="Structure viewer")
             return []
 
-    def _begin_structure_rotation(self, event) -> None:
-        ax = getattr(event, "inaxes", None)
-        self._structure_rotation_source = ax if ax in self.structure_axes else None
+    @staticmethod
+    def _structure_axis_limits(ax) -> Optional[Tuple[Tuple[float, float], ...]]:
+        """The axes' current 3D limits, or None if they cannot be read.
 
-    def _apply_structure_rotation(self, source_ax, *, redraw: bool = True) -> None:
-        if source_ax is None or source_ax not in self.structure_axes:
+        Matplotlib's 3D navigation expresses both zoom (right drag) and pan
+        (middle drag) purely as changes to these limits, so reading and writing
+        them is all that is needed to mirror either gesture onto the other
+        panels."""
+        try:
+            return (
+                (float(ax.get_xlim3d()[0]), float(ax.get_xlim3d()[1])),
+                (float(ax.get_ylim3d()[0]), float(ax.get_ylim3d()[1])),
+                (float(ax.get_zlim3d()[0]), float(ax.get_zlim3d()[1])),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _apply_structure_axis_limits(ax, limits: Optional[Tuple[Tuple[float, float], ...]]) -> None:
+        if not limits or len(limits) != 3:
+            return
+        try:
+            ax.set_xlim3d(limits[0][0], limits[0][1], auto=False)
+            ax.set_ylim3d(limits[1][0], limits[1][1], auto=False)
+            ax.set_zlim3d(limits[2][0], limits[2][1], auto=False)
+        except Exception:
+            pass
+
+    def _begin_structure_view_drag(self, event) -> None:
+        # Only a panel that actually drew a structure may drive the shared
+        # view: an empty panel never had its limits or view angles set, so
+        # letting it be the source would push matplotlib's defaults onto the
+        # panels that do have content.
+        ax = getattr(event, "inaxes", None)
+        self._structure_view_drag_source = ax if ax in self._structure_interactive_axes else None
+
+    def _apply_structure_view(self, source_ax, *, redraw: bool = True) -> None:
+        """Mirror one panel's camera and zoom/pan onto every other panel."""
+        if source_ax is None or source_ax not in self._structure_interactive_axes:
             return
         elev = float(getattr(source_ax, "elev", self.structure_elev))
         azim = float(getattr(source_ax, "azim", self.structure_azim))
         self.structure_elev = elev
         self.structure_azim = azim
+        limits = self._structure_axis_limits(source_ax)
+        if limits is not None:
+            self.structure_view_limits = limits
         for axis in self.structure_axes:
             axis.view_init(elev=elev, azim=azim)
+        # All panels share one cell, so they start from identical limits and
+        # can simply be given the source's -- no rescaling between panels.
+        for axis in self._structure_interactive_axes:
+            if axis is not source_ax:
+                self._apply_structure_axis_limits(axis, limits)
         self._update_structure_depth_cue(elev, azim)
         if redraw:
             self.structure_canvas.draw_idle()
 
     def _sync_structure_view_from_event(self, event) -> None:
-        source_ax = self._structure_rotation_source
+        source_ax = self._structure_view_drag_source
         if source_ax is None:
             source_ax = getattr(event, "inaxes", None)
-        if source_ax is None or source_ax not in self.structure_axes:
+        if source_ax is None or source_ax not in self._structure_interactive_axes:
             return
-        self._apply_structure_rotation(source_ax)
+        self._apply_structure_view(source_ax)
 
-    def _finish_structure_rotation(self, event) -> None:
-        source_ax = self._structure_rotation_source
+    def _finish_structure_view_drag(self, event) -> None:
+        source_ax = self._structure_view_drag_source
         if source_ax is None:
             source_ax = getattr(event, "inaxes", None)
-        self._apply_structure_rotation(source_ax, redraw=False)
-        self._structure_rotation_source = None
+        self._apply_structure_view(source_ax, redraw=False)
+        self._structure_view_drag_source = None
         self.structure_canvas.draw()
 
     def _layout_structure_figure(self) -> None:
@@ -12273,6 +12343,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_figure.clear()
         self.structure_figure.patch.set_facecolor("#ffffff")
         self.structure_axes = []
+        self._structure_interactive_axes = []
         self._structure_depth_artists = []
         status = str(getattr(self, "_run_status", "READY")).upper()
         waiting = status in {"RUNNING", "STOPPING"}

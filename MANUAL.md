@@ -618,7 +618,9 @@ The current structure panel compares:
 - Superflip,
 - SharpED.
 
-Loaded structures use synchronized rotation.
+All three panels share one camera and one zoom: dragging with the **left** button rotates, with the **right** button zooms, and with the **middle** button pans — every gesture is applied to all loaded panels at once, so the structures stay directly comparable. A panel with no loaded structure is skipped and cannot drive the shared view.
+
+The shared view is kept when the panels are redrawn (for example when a new cycle finishes), and is reset to the full unit cell when the cell geometry itself changes.
 
 Hydrogens are hidden in the preview when this is the active visualization policy.
 

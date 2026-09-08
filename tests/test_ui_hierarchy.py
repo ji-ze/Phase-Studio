@@ -17,6 +17,8 @@ Covers:
   - Canonical page heading text for each of the 8 configuration subpages.
   - Help navigation link labels are exactly the expected, unabbreviated set.
   - Callout construction: kind-aware object property, still readable text.
+  - Advanced -> SharpED map value exponent control.
+  - Structure Comparison: one shared camera/zoom across all three panels.
 """
 import os
 import sys
@@ -336,6 +338,111 @@ def main():
         check("Map value exponent configurationLocked property is cleared on unlock",
               exponent_widget.property("configurationLocked") is False)
         check("Map value exponent value survives the lock/unlock cycle unchanged", exponent_widget.value() == 1.0)
+
+    # =========================================================================
+    # Structure Comparison: rotation, zoom and pan are shared by all panels.
+    # Matplotlib drives rotation through elev/azim but zoom (right drag) and
+    # pan (middle drag) through the 3D axis limits, so the limits have to be
+    # mirrored too -- that is what this section pins down.
+    # =========================================================================
+    import gemmi
+    import numpy as np
+
+    def panel_limits(ax):
+        return (
+            tuple(round(float(v), 6) for v in ax.get_xlim3d()),
+            tuple(round(float(v), 6) for v in ax.get_ylim3d()),
+            tuple(round(float(v), 6) for v in ax.get_zlim3d()),
+        )
+
+    def fixture_atoms(seed):
+        return [
+            appmod.AtomSite(
+                label=f"C{i}", element="C",
+                frac=np.array([((i * 7 + seed) % 10) / 10.0,
+                               ((i * 3 + seed) % 10) / 10.0,
+                               ((i * 5 + seed) % 10) / 10.0], dtype=float),
+            )
+            for i in range(6)
+        ]
+
+    class FakeMouseEvent:
+        """The few attributes Axes3D._on_move() and the app's handlers read."""
+
+        def __init__(self, ax, x, y, xdata, ydata, button):
+            self.inaxes = ax
+            self.x, self.y = x, y
+            self.xdata, self.ydata = xdata, ydata
+            self.button = button
+            self.key = None
+            self.canvas = win.structure_canvas
+
+    win.structure_cell = gemmi.UnitCell(10.0, 11.0, 12.0, 90.0, 90.0, 90.0)
+    win.reference_atoms_for_plot = fixture_atoms(0)
+    win.superflip_atoms_for_plot = fixture_atoms(1)
+    win.deblur_atoms_for_plot = fixture_atoms(2)
+    win._update_structure_views()
+    # Axes3D._on_move() bails out until the projection matrix exists, which
+    # only happens on a real draw -- the offscreen canvas is never painted by
+    # an event loop here, so force one.
+    win.structure_canvas.draw()
+
+    check("Structure Comparison builds all 3 panels", len(win.structure_axes) == 3)
+    check("All 3 panels count as interactive when all have atoms", len(win._structure_interactive_axes) == 3)
+    check("All panels start from identical 3D limits (they share one cell)",
+          len({panel_limits(a) for a in win.structure_axes}) == 1)
+
+    limits_before = panel_limits(win.structure_axes[0])
+    source_ax = win.structure_axes[1]
+
+    # Right-button drag == matplotlib's 3D zoom. Drive matplotlib's own
+    # handler exactly as the canvas would, then let the app mirror the result.
+    source_ax.button_pressed = 3
+    source_ax._sx, source_ax._sy = 0.5, 0.5
+    win._begin_structure_view_drag(FakeMouseEvent(source_ax, 700, 400, 0.5, 0.5, 3))
+    check("A populated panel is accepted as the drag source", win._structure_view_drag_source is source_ax)
+
+    zoom_move = FakeMouseEvent(source_ax, 700, 300, 0.5, 0.30, 3)
+    source_ax._on_move(zoom_move)
+    win._sync_structure_view_from_event(zoom_move)
+
+    limits_after = panel_limits(source_ax)
+    check("Right-drag actually zoomed the panel under the cursor", limits_after != limits_before)
+    check("Right-drag zoom is mirrored onto every other panel",
+          len({panel_limits(a) for a in win.structure_axes}) == 1)
+    stored_limits = tuple(
+        tuple(round(float(v), 6) for v in pair) for pair in (win.structure_view_limits or ())
+    )
+    check("The shared zoom is recorded on the window for later re-renders", stored_limits == limits_after)
+
+    win._finish_structure_view_drag(FakeMouseEvent(source_ax, 700, 300, 0.5, 0.30, 3))
+    check("Finishing the drag clears the drag source", win._structure_view_drag_source is None)
+
+    # The zoom must survive a redraw, exactly as the rotation already does.
+    win._update_structure_views()
+    check("Zoom is preserved across a panel re-render", panel_limits(win.structure_axes[0]) == limits_after)
+    check("Panels stay identical after the re-render",
+          len({panel_limits(a) for a in win.structure_axes}) == 1)
+
+    # A different cell must reset the view rather than inherit a stale zoom.
+    win.structure_cell = gemmi.UnitCell(20.0, 21.0, 22.0, 90.0, 90.0, 90.0)
+    win._update_structure_views()
+    check("A cell change drops the stored zoom instead of reusing it", win.structure_view_limits is None)
+    check("A cell change reframes the panels on the new cell",
+          panel_limits(win.structure_axes[0]) != limits_after)
+
+    # An empty panel has no limits of its own and must not drive the others.
+    win.structure_cell = gemmi.UnitCell(10.0, 11.0, 12.0, 90.0, 90.0, 90.0)
+    win.deblur_atoms_for_plot = []
+    win._update_structure_views()
+    check("An empty panel is excluded from the interactive set", len(win._structure_interactive_axes) == 2)
+    win._begin_structure_view_drag(FakeMouseEvent(win.structure_axes[2], 1200, 400, 0.5, 0.5, 3))
+    check("An empty panel is refused as a drag source", win._structure_view_drag_source is None)
+
+    check("Structure viewer hint documents the right-button zoom",
+          "right-drag to zoom" in win.structure_rotation_hint.text())
+    check("Structure viewer hint still documents rotation and the shared views",
+          "rotate" in win.structure_rotation_hint.text() and "sync" in win.structure_rotation_hint.text())
 
     # The simplified Jana2020 Wizard must not gain this Advanced-only setting.
     import phase_studio.jana_superflip as jana_superflip

@@ -137,6 +137,30 @@ identity fast path: the map file is neither read nor rewritten, so the
 default workflow uploads byte-for-byte the same file it always did. This is
 the "same input, same result" rule applied to a new optional parameter.
 
+## Structure Comparison: one shared camera
+
+The three Structure Comparison panels (Reference / Superflip / SharpED) are
+separate `Axes3D` subplots that are kept deliberately in lockstep, because
+their whole purpose is side-by-side comparison. Matplotlib expresses the
+three navigation gestures differently -- left-drag rotation changes
+`elev`/`azim`, while right-drag zoom and middle-drag pan both rewrite the
+axes' 3D limits -- so `_apply_structure_view()` mirrors *both* representations
+from whichever panel the drag started on onto the others, and remembers them
+on the window (`structure_elev`/`structure_azim` and
+`structure_view_limits`) so a re-render does not throw the user's view away.
+
+Two guards matter here. Only panels that actually drew a structure are
+eligible (`_structure_interactive_axes`): an empty panel never had its limits
+or view angles set, so letting it drive the view would push matplotlib's
+defaults onto the panels that do have content. And the remembered zoom is
+tagged with the base limits the cell geometry produced
+(`structure_view_base_limits`); when a different cell makes those change, the
+stored view is dropped rather than applied to a different crystal.
+
+The Jana2020 result-selection dialog reuses these same methods through its
+`_PreviewHost` shim, so its preview panels behave identically without a second
+implementation.
+
 ## Where UI formatting belongs
 
 Canonical, reusable display-formatting functions already live in
