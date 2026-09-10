@@ -281,6 +281,132 @@ $stagedJanaRuntime = Join-Path $stagedJanaDir "_internal"
 Assert-PathExists $stagedJanaExe "Staged dist\PhaseStudio\JanaIntegration\superflip.exe"
 Assert-PathExists $stagedJanaRuntime "Staged dist\PhaseStudio\JanaIntegration\_internal"
 
+# ---------------------------------------------------------------------------
+# Verify that each distribution is actually PORTABLE -- that it will start on
+# a clean Windows 10/11 x64 machine with no Python, no Conda, no PySide6/Qt
+# and no separately installed Visual C++ Redistributable.
+#
+# The expected DLL list is not hard-coded: each spec writes
+# build\portable-runtime-<app>.json recording what its own dependency audit
+# determined this build requires, and only those DLLs are checked here.
+# ---------------------------------------------------------------------------
+$portableOk = $true
+
+function Test-PortableRuntime($DistName, $DistPath, $ManifestName) {
+    $internal = Join-Path $DistPath "_internal"
+    $manifestPath = Join-Path $buildDir "portable-runtime-$ManifestName.json"
+
+    Write-Host ""
+    Write-Host "$DistName"
+
+    if (-not (Test-Path $manifestPath)) {
+        Write-Host "  portable-runtime manifest not found: $manifestPath" -ForegroundColor Red
+        return $false
+    }
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+
+    $ok = $true
+    # NB: PowerShell variable names are case-insensitive -- a loop variable
+    # named $DistName/$Name here would clobber this function's parameters.
+    $expected = @()
+    foreach ($item in $manifest.msvc_runtime) { $expected += $item.name }
+    foreach ($qtLib in $manifest.required_binaries) { $expected += $qtLib }
+
+    Write-Host "  Portable runtime:"
+    foreach ($dllName in $expected) {
+        $found = Get-ChildItem -LiteralPath $internal -Recurse -File -Filter $dllName -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($found) {
+            Write-Host ("    {0,-24} OK" -f $dllName)
+        } else {
+            Write-Host ("    {0,-24} MISSING" -f $dllName) -ForegroundColor Red
+            $ok = $false
+        }
+    }
+
+    # An app-local Universal CRT must NOT be shipped: the UCRT belongs to
+    # Windows 10/11, and a private older copy is a portability hazard.
+    # (-Include needs a wildcard path in PowerShell 5.1; filter on Name.)
+    $allFiles = @(Get-ChildItem -LiteralPath $internal -Recurse -File -ErrorAction SilentlyContinue)
+    $ucrt = @($allFiles | Where-Object {
+        $_.Name -like 'ucrtbase.dll' -or $_.Name -like 'api-ms-win-*.dll'
+    })
+    if ($ucrt.Count -eq 0) {
+        Write-Host ("    {0,-24} OK (Windows provides the UCRT)" -f "no app-local UCRT")
+    } else {
+        Write-Host ("    {0,-24} {1} file(s) present" -f "app-local UCRT", $ucrt.Count) -ForegroundColor Red
+        $ok = $false
+    }
+
+    # Windows keeps one module per base name per process, so two different
+    # builds of e.g. MSVCP140.dll in different subdirectories cannot coexist.
+    $runtimeFiles = @($allFiles | Where-Object {
+        $_.Name -like 'vcruntime*.dll' -or $_.Name -like 'msvcp140*.dll' -or $_.Name -like 'Qt6*.dll'
+    })
+    $dupes = @($runtimeFiles |
+        Group-Object { $_.Name.ToLowerInvariant() } |
+        Where-Object { $_.Count -gt 1 -and (@($_.Group.Length | Sort-Object -Unique).Count -gt 1) })
+    if ($dupes.Count -eq 0) {
+        Write-Host ("    {0,-24} OK" -f "no duplicate runtime")
+    } else {
+        foreach ($dupe in $dupes) {
+            Write-Host ("    {0,-24} {1} differing copies" -f $dupe.Name, $dupe.Count) -ForegroundColor Red
+        }
+        $ok = $false
+    }
+
+    # Full native-dependency and symbol-level audits.
+    $auditor = Join-Path $PSScriptRoot "tools\audit_dependencies.py"
+    $verifier = Join-Path $PSScriptRoot "tools\verify_imports.py"
+
+    if (Test-Path $auditor) {
+        $auditOutput = & $PythonExe $auditor --dist $DistPath 2>&1
+        $auditFailed = ($LASTEXITCODE -ne 0)
+        $auditOutput | Where-Object { $_ -match 'Result:|PORTABLE|UNRESOLVED|OUTSIDE THE DIST|Windows 10 1903' } |
+            ForEach-Object { Write-Host "    $_" }
+        if ($auditFailed) { $ok = $false }
+    }
+
+    if (Test-Path $verifier) {
+        $verifyOutput = & $PythonExe $verifier $DistPath --quiet 2>&1
+        $verifyFailed = ($LASTEXITCODE -ne 0)
+        $verifyOutput | Where-Object { $_ -match 'Result:|UNSATISFIED|MISSING DLL|DUPLICATE DLL' } |
+            ForEach-Object { Write-Host "    $_" }
+        if ($verifyFailed) { $ok = $false }
+    }
+
+    if ($ok) {
+        Write-Host "  -> PORTABLE" -ForegroundColor Green
+    } else {
+        Write-Host "  -> NOT PORTABLE" -ForegroundColor Red
+    }
+    return $ok
+}
+
+Write-Step "Verifying portable runtime"
+if (-not (Test-PortableRuntime "dist\PhaseStudio" (Join-Path $distDir "PhaseStudio") "PhaseStudio")) {
+    $portableOk = $false
+}
+if (-not (Test-PortableRuntime "dist\superflip" (Join-Path $distDir "superflip") "superflip")) {
+    $portableOk = $false
+}
+# The staged copy is a plain file copy of dist\superflip\, but it is what the
+# standalone application actually installs into Jana2020 -- verify it too.
+if (-not (Test-PortableRuntime "dist\PhaseStudio\JanaIntegration" $stagedJanaDir "superflip")) {
+    $portableOk = $false
+}
+
+if (-not $portableOk) {
+    throw @"
+One or more distributions failed the portable-runtime check (see above).
+
+The build environment must be a plain (non-Conda) virtual environment using
+the PySide6 wheel from PyPI, which bundles Qt, shiboken6, the Qt plugins and a
+matching Visual C++ runtime inside the installed package. See BUILDING.md,
+"Windows portable build".
+"@
+}
+
 Write-Host ""
 Write-Host "Developer build complete." -ForegroundColor Green
 Write-Host "  PhaseStudio: $phaseStudioExe"

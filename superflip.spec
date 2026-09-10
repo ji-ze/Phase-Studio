@@ -1,11 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 project_dir = Path(SPECPATH).resolve()
+
+# Shared portable-runtime staging, identical to the one the main application
+# uses (see packaging/pyinstaller/portable_runtime.py). It matters especially
+# here: this wrapper is deployed INSIDE the Jana2020 tree, beside Jana's own
+# executables, so it must not pick up foreign Qt/ICU/VC runtime binaries from
+# its deployment directory or from PATH.
+packaging_dir = project_dir / "packaging" / "pyinstaller"
+sys.path.insert(0, str(packaging_dir))
+import portable_runtime  # noqa: E402
+
+qt_report = portable_runtime.validate_pyside6_installation()
 
 hiddenimports = [
     "phase_studio",
@@ -44,7 +56,9 @@ a = Analysis(
             "backends": "QtAgg",
         },
     },
-    runtime_hooks=[],
+    runtime_hooks=[
+        str(packaging_dir / "runtime_hooks" / "pyi_rth_dll_isolation.py"),
+    ],
     excludes=[
         "PyQt5",
         "PyQt6",
@@ -54,6 +68,21 @@ a = Analysis(
     ],
     noarchive=False,
     optimize=0,
+)
+
+# Same portable native runtime treatment as the main application: no app-local
+# Universal CRT, and exactly one copy of each required VC++ runtime DLL at the
+# _internal root.
+a.binaries, removed_ucrt = portable_runtime.strip_app_local_ucrt(a.binaries)
+a.binaries, staged_runtime = portable_runtime.stage_msvc_runtime(a.binaries)
+
+portable_runtime.report("superflip", staged_runtime, qt_report, removed_ucrt)
+portable_runtime.write_portable_manifest(
+    project_dir / "build" / "portable-runtime-superflip.json",
+    app="superflip",
+    staged_runtime=staged_runtime,
+    qt_report=qt_report,
+    removed_ucrt=removed_ucrt,
 )
 
 pyz = PYZ(a.pure)

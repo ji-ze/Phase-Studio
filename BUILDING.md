@@ -56,32 +56,151 @@ Do not claim platform-specific functionality is verified unless it has been test
 
 ---
 
-## 3. Windows one-file build
+## 3. Windows portable build
 
-The project has been packaged with PyInstaller as a single GUI executable.
-
-From the repository root in an environment containing the application dependencies:
-
-```powershell
-python -m PyInstaller `
-  --noconfirm `
-  --clean `
-  --onefile `
-  --windowed `
-  --name PhaseStudio `
-  --icon phase_studio\assets\phase_studio.ico `
-  --collect-data phase_studio `
-  --collect-all qtvscodestyle `
-  phase_studio\app.py
-```
-
-Expected output:
+Windows builds are **onedir** PyInstaller distributions. Do not switch them to
+one-file: production and the test suite depend on this layout.
 
 ```text
-dist\PhaseStudio.exe
+dist\PhaseStudio\
+    PhaseStudio.exe
+    _internal\
+    JanaIntegration\          (staged copy of dist\superflip\)
+        superflip.exe
+        _internal\
+
+dist\superflip\               (authoritative Jana wrapper build)
+    superflip.exe
+    _internal\
 ```
 
-Before publishing a release, test the executable on a machine/environment that does not rely on the active development environment.
+All of these are *portable*: they start on a clean, freshly installed
+Windows 10/11 x64 machine with no Python, no Conda, no PySide6/Qt, and **no
+separately installed Visual C++ Redistributable**.
+
+### Build
+
+Activate the build environment first (the script uses the `python` on `PATH`
+deliberately, so it honours an activated venv/Conda environment), then:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File packaging\build_windows.ps1
+```
+
+The script cleans only its own two output trees (`dist\PhaseStudio`,
+`dist\superflip` and the matching `build\` work directories) before building,
+so a new `_internal` is never overlaid on an older one. Pass `-Clean:$false`
+to skip that step.
+
+It then stages `dist\superflip\` into `dist\PhaseStudio\JanaIntegration\`,
+where the frozen application looks for the wrapper it installs into Jana2020,
+and finally verifies all three trees against the portable-runtime manifests.
+
+To invoke PyInstaller directly:
+
+```powershell
+python -m PyInstaller --clean --noconfirm packaging\pyinstaller\PhaseStudio.spec
+python -m PyInstaller --clean --noconfirm superflip.spec
+```
+
+A reference build environment (plain venv, PySide6 wheel from PyPI):
+
+```powershell
+uv venv --python 3.12 .venv-build
+uv pip install --python .venv-build\Scripts\python.exe `
+  pyinstaller==6.20.0 PySide6==6.11.1 shiboken6==6.11.1 `
+  numpy matplotlib gemmi qtvscodestyle pefile
+uv pip install --python .venv-build\Scripts\python.exe -e . --no-deps
+.venv-build\Scripts\Activate.ps1
+```
+
+`pefile` is required by the specs' dependency discovery and by the auditors in
+`packaging\tools\`; PyInstaller already depends on it.
+
+### Build environment requirements
+
+The build environment must be a **plain (non-Conda) virtual environment using
+the PySide6 wheel from PyPI**. That wheel is self-contained: `Qt6*.dll`,
+`shiboken6`, the Qt plugins and a matching Visual C++ runtime all live inside
+the installed `PySide6`/`shiboken6` packages, so one internally consistent Qt
+runtime can be staged.
+
+Conda/Anaconda PySide6 keeps Qt in `<env>\Library\bin` and its plugins in
+`<env>\Library\lib\qt6\plugins`, outside the Python package. The specs reject
+such an environment rather than produce a bundle that only works on the build
+machine. Qt DLLs must never be mixed in from Anaconda, PyQt, QGIS, Jana2020,
+`PATH`, or another Phase Studio build.
+
+### What makes the distribution portable
+
+Handled by `packaging/pyinstaller/portable_runtime.py`, shared by both specs:
+
+- **App-local Visual C++ runtime.** `vcruntime140.dll`, `vcruntime140_1.dll`,
+  `msvcp140.dll`, `msvcp140_1.dll` and `msvcp140_2.dll` are bundled. Windows
+  ships none of these; a clean PC has them only if some other product installed
+  `vc_redist.x64.exe`. The required set is discovered from the PE import tables
+  of the binaries the build actually collected, and each DLL is taken from an
+  explicit in-environment source — never from `System32` and never from `PATH`.
+- **One copy of each, at the `_internal` root.** Windows keeps one module per
+  base name per process. Several copies of `msvcp140.dll` at different versions
+  in different subdirectories is a real cause of
+  `DLL load failed ...: The specified procedure could not be found`.
+- **No app-local Universal CRT.** `ucrtbase.dll` and the `api-ms-win-*.dll`
+  forwarder stubs are removed. The UCRT is a component of Windows 10/11;
+  shipping a private, older copy is a portability hazard, not a fix. Some
+  redistributable Python builds place one in their install root, from where
+  dependency analysis will otherwise collect it.
+- **DLL search isolation.** The `pyi_rth_dll_isolation.py` runtime hook calls
+  `SetDefaultDllDirectories` so native DLLs resolve only from the system
+  directory, the loading DLL's own directory, and this bundle's directories.
+  `PATH` and the executable's own directory stop contributing, which matters
+  because the Superflip wrapper is deployed inside the Jana2020 tree. Inherited
+  `QT_PLUGIN_PATH`/`QTDIR` values pointing outside the bundle are dropped.
+
+### Minimum platform
+
+Currently supported 64-bit Windows 10/11. Qt 6 links the ICU library that ships
+with Windows (`icuuc.dll`), which is present from **Windows 10 version 1903**
+onwards; it is an OS component and cannot be bundled. The build reports this as
+a platform requirement rather than a packaging defect. No Windows 7/8
+compatibility work is included.
+
+### Verifying a build
+
+`packaging\build_windows.ps1` prints a portability report for each
+distribution, listing only the DLLs the audited build actually requires:
+
+```text
+  Portable runtime:
+    msvcp140.dll             OK
+    msvcp140_1.dll           OK
+    msvcp140_2.dll           OK
+    vcruntime140.dll         OK
+    vcruntime140_1.dll       OK
+    Qt6Core.dll              OK
+    Qt6Gui.dll               OK
+    Qt6Widgets.dll           OK
+    no app-local UCRT        OK (Windows provides the UCRT)
+    no duplicate runtime     OK
+```
+
+The two auditors it drives can also be run by hand:
+
+```powershell
+# Where every native dependency resolves from
+python packaging\tools\audit_dependencies.py --dist dist\PhaseStudio
+
+# Every imported symbol against the DLL that will provide it,
+# plus conflicting duplicate DLL base names
+python packaging\tools\verify_imports.py dist\PhaseStudio
+
+# The build environment itself, before packaging
+python packaging\tools\audit_dependencies.py --env
+```
+
+`verify_imports.py` exists because an unsatisfied *symbol* is what produces
+`The specified procedure could not be found` (Windows error 127), as opposed to
+a missing DLL (error 126).
 
 ### Windows SmartScreen
 
@@ -164,25 +283,40 @@ The Jana2020 wrapper is built from:
 phase_studio/jana_superflip.py
 ```
 
-The repository may provide a dedicated PyInstaller specification such as:
+Its authoritative PyInstaller specification stays at the repository root:
 
 ```text
 superflip.spec
 ```
 
-When present, prefer the repository `.spec` file over reconstructing its settings manually:
+Always prefer that `.spec` file over reconstructing its settings manually:
 
-```bash
+```powershell
 python -m PyInstaller --clean --noconfirm superflip.spec
 ```
 
-A typical onedir wrapper build produces:
+or build it together with the application:
 
-```text
-dist/superflip/
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 ```
 
-Keep the complete generated directory together unless the specification explicitly produces a one-file build.
+The wrapper build is **onedir** and must stay that way:
+
+```text
+dist\superflip\
+    superflip.exe
+    _internal\
+```
+
+Keep the complete generated directory together — `superflip.exe` cannot run
+without its `_internal\` directory.
+
+The wrapper is packaged with the same portable-runtime rules as the main
+application (see section 3), which matters especially here: the wrapper is
+deployed *inside* the Jana2020 tree, so its DLL search path is isolated to
+prevent it from loading Qt, ICU or Visual C++ runtime binaries belonging to
+Jana2020 or to anything else on `PATH`.
 
 ---
 

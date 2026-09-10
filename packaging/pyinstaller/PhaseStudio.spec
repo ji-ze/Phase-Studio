@@ -17,6 +17,7 @@
 # developer/testing distribution) builds; keep both in sync if PyInstaller
 # requirements change.
 
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -37,6 +38,17 @@ if not entry_point.is_file():
         f"Resolved project root: {project_dir}\n"
         f"SPECPATH was: {Path(SPECPATH).resolve()}"
     )
+
+# Shared portable-runtime staging (see packaging/pyinstaller/portable_runtime.py).
+# It lives beside this spec and is not importable as an installed package.
+spec_dir = Path(SPECPATH).resolve()
+sys.path.insert(0, str(spec_dir))
+import portable_runtime  # noqa: E402
+
+# Fail before doing any work if the build environment cannot produce a
+# consistent Qt runtime (Conda PySide6 with Qt outside the Python package,
+# mismatched PySide6/shiboken6, missing Qt platform plugin).
+qt_report = portable_runtime.validate_pyside6_installation()
 
 hiddenimports = [
     "phase_studio",
@@ -76,7 +88,12 @@ a = Analysis(
             "backends": "QtAgg",
         },
     },
-    runtime_hooks=[],
+    # Resolve native DLLs from this distribution only -- not from PATH and not
+    # from the executable's own directory. Prevents a foreign Qt6*.dll, ICU or
+    # VC runtime belonging to another installed program from being loaded.
+    runtime_hooks=[
+        str(spec_dir / "runtime_hooks" / "pyi_rth_dll_isolation.py"),
+    ],
     excludes=[
         "PyQt5",
         "PyQt6",
@@ -86,6 +103,29 @@ a = Analysis(
     ],
     noarchive=False,
     optimize=0,
+)
+
+# ---------------------------------------------------------------------------
+# Portable native runtime -- makes this distribution start on a clean Windows
+# 10/11 x64 machine with no Visual C++ Redistributable installed.
+# ---------------------------------------------------------------------------
+# 1. Drop any app-local Universal CRT collected from the Python distribution:
+#    the UCRT is a component of Windows 10/11, and a private older copy is a
+#    portability hazard rather than a fix.
+a.binaries, removed_ucrt = portable_runtime.strip_app_local_ucrt(a.binaries)
+
+# 2. Bundle exactly one copy of each required VC++ runtime DLL at the
+#    _internal root, discovered from the collected binaries' import tables and
+#    taken from explicit in-environment sources (never System32, never PATH).
+a.binaries, staged_runtime = portable_runtime.stage_msvc_runtime(a.binaries)
+
+portable_runtime.report("PhaseStudio", staged_runtime, qt_report, removed_ucrt)
+portable_runtime.write_portable_manifest(
+    project_dir / "build" / "portable-runtime-PhaseStudio.json",
+    app="PhaseStudio",
+    staged_runtime=staged_runtime,
+    qt_report=qt_report,
+    removed_ucrt=removed_ucrt,
 )
 
 pyz = PYZ(a.pure)
