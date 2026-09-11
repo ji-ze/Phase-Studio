@@ -11821,6 +11821,50 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if hasattr(self, "metrics_reset_btn"):
             self.metrics_reset_btn.setEnabled(interaction.user_modified or interaction.mode == "detail")
 
+    # --- Metric legend band -----------------------------------------------
+    # The reserved band used to be a flat 112 px, which is narrower than the
+    # legend the validation tabs actually draw ("Omit map correlation" needs
+    # ~133 px), so the longest labels were clipped at the canvas edge. The
+    # band is now measured from the real legend and clamped: the minimum is
+    # the previous fixed value, so tabs whose labels already fitted keep
+    # exactly the layout they had.
+    METRICS_LEGEND_MIN_WIDTH_PX = 112.0
+    METRICS_LEGEND_MAX_WIDTH_PX = 190.0
+    METRICS_LEGEND_TEXT_PADDING_PX = 6.0
+
+    def _metrics_legend_width_pixels(self, figure) -> float:
+        """Width in device pixels the figure's legend needs to render whole.
+
+        Measured from the legend itself (handles, handle/text padding and the
+        label text), which is what Matplotlib will actually draw, rather than
+        guessed from a character count. Falls back to an estimate only if no
+        renderer is available yet; either way the caller clamps the result.
+        """
+        if not figure.legends:
+            return 0.0
+        legend = figure.legends[0]
+        try:
+            renderer = figure.canvas.get_renderer()
+        except Exception:
+            renderer = None
+        if renderer is not None:
+            try:
+                measured = float(legend.get_window_extent(renderer).width)
+                if math.isfinite(measured) and measured > 0.0:
+                    return measured + self.METRICS_LEGEND_TEXT_PADDING_PX
+            except Exception:
+                pass
+        # No renderer yet (first layout before any draw): approximate from the
+        # longest label at the legend's own font size, plus its handle column.
+        try:
+            labels = [text.get_text() for text in legend.get_texts()]
+            font_pixels = float(legend.prop.get_size_in_points()) * figure.dpi / 72.0
+            longest = max((len(label) for label in labels), default=0)
+            handle_pixels = 1.8 * font_pixels
+            return longest * 0.55 * font_pixels + handle_pixels + self.METRICS_LEGEND_TEXT_PADDING_PX
+        except Exception:
+            return self.METRICS_LEGEND_MIN_WIDTH_PX
+
     def _layout_metrics_figure(self, key: str) -> None:
         figure = self.metrics_figures[key]
         canvas = self.metrics_canvases[key]
@@ -11839,11 +11883,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if has_data:
             top = 1.0 - min(0.08, max(0.035, 10.0 / height))
             if has_legend:
-                # Reserve a compact, fixed-width band for the vertical legend.
-                # Keeping this budget pixel based avoids wasting plot width on
-                # large canvases while still fitting the longest label at
-                # moderately narrow widths.
-                legend_width_pixels = 112.0
+                # Reserve a compact, content-aware band for the vertical
+                # legend. Keeping this budget pixel based avoids wasting plot
+                # width on large canvases; measuring it means the longest
+                # label is no longer clipped, and the clamp keeps a
+                # pathological label from eating the plot. The 0.32 fraction
+                # below is a second, canvas-relative safety net on narrow
+                # canvases.
+                legend_width_pixels = min(
+                    self.METRICS_LEGEND_MAX_WIDTH_PX,
+                    max(
+                        self.METRICS_LEGEND_MIN_WIDTH_PX,
+                        self._metrics_legend_width_pixels(figure),
+                    ),
+                )
                 outer_right_pixels = 8.0
                 right = 1.0 - min(
                     0.32,

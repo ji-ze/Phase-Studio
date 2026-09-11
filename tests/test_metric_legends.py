@@ -251,6 +251,127 @@ def main():
         len(set(styles)) == len(styles) and len(styles) > 1,
     )
 
+    # =====================================================================
+    # The reserved legend band must actually fit the labels it shows.
+    #
+    # It used to be a flat 112 px, narrower than the legend the validation
+    # tabs draw ("Omit map correlation" needs ~133 px), so the longest labels
+    # were clipped at the canvas edge.
+    # =====================================================================
+    win.resize(1500, 950)
+    win.show()
+    app.processEvents()
+    win.results = [make_result(appmod, tmp, cycle, sparse=False) for cycle in (1, 2, 3)]
+    win._update_plot()
+    app.processEvents()
+
+    def laid_out(key):
+        """Lay out and draw one tab, returning (figure, legend, renderer).
+
+        The tab is selected first: _layout_metrics_figure budgets in canvas
+        widget pixels while positioning the legend in figure-fraction
+        coordinates, so the two only describe the same geometry once Qt has
+        actually sized the canvas and matplotlib has resized the figure to
+        match. Measuring an unsized canvas would compare the legend against a
+        figure that is not the one on screen.
+        """
+        win.metrics_tabs.setCurrentIndex(win._metrics_tab_keys.index(key))
+        app.processEvents()
+        figure = win.metrics_figures[key]
+        canvas = win.metrics_canvases[key]
+        win._layout_metrics_figure(key)
+        canvas.draw()
+        legend = figure.legends[0] if figure.legends else None
+        return figure, legend, figure.canvas.get_renderer()
+
+    seen_labels = set()
+    for key, title in MULTI_SERIES_TABS.items():
+        figure, legend, renderer = laid_out(key)
+        check("%s: has a legend to measure" % title, legend is not None)
+        if legend is None:
+            continue
+        figure_right = figure.get_window_extent().x1
+        # Guard the measurement itself: if the canvas widget and the figure
+        # disagree on width, the numbers below describe a layout that is not
+        # what the user sees, and the clipping check would be meaningless.
+        check(
+            "%s: the measured canvas matches the on-screen figure width" % title,
+            abs(win.metrics_canvases[key].width() - figure_right) <= 1.0,
+        )
+        legend_box = legend.get_window_extent(renderer)
+        check(
+            "%s: the whole legend fits inside the canvas (right edge %.0f of %.0f px)"
+            % (title, legend_box.x1, figure_right),
+            legend_box.x1 <= figure_right,
+        )
+        # Every individual label, not just the legend box as a whole.
+        for text in legend.get_texts():
+            label = text.get_text()
+            seen_labels.add(label)
+            check(
+                "%s: legend label %r is not clipped" % (title, label),
+                text.get_window_extent(renderer).x1 <= figure_right,
+            )
+        # The reserved band must be at least as wide as the legend needs.
+        reserved = min(
+            win.METRICS_LEGEND_MAX_WIDTH_PX,
+            max(win.METRICS_LEGEND_MIN_WIDTH_PX, win._metrics_legend_width_pixels(figure)),
+        )
+        check(
+            "%s: the reserved band covers the measured legend width" % title,
+            reserved >= legend_box.width,
+        )
+
+    # The specific labels called out as the longest in the current metric set.
+    for label in ("Reference match", "Heavy atoms found", "Omit map correlation", "R_free"):
+        check("legend label %r was actually exercised above" % label, label in seen_labels)
+
+    # ---- clamp bounds ------------------------------------------------
+    check(
+        "the legend band never shrinks below the previous fixed width",
+        win.METRICS_LEGEND_MIN_WIDTH_PX == 112.0,
+    )
+    check(
+        "the legend band is capped in the intended 180-200 px range",
+        180.0 <= win.METRICS_LEGEND_MAX_WIDTH_PX <= 200.0,
+    )
+    check(
+        "the clamp is ordered min < max",
+        win.METRICS_LEGEND_MIN_WIDTH_PX < win.METRICS_LEGEND_MAX_WIDTH_PX,
+    )
+
+    # ---- a pathological label cannot eat the plot --------------------
+    long_label = "An absurdly long metric label that should never be allowed " * 3
+    win._render_metrics_tab(
+        "superflip",
+        [
+            (long_label, [r.superflip_heavy_atom_count for r in win.results], True, "#001170", "o", "-"),
+            ("Recall", [r.superflip_recall for r in win.results], True, "#2264b8", "^", "-"),
+        ],
+    )
+    figure, legend, _renderer = laid_out("superflip")
+    measured = win._metrics_legend_width_pixels(figure)
+    clamped = min(win.METRICS_LEGEND_MAX_WIDTH_PX, max(win.METRICS_LEGEND_MIN_WIDTH_PX, measured))
+    check("pathological label: raw measurement exceeds the cap", measured > win.METRICS_LEGEND_MAX_WIDTH_PX)
+    check("pathological label: the reserved band is clamped to the cap",
+          clamped == win.METRICS_LEGEND_MAX_WIDTH_PX)
+    axes_box = win.metrics_axes["superflip"].get_window_extent()
+    check("pathological label: the plot keeps most of the canvas",
+          axes_box.width >= figure.get_window_extent().x1 * 0.5)
+
+    # ---- no legend means no reserved band ----------------------------
+    win._replay_metrics_tab("superflip")
+    legend_figure, _legend, _r = laid_out("superflip")
+    legend_axes_right = win.metrics_axes["superflip"].get_window_extent().x1
+    plain_figure, plain_legend, _r2 = laid_out("powder_repartition")
+    plain_axes = win.metrics_axes["powder_repartition"].get_window_extent()
+    check("a single-series tab reserves no legend band", plain_legend is None)
+    check(
+        "a single-series tab uses the width a legend band would have cost",
+        (plain_axes.x1 / plain_figure.get_window_extent().x1)
+        > (legend_axes_right / legend_figure.get_window_extent().x1),
+    )
+
     failures = [name for name, ok in results_log if not ok]
     print()
     if failures:
