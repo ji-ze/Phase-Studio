@@ -102,9 +102,9 @@ except Exception:
     )
 
 try:
-    from phase_studio.process_utils import allow_external_process_foreground, text_encoding
+    from phase_studio.process_utils import allow_external_process_foreground, no_console_popen_kwargs, text_encoding
 except Exception:
-    from process_utils import allow_external_process_foreground, text_encoding
+    from process_utils import allow_external_process_foreground, no_console_popen_kwargs, text_encoding
 
 try:
     import gemmi
@@ -4677,6 +4677,7 @@ def run_command(
     stop_event: Optional[threading.Event] = None,
     allow_foreground: bool = False,
     on_output_line: Optional[Callable[[str], None]] = None,
+    hide_console: bool = False,
 ) -> int:
     """Run an external command, writing its complete raw stdout/stderr to
     log_path unchanged, byte for byte (including any bare '\\r' console
@@ -4687,7 +4688,14 @@ def run_command(
     on_output_line, when given, is called with each decoded line as it
     arrives WHILE the process is still running (best-effort progress
     observation only; a raised exception from it is swallowed so a parsing
-    bug can never fail the run or block stop_event/timeout handling)."""
+    bug can never fail the run or block stop_event/timeout handling).
+
+    hide_console=True starts the child without a visible console window on
+    Windows (see process_utils.no_console_popen_kwargs). It changes nothing
+    else: the command line, working directory, captured stdout/stderr, exit
+    code and stop_event/timeout termination all behave identically. Opt in
+    per call site rather than globally -- a console that IS part of the user
+    interface must keep showing."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     display_cmd = [Path(str(cmd[0])).name] if cmd else []
     for argument in cmd[1:]:
@@ -4708,7 +4716,22 @@ def run_command(
                     pass
 
         try:
-            proc = subprocess.Popen(list(cmd), cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            launch_kwargs: Dict[str, object] = {}
+            if hide_console:
+                # No console window for a GUI-launched calculation process.
+                # stdin is pointed at DEVNULL only in this branch: the hidden
+                # console has no reachable input, so an unexpected prompt
+                # would otherwise block invisibly and forever instead of
+                # failing fast into the log below.
+                launch_kwargs.update(no_console_popen_kwargs())
+                launch_kwargs["stdin"] = subprocess.DEVNULL
+            proc = subprocess.Popen(
+                list(cmd),
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                **launch_kwargs,
+            )
             if allow_foreground:
                 allow_external_process_foreground(proc.pid)
         except OSError as exc:
@@ -5358,7 +5381,19 @@ def run_edma_on_xplor(
         log(f"  plimit={float(absolute_plimit):g}")
     else:
         log(f"  map σ={map_sigma:g} · plimit={float(absolute_plimit):g}")
-    run_command([edma_exe, inp.name], cwd=out_dir, log_path=edma_log, log=log, stop_event=stop_event)
+    # EDMA is a console executable started by the GUI; its console window is
+    # not part of the user interface (all of its output is captured into
+    # edma_log below), so it runs hidden. Command line, working directory,
+    # captured output, exit-code handling and stop_event termination are
+    # deliberately unchanged.
+    run_command(
+        [edma_exe, inp.name],
+        cwd=out_dir,
+        log_path=edma_log,
+        log=log,
+        stop_event=stop_event,
+        hide_console=True,
+    )
     log_text = edma_log.read_text(encoding="utf-8", errors="replace") if edma_log.is_file() else ""
     lower_log = log_text.lower()
     edma_failed = (
@@ -6571,6 +6606,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._structure_view_drag_source: Optional[object] = None
         self._configuration_locked = False
         self.jana_wizard_context = JanaWizardContext()
+        # One-shot guard so the Wizard Phase-recycling selector opens exactly
+        # once per completed run. Reset when a new run starts, so a second run
+        # in the same session opens it again.
+        self._jana_auto_selector_shown = False
         self._run_status = "READY"
         self._cycle_progress_state: Optional[CycleProgressState] = None
         self._syncing_metadata_controls = False
@@ -10666,14 +10705,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     # -- is eligible).
                     if self._jana_wizard_handoff_available():
                         if self.jana_wizard_context.launch_mode == "phase_recycling":
-                            self._append_execution_log(
-                                "Phase recycling complete. Opening the Jana2020 result selector automatically.",
-                                subsystem="Jana2020",
-                            )
-                            self.open_jana_result_selector(
-                                source_mode="locked",
-                                initial_source=self.jana_wizard_context.wizard_map_source or "deblurred",
-                            )
+                            # Deferred to the next event-loop turn, on the GUI
+                            # thread, rather than opened inline here: at this
+                            # point we are still inside the queue-drain loop of
+                            # this QTimer slot, and the selector is modal
+                            # (dialog.exec()). Opening it inline would run a
+                            # nested event loop from inside the drain -- which
+                            # re-enters _poll_queue and stalls every remaining
+                            # message for as long as the dialog stays open.
+                            # Every completed result is already committed to
+                            # self.results (the "result" messages are queued
+                            # before "done" and drained above), the run status
+                            # is COMPLETE, and the action button has been
+                            # re-synced, so the state the selector reads is
+                            # final by the time this fires.
+                            QTimer.singleShot(0, self._auto_open_jana_result_selector)
                         else:
                             self._append_execution_log(
                                 "[Jana2020] Hand-off ready · select Superflip or SharpED result",
@@ -10681,6 +10727,58 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                             )
         except queue.Empty:
             pass
+
+    def _auto_open_jana_result_selector(self) -> None:
+        """Open the locked Jana2020 result selector after a successful Wizard
+        Phase-recycling run (GUI thread, one event-loop turn after completion).
+
+        Nothing here is speculative: "Opening..." is logged immediately before
+        the real open request and a confirmation only after the selector has
+        actually been constructed and shown, so the execution log can never
+        claim a selector that never appeared. A failure is reported, never
+        swallowed -- in a windowed build an escaping exception would otherwise
+        vanish with no stderr to print to, which is exactly how this looked
+        like "the log says it opened but nothing happened".
+        """
+        # Re-check rather than trust the state captured at completion time:
+        # this runs one event-loop turn later, so a Clear (or a new run) could
+        # have invalidated the results in between.
+        if not self._jana_wizard_handoff_available():
+            return
+        if self.jana_wizard_context.launch_mode != "phase_recycling":
+            return
+        if self._jana_auto_selector_shown:
+            return
+        self._jana_auto_selector_shown = True
+        self._append_execution_log(
+            "Phase recycling complete. Opening the Jana2020 result selector automatically.",
+            subsystem="Jana2020",
+        )
+        try:
+            self.open_jana_result_selector(
+                source_mode="locked",
+                initial_source=self.jana_wizard_context.wizard_map_source or "deblurred",
+            )
+        except Exception as exc:
+            self._append_execution_log(
+                f"The Jana2020 result selector could not be opened: {exc}",
+                level="ERROR",
+                subsystem="Jana2020",
+            )
+            self._show_error_report(
+                build_error_report(
+                    exc,
+                    subsystem="Jana2020",
+                    operation="Open Jana2020 result selector",
+                    extra_details=traceback.format_exc(),
+                )
+            )
+        finally:
+            # "Send to Jana2020" stays available either way: after a normal
+            # close it is the manual way back in, and after a failure it is
+            # the retry. It is never disabled merely because the automatic
+            # open was already attempted.
+            self._sync_jana_action_button()
 
     def _source_map_path(self, result: CycleResult, source: str) -> Path:
         return Path(result.superflip_map) if source == "superflip" else Path(result.deblur_map)
@@ -10742,10 +10840,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         superflip_ok = self._source_available_for_results("superflip")
         sharped_ok = self._source_available_for_results("deblurred")
         wants_superflip = str(initial_source or "").strip().lower() == "superflip"
-        if wants_superflip and not superflip_ok and sharped_ok:
-            initial_source = "deblurred"
-        elif not wants_superflip and not sharped_ok and superflip_ok:
-            initial_source = "superflip"
+        if switchable:
+            # The user can switch source here, so opening on the other tab
+            # when the requested one produced nothing is a helpful default,
+            # not a silent substitution -- both remain visible and labelled.
+            if wants_superflip and not superflip_ok and sharped_ok:
+                initial_source = "deblurred"
+            elif not wants_superflip and not sharped_ok and superflip_ok:
+                initial_source = "superflip"
+        else:
+            # Locked (Wizard Phase recycling): the map source was chosen in
+            # the Wizard and no switch is offered, so quietly handing back
+            # the OTHER source would misrepresent the result. Fail loudly
+            # and precisely instead.
+            locked_available = superflip_ok if wants_superflip else sharped_ok
+            if not locked_available:
+                self._show_error_report(
+                    build_error_report(
+                        RuntimeError(
+                            f"No completed {result_source_title(initial_source)} result is "
+                            f"available for Jana2020 handoff."
+                        ),
+                        subsystem="Jana2020",
+                        operation="Jana2020 handoff",
+                        severity="warning",
+                    )
+                )
+                return
         state: Dict[str, object] = {"source": initial_source, "cycle": None}
 
         def fmt(value: object) -> str:
@@ -10783,8 +10904,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             _plot_structure_atoms = IterativeSuperflipPipelineQtGUI._plot_structure_atoms
             _update_structure_depth_artist = IterativeSuperflipPipelineQtGUI._update_structure_depth_artist
             _update_structure_depth_cue = IterativeSuperflipPipelineQtGUI._update_structure_depth_cue
-            _structure_axis_limits = IterativeSuperflipPipelineQtGUI._structure_axis_limits
-            _apply_structure_axis_limits = IterativeSuperflipPipelineQtGUI._apply_structure_axis_limits
+            # These two are @staticmethod on the main window. Reading them
+            # off the class yields the PLAIN underlying function, and binding
+            # a plain function as a class attribute here would turn it back
+            # into an instance method -- so preview_host._apply_structure_
+            # axis_limits(ax, limits) would pass (self, ax, limits) and raise
+            # TypeError. Re-wrap them so they stay static, exactly as on the
+            # main window.
+            _structure_axis_limits = staticmethod(IterativeSuperflipPipelineQtGUI._structure_axis_limits)
+            _apply_structure_axis_limits = staticmethod(IterativeSuperflipPipelineQtGUI._apply_structure_axis_limits)
             _begin_structure_view_drag = IterativeSuperflipPipelineQtGUI._begin_structure_view_drag
             _apply_structure_view = IterativeSuperflipPipelineQtGUI._apply_structure_view
             _sync_structure_view_from_event = IterativeSuperflipPipelineQtGUI._sync_structure_view_from_event
@@ -11292,6 +11420,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sharped_btn.clicked.connect(lambda _checked=False: rebuild("deblurred"))
 
         rebuild(str(state["source"]))
+
+        # Everything is constructed and populated; the modal show below cannot
+        # now fail to produce a visible selector. Logged here rather than after
+        # exec() returns, which would mean "closed", not "opened".
+        self._append_execution_log("[Jana2020] Result selector opened.", subsystem="Jana2020")
 
         if dialog.exec() != QDialog.Accepted:
             # Closing without sending keeps the main window and its completed
@@ -11909,7 +12042,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             unit = "%" if ("%" in label or ("%" in raw_ylabel and raw)) else ""
             hover_series.append((label, list(cycles), list(y), list(values), unit))
         self._metrics_hover_series[key] = hover_series
-        if plotted > 1:
+        # Whether this tab shows a legend is decided by the tab's DEFINITION
+        # (how many labelled series it can ever plot), never by how many of
+        # them happen to carry finite values right now. Keying it off the
+        # live count made the legend flicker in and out between cycles: on
+        # cycle 1 several multi-metric tabs have exactly one finite series
+        # (Map correlation needs a previous cycle, reference-dependent
+        # metrics need a reference, ...), so `plotted > 1` was False and the
+        # legend silently vanished until a later cycle happened to populate
+        # a second series.
+        #
+        # A genuinely single-series tab (Powder repartitioning, Intensity
+        # correction) still omits its legend: its y-axis label already names
+        # the one plotted metric, so a one-item legend would just repeat it
+        # while costing horizontal space.
+        #
+        # Built here, AFTER every artist for this pass has been added, and
+        # after figure.clear() above discarded the previous pass's legend --
+        # so the legend always matches the artists actually on screen, with
+        # one entry per plotted series and no stale or placeholder entries.
+        if plotted >= 1 and len(series) > 1:
             handles, labels = ax.get_legend_handles_labels()
             figure.legend(
                 handles,
@@ -11934,9 +12086,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 color="#7183a6",
                 transform=ax.transAxes,
             )
-        # A single-series tab (Powder repartitioning) omits its legend: the
-        # y-axis label already uniquely names the one plotted metric, and a
-        # one-item legend just repeats it while wasting horizontal space.
 
         view_mode = "full"
         if interaction is not None:
@@ -12648,6 +12797,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._append_execution_log("External reference file is empty; no external reference density or atom sites will be used.", level="DETAIL")
         self.stop_after_cycle.clear()
         self.stop_now.clear()
+        self._jana_auto_selector_shown = False
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self._set_overall_progress_text("Running")
@@ -12684,6 +12834,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.last_run_config = state.cfg
         self.stop_after_cycle.clear()
         self.stop_now.clear()
+        self._jana_auto_selector_shown = False
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self._set_overall_progress_text("Running")

@@ -960,6 +960,126 @@ class _JanaWorkflowWizard:
         legacy_value = str(self.settings.value(legacy_key, "") or "").strip()
         return legacy_value or fallback
 
+    # --- Wizard window width policy ---------------------------------------
+    # The Wizard used to take whatever width self.content.sizeHint() happened
+    # to report, which on a normal desktop settled around the 640 px minimum:
+    # workflow descriptions, the Scientific-validation text and the
+    # cross-validation explanation all wrapped far more than necessary, which
+    # in turn made the pages tall enough to scroll while leaving wide empty
+    # bands below the content. A deliberate preferred width fixes the cause
+    # (too little horizontal space) rather than the symptom (height).
+    #
+    # Nothing here is a fixed pixel geometry: the preferred width is clamped
+    # to the screen that is actually available, so 1366x768 and smaller stay
+    # usable.
+    WIZARD_MIN_WIDTH = 680
+    WIZARD_PREFERRED_WIDTH = 720
+    WIZARD_MAX_WIDTH = 820
+    WIZARD_MAX_SCREEN_FRACTION = 0.92
+
+    def _available_screen_width(self) -> int:
+        """Usable width of the screen this dialog is on (taskbar excluded)."""
+        try:
+            from PySide6.QtGui import QGuiApplication
+
+            screen = self.dialog.screen() or QGuiApplication.primaryScreen()
+            if screen is not None:
+                return int(screen.availableGeometry().width())
+        except Exception:
+            pass
+        return 0
+
+    def _preferred_dialog_width(self) -> int:
+        """Target content width: roomy on a desktop, never wider than the screen."""
+        natural = int(self.content.sizeHint().width()) + 8
+        target = max(natural, self.WIZARD_PREFERRED_WIDTH)
+        target = min(target, self.WIZARD_MAX_WIDTH)
+        target = max(target, self.WIZARD_MIN_WIDTH)
+        available = self._available_screen_width()
+        if available > 0:
+            # A narrow display wins over the preferred width every time; the
+            # body scrolls and the fixed footer stays visible (see the footer
+            # note in run(): it lives on outer_root, outside the scroll area).
+            target = min(target, max(1, int(available * self.WIZARD_MAX_SCREEN_FRACTION)))
+        return int(target)
+
+    def _fit_model_popup_width(self) -> None:
+        """Widen the model drop-down's popup to fit the longest model name.
+
+        Server model identifiers are considerably longer than the closed combo
+        box, which elides them into ambiguity ("sharped-2026-03-v2-..."). The
+        popup is widened to the real text width, clamped to the usable screen
+        so the expanded list can never extend past the display edge. Purely
+        presentational: items, ordering and the current selection are
+        untouched.
+        """
+        try:
+            view = self.model.view()
+            metrics = view.fontMetrics()
+            widest = max(
+                (metrics.horizontalAdvance(self.model.itemText(i)) for i in range(self.model.count())),
+                default=0,
+            )
+            if widest <= 0:
+                return
+            # Frame, scrollbar and a little breathing room.
+            needed = widest + 48
+            available = self._available_screen_width()
+            if available > 0:
+                needed = min(needed, int(available * self.WIZARD_MAX_SCREEN_FRACTION))
+            view.setMinimumWidth(max(self.model.width(), int(needed)))
+        except Exception:
+            # Never let a cosmetic sizing detail break model refresh.
+            pass
+
+    def _size_stack_to_current_page(self) -> None:
+        """Make the page stack report the height of the CURRENT page only.
+
+        QStackedWidget's sizeHint is the maximum over every page it holds, so
+        sizing the window from it made page 1 as tall as the tallest page
+        (Phase recycling) and left a large empty band between the workflow
+        cards and the footer. Giving the non-current pages an Ignored vertical
+        policy is the standard way to make the stack track the page actually
+        on screen; the pages themselves are otherwise untouched.
+        """
+        QSizePolicy = self.qt["QSizePolicy"]
+        current = self.stack.currentWidget()
+        for index in range(self.stack.count()):
+            page = self.stack.widget(index)
+            policy = page.sizePolicy()
+            policy.setVerticalPolicy(
+                QSizePolicy.Preferred if page is current else QSizePolicy.Ignored
+            )
+            page.setSizePolicy(policy)
+        self.stack.adjustSize()
+
+    def _content_height_for_width(self, width: int) -> int:
+        """Height the scrollable content needs at *width*, counting only the
+        page currently on screen.
+
+        QStackedLayout reports the maximum height over ALL of its pages, for
+        both sizeHint() and heightForWidth(). Sizing the window from that made
+        the short pages as tall as the tallest one (Phase recycling), which is
+        where the large empty band between the content and the footer came
+        from. The stack's contribution is therefore swapped for the current
+        page's own requirement; everything else in the content column
+        (margins, spacing, any non-stack widget) still comes from the real
+        measurement.
+        """
+
+        def needed(widget) -> int:
+            if widget is None:
+                return 0
+            if widget.hasHeightForWidth():
+                return int(widget.heightForWidth(width))
+            return int(widget.sizeHint().height())
+
+        total = needed(self.content)
+        current_page = self.stack.currentWidget()
+        if current_page is None:
+            return total
+        return max(0, total - needed(self.stack) + needed(current_page))
+
     def _adjust_dialog_size(self) -> None:
         from phase_studio.app import apply_safe_dialog_geometry
         # dialog.adjustSize() alone under-sizes the window here: QScrollArea's
@@ -982,6 +1102,7 @@ class _JanaWorkflowWizard:
         # disclosure) -- always resize from a fresh measurement of what the
         # CURRENT page actually needs, not whatever the dialog happened to be
         # sized to from an earlier call.
+        self._size_stack_to_current_page()
         self.dialog.adjustSize()
         footer_widget = self.chrome_holder["footer"]
         chrome_height = (
@@ -989,17 +1110,14 @@ class _JanaWorkflowWizard:
             + self.context_banner.sizeHint().height()
             + (footer_widget.sizeHint().height() if footer_widget is not None else 0)
         )
-        target_width = self.content.sizeHint().width() + 8
+        target_width = self._preferred_dialog_width()
         # content.sizeHint() alone is unreliable here: it is computed at some
         # narrower candidate width, so word-wrapped labels (workflow card
         # descriptions, the Cell row, etc.) end up wrapping to more lines
         # than they actually will at target_width, overstating the needed
         # height by 100+ px. heightForWidth(target_width) asks for the real
         # answer at the width the dialog will actually use.
-        content_height = (
-            self.content.heightForWidth(target_width) if self.content.hasHeightForWidth()
-            else self.content.sizeHint().height()
-        )
+        content_height = self._content_height_for_width(target_width)
         target_height = chrome_height + content_height + 8
         apply_safe_dialog_geometry(self.dialog, target_width, target_height)
 
@@ -1821,6 +1939,7 @@ class _JanaWorkflowWizard:
             self.model.addItems(values)
             self.model.setCurrentText(current if current in values else "default")
             self.model.blockSignals(False)
+            self._fit_model_popup_width()
             if default_model:
                 self.model_status.setText(f"{len(values) - 1} models available · Default: {default_model}")
             else:

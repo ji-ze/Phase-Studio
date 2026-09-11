@@ -34,6 +34,39 @@ for every file, checking the exit code) without any additional tooling.
   value-changing server, which proves the inverse is applied to the
   server's actual output rather than to a cached copy of the upload).
 
+- `test_process_launch.py` -- how external calculation processes are
+  launched. EDMA must start without a visible console window on Windows
+  (`CREATE_NO_WINDOW`), while its command line, working directory, captured
+  stdout, exit code and `stop_event` cancellation stay exactly as before.
+  Also pins that console hiding is opt-in per call site rather than global,
+  and that no creation flags are forced on Linux/macOS.
+
+- `test_metric_legends.py` -- Workflow-metrics legend determinism. Walks the
+  real lifecycle (no data -> first cycle -> second cycle -> re-render -> tab
+  switch -> view reset -> completion) and checks after every step that each
+  multi-metric tab shows a legend matching exactly the series it plotted,
+  with no duplicate or empty entries, and that the two genuinely
+  single-metric tabs still omit theirs. The first-cycle case is the
+  regression itself: the legend used to disappear whenever only one series
+  happened to carry finite values.
+
+- `test_jana_completion.py` -- the Jana2020 Wizard completion path. Drives
+  the real pipeline message queue and Qt event loop to COMPLETE and checks
+  that the locked result selector opens automatically exactly once, on the
+  Wizard's own map source, with "Send to Jana2020" left enabled and
+  reopening the same locked selector. Also covers Full configuration
+  (manual, switchable, never auto-opened), standalone (never auto-opened),
+  and the locked-source-unavailable error path. Uses structures that
+  actually parse, because the original failure only appeared once the
+  selector had real atoms to render.
+
+- `test_wizard_geometry.py` -- the Jana2020 Wizard's window geometry: the
+  preferred width is substantially wider than the old narrow layout, always
+  clamped inside the available screen at 1920x1080 / 1600x900 / 1366x768,
+  the header and footer stay outside the scrollable body, and the window
+  height follows the page actually on screen instead of the tallest page in
+  the stack.
+
 ## Adding a new golden regression test
 
 1. Build a small, fully hand-verifiable fixture (few reflections/cycles,
