@@ -1100,10 +1100,167 @@ def _install_tooltip_width_cap(app: object) -> None:
     QWidget.setToolTip = _phase_studio_set_tooltip
 
 
+def install_wheel_safety(app: object) -> object:
+    """Stop the mouse wheel from silently changing configuration values.
+
+    Scrolling a settings page used to alter whatever spin box or combo box the
+    pointer happened to pass over, quietly changing a scientific setting the
+    user never touched and never saw change.
+
+    A value editor only accepts wheel input after it has been *explicitly
+    clicked*. Keyboard focus alone is deliberately not enough: Tab, programmatic
+    focus and restoring a page all set focus without the user ever pointing at
+    the control. Clicking arms it; losing focus disarms it.
+
+    When an editor is not armed the wheel event is forwarded to the nearest
+    scroll area so the page scrolls as the user intended -- it is redirected,
+    never swallowed.
+
+    Deliberately untouched: scroll bars and scroll areas themselves, an open
+    combo box popup (its list scrolls normally), and every canvas-style widget,
+    so Matplotlib wheel zoom and the structure viewer keep working.
+
+    Returns the installed filter (also stored on the application), so tests and
+    a later re-style can find it.
+    """
+    from PySide6.QtCore import QEvent, QObject, Qt
+    from PySide6.QtWidgets import (
+        QAbstractScrollArea,
+        QAbstractSlider,
+        QAbstractSpinBox,
+        QApplication,
+        QComboBox,
+        QScrollBar,
+    )
+
+    class WheelSafetyFilter(QObject):
+        """Application-wide click-to-arm wheel guard for value editors."""
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._armed = None
+
+        @staticmethod
+        def is_value_editor(widget) -> bool:
+            """Form/configuration editors whose value the wheel would change.
+
+            QAbstractSlider covers QSlider, but QScrollBar is a slider too and
+            must keep its normal wheel behaviour, so it is excluded explicitly.
+            """
+            if isinstance(widget, QScrollBar):
+                return False
+            return isinstance(widget, (QAbstractSpinBox, QComboBox, QAbstractSlider))
+
+        def editor_for(self, widget):
+            """The value editor that *widget* belongs to, if any.
+
+            Spin boxes and combo boxes are compound widgets: the press and the
+            wheel both land on an internal QLineEdit or button child, never on
+            the editor itself, so the event has to be resolved back to the
+            editor or clicking one would never arm it.
+            """
+            node = widget
+            while node is not None:
+                if self.is_value_editor(node):
+                    return node
+                try:
+                    node = node.parentWidget()
+                except Exception:
+                    return None
+            return None
+
+        def is_armed(self, widget) -> bool:
+            return self._armed is not None and self._armed is widget
+
+        def arm(self, widget) -> None:
+            self._armed = widget if self.is_value_editor(widget) else None
+
+        def disarm(self, widget=None) -> None:
+            if widget is None or self._armed is widget:
+                self._armed = None
+
+        @staticmethod
+        def _popup_is_open(widget) -> bool:
+            if not isinstance(widget, QComboBox):
+                return False
+            try:
+                view = widget.view()
+                return view is not None and view.isVisible()
+            except Exception:
+                return False
+
+        @staticmethod
+        def _scrollable_ancestor(widget):
+            parent = widget.parentWidget() if widget is not None else None
+            while parent is not None:
+                if isinstance(parent, QAbstractScrollArea):
+                    return parent
+                parent = parent.parentWidget()
+            return None
+
+        def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+            try:
+                event_type = event.type()
+            except Exception:
+                return False
+
+            if event_type == QEvent.Type.MouseButtonPress:
+                # Explicit pointer activation is the ONLY thing that arms an
+                # editor. A press anywhere else disarms whatever was armed.
+                # Qt delivers the same press to the editor AND to its
+                # ancestors, so disarming whenever a press does not resolve to
+                # an editor would immediately undo the arming that the very
+                # same click just performed. Arming happens here; disarming is
+                # left entirely to FocusOut, which fires as soon as the user
+                # clicks or tabs anywhere else.
+                editor = self.editor_for(watched)
+                if editor is not None:
+                    self.arm(editor)
+                return False
+
+            if event_type == QEvent.Type.FocusOut:
+                editor = self.editor_for(watched)
+                # Opening a combo box moves focus into its own popup, which is
+                # not the user leaving the editor -- disarming there would undo
+                # the arming that opening it just performed.
+                if editor is not None and not self._popup_is_open(editor):
+                    self.disarm(editor)
+                return False
+
+            if event_type != QEvent.Type.Wheel:
+                return False
+            editor = self.editor_for(watched)
+            if editor is None:
+                return False
+            if self.is_armed(editor) or self._popup_is_open(editor):
+                return False  # deliberate interaction: normal behaviour
+
+            # Not armed: give the scroll the user actually meant to the page.
+            scroll_area = self._scrollable_ancestor(editor)
+            if scroll_area is not None:
+                QApplication.sendEvent(scroll_area.viewport(), event)
+            return True
+
+    try:
+        previous = getattr(app, "_phase_studio_wheel_filter", None)
+        if previous is not None:
+            app.removeEventFilter(previous)
+        wheel_filter = WheelSafetyFilter(app)
+        app._phase_studio_wheel_filter = wheel_filter
+        app.installEventFilter(wheel_filter)
+        return wheel_filter
+    except Exception:
+        return None
+
+
 def apply_phase_studio_style(app: object) -> None:
     """Apply the SharpED logo palette and Phase Studio visual system."""
     try:
         _install_tooltip_width_cap(app)
+    except Exception:
+        pass
+    try:
+        install_wheel_safety(app)
     except Exception:
         pass
     try:

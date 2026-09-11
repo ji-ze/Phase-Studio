@@ -888,6 +888,83 @@ REFERENCE_STRUCTURE_SUFFIXES = {".cif", ".ins", ".res"}
 REFERENCE_DENSITY_SUFFIXES = {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"}
 REFERENCE_FILE_SUFFIXES = REFERENCE_STRUCTURE_SUFFIXES | REFERENCE_DENSITY_SUFFIXES
 
+# --- Authoritative file-dialog filters ---------------------------------------
+# Every model/reference selector in the application and in the Jana2020 Wizard
+# builds its filter here, from the suffix sets above, so no selector can drift
+# into offering a format the code cannot actually handle.
+#
+# What each set is derived from, audited against the real code paths:
+#
+#   REFERENCE_STRUCTURE_SUFFIXES  structures parsed for reference comparison
+#                                 (parse_cif_atoms / reference handling)
+#   REFERENCE_DENSITY_SUFFIXES    density maps accepted as a reference
+#   SUPERFLIP_MODEL_SUFFIXES      what run_superflip_cycle() will actually pass
+#                                 to Superflip as a modelfile -- .xplor (through
+#                                 normalize_xplor_for_superflip_modelfile), .cif
+#                                 and .ccp4. Anything else raises there, so
+#                                 nothing else may be offered.
+#   WRAPPER_REFERENCE_SUFFIXES    the narrower set the single-pass Jana2020
+#                                 wrapper validates (.cif / .xplor). It is NOT a
+#                                 filter oversight: the wrapper rejects the rest.
+SUPERFLIP_MODEL_SUFFIXES = {".xplor", ".ccp4", ".cif"}
+WRAPPER_REFERENCE_SUFFIXES = {".cif", ".xplor"}
+
+
+def _filter_group(label: str, suffixes: "Iterable[str]") -> str:
+    patterns = " ".join("*" + s for s in sorted(suffixes))
+    return f"{label} ({patterns})"
+
+
+def supported_structure_filters() -> str:
+    """File-dialog filter for structure models only."""
+    return _filter_group("Structure models", REFERENCE_STRUCTURE_SUFFIXES)
+
+
+def supported_density_map_filters() -> str:
+    """File-dialog filter for density maps only."""
+    return _filter_group("Density maps", REFERENCE_DENSITY_SUFFIXES)
+
+
+def supported_reference_filters() -> str:
+    """Filter for a reference model: a structure OR a density map."""
+    return ";;".join([
+        _filter_group("All supported reference files", REFERENCE_FILE_SUFFIXES),
+        supported_structure_filters(),
+        supported_density_map_filters(),
+        "All files (*)",
+    ])
+
+
+def supported_model_filters() -> str:
+    """Filter for an initial/recycled Superflip model file.
+
+    Exactly the formats run_superflip_cycle() accepts as a modelfile.
+    """
+    structures = SUPERFLIP_MODEL_SUFFIXES & REFERENCE_STRUCTURE_SUFFIXES
+    maps = SUPERFLIP_MODEL_SUFFIXES - REFERENCE_STRUCTURE_SUFFIXES
+    return ";;".join([
+        _filter_group("All supported model files", SUPERFLIP_MODEL_SUFFIXES),
+        _filter_group("Density maps", maps),
+        _filter_group("Structure models", structures),
+        "All files (*)",
+    ])
+
+
+def supported_wrapper_reference_filters() -> str:
+    """Reference filter for the single-pass Jana2020 wrapper workflows.
+
+    Deliberately narrower than supported_reference_filters(): the wrapper
+    validates the selection against .cif/.xplor and rejects anything else, so
+    offering more here would only produce a late error.
+    """
+    return ";;".join([
+        _filter_group("Supported reference files", WRAPPER_REFERENCE_SUFFIXES),
+        _filter_group("Structure models", WRAPPER_REFERENCE_SUFFIXES & REFERENCE_STRUCTURE_SUFFIXES),
+        _filter_group("Density maps", WRAPPER_REFERENCE_SUFFIXES & REFERENCE_DENSITY_SUFFIXES),
+        "All files (*)",
+    ])
+
+
 # -----------------------------------------------------------------------------
 # CIF / crystallographic helpers
 # -----------------------------------------------------------------------------
@@ -7937,10 +8014,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # summary in a normal 1080p window -- scoped to this one group via a
         # dynamic property, not a change to every subsection's spacing.
         reference_form.parentWidget().setProperty("tightTop", True)
-        self._add_path(reference_form, "reference_cif", "Reference structure", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
+        # "Reference model", not "Reference structure": this selector validly
+        # accepts either a structure model or a density map (see
+        # REFERENCE_FILE_SUFFIXES), so naming it a structure was misleading.
+        self._add_path(reference_form, "reference_cif", "Reference model", "", "file", supported_reference_filters())
         self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
         self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
-        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
+        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", supported_model_filters())
         input_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         input_tab.addStretch(1)
 

@@ -1568,6 +1568,14 @@ class _JanaWorkflowWizard:
 
     # ----- Page 1: input summary, reference/model files, then the 3 primary workflow actions -----
     def _build_page1(self) -> None:
+        # One authoritative source for every model/reference file filter, shared
+        # with the main window (see phase_studio.app) so no selector carries its
+        # own extension list.
+        from phase_studio.app import (
+            supported_model_filters,
+            supported_wrapper_reference_filters,
+        )
+
         qt = self.qt
         QFileDialog = qt["QFileDialog"]
         QFormLayout = qt["QFormLayout"]
@@ -1816,7 +1824,11 @@ class _JanaWorkflowWizard:
 
         self.reference_file = add_file_row(
             "Reference (optional)",
-            "Reference files (*.cif *.xplor);;CIF structures (*.cif);;XPLOR maps (*.xplor);;All files (*)",
+            # Same authoritative helper the main window uses, so no selector
+            # carries its own extension list. Deliberately the narrower wrapper
+            # set: the single-pass workflows validate the selection against
+            # .cif/.xplor and reject anything else.
+            supported_wrapper_reference_filters(),
             "Reference CIF structure or XPLOR density map, used together with the "
             "incoming Jana2020 .inflip without replacing its embedded reflections or metadata. "
             "When supplied, Superflip also reports how well each cycle matches this reference, "
@@ -1827,7 +1839,7 @@ class _JanaWorkflowWizard:
         )
         self.model_file = add_file_row(
             "Initial model (optional)",
-            "Model/map files (*.xplor *.ccp4 *.cif);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4);;CIF structures (*.cif);;All files (*)",
+            supported_model_filters(),
             "Model or density map to seed the first Superflip cycle. If supplied, "
             "cycle 1 is model-seeded: repeatmode is forced to 1 and randomseed is omitted. "
             "Pre-filled from the incoming .inflip's own modelfile keyword, if it declares one.",
