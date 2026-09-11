@@ -66,8 +66,8 @@ DEFAULT_SERVER_URL = "https://jana.fzu.cz"
 DEFAULT_JANA_SUPERFLIP = Path(r"C:\Jana2020\SUPERFLIP\superflip_original.exe")
 DEFAULT_JANA_EDMA = Path(r"C:\Jana2020\SUPERFLIP\EDMA.exe")
 
-INPUT_MODE_INFLIP = "Jana .inflip"
-INPUT_MODE_INFLIP_OVERRIDES = "Jana .inflip with external HKL/CIF overrides"
+INPUT_MODE_INFLIP = "Jana2020 .inflip"
+INPUT_MODE_INFLIP_OVERRIDES = "Jana2020 .inflip with external HKL/CIF overrides"
 INPUT_MODE_EXTERNAL = "External HKL + reference CIF"
 INPUT_MODE_LABELS = [
     INPUT_MODE_INFLIP,
@@ -1049,7 +1049,7 @@ class _JanaWorkflowWizard:
     # reads as an input error rather than a number. Capped to a comfortable
     # editor width, with the spare width becoming flexible space so the labels
     # stay aligned. Still well within the usable area at 1366x768.
-    MAP_FEEDBACK_EDITOR_WIDTH = 200
+    MAP_FEEDBACK_EDITOR_WIDTH = 230
 
     def _constrain_numeric_editors(self, *editors) -> None:
         """Give short numeric editors a sensible preferred width."""
@@ -1061,6 +1061,35 @@ class _JanaWorkflowWizard:
                 editor.setMinimumWidth(min(140, self.MAP_FEEDBACK_EDITOR_WIDTH))
             except Exception:
                 pass
+
+    def _apply_wizard_section_style(self) -> None:
+        """Give every Wizard section the same spacing rhythm.
+
+        Tags each QGroupBox so the shared QGroupBox#wizardSection rule applies,
+        and normalises the page-level gaps to the shared spacing levels. The
+        main Phase Studio GUI is deliberately untouched: it has a scrollable
+        settings panel per page, while the Wizard stacks several sections in
+        one screen-safe window.
+        """
+        try:
+            from phase_studio.ui_style import PHASE_STUDIO_SPACING as spacing
+        except Exception:
+            return
+        QGroupBox = self.qt["QGroupBox"]
+        for group in self.dialog.findChildren(QGroupBox):
+            if not group.objectName():
+                group.setObjectName("wizardSection")
+        for page in (getattr(self, "page1", None), getattr(self, "page2", None),
+                     getattr(self, "page3", None)):
+            if page is None or page.layout() is None:
+                continue
+            page.layout().setSpacing(spacing["section_gap"])
+        try:
+            self.content_layout.setSpacing(spacing["section_gap"])
+            margin = spacing["page_margin"]
+            self.content_layout.setContentsMargins(margin, 10, margin, 10)
+        except Exception:
+            pass
 
     def _fit_model_popup_width(self) -> None:
         """Widen the model drop-down's popup to fit the longest model name.
@@ -1091,53 +1120,68 @@ class _JanaWorkflowWizard:
             # Never let a cosmetic sizing detail break model refresh.
             pass
 
-    def _size_stack_to_current_page(self) -> None:
-        """Make the page stack report the height of the CURRENT page only.
+    def _content_inner_width(self, width: int) -> int:
+        """Width available to the page inside the scrollable content column."""
+        margins = self.content_layout.contentsMargins()
+        return max(1, int(width) - margins.left() - margins.right())
 
-        QStackedWidget's sizeHint is the maximum over every page it holds, so
-        sizing the window from it made page 1 as tall as the tallest page
-        (Phase recycling) and left a large empty band between the workflow
-        cards and the footer. Giving the non-current pages an Ignored vertical
-        policy is the standard way to make the stack track the page actually
-        on screen; the pages themselves are otherwise untouched.
+    def _page_height_for_width(self, page, width: int) -> int:
+        """Height the given page needs at *width*."""
+        if page is None:
+            return 0
+        if page.hasHeightForWidth():
+            return int(page.heightForWidth(width))
+        return int(page.sizeHint().height())
+
+    def _size_stack_to_current_page(self, width: int) -> int:
+        """Pin the page stack to exactly the height the CURRENT page needs.
+
+        QStackedLayout reports the tallest page it holds whichever page is
+        showing, and the surrounding QVBoxLayout/QWidgetItem cache that answer,
+        so neither overriding the stack's size hints nor invalidating the
+        layout was enough on its own -- the scrolled widget stayed as tall as
+        the Map feedback page and every short page kept a scrollbar it did not
+        need. Setting the height explicitly is cache-proof.
+
+        Nothing is clipped: the height IS the current page's own requirement.
+        On a display too short for it the viewport shrinks below this and the
+        scroll area scrolls normally, which is when a scrollbar is genuinely
+        wanted.
         """
-        QSizePolicy = self.qt["QSizePolicy"]
-        current = self.stack.currentWidget()
-        for index in range(self.stack.count()):
-            page = self.stack.widget(index)
-            policy = page.sizePolicy()
-            policy.setVerticalPolicy(
-                QSizePolicy.Preferred if page is current else QSizePolicy.Ignored
-            )
-            page.setSizePolicy(policy)
-        self.stack.adjustSize()
+        page = self.stack.currentWidget()
+        needed = self._page_height_for_width(page, self._content_inner_width(width))
+        if needed > 0:
+            self.stack.setFixedHeight(needed)
+        return needed
 
     def _content_height_for_width(self, width: int) -> int:
-        """Height the scrollable content needs at *width*, counting only the
-        page currently on screen.
+        """Height the scrollable content column needs at *width*.
 
-        QStackedLayout reports the maximum height over ALL of its pages, for
-        both sizeHint() and heightForWidth(). Sizing the window from that made
-        the short pages as tall as the tallest one (Phase recycling), which is
-        where the large empty band between the content and the footer came
-        from. The stack's contribution is therefore swapped for the current
-        page's own requirement; everything else in the content column
-        (margins, spacing, any non-stack widget) still comes from the real
-        measurement.
+        Summed from the content layout's own items rather than asking the
+        widget, whose heightForWidth is cached per width and went stale as soon
+        as the visible page changed.
         """
-
-        def needed(widget) -> int:
+        margins = self.content_layout.contentsMargins()
+        inner = self._content_inner_width(width)
+        total = margins.top() + margins.bottom()
+        visible_items = 0
+        for index in range(self.content_layout.count()):
+            item = self.content_layout.itemAt(index)
+            widget = item.widget()
             if widget is None:
-                return 0
-            if widget.hasHeightForWidth():
-                return int(widget.heightForWidth(width))
-            return int(widget.sizeHint().height())
-
-        total = needed(self.content)
-        current_page = self.stack.currentWidget()
-        if current_page is None:
-            return total
-        return max(0, total - needed(self.stack) + needed(current_page))
+                total += int(item.sizeHint().height())
+                visible_items += 1
+                continue
+            if widget is self.stack:
+                total += self._page_height_for_width(self.stack.currentWidget(), inner)
+            elif widget.hasHeightForWidth():
+                total += int(widget.heightForWidth(inner))
+            else:
+                total += int(widget.sizeHint().height())
+            visible_items += 1
+        if visible_items > 1:
+            total += self.content_layout.spacing() * (visible_items - 1)
+        return max(0, total)
 
     def _adjust_dialog_size(self) -> None:
         from phase_studio.app import apply_safe_dialog_geometry
@@ -1161,7 +1205,11 @@ class _JanaWorkflowWizard:
         # disclosure) -- always resize from a fresh measurement of what the
         # CURRENT page actually needs, not whatever the dialog happened to be
         # sized to from an earlier call.
-        self._size_stack_to_current_page()
+        target_width = self._preferred_dialog_width()
+        # Pin the stack to the current page BEFORE anything is measured, so the
+        # scroll area is told the real content height rather than the tallest
+        # page's.
+        self._size_stack_to_current_page(target_width)
         self.dialog.adjustSize()
         footer_widget = self.chrome_holder["footer"]
         chrome_height = (
@@ -1169,7 +1217,6 @@ class _JanaWorkflowWizard:
             + self.context_banner.sizeHint().height()
             + (footer_widget.sizeHint().height() if footer_widget is not None else 0)
         )
-        target_width = self._preferred_dialog_width()
         # content.sizeHint() alone is unreliable here: it is computed at some
         # narrower candidate width, so word-wrapped labels (workflow card
         # descriptions, the Cell row, etc.) end up wrapping to more lines
@@ -1179,6 +1226,18 @@ class _JanaWorkflowWizard:
         content_height = self._content_height_for_width(target_width)
         target_height = chrome_height + content_height + 8
         apply_safe_dialog_geometry(self.dialog, target_width, target_height)
+
+        # Second pass: the first measurement is taken while the page is still
+        # at its previous size, and Qt caches a widget item's heightForWidth
+        # per width, so a page that grew or shrank on this transition can
+        # report a stale height. Re-measuring once the new geometry is applied
+        # converges on the real requirement -- without it a tall page could be
+        # left in a window too short for it, scrolling content that would
+        # otherwise have fitted.
+        settled_height = chrome_height + self._content_height_for_width(target_width) + 8
+        if abs(settled_height - target_height) > 2:
+            self._size_stack_to_current_page(target_width)
+            apply_safe_dialog_geometry(self.dialog, target_width, settled_height)
 
     def _get_backing_window(self):
         win = self.backing_window_holder.get("win")
@@ -1377,6 +1436,17 @@ class _JanaWorkflowWizard:
         QWidget = qt["QWidget"]
 
         app = QApplication.instance() or QApplication([sys.argv[0], *args])
+        # Same application icon as the main window, via the same helper: the
+        # Wizard is Phase Studio, not a separate tool, and without this its
+        # title bar, taskbar entry and Alt+Tab card all show the generic Qt
+        # icon. Set on the application, so every Wizard page and dialog
+        # inherits it.
+        try:
+            from phase_studio.app import apply_phase_studio_app_icon
+
+            apply_phase_studio_app_icon(app)
+        except Exception:
+            pass
         apply_phase_studio_style(app)
         # Load after PySide6/style setup, same ordering as the other phase_studio.app
         # imports in this module: shares the exact header/banner widgets the main
@@ -1456,7 +1526,40 @@ class _JanaWorkflowWizard:
         self.inflip_info.setToolTip(str(inflip_path) if inflip_path else "")
         self.root.addWidget(self.inflip_info)
 
-        self.stack = QStackedWidget()
+        # QStackedLayout reports the tallest page it holds for BOTH sizeHint()
+        # and heightForWidth(), whichever page is showing. Inside a
+        # widgetResizable QScrollArea that made the scrolled widget permanently
+        # as tall as the Map feedback page, so every page -- including the short
+        # workflow page -- displayed a vertical scrollbar it did not need, and
+        # short pages sat in a tall window with a large blank band.
+        #
+        # Reporting the CURRENT page's requirement instead is what actually
+        # makes the content fit: nothing is clipped and nothing is hidden, the
+        # scroll area simply stops being told the page overflows. Scrolling
+        # still engages normally when a page genuinely is taller than the
+        # viewport (the policy stays ScrollBarAsNeeded).
+        class _CurrentPageStack(QStackedWidget):
+            def sizeHint(self):  # noqa: N802 - Qt override
+                page = self.currentWidget()
+                return page.sizeHint() if page is not None else super().sizeHint()
+
+            def minimumSizeHint(self):  # noqa: N802 - Qt override
+                page = self.currentWidget()
+                return page.minimumSizeHint() if page is not None else super().minimumSizeHint()
+
+            def hasHeightForWidth(self):  # noqa: N802 - Qt override
+                page = self.currentWidget()
+                return page.hasHeightForWidth() if page is not None else super().hasHeightForWidth()
+
+            def heightForWidth(self, width):  # noqa: N802 - Qt override
+                page = self.currentWidget()
+                if page is not None and page.hasHeightForWidth():
+                    return page.heightForWidth(width)
+                return super().heightForWidth(width)
+
+        self.stack = _CurrentPageStack()
+        # Re-ask the layout for a size whenever the visible page changes.
+        self.stack.currentChanged.connect(lambda _index=0: self.stack.updateGeometry())
         self.root.addWidget(self.stack, 1)
 
         self._build_page1()
@@ -2359,6 +2462,11 @@ class _JanaWorkflowWizard:
         self.powder_enabled_checkbox.toggled.connect(sync_powder_dependency)
         sync_powder_dependency()
 
+        # One consistent rhythm for every Wizard section (shared constants in
+        # ui_style.PHASE_STUDIO_SPACING), instead of each page carrying its own
+        # pixel values. Layout only -- no control, value or behaviour changes.
+        self._apply_wizard_section_style()
+
         # Map feedback numeric editors: layout only, no changed semantics.
         self._constrain_numeric_editors(
             self.missing_start_cycle_spin,
@@ -2660,6 +2768,7 @@ def launch_phase_studio_from_jana(
 
     from phase_studio.app import (
         IterativeSuperflipPipelineQtGUI,
+        apply_phase_studio_app_icon,
         create_startup_splash,
         initialize_main_window,
         parse_inflip_settings,
@@ -2674,6 +2783,7 @@ def launch_phase_studio_from_jana(
 
     app = QApplication.instance() or QApplication(sys.argv)
     apply_phase_studio_style(app)
+    apply_phase_studio_app_icon(app)
     splash = create_startup_splash()
     splash.show()
     app.processEvents()

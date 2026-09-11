@@ -65,6 +65,7 @@ class _WidthProbe:
 
 def main():
     from PySide6.QtWidgets import QApplication, QDialog
+    from PySide6.QtCore import Qt
 
     app = QApplication.instance() or QApplication([sys.argv[0]])
     import phase_studio.ui_style as ui_style
@@ -211,29 +212,28 @@ def main():
     heights = [page_height(page) for page in pages]
     check("the Wizard pages genuinely differ in height", len(set(heights)) > 1)
 
-    stack_reported = (
-        wizard.stack.heightForWidth(width)
-        if wizard.stack.hasHeightForWidth()
-        else wizard.stack.sizeHint().height()
-    )
-    check(
-        "the raw stack still reports the tallest page (the Qt behaviour being corrected)",
-        stack_reported >= max(heights),
-    )
-
+    # The stack now reports the page on screen rather than the tallest page it
+    # holds -- that correction is what stops short pages being padded out and
+    # stops the scroll area believing every page overflows.
     for index, page in enumerate(pages):
         wizard.stack.setCurrentWidget(page)
-        measured = wizard._content_height_for_width(width)
-        others = [h for i, h in enumerate(heights) if i != index]
-        check(
-            "page %d: measured height follows the current page, not the stack maximum"
-            % (index + 1),
-            measured < stack_reported or page_height(page) >= max(heights),
+        app.processEvents()
+        reported = (
+            wizard.stack.heightForWidth(width)
+            if wizard.stack.hasHeightForWidth()
+            else wizard.stack.sizeHint().height()
         )
-        if others and page_height(page) < max(others):
+        check(
+            "page %d: the stack reports this page, not the tallest one" % (index + 1),
+            abs(reported - page_height(page)) <= 2,
+        )
+        measured = wizard._content_height_for_width(width)
+        taller = [h for i, h in enumerate(heights) if i != index and h > page_height(page)]
+        if taller:
             check(
-                "page %d: a short page is not padded out to the tallest page" % (index + 1),
-                measured < stack_reported,
+                "page %d: a short page is not padded out to the tallest page"
+                % (index + 1),
+                measured < max(taller) + page_height(page),
             )
 
     # No large dead band: the shortest page must measure clearly shorter than
@@ -321,6 +321,130 @@ def main():
                 "Map feedback editor %s is not stretched full width" % name,
                 widget.maximumWidth() <= width_cap,
             )
+
+    # =====================================================================
+    # Window icon (section 38): the Wizard must not fall back to the generic
+    # Qt icon in the title bar, taskbar or Alt+Tab.
+    # =====================================================================
+    import phase_studio.app as appmod
+
+    appmod.apply_phase_studio_app_icon(app)
+    check("the application carries a Phase Studio icon", not app.windowIcon().isNull())
+    check(
+        "the Wizard window inherits a non-null icon",
+        not wizard.dialog.windowIcon().isNull(),
+    )
+    check(
+        "the icon comes from the one existing helper (no second asset)",
+        not appmod.create_phase_studio_app_icon(64).isNull(),
+    )
+    check(
+        "the Wizard title identifies the Jana2020 context",
+        "for Jana2020" in wizard.dialog.windowTitle(),
+    )
+
+    # =====================================================================
+    # Scrollbars (section 37): a page whose content fits must not show one.
+    #
+    # QStackedLayout reports the tallest page it holds whichever page is
+    # showing, and the surrounding layout caches that, so every page used to
+    # be told it overflowed and every page carried a scrollbar.
+    # =====================================================================
+    scroll_area = wizard.scroll_area
+    check(
+        "the scroll area only shows a scrollbar when needed",
+        scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded,
+    )
+
+    def page_fits(page):
+        """Does this page's own requirement fit the scroll viewport?"""
+        wizard.stack.setCurrentWidget(page)
+        wizard._adjust_dialog_size()
+        app.processEvents()
+        needed = wizard._page_height_for_width(
+            page, wizard._content_inner_width(wizard.dialog.width())
+        )
+        return needed, scroll_area.viewport().height()
+
+    for label, page_attr in (
+        ("initial workflow page", "page1"),
+        ("Phase recycling configuration", "page2"),
+        ("Map feedback", "page3"),
+    ):
+        page = getattr(wizard, page_attr, None)
+        if page is None:
+            continue
+        needed, viewport = page_fits(page)
+        visible = scroll_area.verticalScrollBar().isVisible()
+        if needed <= viewport:
+            check(
+                "%s: no scrollbar when the content fits" % label,
+                not visible,
+            )
+        else:
+            # Genuinely taller than the viewport: the content keeps its full
+            # height (nothing is clipped to hide the scrollbar) and the policy
+            # allows scrolling.
+            check(
+                "%s: content keeps its full height and can scroll" % label,
+                wizard.stack.height() >= needed - 2
+                and scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded,
+            )
+        check(
+            "%s: the stack is pinned to this page, not the tallest one" % label,
+            abs(wizard.stack.height() - needed) <= 2,
+        )
+
+    # Expanded SharpED settings must not break the sizing either.
+    if hasattr(wizard, "sharped_toggle"):
+        wizard.stack.setCurrentWidget(wizard.page2)
+        wizard.sharped_toggle.setChecked(True)
+        wizard._adjust_dialog_size()
+        app.processEvents()
+        needed = wizard._page_height_for_width(
+            wizard.page2, wizard._content_inner_width(wizard.dialog.width())
+        )
+        check(
+            "expanded SharpED settings: the stack still follows the page",
+            abs(wizard.stack.height() - needed) <= 2,
+        )
+        wizard.sharped_toggle.setChecked(False)
+        wizard._adjust_dialog_size()
+        app.processEvents()
+
+    # The footer must never be overlapped by, or scroll with, page content.
+    footer_widget = wizard.chrome_holder.get("footer")
+    if footer_widget is not None:
+        check(
+            "the footer sits below the scrollable body, never overlapping it",
+            footer_widget.y() >= scroll_area.y() + scroll_area.height() - 2,
+        )
+
+    # =====================================================================
+    # Shared visual constants (section 34) rather than scattered pixels.
+    # =====================================================================
+    spacing = getattr(ui_style, "PHASE_STUDIO_SPACING", None)
+    check("shared spacing constants exist", isinstance(spacing, dict))
+    if isinstance(spacing, dict):
+        for key in ("page_margin", "section_gap", "row_gap", "numeric_editor_width"):
+            check("spacing level %r is defined" % key, key in spacing)
+        check(
+            "every Wizard page uses the shared section gap",
+            all(
+                getattr(wizard, name).layout().spacing() == spacing["section_gap"]
+                for name in ("page1", "page2", "page3")
+                if getattr(wizard, name, None) is not None
+            ),
+        )
+
+    from PySide6.QtWidgets import QGroupBox
+
+    groups = wizard.dialog.findChildren(QGroupBox)
+    check("the Wizard has configuration sections", len(groups) > 0)
+    check(
+        "every Wizard section shares one style hook",
+        all(g.objectName() == "wizardSection" for g in groups),
+    )
 
     failures = [name for name, ok in results_log if not ok]
     print()

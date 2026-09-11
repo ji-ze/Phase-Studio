@@ -5997,6 +5997,23 @@ def create_phase_studio_app_icon(size: int = 64) -> QIcon:
     return QIcon(target)
 
 
+def apply_phase_studio_app_icon(app: "QApplication") -> None:
+    """Stamp the Phase Studio icon onto the whole application.
+
+    Set on the QApplication rather than per window: QWidget.windowIcon() falls
+    back to the application icon, so this is what gives the Jana2020 Wizard,
+    the result selector and every other top-level dialog a real title-bar,
+    taskbar and Alt+Tab icon instead of the generic Qt fallback. Uses the one
+    existing icon helper -- no second asset, no per-window duplication.
+    """
+    try:
+        if app is not None and app.windowIcon().isNull():
+            app.setWindowIcon(create_phase_studio_app_icon(256))
+    except Exception:
+        # A missing icon must never prevent the application from starting.
+        pass
+
+
 def create_phase_studio_brand_header() -> QWidget:
     """The "PHASE STUDIO" branded header (logo, title, version badge,
     subtitle) -- shared by the main window and any other Phase Studio
@@ -7438,7 +7455,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "Cycles above the completed count first."
         )
         self.stop_btn.setToolTip("Request a graceful stop after the currently running cycle has completed.")
-        self.stop_now_btn.setToolTip("Terminate the currently running external Superflip/EDMA process and stop the pipeline as soon as possible.")
+        self.stop_now_btn.setToolTip("Terminate the currently running external Superflip/EDMA process and stop the workflow as soon as possible.")
         self.clear_btn.setToolTip("Clear the log panel and reset the plotted metrics for the current GUI session.")
         self.run_btn.clicked.connect(self.start_run)
         self.continue_btn.clicked.connect(self.continue_run)
@@ -7486,7 +7503,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setFormat("Idle")
-        self.progress_bar.setToolTip("Cycle-level progress indicator for the iterative pipeline.")
+        self.progress_bar.setToolTip("Cycle-level progress indicator for the iterative workflow.")
         run_status_layout.addWidget(self.progress_bar)
         current_cycle_header = QHBoxLayout()
         current_cycle_label = QLabel("Current cycle")
@@ -10751,10 +10768,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.progress_bar.setValue(value)
                     self._set_overall_progress_text("Running")
                 elif kind == "error":
-                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run pipeline")
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run workflow")
                     self._handle_pipeline_error(report)
                 elif kind == "error_report":
-                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run pipeline")
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run workflow")
                     self._handle_pipeline_error(report)
                 elif kind == "cancelled":
                     self._finish_cancelled_run()
@@ -10765,12 +10782,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.stop_after_cycle.clear()
                     self.stop_now.clear()
                     self._set_run_status("Complete")
-                    self._append_execution_log("=== Pipeline complete ===", level="SUCCESS")
+                    self._append_execution_log("=== Workflow complete ===", level="SUCCESS")
                     if payload is not None:
                         self.progress_bar.setValue(int(payload))
                     self._set_overall_progress_text("Complete")
                     if self._cycle_progress_state is None:
-                        self.current_cycle_detail.setText("Pipeline complete")
+                        self.current_cycle_detail.setText("Workflow complete")
                         self.current_cycle_stage_counter.setText("Completed")
                     self.run_btn.setEnabled(True)
                     self.run_btn.setText("Run phasing")
@@ -12940,7 +12957,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
-            self._append_execution_log("Pipeline is already running.", level="WARNING", subsystem="Pipeline")
+            self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Pipeline")
             return
         try:
             cfg = self.get_config()
@@ -12978,21 +12995,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_overall_progress_text("Running")
         self._cycle_progress_state = None
         self.current_cycle_progress.setRange(0, 0)
-        self.current_cycle_detail.setText("Preparing pipeline…")
+        self.current_cycle_detail.setText("Preparing workflow…")
         self.current_cycle_stage_counter.setText("Preparing")
         self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
         self.run_btn.setText("Running…")
         self.log_text.horizontalScrollBar().setValue(0)
-        self._append_execution_log("Preparing validated pipeline inputs…", level="DETAIL")
+        self._append_execution_log("Preparing validated workflow inputs…", level="DETAIL")
         QApplication.processEvents()
         self.worker = threading.Thread(target=self.pipeline_worker, args=(cfg,), daemon=True)
         self.worker.start()
 
     def continue_run(self) -> None:
         if self.worker and self.worker.is_alive():
-            self._append_execution_log("Pipeline is already running.", level="WARNING", subsystem="Pipeline")
+            self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Pipeline")
             return
         state = self._resume_state
         if state is None:
@@ -13017,14 +13034,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_overall_progress_text("Running")
         self._cycle_progress_state = None
         self.current_cycle_progress.setRange(0, 0)
-        self.current_cycle_detail.setText("Resuming pipeline…")
+        self.current_cycle_detail.setText("Resuming workflow…")
         self.current_cycle_stage_counter.setText("Preparing")
         self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
         self.run_btn.setText("Running…")
         self._append_execution_log(
-            f"Continuing pipeline from cycle {state.completed_cycles + 1} of {requested_cycles}, "
+            f"Continuing workflow from cycle {state.completed_cycles + 1} of {requested_cycles}, "
             "reusing the previous run's metadata, reflections and cycle feedback.",
             level="DETAIL",
         )
@@ -13050,7 +13067,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             except Exception as exc:
                 self.msg_queue.put((
                     "error_report",
-                    build_error_report(exc, operation="Run pipeline", extra_details=traceback.format_exc()),
+                    build_error_report(exc, operation="Run workflow", extra_details=traceback.format_exc()),
                 ))
             return
         try:
@@ -13281,7 +13298,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "error_report",
                 build_error_report(
                     exc,
-                    operation="Run pipeline",
+                    operation="Run workflow",
                     extra_details=traceback.format_exc(),
                 ),
             ))
@@ -14019,6 +14036,7 @@ def initialize_main_window(
 
 def main() -> None:
     app = QApplication(sys.argv)
+    apply_phase_studio_app_icon(app)
     apply_phase_studio_style(app)
     splash = create_startup_splash()
     splash.show()

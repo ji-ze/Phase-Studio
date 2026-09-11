@@ -7,6 +7,23 @@ CONTROL_ARROW_HEIGHT = 4.0
 CONTROL_ARROW_STROKE_WIDTH = 1.5
 
 
+# --- Shared visual constants -------------------------------------------------
+# One small, named set of spacing levels for the Jana2020 Wizard, so its page
+# code asks for a level instead of carrying unrelated pixel values. The main
+# Phase Studio GUI keeps its own established rhythm; only the Wizard's section
+# padding is tightened (QGroupBox#wizardSection in the stylesheet), because the
+# Wizard stacks several configuration sections in one screen-safe window where
+# the main GUI has a whole scrollable panel per page.
+PHASE_STUDIO_SPACING = {
+    "page_margin": 14,
+    "section_gap": 8,
+    "heading_gap": 6,
+    "row_gap": 6,
+    "inline_gap": 8,
+    "control_height": 26,
+    "numeric_editor_width": 230,
+}
+
 _SHARPED_QSS = """
 QWidget {
     background-color: #ffffff;
@@ -26,6 +43,15 @@ QGroupBox {
     margin-top: 1.25em;
     padding: 12px 8px 8px 8px;
     background-color: #ffffff;
+}
+QGroupBox#wizardSection {
+    /* The Wizard stacks several configuration sections inside one
+       screen-safe window, so it uses a tighter vertical rhythm than the main
+       GUI's scrollable settings panels. Same border, title and colours --
+       only the padding differs, which is what keeps Map feedback on one
+       screen at 1080p instead of scrolling. */
+    margin-top: 1.05em;
+    padding: 8px 8px 6px 8px;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
