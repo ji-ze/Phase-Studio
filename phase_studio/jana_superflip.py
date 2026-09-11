@@ -45,9 +45,19 @@ except Exception:
     from ui_style import apply_phase_studio_style
 
 try:
-    from phase_studio.process_utils import allow_external_process_foreground, text_encoding
+    from phase_studio.process_utils import (
+        allow_external_process_foreground,
+        ensure_visible_console,
+        no_console_popen_kwargs,
+        text_encoding,
+    )
 except Exception:
-    from process_utils import allow_external_process_foreground, text_encoding
+    from process_utils import (
+        allow_external_process_foreground,
+        ensure_visible_console,
+        no_console_popen_kwargs,
+        text_encoding,
+    )
 
 
 COMMENT_MARKERS = ("#", "!", ";")
@@ -616,19 +626,50 @@ def resolve_original_superflip(exe_dir: Path) -> Path:
 
 
 def run_process(cmd: Sequence[str], cwd: Path, log: Callable[[str], None]) -> int:
+    """Run one external command for a wrapper-only Jana2020 workflow.
+
+    These workflows (Superflip only, Superflip + SharpED) never open the Phase
+    Studio main window, so this console IS the user's live execution feedback.
+
+    Exactly one visible console is involved and it belongs to the wrapper: the
+    child is started hidden and its output is teed straight back out to the
+    wrapper's console as it arrives, as well as into log.txt through the
+    existing logger. Previously the only window on screen was the child's own,
+    created by Windows because the windowed wrapper has no console to share --
+    and it was empty, because the child's stdout/stderr were redirected into a
+    pipe for logging and so never reached it.
+
+    GFORTRAN_UNBUFFERED_ALL is set for the child because Superflip is a
+    gfortran program, whose runtime block-buffers stdout when it is a pipe
+    rather than a terminal; without it a whole run would appear at once at the
+    end. It affects I/O buffering only, never any computed value.
+    """
     log("Running: " + " ".join(str(part) for part in cmd))
+    ensure_visible_console("Phase Studio - Superflip")
+    child_env = dict(os.environ)
+    child_env.setdefault("GFORTRAN_UNBUFFERED_ALL", "y")
     proc = subprocess.Popen(
         [str(part) for part in cmd],
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
         text=True,
         encoding=text_encoding(),
         errors="replace",
+        env=child_env,
+        **no_console_popen_kwargs(),
     )
     allow_external_process_foreground(proc.pid)
     assert proc.stdout is not None
-    for line in proc.stdout:
+    # readline() rather than iterating the file object: it hands back each line
+    # as soon as the child emits it, so the console fills in progressively
+    # instead of only at the end. stderr is folded into this same stream, so a
+    # single reader can never deadlock on a second, undrained pipe.
+    while True:
+        line = proc.stdout.readline()
+        if not line:
+            break
         log(line.rstrip("\r\n"))
     code = proc.wait()
     log(f"Process finished with code {code}")
@@ -1002,6 +1043,24 @@ class _JanaWorkflowWizard:
             # note in run(): it lives on outer_root, outside the scroll area).
             target = min(target, max(1, int(available * self.WIZARD_MAX_SCREEN_FRACTION)))
         return int(target)
+
+    # Short numeric editors should not span the whole Wizard: at the wider
+    # window a spin box holding "1" or "0.000" stretched across ~500 px, which
+    # reads as an input error rather than a number. Capped to a comfortable
+    # editor width, with the spare width becoming flexible space so the labels
+    # stay aligned. Still well within the usable area at 1366x768.
+    MAP_FEEDBACK_EDITOR_WIDTH = 200
+
+    def _constrain_numeric_editors(self, *editors) -> None:
+        """Give short numeric editors a sensible preferred width."""
+        for editor in editors:
+            if editor is None:
+                continue
+            try:
+                editor.setMaximumWidth(self.MAP_FEEDBACK_EDITOR_WIDTH)
+                editor.setMinimumWidth(min(140, self.MAP_FEEDBACK_EDITOR_WIDTH))
+            except Exception:
+                pass
 
     def _fit_model_popup_width(self) -> None:
         """Widen the model drop-down's popup to fit the longest model name.
@@ -1817,6 +1876,14 @@ class _JanaWorkflowWizard:
             "SharpED inference model. Select a model returned by the server or enter an "
             "explicit model identifier. The value 'default' requests the server default."
         )
+        # An explicit pick must survive Back/Next and any later refresh; a value
+        # that is merely the saved/initial one must not block resolving the
+        # server default once the list actually arrives.
+        self.model_user_picked = {"value": False}
+        self.model.activated.connect(lambda _index=0: self.model_user_picked.__setitem__("value", True))
+        self.model.lineEdit().textEdited.connect(
+            lambda _text="": self.model_user_picked.__setitem__("value", True)
+        )
         self.processing_form.addRow("Model", self.model)
         self.page2_layout.addLayout(self.processing_form)
 
@@ -1825,7 +1892,7 @@ class _JanaWorkflowWizard:
         self.refresh_layout.setContentsMargins(0, 0, 0, 0)
         self.refresh_models_button = QPushButton("Refresh models")
         self.refresh_models_button.setToolTip("Query the SharpED server for its currently available models.")
-        self.model_status = QLabel("Model list not loaded.")
+        self.model_status = QLabel("Loading models…")
         self.model_status.setWordWrap(True)
         self.model_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         self.refresh_layout.addWidget(self.refresh_models_button)
@@ -1888,11 +1955,26 @@ class _JanaWorkflowWizard:
         self.refresh_results: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.refresh_timer = QTimer(self.dialog)
         self.refresh_timer.setInterval(100)
+        # Session cache: one successful list is reused for the whole Wizard
+        # session, so paging Back/Next never re-queries the server. "key" is the
+        # server configuration the cached list belongs to, so changing the URL
+        # or token invalidates it.
+        self.model_cache = {"loaded": False, "inflight": False, "key": None}
 
-        def refresh_available_models() -> None:
+        def model_request_key() -> tuple:
+            return (
+                self.server_url.text().strip() or DEFAULT_SERVER_URL,
+                self.api_token.text().strip(),
+            )
+
+        def refresh_available_models(manual: bool = True) -> None:
             base_url = self.server_url.text().strip() or DEFAULT_SERVER_URL
+            if self.model_cache["inflight"]:
+                return
+            self.model_cache["inflight"] = True
+            self.model_cache["key"] = model_request_key()
             self.refresh_models_button.setEnabled(False)
-            self.model_status.setText("Contacting the SharpED server…")
+            self.model_status.setText("Loading models…")
 
             def worker() -> None:
                 try:
@@ -1914,8 +1996,11 @@ class _JanaWorkflowWizard:
 
             self.refresh_timer.stop()
             self.refresh_models_button.setEnabled(True)
+            self.model_cache["inflight"] = False
             if state == "error":
-                self.model_status.setText("Unable to retrieve the model list.")
+                # Manual retry stays available; a model identifier can still be
+                # typed by hand, so this is a degraded state, not a dead end.
+                self.model_status.setText("Model list unavailable · use Refresh models to retry.")
                 self.model_status.setToolTip(
                     "Model discovery failed. Verify the server URL and network connection; "
                     "a model identifier may still be entered manually.\n\n"
@@ -1937,16 +2022,48 @@ class _JanaWorkflowWizard:
             self.model.blockSignals(True)
             self.model.clear()
             self.model.addItems(values)
-            self.model.setCurrentText(current if current in values else "default")
+            # An explicit user pick wins; otherwise fall back to the sentinel,
+            # which deblur_with_sharped() resolves to the server default at run
+            # time. The sentinel's internal value stays exactly "default" -- the
+            # resolved name is shown in the status line rather than folded into
+            # the combo value, so no new SharpED API semantics are invented.
+            if self.model_user_picked["value"] and current in values:
+                self.model.setCurrentText(current)
+            else:
+                self.model.setCurrentText(current if current in values else "default")
             self.model.blockSignals(False)
             self._fit_model_popup_width()
+            self.model_cache["loaded"] = True
+            model_count = len(values) - 1
+            noun = "model" if model_count == 1 else "models"
             if default_model:
-                self.model_status.setText(f"{len(values) - 1} models available · Default: {default_model}")
+                self.model_status.setText(
+                    f"{model_count} {noun} available · server default: {default_model}"
+                )
             else:
-                self.model_status.setText(f"{len(values) - 1} models available")
+                self.model_status.setText(f"{model_count} {noun} available")
 
-        self.refresh_models_button.clicked.connect(refresh_available_models)
+        self.refresh_models_button.clicked.connect(lambda _checked=False: refresh_available_models(manual=True))
         self.refresh_timer.timeout.connect(poll_model_refresh)
+
+        def ensure_models_loaded() -> None:
+            """Fetch the SharpED model list once, before the user picks a model.
+
+            Only for workflows that actually run SharpED -- "Superflip only"
+            never contacts the server. Asynchronous (the existing worker thread
+            and poll timer), so the Wizard never freezes, and cached for the
+            session: a repeat call after a successful load, or while a request
+            is already in flight, does nothing.
+            """
+            if self._current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
+                return
+            if self.model_cache["inflight"]:
+                return
+            if self.model_cache["loaded"] and self.model_cache["key"] == model_request_key():
+                return
+            refresh_available_models(manual=False)
+
+        self._ensure_models_loaded = ensure_models_loaded
 
         self.validation_group = QGroupBox("Scientific validation")
         self.validation_layout = QHBoxLayout(self.validation_group)
@@ -1955,9 +2072,9 @@ class _JanaWorkflowWizard:
         self.warning_icon.setAlignment(Qt.AlignTop)
         self.validation_layout.addWidget(self.warning_icon, 0, Qt.AlignTop)
         self.warning_text = QLabel(
-            "SharpED uses a neural-network density-processing model. Its output may "
-            "contain artifacts and should be validated against the measured "
-            "diffraction data and an independent crystallographic refinement."
+            "SharpED uses a neural-network model for electron-density map processing. "
+            "Its output may contain artifacts and should be validated against the "
+            "measured diffraction data and an independent crystallographic refinement."
         )
         self.warning_text.setWordWrap(True)
         self.validation_layout.addWidget(self.warning_text, 1)
@@ -2242,6 +2359,19 @@ class _JanaWorkflowWizard:
         self.powder_enabled_checkbox.toggled.connect(sync_powder_dependency)
         sync_powder_dependency()
 
+        # Map feedback numeric editors: layout only, no changed semantics.
+        self._constrain_numeric_editors(
+            self.missing_start_cycle_spin,
+            self.missing_percent_spin,
+            self.intensity_start_cycle_spin,
+            self.intensity_damping_spin,
+            self.intensity_sigma_spin,
+            self.powder_start_cycle_spin,
+            self.powder_wavelength_spin,
+            self.powder_separation_spin,
+            self.powder_mix_spin,
+        )
+
         self.detected_data_mode_holder: dict = {"mode": None}
 
 
@@ -2299,7 +2429,10 @@ class _JanaWorkflowWizard:
         self._workflow_changed()
 
         self.PAGE2_BANNER_TEXT = {
-            WORKFLOW_SUPERFLIP_SHARPED: ("SUPERFLIP + SHARPED", "Configure the map returned to Jana2020"),
+            WORKFLOW_SUPERFLIP_SHARPED: (
+                "SUPERFLIP + SHARPED",
+                "Configure SharpED processing before returning the result to Jana2020",
+            ),
             WORKFLOW_PHASE_RECYCLING: ("PHASE RECYCLING", "Configure iterative reconstruction and validation"),
         }
 
@@ -2314,6 +2447,11 @@ class _JanaWorkflowWizard:
         def go_to_page2() -> None:
             self.stack.setCurrentWidget(self.page2)
             self.back_button.setVisible(True)
+            # Page 2 is where a SharpED model is chosen, so the list is fetched
+            # on arrival instead of leaving the user on "Model list not loaded."
+            # until they find the Refresh button. No-op for Superflip only, and
+            # cached for the rest of the session.
+            self._ensure_models_loaded()
             if self._current_workflow() == WORKFLOW_PHASE_RECYCLING:
                 # Phase recycling alone continues to a third page (Map feedback)
                 # before anything runs; Superflip + SharpED has no such page and

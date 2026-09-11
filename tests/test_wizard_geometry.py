@@ -247,6 +247,81 @@ def main():
         shortest < tallest,
     )
 
+    # =====================================================================
+    # Disabled controls must stay readable (Map feedback shows real values in
+    # controls that are disabled until their feature is switched on).
+    # =====================================================================
+    import re as _re
+
+    def _linear(component):
+        value = component / 255.0
+        return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+    def _luminance(hex_colour):
+        r = int(hex_colour[1:3], 16)
+        g = int(hex_colour[3:5], 16)
+        b = int(hex_colour[5:7], 16)
+        return 0.2126 * _linear(r) + 0.7152 * _linear(g) + 0.0722 * _linear(b)
+
+    def contrast(fg, bg):
+        light, dark = sorted((_luminance(fg), _luminance(bg)), reverse=True)
+        return (light + 0.05) / (dark + 0.05)
+
+    style = ui_style.PHASE_STUDIO_QSS if hasattr(ui_style, "PHASE_STUDIO_QSS") else None
+    if style is None:
+        import inspect as _inspect
+
+        style = _inspect.getsource(ui_style)
+    block = _re.search(
+        r"QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled \{(.*?)\}",
+        style,
+        _re.S,
+    )
+    check("the disabled-control style block is present", block is not None)
+    if block is not None:
+        body = block.group(1)
+        fg = _re.search(r"color:\s*(#[0-9a-fA-F]{6})", body)
+        bg = _re.search(r"background-color:\s*(#[0-9a-fA-F]{6})", body)
+        check("disabled controls define a foreground colour", fg is not None)
+        check("disabled controls define a background colour", bg is not None)
+        if fg and bg:
+            ratio = contrast(fg.group(1), bg.group(1))
+            check(
+                "disabled control text is comfortably readable (>= 4.5:1), was ~2.8:1",
+                ratio >= 4.5,
+            )
+            # It must still READ as disabled: clearly lower contrast than the
+            # enabled navy on the same field.
+            enabled_ratio = contrast("#001170", bg.group(1))
+            check(
+                "disabled controls remain clearly weaker than enabled ones",
+                ratio < enabled_ratio,
+            )
+
+    # Short numeric editors are not stretched across the whole Wizard.
+    width_cap = getattr(wizard_cls, "MAP_FEEDBACK_EDITOR_WIDTH", None)
+    check("a Map feedback editor width is defined", width_cap is not None)
+    if width_cap is not None:
+        check(
+            "the editor width sits in the intended 180-240 px band",
+            180 <= width_cap <= 240,
+        )
+        for name in (
+            "missing_start_cycle_spin",
+            "missing_percent_spin",
+            "intensity_start_cycle_spin",
+            "intensity_damping_spin",
+            "intensity_sigma_spin",
+            "powder_start_cycle_spin",
+        ):
+            widget = getattr(wizard, name, None)
+            if widget is None:
+                continue
+            check(
+                "Map feedback editor %s is not stretched full width" % name,
+                widget.maximumWidth() <= width_cap,
+            )
+
     failures = [name for name, ok in results_log if not ok]
     print()
     if failures:

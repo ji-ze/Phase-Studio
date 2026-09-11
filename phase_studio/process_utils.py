@@ -71,3 +71,59 @@ def no_console_popen_kwargs() -> dict:
         "creationflags": subprocess.CREATE_NO_WINDOW,
         "startupinfo": startupinfo,
     }
+
+
+def ensure_visible_console(title: str = "") -> bool:
+    """Give this process one visible console window and bind stdout/stderr to it.
+
+    Used only by the wrapper-only Jana2020 workflows (Superflip only,
+    Superflip + SharpED), where the console IS the user's live execution
+    feedback because no Phase Studio main window opens.
+
+    The wrapper is built windowed, so it normally has no console at all. That
+    is why the console the user used to see was empty: it belonged to the
+    Superflip child process, whose stdout/stderr were redirected into a pipe
+    for logging, leaving its window with nothing to print. Allocating a
+    console here -- and launching the child hidden with its output teed back
+    into this console -- keeps exactly one visible window and puts the real
+    output in it.
+
+    Returns True when a console is available afterwards. Never raises: losing
+    the console must never take down a calculation.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        if not kernel32.GetConsoleWindow():
+            if not kernel32.AllocConsole():
+                return False
+        if title:
+            try:
+                kernel32.SetConsoleTitleW(str(title))
+            except Exception:
+                pass
+    except Exception:
+        return False
+
+    # A windowed build starts with sys.stdout/sys.stderr as None (or detached),
+    # so bind them to the console device explicitly; otherwise every print()
+    # into the freshly allocated console would silently do nothing.
+    for name, device, mode in (
+        ("stdout", "CONOUT$", "w"),
+        ("stderr", "CONOUT$", "w"),
+    ):
+        stream = getattr(sys, name, None)
+        try:
+            if stream is not None and stream.fileno() >= 0:
+                continue
+        except Exception:
+            pass
+        try:
+            handle = open(device, mode, buffering=1, encoding=text_encoding(), errors="replace")
+            setattr(sys, name, handle)
+        except Exception:
+            pass
+    return True

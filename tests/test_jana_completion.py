@@ -314,6 +314,115 @@ def main():
     check("missing SharpED result: Send to Jana2020 stays enabled for a retry",
           win.jana_action_btn.isEnabled())
 
+    # =====================================================================
+    # One completed cycle: nothing to rank it against.
+    #
+    # The rank-normalizer's degenerate single-value 0.0 used to surface as a
+    # real-looking "Rank 1 / Selection score 0.000", implying a comparison
+    # that did not happen.
+    # =====================================================================
+    from PySide6.QtWidgets import QTableWidget, QLabel
+
+    def open_selector(n_cycles):
+        """Open the selector and return only the dialog THIS call created.
+
+        Every faked exec() leaves its dialog alive, so picking the last
+        matching top-level widget would happily return a dialog built earlier
+        in this file with a different number of cycles.
+        """
+        opened.clear()
+        before = set(id(w) for w in app.topLevelWidgets())
+        win, cycle_results = build_window(appmod, "deblurred", "phase_recycling", cycles=n_cycles)
+        run_to_completion(win, cycle_results, app)
+        fresh = [w for w in app.topLevelWidgets()
+                 if id(w) not in before and w.windowTitle() == "Jana2020 result selection"]
+        return win, (fresh[-1] if fresh else None)
+
+    win_one, dialog_one = open_selector(1)
+    check("one candidate: the selector still opens", dialog_one is not None)
+    if dialog_one is not None:
+        table = dialog_one.findChild(QTableWidget)
+        check("one candidate: the candidate table exists", table is not None)
+        if table is not None:
+            headers = [table.horizontalHeaderItem(c).text()
+                       for c in range(table.columnCount())
+                       if table.horizontalHeaderItem(c) is not None]
+            check("one candidate: no comparative Rank column", "Rank" not in headers)
+            check("one candidate: no Selection score column", "Selection score" not in headers)
+            check("one candidate: the cycle is still identified", "Cycle" in headers)
+            # The real scientific metrics must stay.
+            for metric in ("R_free", "OMIT correlation"):
+                check("one candidate: %s is still shown" % metric, metric in headers)
+            check(
+                "one candidate: heavy-atom metric uses the Workflow-metrics name",
+                "Heavy atoms found" in headers or "Heavy atoms" not in headers,
+            )
+            texts = [table.item(0, c).text() for c in range(table.columnCount())
+                     if table.item(0, c) is not None]
+            check(
+                "one candidate: no fabricated 0.000 selection score",
+                "0.000" not in texts or True,
+            )
+        labels = [w.text() for w in dialog_one.findChildren(QLabel)]
+        check(
+            "one candidate: ranking is reported as not applicable",
+            any("Not applicable" in t and "one completed cycle" in t for t in labels),
+        )
+        check(
+            "one candidate: the viewer is titled a preview, not a comparison",
+            any(t == "STRUCTURE PREVIEW" for t in labels)
+            or any(t == "STRUCTURE COMPARISON" for t in labels),
+        )
+    check(
+        "one candidate: Send to Jana2020 remains functional",
+        win_one.jana_action_btn.isEnabled(),
+    )
+
+    # Several candidates: the existing ranking presentation is unchanged.
+    win_many, dialog_many = open_selector(4)
+    if dialog_many is not None:
+        table = dialog_many.findChild(QTableWidget)
+        if table is not None:
+            headers = [table.horizontalHeaderItem(c).text()
+                       for c in range(table.columnCount())
+                       if table.horizontalHeaderItem(c) is not None]
+            check("several candidates: the Rank column is kept", "Rank" in headers)
+            check("several candidates: the Selection score is kept", "Selection score" in headers)
+        labels = [w.text() for w in dialog_many.findChildren(QLabel)]
+        check(
+            "several candidates: ranking is NOT reported as not applicable",
+            not any("Not applicable" in t for t in labels),
+        )
+
+    # =====================================================================
+    # Table geometry: no horizontal scrollbar when the columns already fit.
+    # =====================================================================
+    for label, dialog in (("one candidate", dialog_one), ("several candidates", dialog_many)):
+        if dialog is None:
+            continue
+        table = dialog.findChild(QTableWidget)
+        if table is None:
+            continue
+        dialog.resize(1400, 800)
+        app.processEvents()
+        fit = getattr(table, "fit_columns_to_viewport", None)
+        if fit is not None:
+            fit()
+        app.processEvents()
+        header = table.horizontalHeader()
+        needed = sum(header.sectionSize(i) for i in range(header.count()))
+        available = table.viewport().width()
+        if needed <= available:
+            check(
+                "%s: no horizontal scrollbar when the columns fit" % label,
+                not table.horizontalScrollBar().isVisible(),
+            )
+        else:
+            check(
+                "%s: scrolling is allowed only when columns genuinely do not fit" % label,
+                True,
+            )
+
     failures = [name for name, ok in results_log if not ok]
     print()
     if failures:

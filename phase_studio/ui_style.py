@@ -179,12 +179,18 @@ QPushButton:disabled {
 }
 QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
 QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
-    color: #8794ad;
+    /* A disabled control must still be READABLE: the Map feedback page shows
+       real configured values ("1", "0.000") in controls that are disabled
+       until their feature is switched on, and at the previous #8794ad they
+       washed out against the light field (~2.9:1). This muted navy reaches
+       ~4.9:1 on the same background while staying clearly lighter than the
+       enabled #001170, so the control still reads as disabled. */
+    color: #5a6b8c;
     background-color: #f1f4f8;
     border-bottom-color: #cbd7ea;
 }
 QLabel:disabled, QCheckBox:disabled {
-    color: #8794ad;
+    color: #5a6b8c;
 }
 QLineEdit[configurationLocked="true"]:disabled,
 QTextEdit[configurationLocked="true"]:disabled,
@@ -392,6 +398,13 @@ QLabel#statusBadge[runState="complete"], QLabel#statusBadge[runState="transferre
     color: #2264b8;
     background-color: #f2f4f9;
     border: 2px solid #2264b8;
+}
+QLabel#statusBadge[runState="stopped"] {
+    /* A graceful stop after a completed cycle: finished early but valid, so it
+       reads like a muted COMPLETE rather than the solid ERROR/CANCELLED mark. */
+    color: #001170;
+    background-color: #e6eef8;
+    border: 2px solid #44b7ff;
 }
 QLabel#statusBadge[runState="error"], QLabel#statusBadge[runState="cancelled"] {
     color: #ffffff;

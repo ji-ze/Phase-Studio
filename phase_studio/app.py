@@ -4076,6 +4076,7 @@ def return_phase_studio_result_to_jana(
         log=log,
         stop_event=stop_event,
         allow_foreground=True,
+        hide_console=True,
     )
     log("Jana2020 final Superflip handoff completed.")
 
@@ -4387,7 +4388,15 @@ def superflip_normalize_keyword_lines(normalize: str, nresshells: int, log: Opti
     if not mode or mode in {"none", "no", "off", "omit", "local"}:
         return []
     if log:
-        log(f"Superflip normalize value {normalize!r} may be unsupported by this executable; omitting normalize keyword.")
+        # Phase Studio never emits a normalize keyword: this function returns no
+        # lines for every value. The previous "may be unsupported by this
+        # executable" implied a per-executable capability check that is not
+        # performed, so it is stated as what actually happens instead -- no
+        # claim of certainty about the binary, and no vague hedge either.
+        log(
+            f"Superflip normalize value {normalize!r} is not passed to Superflip; "
+            "the normalize keyword is omitted for compatibility."
+        )
     return []
 
 def write_structure_cif(
@@ -4933,6 +4942,7 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
         stop_event=stop_event,
         allow_foreground=True,
         on_output_line=on_output_line,
+        hide_console=True,
     )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
@@ -4999,6 +5009,7 @@ def run_superflip_symmetrize_map(
         log=log,
         stop_event=stop_event,
         allow_foreground=True,
+        hide_console=True,
     )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
@@ -6610,6 +6621,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # once per completed run. Reset when a new run starts, so a second run
         # in the same session opens it again.
         self._jana_auto_selector_shown = False
+        self._workflow_log_once: set = set()
         self._run_status = "READY"
         self._cycle_progress_state: Optional[CycleProgressState] = None
         self._syncing_metadata_controls = False
@@ -10138,7 +10150,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._last_log_record = record
         return True
 
+    # Compatibility/configuration notices that describe a STABLE property of
+    # the current executable or settings, so they say exactly the same thing on
+    # every Superflip call. They were emitted for the normal calculation, again
+    # for the OMIT calculation, and again for every cycle -- on a 5-cycle OMIT
+    # run that is the same three lines up to twenty times, burying the
+    # scientifically interesting output. They are reported once per workflow.
+    # Matching is on the full message text, so a genuinely NEW warning (a
+    # different keyword, a different value) is still reported the first time it
+    # appears. The per-process Superflip/EDMA log files keep every occurrence.
+    LOG_ONCE_PER_WORKFLOW_PREFIXES = (
+        "Superflip normalize value",
+        "Superflip executable does not support",
+        "  Ignored duplicate/managed Superflip keyword",
+    )
+
     def log(self, message: str, *, level: str = "", subsystem: str = "") -> None:
+        text = str(message)
+        if text.startswith(self.LOG_ONCE_PER_WORKFLOW_PREFIXES):
+            seen = getattr(self, "_workflow_log_once", None)
+            if seen is None:
+                seen = set()
+                self._workflow_log_once = seen
+            if text in seen:
+                return
+            seen.add(text)
         work_dir = self.last_run_config.work_dir if self.last_run_config is not None else None
         self.msg_queue.put(("log", classify_log_record(
             message,
@@ -10222,7 +10258,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.current_cycle_progress.setRange(0, 1)
             self.current_cycle_progress.setValue(0)
             self.current_cycle_stage_counter.setText(terminal)
-            self.current_cycle_detail.setText("Stopped by user" if terminal == "Stopped" else terminal)
+            self.current_cycle_detail.setText("Stopped after current cycle" if terminal == "Stopped" else terminal)
             return
 
         stage_total = max(1, int(state.stage_total))
@@ -10248,7 +10284,43 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_run_status("Cancelled")
         self.run_btn.setText("Run phasing")
         self._update_action_states()
-        self._append_execution_log("Pipeline cancelled by the user.", level="WARNING", subsystem="Pipeline")
+        self._append_execution_log(
+            "Workflow cancelled by the user.", level="WARNING", subsystem="Workflow"
+        )
+
+    def _finish_stopped_run(self, completed_cycles: int) -> None:
+        """Terminal state for "Stop after current cycle": the requested cycle
+        finished normally, so every completed result stays valid and usable.
+
+        Deliberately distinct from _finish_cancelled_run(): calling this a
+        cancellation told the user their completed, scientifically valid
+        cycles had been thrown away, which is not what happened.
+        """
+        self.worker = None
+        completed = max(int(completed_cycles), len(self.results))
+        total_cycles = max(1, int(getattr(self.last_run_config, "cycles", 1)), completed)
+        self.progress_bar.setRange(0, total_cycles)
+        self.progress_bar.setValue(min(completed, total_cycles))
+        self._set_overall_progress_text("Stopped")
+        self._set_terminal_cycle_state("Stopped")
+        self.stop_after_cycle.clear()
+        self.stop_now.clear()
+        self._set_run_status("Stopped")
+        self.run_btn.setText("Run phasing")
+        self.run_btn.setEnabled(True)
+        self._update_action_states()
+        self._append_execution_log(
+            f"Workflow stopped after cycle {completed} as requested.",
+            level="WARNING",
+            subsystem="Workflow",
+        )
+        self._append_execution_log(
+            "Completed results are available.",
+            subsystem="Workflow",
+        )
+        # A partially completed workflow is still a usable result set: the
+        # Jana2020 hand-off stays available for whatever finished.
+        self._sync_jana_action_button()
 
     def _set_run_status(self, status: str) -> None:
         normalized = str(status).strip().upper() or "READY"
@@ -10258,6 +10330,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "COMPLETED": "COMPLETE",
             "FAILED": "ERROR",
             "CANCELED": "CANCELLED",
+            # A graceful "Stop after current cycle" is its own terminal state:
+            # the cycle completed and its results are valid. It must never be
+            # folded into CANCELLED, which means an immediate interruption.
+            "STOP": "STOPPED",
             # The pipeline is still RUNNING for button-enablement purposes while a
             # stop is pending; the "stopping" badge is shown separately via
             # _show_stopping_badge() without changing the stored _run_status.
@@ -10682,6 +10758,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self._handle_pipeline_error(report)
                 elif kind == "cancelled":
                     self._finish_cancelled_run()
+                elif kind == "stopped":
+                    self._finish_stopped_run(int(payload) if payload is not None else len(self.results))
                 elif kind == "done":
                     self.worker = None
                     self.stop_after_cycle.clear()
@@ -11079,7 +11157,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     ("Mean cycles", lambda r: r.superflip_mean_cycles, fmt),
                     ("Recall", lambda r: r.superflip_recall, fmt),
                     ("Precision", lambda r: r.superflip_precision, fmt),
-                    ("Heavy atoms", lambda r: r.superflip_heavy_atom_count, fmt_count),
+                    ("Heavy atoms found", lambda r: r.superflip_heavy_atom_count, fmt_count),
                 ]
                 rfree_getter = lambda r: r.omit_superflip_rfree
                 omit_getter = lambda r: r.omit_superflip_correlation
@@ -11092,7 +11170,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 candidate_columns = [
                     ("Recall", lambda r: r.deblur_recall, fmt),
                     ("Precision", lambda r: r.deblur_precision, fmt),
-                    ("Heavy atoms", lambda r: r.deblur_heavy_atom_count, fmt_count),
+                    ("Heavy atoms found", lambda r: r.deblur_heavy_atom_count, fmt_count),
                     ("Map correlation", lambda r: r.recycle_map_correlation, fmt),
                 ]
                 rfree_getter = lambda r: r.omit_deblur_rfree
@@ -11149,7 +11227,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             for idx in range(len(self.results)):
                 valid = [normalized[idx] for _name, normalized in normalized_dims if normalized[idx] is not None]
                 scores.append(sum(valid) / len(valid) if valid else None)
-            ranking_active = any(s is not None for s in scores)
+            # Ranking is comparative: with a single completed cycle there is
+            # nothing to compare it against, and the rank-normalizer's degenerate
+            # 0.0 would be displayed as a real "Selection score 0.000" beside a
+            # "Rank 1" that means nothing. Show the metrics, drop the comparison.
+            ranking_active = len(self.results) > 1 and any(s is not None for s in scores)
 
             if ranking_active:
                 order = sorted(
@@ -11181,12 +11263,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             cycle_col_index = headers.index("Cycle")
             reference_available = bool(self.reference_atoms_for_plot)
 
-            if normalized_dims:
+            if len(self.results) <= 1:
+                ranking_summary = "Not applicable — only one completed cycle"
+            elif normalized_dims:
                 ranking_summary = " + ".join(name for name, _values in normalized_dims)
                 if not rmsd_available and (rfree_available or omit_available):
                     ranking_summary += " (reference RMSD unavailable)"
-            elif len(self.results) <= 1:
-                ranking_summary = "Not applicable"
             else:
                 ranking_summary = "Not available"
 
@@ -11213,6 +11295,38 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             table.verticalHeader().setVisible(False)
             table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
             table.horizontalHeader().setStretchLastSection(len(headers) <= 3)
+
+            def fit_table_columns_to_viewport() -> None:
+                """Use the width the table already has before scrolling it.
+
+                ResizeToContents sizes every column to its content and then lets
+                the table scroll horizontally, which produced a scrollbar even
+                when the columns would comfortably have fitted. When they do
+                fit, the spare width is shared out instead; when they genuinely
+                do not, content sizing and the scrollbar come back.
+                """
+                header = table.horizontalHeader()
+                try:
+                    needed = sum(header.sectionSize(i) for i in range(header.count()))
+                    available = table.viewport().width()
+                except Exception:
+                    return
+                if needed <= 0 or available <= 0:
+                    return
+                if needed <= available:
+                    header.setSectionResizeMode(QHeaderView.Stretch)
+                    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                else:
+                    header.setSectionResizeMode(QHeaderView.ResizeToContents)
+                    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+            table.fit_columns_to_viewport = fit_table_columns_to_viewport  # type: ignore[attr-defined]
+            # Re-fit whenever the table is resized (dialog resize, splitter drag).
+            table.resizeEvent = (  # type: ignore[assignment]
+                lambda event, _base=table.resizeEvent, _fit=fit_table_columns_to_viewport: (
+                    _base(event), _fit()
+                )[0]
+            )
 
             class _NumericTableWidgetItem(QTableWidgetItem):
                 """Sorts by an explicit numeric/string key instead of Qt's
@@ -11384,7 +11498,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             viewer_section_layout = QVBoxLayout(viewer_section)
             viewer_section_layout.setContentsMargins(0, 0, 0, 0)
             viewer_section_layout.setSpacing(3)
-            viewer_section_label = QLabel("STRUCTURE COMPARISON")
+            # One structure and nothing to hold it against is a preview, not a
+            # comparison (the 3D rendering itself is unchanged either way).
+            viewer_section_label = QLabel(
+                "STRUCTURE COMPARISON" if reference_available else "STRUCTURE PREVIEW"
+            )
             viewer_section_label.setObjectName("sectionLabel")
             viewer_section_layout.addWidget(viewer_section_label)
             viewer_section_layout.addWidget(preview_canvas, 1)
@@ -11401,6 +11519,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 int(splitter_total * table_share), int(splitter_total * (1.0 - table_share))
             ])
             body_layout.addWidget(splitter, 1)
+            # After the splitter has handed the table its width.
+            QTimer.singleShot(0, fit_table_columns_to_viewport)
 
             if ranking_active:
                 note_text = (
@@ -11952,7 +12072,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             status = str(getattr(self, "_run_status", "READY")).upper()
             if status in {"RUNNING", "STOPPING"}:
                 empty_message = "Waiting for reconstruction metrics…"
-            elif status in {"ERROR", "CANCELLED"}:
+            elif status in {"ERROR", "CANCELLED", "STOPPED"}:
                 empty_message = "No reconstruction metrics available."
             else:
                 empty_message = "Run phasing to display reconstruction metrics."
@@ -12851,6 +12971,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_after_cycle.clear()
         self.stop_now.clear()
         self._jana_auto_selector_shown = False
+        # Fresh workflow: stable compatibility notices are reported again.
+        self._workflow_log_once = set()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self._set_overall_progress_text("Running")
@@ -12888,6 +13010,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_after_cycle.clear()
         self.stop_now.clear()
         self._jana_auto_selector_shown = False
+        # Fresh workflow: stable compatibility notices are reported again.
+        self._workflow_log_once = set()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self._set_overall_progress_text("Running")
@@ -13190,7 +13314,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
             if self.stop_after_cycle.is_set():
-                self.msg_queue.put(("cancelled", state.completed_cycles))
+                # Graceful stop: the cycle above finished normally and its
+                # results are valid, which is NOT the same terminal state as
+                # an immediate interruption.
+                self.msg_queue.put(("stopped", state.completed_cycles))
                 return
             self._emit_cycle_progress(
                 cyc,
@@ -13645,7 +13772,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 complete=True,
             )
             if self.stop_after_cycle.is_set():
-                self.msg_queue.put(("cancelled", state.completed_cycles))
+                # Graceful stop: the cycle above finished normally and its
+                # results are valid, which is NOT the same terminal state as
+                # an immediate interruption.
+                self.msg_queue.put(("stopped", state.completed_cycles))
                 return
         self.msg_queue.put(("done", state.completed_cycles))
 
@@ -13664,7 +13794,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         progress_stages = ["Preparing cycle", "Superflip", "SharpED", "Phase calculation", "Finalizing cycle"]
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
             if self.stop_after_cycle.is_set():
-                self.msg_queue.put(("cancelled", state.completed_cycles))
+                # Graceful stop: the cycle above finished normally and its
+                # results are valid, which is NOT the same terminal state as
+                # an immediate interruption.
+                self.msg_queue.put(("stopped", state.completed_cycles))
                 return
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Preparing cycle", detail="preparing input map")
             cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
@@ -13783,7 +13916,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.msg_queue.put(("progress", state.completed_cycles))
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="completed", complete=True)
             if self.stop_after_cycle.is_set():
-                self.msg_queue.put(("cancelled", state.completed_cycles))
+                # Graceful stop: the cycle above finished normally and its
+                # results are valid, which is NOT the same terminal state as
+                # an immediate interruption.
+                self.msg_queue.put(("stopped", state.completed_cycles))
                 return
         self.msg_queue.put(("done", state.completed_cycles))
 

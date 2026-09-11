@@ -39,7 +39,11 @@ for every file, checking the exit code) without any additional tooling.
   (`CREATE_NO_WINDOW`), while its command line, working directory, captured
   stdout, exit code and `stop_event` cancellation stay exactly as before.
   Also pins that console hiding is opt-in per call site rather than global,
-  and that no creation flags are forced on Linux/macOS.
+  and that no creation flags are forced on Linux/macOS. Covers the Superflip
+  console policy too: hidden when the full Phase Studio GUI owns execution
+  (it already shows run status, progress, the log and cancellation), and for
+  the wrapper-only workflows one visible console owned by the wrapper, with
+  the child's output teed out progressively rather than buffered until exit.
 
 - `test_metric_legends.py` -- Workflow-metrics legend determinism. Walks the
   real lifecycle (no data -> first cycle -> second cycle -> re-render -> tab
@@ -66,6 +70,20 @@ for every file, checking the exit code) without any additional tooling.
   the header and footer stay outside the scrollable body, and the window
   height follows the page actually on screen instead of the tallest page in
   the stack.
+
+- `test_workflow_states.py` -- the four user-facing workflow terminal states.
+  COMPLETE, STOPPED, CANCELLED and FAILED must stay distinct; in particular a
+  graceful "Stop after current cycle" is STOPPED, keeps its completed results,
+  says so in the execution log, and leaves the Jana2020 hand-off available --
+  it is never reported as a cancellation.
+
+- `test_wizard_models.py` -- the Wizard's SharpED model list. The list is
+  fetched automatically when a SharpED page is entered (never for Superflip
+  only), exactly once, asynchronously, and cached for the session; an explicit
+  user choice survives a refresh; the resolved server default is shown while
+  the internal `default` sentinel is preserved; a failure stays concise with
+  Refresh models still available. The server is stubbed, so the request count
+  itself is asserted.
 
 ## Adding a new golden regression test
 

@@ -26,6 +26,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -303,6 +304,107 @@ def main():
         appmod.run_command = real_run_command
         appmod.normalize_xplor_for_edma = real_normalize
         appmod.edma_absolute_plimit = real_plimit
+
+    # =====================================================================
+    # Superflip console policy: hidden when the full GUI owns execution,
+    # visible (and populated) for the wrapper-only workflows.
+    # =====================================================================
+    # Full-GUI Superflip: the GUI owns execution and already shows run status,
+    # per-cycle progress, repeat progress, the execution log and cancellation,
+    # so no separate Superflip console should appear.
+    import inspect
+
+    for func_name, label in (
+        ("run_superflip_cycle", "Superflip cycle"),
+        ("run_superflip_symmetrize", "Superflip symmetrization"),
+        ("run_edma_on_xplor", "EDMA"),
+    ):
+        func = getattr(appmod, func_name, None)
+        if func is None:
+            continue
+        body = inspect.getsource(func)
+        check(
+            "full GUI: %s is launched with a hidden console" % label,
+            "hide_console=True" in body,
+        )
+        check(
+            "full GUI: %s still passes its stop_event for cancellation" % label,
+            "stop_event=stop_event" in body,
+        )
+
+
+    # --- wrapper-only: no hidden-console flag suppression of the wrapper's own
+    #     console, and the child's output really is teed out live ---
+    from phase_studio import jana_superflip as js
+
+    class _LivePopen:
+        """A child that emits lines over time, so buffering is observable."""
+
+        last = None
+
+        def __init__(self, cmd, **kwargs):
+            self.cmd = list(cmd)
+            self.kwargs = dict(kwargs)
+            self.pid = 99
+            self.returncode = None
+            self._lines = [t + chr(10) for t in ("line 1", "line 2", "line 3")]
+            self._emitted = 0
+            _LivePopen.last = self
+            outer = self
+
+            class _Stdout:
+                def readline(self_inner):
+                    if outer._emitted >= len(outer._lines):
+                        return ""
+                    line = outer._lines[outer._emitted]
+                    outer._emitted += 1
+                    time.sleep(0.05)
+                    return line
+
+            self.stdout = _Stdout()
+
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    real_popen = subprocess.Popen
+    real_console = js.ensure_visible_console
+    console_calls = []
+    try:
+        subprocess.Popen = _LivePopen
+        js.ensure_visible_console = lambda title="": console_calls.append(title) or True
+        arrivals = []
+        start = time.time()
+        js.run_process(["superflip_original.exe", "job.inflip"],
+                       cwd=Path(tmp), log=lambda m: arrivals.append((time.time() - start, m)))
+        launched = _LivePopen.last
+        check("wrapper-only run allocates the wrapper's own visible console", bool(console_calls))
+        check(
+            "wrapper-only child is started hidden so only one console is visible",
+            ("creationflags" in launched.kwargs) if is_windows else True,
+        )
+        check("wrapper-only keeps the exact command line",
+              launched.cmd == ["superflip_original.exe", "job.inflip"])
+        check("wrapper-only keeps the working directory", launched.kwargs.get("cwd") == str(tmp))
+        check("wrapper-only still captures stdout", launched.kwargs.get("stdout") == subprocess.PIPE)
+        check("wrapper-only folds stderr into the captured stream",
+              launched.kwargs.get("stderr") == subprocess.STDOUT)
+        check(
+            "wrapper-only asks the gfortran child not to block-buffer its output",
+            (launched.kwargs.get("env") or {}).get("GFORTRAN_UNBUFFERED_ALL") == "y",
+        )
+        body = [m for _t, m in arrivals if m.startswith("line ")]
+        check("wrapper-only tees every child line out", body == ["line 1", "line 2", "line 3"])
+        # Progressive, not all at the end: the three lines must arrive at
+        # measurably different times rather than in one burst after exit.
+        times = [t for t, m in arrivals if m.startswith("line ")]
+        check(
+            "wrapper-only output is progressive, not buffered until completion",
+            len(times) == 3 and (times[-1] - times[0]) >= 0.04,
+        )
+    finally:
+        subprocess.Popen = real_popen
+        js.ensure_visible_console = real_console
 
     failures = [name for name, ok in results_log if not ok]
     print()
