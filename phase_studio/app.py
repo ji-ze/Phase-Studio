@@ -7414,8 +7414,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>External programs</h3>
             <p><b>Superflip executable</b> is the absolute path to the original Jana2020 Superflip executable (default <code>C:\\Jana2020\\SUPERFLIP\\superflip_original.exe</code>). Do not select the Phase Studio wrapper named superflip.exe.</p>
             <p><b>EDMA executable</b> is the absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps (default <code>C:\\Jana2020\\SUPERFLIP\\EDMA.exe</code>).</p>
+            <p>Superflip and EDMA are external third-party programs, distributed by their own authors and not bundled with Phase Studio. Both are normally installed with Jana2020; if a path is not configured, Phase Studio looks for them in <code>C:\\Jana2020\\SUPERFLIP</code> when a workflow starts and fills the path in automatically. Official downloads: <a href="https://superflip.fzu.cz/download/superflip_win.zip">superflip_win.zip</a> and <a href="https://superflip.fzu.cz/download/EDMA_win.zip">EDMA_win.zip</a>; license information at <a href="https://superflip.fzu.cz/">superflip.fzu.cz</a>.</p>
+            <p>Requirements are checked immediately before a workflow starts, and only for the stages that workflow actually uses -- a workflow that never runs EDMA is never asked for EDMA.</p>
             <h3>SharpED connection</h3>
             <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
+            <p>SharpED processing needs an active Jana2020 or SharpED account. Sign in at <a href="https://sharped.fzu.cz/sharp-ed">sharped.fzu.cz/sharp-ed</a> and create a token with <b>Create token</b>, then paste it into <b>API token</b> above.</p>
             <h3>Interface</h3>
             <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize SharpED map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
         """, advanced=True)
@@ -13026,14 +13029,82 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             issues.append("A SharpED API token is required for the selected workflow.")
         needs_superflip = not is_recycling or reconstruction_mode == "sharped_recycle"
         needs_edma = (not is_recycling and (cfg.run_edma_superflip or cfg.run_edma_deblurred)) or (is_recycling and cfg.run_edma_recycle_final)
-        for exe, label, needed in (
-            (cfg.superflip_exe, "Superflip", needs_superflip),
-            (cfg.edma_exe, "EDMA", needs_edma),
-        ):
-            if needed and resolve_executable_for_validation(exe) is None:
-                issues.append(f"The {label} executable was not found.")
-                details.append(f"{label} executable: {exe or '(not selected)'}")
+        needs_sharped = bool(cfg.run_sharped or is_recycling)
+        preflight_issues, preflight_details = self._run_workflow_preflight(
+            cfg, needs_superflip=needs_superflip, needs_edma=needs_edma,
+            needs_sharped=needs_sharped,
+        )
+        issues.extend(preflight_issues)
+        details.extend(preflight_details)
         return list(dict.fromkeys(issues)), sanitize_error_details("\n".join(details))
+
+    def _run_workflow_preflight(self, cfg: RunConfig, *, needs_superflip: bool,
+                                needs_edma: bool, needs_sharped: bool) -> Tuple[List[str], List[str]]:
+        """Check the external programs and services THIS workflow will use.
+
+        Runs through the one shared requirements module, so the full GUI and the
+        Jana2020 Wizard apply identical rules. Only what the configured workflow
+        actually needs is checked -- a workflow that never runs EDMA is never
+        asked for EDMA.
+
+        When a requirement is unsatisfied but a usable installation is found in
+        the standard Jana2020 location, the configured path is repaired in place
+        (config, the Advanced -> Setup widget and the saved settings) and the
+        workflow continues, rather than stopping to ask about something Phase
+        Studio can see for itself.
+        """
+        from phase_studio import requirements as reqs
+
+        issues: List[str] = []
+        details: List[str] = []
+        required = reqs.requirements_for_workflow(
+            needs_superflip=needs_superflip, needs_edma=needs_edma,
+            needs_sharped=needs_sharped,
+        )
+        if not required.kinds():
+            return issues, details
+
+        result = reqs.run_preflight(
+            required,
+            superflip_path=cfg.superflip_exe,
+            edma_path=cfg.edma_exe,
+            sharped_base_url=cfg.sharped_base_url,
+            sharped_token=cfg.sharped_api_token,
+            accept_suggestion=lambda _status: True,
+        )
+
+        for repaired in result.repaired:
+            key = ("superflip_exe" if repaired.kind is reqs.RequirementKind.SUPERFLIP
+                   else "edma_exe")
+            path_text = str(repaired.path)
+            widget = self.inputs.get(key)
+            if widget is not None:
+                self._set_widget_value_from_string(widget, path_text)
+            if key == "superflip_exe":
+                cfg.superflip_exe = path_text
+            else:
+                cfg.edma_exe = path_text
+            label = "Superflip" if key == "superflip_exe" else "EDMA"
+            self._append_execution_log(
+                f"{label} executable detected automatically: {path_text}",
+                level="DETAIL", subsystem="Setup",
+            )
+        if result.repaired:
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+
+        for status in result.failures:
+            issues.append(status.message)
+            if status.kind is reqs.RequirementKind.SHARPED:
+                # Never echo the token, the server URL or the raw error text.
+                details.append(f"SharpED requirement: {status.state.value}")
+            else:
+                label = ("Superflip" if status.kind is reqs.RequirementKind.SUPERFLIP
+                         else "EDMA")
+                details.append(f"{label} executable: {status.detail or '(not selected)'}")
+        return issues, details
 
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
