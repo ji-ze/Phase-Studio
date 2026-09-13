@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Phase Studio MSIX manifest template.
+
+  This is a TEMPLATE: {{TOKEN}} placeholders are filled in by
+  packaging/build_store_msix.ps1 from a local, gitignored
+  packaging/msix/store_identity.json (create it from
+  store_identity.example.json; see packaging/README_STORE.md). The real
+  Package Identity Name/Publisher come from Microsoft Partner Center and are
+  never hard-coded here.
+
+  Full-trust classic Win32 desktop application (runFullTrust), targeting
+  Windows.Desktop only. The PySide6 application itself is NOT converted to
+  UWP; MSIX only packages/deploys the existing ONEDIR PyInstaller build.
+
+  Entry point is PhaseStudio\PhaseStudio.exe. JanaIntegration\superflip.exe
+  is bundled payload/resources only; it is never the package's Application
+  entry point and Windows never launches it directly; Phase Studio itself
+  copies it out to a user-selected Jana2020 installation on explicit user
+  request (see phase_studio/jana_integration.py).
+
+  No allowElevation or other restricted capability is declared; Jana2020
+  integration installs into a Jana2020\SUPERFLIP directory the current user
+  can already write to, or is reported as a plain permissions error (see
+  Part E of the Jana2020 integration implementation notes).
+-->
+<Package
+    xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+    IgnorableNamespaces="uap rescap">
+
+  <Identity
+      Name="{{IDENTITY_NAME}}"
+      Publisher="{{IDENTITY_PUBLISHER}}"
+      Version="{{PACKAGE_VERSION}}"
+      ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>{{PACKAGE_DISPLAY_NAME}}</DisplayName>
+    <PublisherDisplayName>{{PUBLISHER_DISPLAY_NAME}}</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+    <Description>{{PACKAGE_DESCRIPTION}}</Description>
+  </Properties>
+
+  <Resources>
+    <Resource Language="en-us" />
+  </Resources>
+
+  <Dependencies>
+    <!-- Windows 10 1809 (17763) or later; adjust only if a genuinely older
+         minimum is required and verified against the actual PySide6/Qt
+         runtime requirements in use. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Applications>
+    <Application Id="PhaseStudio" Executable="PhaseStudio\PhaseStudio.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+          DisplayName="{{PACKAGE_DISPLAY_NAME}}"
+          Description="{{PACKAGE_DESCRIPTION}}"
+          Square150x150Logo="Assets\Square150x150Logo.png"
+          Square44x44Logo="Assets\Square44x44Logo.png"
+          BackgroundColor="transparent">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" Square71x71Logo="Assets\Square71x71Logo.png" Square310x310Logo="Assets\Square310x310Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+
+</Package>

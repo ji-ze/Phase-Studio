@@ -1,5 +1,4 @@
-# Compatibility entry point: the portable ONEDIR spec is authoritative.
 from pathlib import Path
-SPECPATH = str(Path(SPECPATH) / "packaging" / "pyinstaller")
+installer_build = True
 shared_spec = Path(SPECPATH) / "PhaseStudio.spec"
 exec(compile(shared_spec.read_text(encoding="utf-8"), str(shared_spec), "exec"))

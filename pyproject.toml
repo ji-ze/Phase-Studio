@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "phase-studio"
-version = "1.0.6"
+dynamic = ["version"]
 description = "Qt application for iterative Superflip, SharpED server deblurring and EDMA crystallographic reconstruction."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,10 +33,19 @@ dev = [
 ]
 
 [project.scripts]
-phase-studio = "phase_studio.app:main"
+phase-studio = "phase_studio.standalone:main"
+phase-studio-jana-installer = "phase_studio.jana_installer:main"
 
 [tool.setuptools]
 packages = ["phase_studio"]
 
 [tool.setuptools.package-data]
 phase_studio = ["assets/*.svg", "assets/*.xpm", "assets/*.ico"]
+
+[tool.setuptools.dynamic]
+# Single source of truth for the package version: phase_studio/version.py
+# (the same file every runtime display -- window titles, splash screen,
+# the Jana2020 integration marker -- already derives from). Previously this
+# file hard-coded its own separate "1.0.8" literal, which had already
+# drifted out of sync with version.py once before.
+version = { attr = "phase_studio.version.VERSION" }

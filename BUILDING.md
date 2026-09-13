@@ -1,6 +1,6 @@
 # Building Phase Studio
 
-This document contains source-installation, packaging, and developer-oriented build information for **Phase Studio 1.0.6**.
+This document contains source-installation, packaging, and developer-oriented build information for the version in `phase_studio/version.py`.
 
 End users normally do not need these steps. See [README.md](README.md) and [MANUAL.md](MANUAL.md) instead.
 
@@ -44,50 +44,82 @@ python -m compileall -q phase_studio
 
 ### Tests
 
-Run the repository test suite using the current project configuration.
+Run every plain Python regression script (no pytest required):
 
-For example, where pytest is configured:
-
-```bash
-python -m pytest
+```powershell
+Get-ChildItem tests/test_*.py | ForEach-Object {
+    python $_.FullName
+    if ($LASTEXITCODE -ne 0) { throw "Test failed: $($_.Name)" }
+}
 ```
-
-Do not claim platform-specific functionality is verified unless it has been tested on that platform.
 
 ---
 
-## 3. Windows one-file build
+## 3. Two independent Windows products
 
-The project has been packaged with PyInstaller as a single GUI executable.
-
-From the repository root in an environment containing the application dependencies:
+Use a plain CPython x64 virtual environment with the PyPI PySide6 wheel,
+not a Conda Qt installation. Install the build dependencies in that environment:
 
 ```powershell
-python -m PyInstaller `
-  --noconfirm `
-  --clean `
-  --onefile `
-  --windowed `
-  --name PhaseStudio `
-  --icon phase_studio\assets\phase_studio.ico `
-  --collect-data phase_studio `
-  --collect-all qtvscodestyle `
-  phase_studio\app.py
+python -m pip install -e ".[dev]"
 ```
 
-Expected output:
+Activate it, then run from the repository root:
+
+```powershell
+# Both products, including the authoritative Jana wrapper
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target All
+# Standalone only; does not build or stage the Jana installer payload
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target Standalone
+# Installer and its complete authoritative wrapper payload
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target JanaInstaller
+# Wrapper alone
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target JanaWrapper
+```
+
+Outputs:
 
 ```text
-dist\PhaseStudio.exe
+dist/PhaseStudio/PhaseStudio.exe
+    _internal/                         standalone scientific application
+dist/PhaseStudioJanaInstaller/PhaseStudioJanaInstaller.exe
+    _internal/                         integration-manager UI only
+    JanaIntegration/superflip.exe      staged authoritative wrapper
+    JanaIntegration/_internal/         complete wrapper scientific runtime
+dist/superflip/superflip.exe
+    _internal/                         authoritative wrapper build
 ```
 
-Before publishing a release, test the executable on a machine/environment that does not rely on the active development environment.
+Distribute complete directories, never an executable by itself. The installer
+can be copied to USB; it does not need an adjacent standalone application.
+Its payload includes the shared scientific GUI required by the installed
+Wizard's Full configuration option, but its own UI/runtime does not import or
+launch that GUI. Standalone has no installation-management dialog or payload.
+Jana data import remains supported.
 
-### Windows SmartScreen
+`packaging/pyinstaller/PhaseStudio.spec` implements the two outer build profiles.
+`PhaseStudioJanaInstaller.spec` selects the installer entry point; the root
+`PhaseStudio.spec` forwards to the portable standalone spec. The root
+`superflip.spec` remains the authoritative ONEDIR wrapper specification and is
+built with `python -m PyInstaller --clean --noconfirm superflip.spec`.
 
-PyInstaller packaging does not establish publisher trust. Unsigned executables can trigger Microsoft Defender SmartScreen and may appear as an unknown publisher.
+The shared portable-runtime helper and DLL-isolation hook are used by all
+three executables. Each build stages the matching VC++ runtime, excludes
+app-local UCRT, and runs both native dependency and imported-symbol audits.
+The build also inspects the frozen module archives to enforce distribution
+boundaries and compares every staged wrapper file with the authoritative build.
 
-Code signing is a separate release/distribution concern.
+Close an executable before rebuilding its directory. To preserve a running
+older build, use `-DistRoot "$PWD/dist/1.0.9"`; this changes only the output
+location and is restricted to a subdirectory of the repository's `dist`.
+Builds never terminate existing processes. `-Clean:$false` still excludes old
+installation payloads from standalone.
+
+Version strings in windows, Wizard, installer, integration marker, Python
+metadata and Windows EXE resources derive from `phase_studio/version.py`.
+Store packaging derives its fourth `.0` component from the same source.
+
+For Microsoft Store packaging, see [packaging/README_STORE.md](packaging/README_STORE.md).
 
 ---
 
@@ -132,18 +164,15 @@ The exact packaging requirements depend on the build environment. If the project
 
 ## 5. Linux desktop integration and icon
 
-A Linux ELF executable does not use a Windows `.ico` file in the same way as a Windows PE executable. Use one of the square cross-platform assets included in the repository:
+A Linux ELF executable does not use a Windows `.ico` file in the same way as a Windows PE executable, and the repository does not currently ship a standalone SVG/PNG icon asset — only the Windows multi-size `phase_studio/assets/phase_studio.ico`. The in-app logo mark itself is drawn at runtime (`create_phase_studio_logo_pixmap` in `phase_studio/app.py`) rather than loaded from an image file.
 
-```text
-phase_studio/assets/phase_studio_icon.svg
-phase_studio/assets/phase_studio_icon.png
+For desktop integration, extract a PNG from the `.ico` first, for example with ImageMagick:
+
+```bash
+convert phase_studio/assets/phase_studio.ico -resize 256x256 phase_studio_icon.png
 ```
 
-The full-width brand mark is also available as `phase_studio_logo.svg` and `phase_studio_logo.png`.
-
-For desktop integration, install an application icon and a `.desktop` entry.
-
-Example:
+Then install an application icon and a `.desktop` entry:
 
 ```ini
 [Desktop Entry]
@@ -155,7 +184,7 @@ Terminal=false
 Categories=Science;Education;
 ```
 
-Copy the selected icon asset beside the executable or install it in the appropriate system icon directory, then set `Icon` to that installed path or icon name.
+Copy the generated icon beside the executable or install it in the appropriate system icon directory, then set `Icon` to that installed path or icon name. If the project later adds a dedicated cross-platform SVG/PNG asset, prefer that over an extracted `.ico` frame.
 
 ---
 
@@ -167,25 +196,40 @@ The Jana2020 wrapper is built from:
 phase_studio/jana_superflip.py
 ```
 
-The repository may provide a dedicated PyInstaller specification such as:
+Its authoritative PyInstaller specification stays at the repository root:
 
 ```text
 superflip.spec
 ```
 
-When present, prefer the repository `.spec` file over reconstructing its settings manually:
+Always prefer that `.spec` file over reconstructing its settings manually:
 
-```bash
+```powershell
 python -m PyInstaller --clean --noconfirm superflip.spec
 ```
 
-A typical onedir wrapper build produces:
+or build it together with the application:
 
-```text
-dist/superflip/
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1
 ```
 
-Keep the complete generated directory together unless the specification explicitly produces a one-file build.
+The wrapper build is **onedir** and must stay that way:
+
+```text
+dist\superflip\
+    superflip.exe
+    _internal\
+```
+
+Keep the complete generated directory together — `superflip.exe` cannot run
+without its `_internal\` directory.
+
+The wrapper is packaged with the same portable-runtime rules as the main
+application (see section 3), which matters especially here: the wrapper is
+deployed *inside* the Jana2020 tree, so its DLL search path is isolated to
+prevent it from loading Qt, ICU or Visual C++ runtime binaries belonging to
+Jana2020 or to anything else on `PATH`.
 
 ---
 
