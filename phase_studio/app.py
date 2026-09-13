@@ -32,7 +32,6 @@ from __future__ import annotations
 import collections
 import csv
 import html
-import locale
 import math
 import os
 import queue
@@ -46,7 +45,7 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -75,9 +74,45 @@ except Exception:
     )
 
 try:
-    from phase_studio.sharped_server_client import SharpEDServerClient
+    from phase_studio.sharped_server_client import (
+        SharpEDServerClient, DEFAULT_SERVER_URL,
+        normalize_server_url, current_model_catalog,
+        model_selection, sync_model_catalog,
+    )
 except Exception:
-    from sharped_server_client import SharpEDServerClient
+    from sharped_server_client import (
+        SharpEDServerClient, DEFAULT_SERVER_URL,
+        normalize_server_url, current_model_catalog,
+        model_selection, sync_model_catalog,
+    )
+
+try:
+    from phase_studio.sharped_map_scaling import (
+        SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
+        SHARPED_MAP_VALUE_EXPONENT_MAX,
+        SHARPED_MAP_VALUE_EXPONENT_MIN,
+        apply_signed_power,
+        describe_map_value_exponent,
+        invert_signed_power,
+        map_value_scaling_is_identity,
+        normalize_map_value_exponent,
+    )
+except Exception:
+    from sharped_map_scaling import (  # type: ignore[no-redef]
+        SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
+        SHARPED_MAP_VALUE_EXPONENT_MAX,
+        SHARPED_MAP_VALUE_EXPONENT_MIN,
+        apply_signed_power,
+        describe_map_value_exponent,
+        invert_signed_power,
+        map_value_scaling_is_identity,
+        normalize_map_value_exponent,
+    )
+
+try:
+    from phase_studio.process_utils import allow_external_process_foreground, no_console_popen_kwargs, text_encoding
+except Exception:
+    from process_utils import allow_external_process_foreground, no_console_popen_kwargs, text_encoding
 
 try:
     import gemmi
@@ -94,8 +129,8 @@ try:
     from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QPoint, QRect, QRectF, QSize
     from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (
-        QApplication, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-        QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit, QMainWindow,
+        QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
+        QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLayout, QLineEdit, QMainWindow, QMessageBox,
         QDialog, QDialogButtonBox, QProgressBar, QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSplitter, QSplashScreen, QToolButton,
         QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QTabWidget, QTextEdit, QVBoxLayout, QWidget
     )
@@ -148,6 +183,8 @@ REFLECTION_DATA_MODE_INTENSITY = "hkl I sigma"
 REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA = "hkl F sigma"
 REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA = "hkl I phase sigma"
 REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA = "hkl F phase sigma"
+REFLECTION_DATA_MODE_INTENSITY_FWHM = "hkl I fwhm"
+REFLECTION_DATA_MODE_AMPLITUDE_FWHM = "hkl F fwhm"
 # Compatibility name used by older settings and internal call sites.
 REFLECTION_DATA_MODE_AUTO = REFLECTION_DATA_MODE_SET_FROM_INFLIP
 ATOMIC_NUMBER_HINTS = {
@@ -322,6 +359,51 @@ class ReferenceContext:
     atoms: List[AtomSite]
 
 
+@dataclass
+class JanaWizardContext:
+    """Distinguishes a normal standalone Phase Studio launch from the two
+    Jana2020-Wizard-initiated launches that open this same main window. Both
+    single-pass workflows (Superflip only, Superflip + SharpED) run through
+    the original lightweight console/wrapper path and never construct this
+    window or this context at all.
+
+    The default (launch_mode="standalone") is a normal standalone launch: no
+    field here may change behavior unless launched_from_jana_wizard is True."""
+
+    launched_from_jana_wizard: bool = False
+    # "standalone" | "full_configuration" | "phase_recycling" -- which of the
+    # two Wizard launches (if any) opened this window. "full_configuration"
+    # is Jana Wizard -> Open full configuration (the user drives the whole
+    # workflow manually, then explicitly clicks Send to Jana2020, with a
+    # Superflip/SharpED source switch in the result selector).
+    # "phase_recycling" is Jana Wizard -> Phase recycling (auto-started, its
+    # map source fixed to whatever was chosen in the Wizard, and its result
+    # selector opens automatically on completion with no source switch).
+    launch_mode: str = "standalone"
+    wizard_map_source: str = ""  # "superflip" or "deblurred"; only meaningful when launch_mode == "phase_recycling"
+
+
+# --- Shared canonical Superflip/SharpED display-name mapping (spec: create
+# one shared user-facing source mapping, do not scatter conditional string
+# literals like `"SharpED" if source == "deblurred" else "Superflip"`
+# throughout the GUI). The internal token stays "superflip" / "deblurred" --
+# only these three helpers translate it to what the user sees. ---
+
+def result_source_title(source: str) -> str:
+    """Canonical short display name for a result-source token."""
+    return "Superflip" if str(source or "").strip().lower() == "superflip" else "SharpED"
+
+
+def result_map_label(source: str) -> str:
+    """Canonical "<Source> map" display label."""
+    return f"{result_source_title(source)} map"
+
+
+def result_structure_label(source: str) -> str:
+    """Canonical "<Source> structure" display label."""
+    return f"{result_source_title(source)} structure"
+
+
 @dataclass(frozen=True)
 class CrystalMetadata:
     """Validated crystallographic metadata selected for one pipeline run."""
@@ -369,7 +451,7 @@ LOG_DETAIL_PREFIXES = (
     "prepared hkl",
     "standardized hkl export",
     "superflip map:",
-    "deblurred map:",
+    "sharped map:",
     "removed stale superflip",
     "xplor map normalized",
     "cif-only exclude settings",
@@ -479,6 +561,18 @@ class CycleResult:
     superflip_success_rate: Optional[float] = None
     superflip_mean_cycles: Optional[float] = None
     recycle_map_correlation: Optional[float] = None
+    omit_superflip_correlation: Optional[float] = None
+    omit_superflip_rfree: Optional[float] = None
+    omit_deblur_correlation: Optional[float] = None
+    omit_deblur_rfree: Optional[float] = None
+    superflip_recall: Optional[float] = None
+    superflip_precision: Optional[float] = None
+    superflip_heavy_atom_count: Optional[float] = None
+    deblur_recall: Optional[float] = None
+    deblur_precision: Optional[float] = None
+    deblur_heavy_atom_count: Optional[float] = None
+    powder_repartition_avg_change_percent: Optional[float] = None
+    intensity_correction_avg_change_percent: Optional[float] = None
 
 
 INPUT_MODE_INFLIP = "jana_inflip"
@@ -486,8 +580,8 @@ INPUT_MODE_INFLIP_OVERRIDES = "jana_inflip_overrides"
 INPUT_MODE_EXTERNAL = "external_hkl_cif"
 
 INPUT_MODE_LABELS = {
-    INPUT_MODE_INFLIP: "Jana .inflip",
-    INPUT_MODE_INFLIP_OVERRIDES: "Jana .inflip with external HKL/reference overrides",
+    INPUT_MODE_INFLIP: "Jana2020 .inflip",
+    INPUT_MODE_INFLIP_OVERRIDES: "Jana2020 .inflip with external HKL/reference overrides",
     INPUT_MODE_EXTERNAL: "External HKL + CIF reference",
 }
 
@@ -496,8 +590,8 @@ METADATA_SOURCE_REFERENCE = "reference_file"
 METADATA_SOURCE_MANUAL = "manual"
 
 METADATA_SOURCE_LABELS = {
-    METADATA_SOURCE_INFLIP: "Jana .inflip",
-    METADATA_SOURCE_REFERENCE: "Reference file",
+    METADATA_SOURCE_INFLIP: "Jana2020 .inflip",
+    METADATA_SOURCE_REFERENCE: "Reference structure",
     METADATA_SOURCE_MANUAL: "Manual",
 }
 
@@ -580,20 +674,30 @@ class RunConfig:
     electrons: str
     dataitemwidths: str
     extra_superflip_keywords: str
+    map_feedback_missing_enabled: bool
     map_feedback_missing_from_cycle: int
     map_feedback_missing_percent_limit: float
+    map_feedback_intensity_enabled: bool
     map_feedback_intensity_from_cycle: int
     map_feedback_intensity_damping: float
     map_feedback_intensity_max_i_over_sigma: float
+    redistribute_overlaps: bool
+    powder_redistribution_from_cycle: int
+    powder_wavelength: float
+    powder_separation_factor: float
+    powder_redistribution_mix: float
     run_sharped: bool
     symmetrize_deblurred_map: bool
     run_edma_superflip: bool
     run_edma_deblurred: bool
+    compute_omit_maps: bool
+    compute_omit_rfree: bool
     sharped_base_url: str
     sharped_api_token: str
     sharped_model: str
     sharped_elements: str
     sharped_outres: float
+    sharped_map_value_exponent: float
     sharped_max_upload_mb: float
     sharped_timeout_seconds: int
     sharped_poll_seconds: int
@@ -630,6 +734,9 @@ class PipelineState:
     auto_reference_cif: Optional[Path] = None
     auto_reference_xplor: Optional[Path] = None
     recycle_map: Optional[Path] = None
+    omit_test_hkls: FrozenSet[Tuple[int, int, int]] = field(default_factory=frozenset)
+    pending_powder_repartition_change_percent: Optional[float] = None
+    pending_intensity_correction_change_percent: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -646,12 +753,80 @@ class CycleProgressState:
     complete: bool = False
 
     def display_text(self) -> str:
-        parts = [f"Cycle {self.cycle_index} / {self.cycle_total}", self.stage_name]
-        if self.sub_index is not None and self.sub_total is not None:
-            parts.append(f"repeat {self.sub_index} / {self.sub_total}")
+        # sub_index/sub_total (Superflip's internal repeat-pass counter) is
+        # deliberately not shown here: it reads as developer/internal detail
+        # in the compact primary status line and is already visible in the
+        # pipeline's own settings-summary log lines.
+        parts = [f"Cycle {self.cycle_index} of {self.cycle_total}", self.stage_name]
         if self.detail:
-            parts.append(self.detail)
+            # Call sites pass lowercase detail phrases ("running", "preparing
+            # upload", ...); capitalize just the leading letter here, in one
+            # place, for sentence-case display rather than editing every
+            # _emit_cycle_progress() call site individually.
+            parts.append(self.detail[:1].upper() + self.detail[1:])
         return " · ".join(part for part in parts if part)
+
+
+@dataclass(frozen=True)
+class SuperflipProgress:
+    """One live progress observation parsed from Superflip's own stdout.
+
+    repeat/repeat_total describe Superflip's internal repeatmode attempt
+    counter -- NOT the Phase Studio workflow cycle ("Cycle N of M") and NOT
+    the final "Saved run" selected-density index. phase is "running" while a
+    repeat is in progress and "completed" once Superflip reports its last run
+    finished."""
+
+    repeat: Optional[int] = None
+    repeat_total: Optional[int] = None
+    phase: str = "running"
+
+
+class SuperflipRepeatProgressParser:
+    """Best-effort, defensive line-by-line parser for Superflip's repeatmode
+    progress, e.g.:
+
+        Starting iteration:                  (first repeat begins)
+        Run number  1. Still  9 to go.       (repeat 1 finished, repeat 2 begins)
+        ...
+        Last run from 10 completed.          (final repeat finished)
+
+    repeat_total is always the EFFECTIVE repeatmode Phase Studio itself wrote
+    into the current .inflip (never parsed from the log), per the requirement
+    that live progress describe the running calculation, not just the GUI
+    setting. Unrecognized lines are ignored; this parser never raises."""
+
+    _RUN_NUMBER_RE = re.compile(r"run\s+number\s+(\d+)\s*\.\s*still\s+(\d+)\s+to\s+go", re.IGNORECASE)
+    _LAST_RUN_RE = re.compile(r"last\s+run\s+from\s+(\d+)\s+completed", re.IGNORECASE)
+
+    def __init__(self, repeat_total: int) -> None:
+        self.repeat_total = max(1, int(repeat_total))
+        self.completed_runs = 0
+        self.saw_progress = False
+
+    def feed(self, line: str) -> Optional[SuperflipProgress]:
+        try:
+            text = str(line or "")
+            if not text.strip():
+                return None
+            if "starting iteration:" in text.lower():
+                self.saw_progress = True
+                repeat = min(self.completed_runs + 1, self.repeat_total)
+                return SuperflipProgress(repeat=repeat, repeat_total=self.repeat_total, phase="running")
+            match = self._RUN_NUMBER_RE.search(text)
+            if match:
+                self.saw_progress = True
+                self.completed_runs = int(match.group(1))
+                repeat = min(self.completed_runs + 1, self.repeat_total)
+                return SuperflipProgress(repeat=repeat, repeat_total=self.repeat_total, phase="running")
+            match = self._LAST_RUN_RE.search(text)
+            if match:
+                self.saw_progress = True
+                self.completed_runs = int(match.group(1))
+                return SuperflipProgress(repeat=self.repeat_total, repeat_total=self.repeat_total, phase="completed")
+        except Exception:
+            return None
+        return None
 
 
 def cycle_progress_stages(cfg: object) -> List[str]:
@@ -666,7 +841,7 @@ def cycle_progress_stages(cfg: object) -> List[str]:
     if bool(getattr(cfg, "symmetrize_deblurred_map", False)) and not raw_superflip_cycling:
         stages.append("Superflip symmetry averaging")
     if bool(getattr(cfg, "run_edma_deblurred", False)) and not raw_superflip_cycling:
-        stages.append("EDMA · deblurred map")
+        stages.append(f"EDMA · {result_map_label('deblurred')}")
     stages.append("Finalizing cycle")
     return stages
 
@@ -720,6 +895,83 @@ class HklLoadResult:
 REFERENCE_STRUCTURE_SUFFIXES = {".cif", ".ins", ".res"}
 REFERENCE_DENSITY_SUFFIXES = {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"}
 REFERENCE_FILE_SUFFIXES = REFERENCE_STRUCTURE_SUFFIXES | REFERENCE_DENSITY_SUFFIXES
+
+# --- Authoritative file-dialog filters ---------------------------------------
+# Every model/reference selector in the application and in the Jana2020 Wizard
+# builds its filter here, from the suffix sets above, so no selector can drift
+# into offering a format the code cannot actually handle.
+#
+# What each set is derived from, audited against the real code paths:
+#
+#   REFERENCE_STRUCTURE_SUFFIXES  structures parsed for reference comparison
+#                                 (parse_cif_atoms / reference handling)
+#   REFERENCE_DENSITY_SUFFIXES    density maps accepted as a reference
+#   SUPERFLIP_MODEL_SUFFIXES      what run_superflip_cycle() will actually pass
+#                                 to Superflip as a modelfile -- .xplor (through
+#                                 normalize_xplor_for_superflip_modelfile), .cif
+#                                 and .ccp4. Anything else raises there, so
+#                                 nothing else may be offered.
+#   WRAPPER_REFERENCE_SUFFIXES    the narrower set the single-pass Jana2020
+#                                 wrapper validates (.cif / .xplor). It is NOT a
+#                                 filter oversight: the wrapper rejects the rest.
+SUPERFLIP_MODEL_SUFFIXES = {".xplor", ".ccp4", ".cif"}
+WRAPPER_REFERENCE_SUFFIXES = {".cif", ".xplor"}
+
+
+def _filter_group(label: str, suffixes: "Iterable[str]") -> str:
+    patterns = " ".join("*" + s for s in sorted(suffixes))
+    return f"{label} ({patterns})"
+
+
+def supported_structure_filters() -> str:
+    """File-dialog filter for structure models only."""
+    return _filter_group("Structure models", REFERENCE_STRUCTURE_SUFFIXES)
+
+
+def supported_density_map_filters() -> str:
+    """File-dialog filter for density maps only."""
+    return _filter_group("Density maps", REFERENCE_DENSITY_SUFFIXES)
+
+
+def supported_reference_filters() -> str:
+    """Filter for a reference model: a structure OR a density map."""
+    return ";;".join([
+        _filter_group("All supported reference files", REFERENCE_FILE_SUFFIXES),
+        supported_structure_filters(),
+        supported_density_map_filters(),
+        "All files (*)",
+    ])
+
+
+def supported_model_filters() -> str:
+    """Filter for an initial/recycled Superflip model file.
+
+    Exactly the formats run_superflip_cycle() accepts as a modelfile.
+    """
+    structures = SUPERFLIP_MODEL_SUFFIXES & REFERENCE_STRUCTURE_SUFFIXES
+    maps = SUPERFLIP_MODEL_SUFFIXES - REFERENCE_STRUCTURE_SUFFIXES
+    return ";;".join([
+        _filter_group("All supported model files", SUPERFLIP_MODEL_SUFFIXES),
+        _filter_group("Density maps", maps),
+        _filter_group("Structure models", structures),
+        "All files (*)",
+    ])
+
+
+def supported_wrapper_reference_filters() -> str:
+    """Reference filter for the single-pass Jana2020 wrapper workflows.
+
+    Deliberately narrower than supported_reference_filters(): the wrapper
+    validates the selection against .cif/.xplor and rejects anything else, so
+    offering more here would only produce a late error.
+    """
+    return ";;".join([
+        _filter_group("Supported reference files", WRAPPER_REFERENCE_SUFFIXES),
+        _filter_group("Structure models", WRAPPER_REFERENCE_SUFFIXES & REFERENCE_STRUCTURE_SUFFIXES),
+        _filter_group("Density maps", WRAPPER_REFERENCE_SUFFIXES & REFERENCE_DENSITY_SUFFIXES),
+        "All files (*)",
+    ])
+
 
 # -----------------------------------------------------------------------------
 # CIF / crystallographic helpers
@@ -896,6 +1148,42 @@ def validate_composition_text(value: str) -> str:
     if not saw_element:
         raise ValueError("Composition is missing.")
     return text
+
+
+def parse_composition_counts(composition: str) -> List[Tuple[str, int]]:
+    """Parse the existing whitespace-separated Superflip composition syntax
+    (e.g. "Zn8 I8 C8 H8 N8" or "Ag 196 S 108") into ordered (element, count)
+    pairs, mirroring validate_composition_text()'s grammar. Used as a
+    composition-driven fallback for EDMA peak element assignment when no
+    reference-structure atom sites are available (see
+    assign_elements_by_reference_composition())."""
+    text = str(composition or "").strip()
+    if not text:
+        return []
+    tokens = [token for token in re.split(r"[\s,;]+", text) if token]
+    result: List[Tuple[str, int]] = []
+    pending_symbol: Optional[str] = None
+    for token in tokens:
+        match = re.fullmatch(r"([A-Z][a-z]?|D)([0-9]+(?:\.[0-9]+)?)?", token)
+        if match:
+            if pending_symbol is not None:
+                result.append((pending_symbol, 1))
+            symbol = "H" if match.group(1) == "D" else match.group(1)
+            if match.group(2) is not None:
+                result.append((symbol, max(1, int(round(float(match.group(2)))))))
+                pending_symbol = None
+            else:
+                pending_symbol = symbol
+            continue
+        if pending_symbol is not None and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", token):
+            result.append((pending_symbol, max(1, int(round(float(token))))))
+            pending_symbol = None
+            continue
+        # Unrecognized token: ignore defensively here -- validate_composition_text()
+        # is the authoritative validator and already runs earlier in the pipeline.
+    if pending_symbol is not None:
+        result.append((pending_symbol, 1))
+    return result
 
 
 def validate_crystal_cell(cell: gemmi.UnitCell) -> gemmi.UnitCell:
@@ -1326,7 +1614,7 @@ def reference_context_with_external_atom_sites(
 ) -> ReferenceContext:
     """Use atom sites from an explicit reference CIF without replacing Jana HKL.
 
-    In Jana .inflip mode, Phase Studio can synthesize a metadata-only CIF from
+    In Jana2020 .inflip mode, Phase Studio can synthesize a metadata-only CIF from
     cell/spacegroup/composition.  That file is useful for setting up the run,
     but it has zero atom sites and is invalid as a Superflip reference density.
     When the user explicitly selects a real CIF as Superflip referencefile, keep
@@ -1399,12 +1687,75 @@ def nearest_metric_to_reference(model_cif: Optional[Path], ref_ctx: ReferenceCon
         return None
     return float(math.sqrt(np.mean(np.square(all_d))))
 
+def atom_recall_precision(
+    model_cif: Optional[Path], ref_ctx: ReferenceContext, merge_distance: float, same_element: bool = True,
+) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    """Recall/precision of EDMA-found atoms against the reference: each atom is
+    matched to its nearest same-element counterpart within merge_distance
+    (independent nearest-neighbor lookup per atom, not a global bipartite
+    assignment -- a lightweight per-cycle indicator, not a publication-grade
+    validation metric). Hydrogen and helium are excluded from both sides before
+    matching, since electron-density charge-flipping cannot resolve them (too
+    few electrons); counting them would systematically and misleadingly depress
+    recall for any hydrogen-containing structure regardless of reconstruction
+    quality. Unlike nearest_metric_to_reference's RMSD, a reference atom with no
+    same-element candidate within range counts as unmatched (no any-element
+    fallback), since miscounting a wrong-element peak as "found" would
+    misrepresent recall/precision. Returns None only when there are no heavy
+    reference atoms to compare against; with a reference but an empty/missing
+    model, returns (0.0, None) -- recall is 0, precision has no denominator
+    (nothing was found to be right or wrong about)."""
+    def heavy(atoms: Sequence[AtomSite]) -> List[AtomSite]:
+        return [a for a in atoms if clean_element_symbol(a.element) not in {"H", "He"}]
+    if not ref_ctx.atoms:
+        return None
+    ref_full = heavy(expanded_unique_atoms(heavy(ref_ctx.atoms), ref_ctx.cell, ref_ctx.spacegroup))
+    if not ref_full:
+        return None
+    model_atoms = heavy(parse_cif_atoms(Path(model_cif))) if model_cif is not None and Path(model_cif).is_file() else []
+    if not model_atoms:
+        return (0.0, None)
+    _, model_sg, _ = parse_cif_cell_and_sg(Path(model_cif))
+    model_full = heavy(expanded_unique_atoms(model_atoms, ref_ctx.cell, model_sg))
+    if not model_full:
+        return (0.0, None)
+    def nearest_distance(a: AtomSite, candidates: Sequence[AtomSite]) -> Optional[float]:
+        same = [b for b in candidates if not same_element or clean_element_symbol(a.element) == clean_element_symbol(b.element)]
+        if not same:
+            return None
+        return min(frac_distance_angstrom(ref_ctx.cell, a.frac, b.frac) for b in same)
+    matched_ref = sum(1 for a in ref_full if (d := nearest_distance(a, model_full)) is not None and d <= merge_distance)
+    matched_model = sum(1 for a in model_full if (d := nearest_distance(a, ref_full)) is not None and d <= merge_distance)
+    recall = matched_ref / len(ref_full)
+    precision = matched_model / len(model_full)
+    return (recall, precision)
+
+def count_heavy_atoms(model_cif: Optional[Path]) -> Optional[float]:
+    """Number of non-hydrogen, non-helium atoms in an EDMA structure export --
+    a reference-free fallback progress indicator (does the found atom count
+    stabilize across cycles) for when no reference structure is available."""
+    if model_cif is None or not Path(model_cif).is_file():
+        return None
+    atoms = parse_cif_atoms(Path(model_cif))
+    if not atoms:
+        return None
+    return float(sum(1 for a in atoms if clean_element_symbol(a.element) not in {"H", "He"}))
+
 # -----------------------------------------------------------------------------
 # HKL / Superflip / SharpED / EDMA
 # -----------------------------------------------------------------------------
 
 def normalize_reflection_data_mode(value: str) -> str:
-    mode = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    # A combo item's own friendly display text (see REFLECTION_DATA_MODE_DISPLAY_LABELS,
+    # used to populate the "HKL format" combo below) must normalize back to its
+    # own internal token, exactly like input_source_mode/metadata_source already
+    # do -- checked before the alias lowering, which would otherwise mangle the
+    # "·"/"σ" characters into something no alias recognizes.
+    raw = str(value or "")
+    for token, label in REFLECTION_DATA_MODE_DISPLAY_LABELS.items():
+        if raw == label:
+            return token
+    mode = raw.strip().lower().replace("-", "_").replace(" ", "_")
     aliases = {
         "auto": REFLECTION_DATA_MODE_SET_FROM_INFLIP,
         "auto_detect": REFLECTION_DATA_MODE_AUTO,
@@ -1430,6 +1781,13 @@ def normalize_reflection_data_mode(value: str) -> str:
         "fobs_zero_phase_sigma": REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
         "intensity_phase_sigma": REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
         "i_phase_sigma": REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+        "hkl_i_fwhm": REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        "hkl_f_fwhm": REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+        "i_fwhm": REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        "intensity_fwhm": REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        "f_fwhm": REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+        "fobs_fwhm": REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+        "amplitude_fwhm": REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
     }
     mode = aliases.get(mode, mode)
     if mode == REFLECTION_DATA_MODE_AUTO:
@@ -1438,15 +1796,59 @@ def normalize_reflection_data_mode(value: str) -> str:
         REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
         REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
         REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+        REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
     }:
         return mode
     return REFLECTION_DATA_MODE_INTENSITY
+
+
+REFLECTION_DATA_MODE_DISPLAY_LABELS = {
+    REFLECTION_DATA_MODE_SET_FROM_INFLIP: "Set from .inflip",
+    REFLECTION_DATA_MODE_INTENSITY: "h k l · I · σ(I)",
+    REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA: "h k l · F · σ(F)",
+    REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA: "h k l · I · phase · σ(I)",
+    REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA: "h k l · F · phase · σ(F)",
+    REFLECTION_DATA_MODE_INTENSITY_FWHM: "h k l · I · FWHM",
+    REFLECTION_DATA_MODE_AMPLITUDE_FWHM: "h k l · F · FWHM",
+}
+
+
+def format_reflection_data_mode(value: str) -> str:
+    """Human-readable column layout for a reflection-data-mode token, for
+    read-only summaries and log lines. Never changes parser mode/columns --
+    display only."""
+    mode = normalize_reflection_data_mode(value)
+    return REFLECTION_DATA_MODE_DISPLAY_LABELS.get(mode, str(value or ""))
+
+
+def wrap_path_tooltip(path_text: str, width: int = 60) -> str:
+    """Wrap a long file path across multiple tooltip lines instead of one
+    huge horizontal line covering most of the window. Paths rarely contain
+    the whitespace textwrap-style wrapping needs, so break after path
+    separators instead."""
+    text = str(path_text or "")
+    if len(text) <= width:
+        return text
+    parts = re.split(r"([\\/])", text)
+    lines: List[str] = []
+    current = ""
+    for part in parts:
+        if current and len(current) + len(part) > width:
+            lines.append(current)
+            current = part
+        else:
+            current += part
+    if current:
+        lines.append(current)
+    return "\n".join(lines)
 
 
 def reflection_mode_is_amplitude(data_mode: str) -> bool:
     return normalize_reflection_data_mode(data_mode) in {
         REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
         REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+        REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
     }
 
 
@@ -1457,9 +1859,26 @@ def reflection_mode_has_phase(data_mode: str) -> bool:
     }
 
 
+def reflection_mode_has_fwhm(data_mode: str) -> bool:
+    """True when the reflection file's second data column is a peak-shape FWHM
+    (full width at half maximum, e.g. from a Le Bail powder extraction), not a
+    genuine measurement uncertainty. FWHM is typically on a completely
+    different scale than the intensity/amplitude it is paired with, so an
+    I/FWHM or F/FWHM ratio is not a signal-to-noise ratio the way I/sigma(I)
+    is, and must not be labeled or interpreted as one."""
+    return normalize_reflection_data_mode(data_mode) in {
+        REFLECTION_DATA_MODE_INTENSITY_FWHM,
+        REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
+    }
+
+
 def superflip_dataformat_for_mode(data_mode: str) -> str:
     quantity = "amplitude" if reflection_mode_is_amplitude(data_mode) else "intensity"
-    return f"{quantity} phase dummy" if reflection_mode_has_phase(data_mode) else f"{quantity} dummy"
+    if reflection_mode_has_phase(data_mode):
+        return f"{quantity} phase dummy"
+    if reflection_mode_has_fwhm(data_mode):
+        return f"{quantity} fwhm"
+    return f"{quantity} dummy"
 
 def detect_reflection_data_mode_from_hkl(hkl_path: Path) -> str:
     name = hkl_path.name.lower()
@@ -1477,6 +1896,10 @@ def detect_reflection_data_mode_from_hkl(hkl_path: Path) -> str:
                     return REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA
                 if "fobs" in low and "phase" in low:
                     return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+                if "intensity" in low and "fwhm" in low:
+                    return REFLECTION_DATA_MODE_INTENSITY_FWHM
+                if ("fobs" in low or "amplitude" in low) and "fwhm" in low:
+                    return REFLECTION_DATA_MODE_AMPLITUDE_FWHM
                 if "fobs" in low and "sigma" in low:
                     return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
                 if "intensity" in low:
@@ -1857,6 +2280,11 @@ def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]
         amplitude = abs(value)
         if amplitude <= 0:
             return 0.0
+        if reflection_mode_has_fwhm(data_mode):
+            # The factor of 2 below propagates a genuine sigma(F) into an
+            # intensity-domain uncertainty (I=F^2 => dI=2F.dF); FWHM is not an
+            # uncertainty, so that propagation does not apply -- use F/FWHM directly.
+            return amplitude / sigma
         return amplitude / (2.0 * sigma)
     return value / sigma
 
@@ -1875,12 +2303,21 @@ def reflection_value_label(data_mode: str) -> str:
     return "Iobs"
 
 def reflection_sigma_label(data_mode: str) -> str:
-    if reflection_mode_is_amplitude(data_mode):
-        return "sigma(Fobs)"
-    return "sigma(Iobs)"
+    if reflection_mode_has_fwhm(data_mode):
+        return "FWHM"
+    return "σ(F)" if reflection_mode_is_amplitude(data_mode) else "σ(I)"
 
 def reflection_primary_snr_label(data_mode: str) -> str:
-    return "I/sigma(I)"
+    # FWHM is a peak-shape width, not an uncertainty (see
+    # reflection_mode_has_fwhm's own docstring warning), so this ratio is
+    # never a true signal-to-noise figure -- but it must at least name the
+    # correct numerator: F/FWHM for amplitude data, I/FWHM for intensity
+    # data (see reflection_signal_to_noise()'s amplitude branch, which
+    # divides |F| by FWHM directly, never converting to the intensity
+    # domain the way the non-FWHM amplitude branch below does).
+    if reflection_mode_has_fwhm(data_mode):
+        return "F/FWHM" if reflection_mode_is_amplitude(data_mode) else "I/FWHM"
+    return "I/σ(I)"
 
 def reflection_primary_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
     return reflection_signal_to_noise(r, data_mode)
@@ -2214,14 +2651,23 @@ def write_observed_reflections(out_hkl: Path, reflections: Sequence[Reflection],
             n += 1
     return n
 
-def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0, data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None, resolution_d_min: float = 0.0) -> int:
+def write_standardized_hkl_with_phase(
+    out_hkl: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0,
+    data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None,
+    resolution_d_min: float = 0.0, calc_by_hkl: Optional[Dict[Tuple[int, int, int], Tuple[float, float]]] = None,
+) -> int:
+    """calc_by_hkl, when given, maps (h, k, l) -> (F_squared_calc, phase_calc_deg) read by
+    FFT from a reconstructed XPLOR map (see xplor_fft_predictions); its phase is written
+    instead of the reflection's own phase field, which is only ever the value supplied by
+    the selected HKL mode (0.0 for most modes) and never reflects the reconstruction."""
     out_hkl.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
     d_min = max(0.0, float(resolution_d_min or 0.0))
     n = 0
     with out_hkl.open("w", encoding="utf-8") as f:
         f.write("# h k l I sigma(I) phase(deg)\n")
-        f.write(f"# Phase Studio {__version__} standardized HKL export; phase is 0.0 unless supplied by the selected HKL mode.\n")
+        phase_note = "phase is calculated by FFT from the reconstructed map" if calc_by_hkl else "phase is 0.0 unless supplied by the selected HKL mode"
+        f.write(f"# Phase Studio {__version__} standardized HKL export; {phase_note}.\n")
         for r in reflections:
             if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
                 if float(r.value) / float(r.sigma) < i_over_sigma_min:
@@ -2236,25 +2682,32 @@ def write_standardized_hkl_with_phase(out_hkl: Path, reflections: Sequence[Refle
                 intensity = value * value
                 sigma_f = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
                 sigma_i = 2.0 * value * sigma_f
-            phase = 0.0 if r.phase is None else float(r.phase)
+            calc = calc_by_hkl.get((int(r.h), int(r.k), int(r.l))) if calc_by_hkl else None
+            phase = float(calc[1]) if calc is not None else (0.0 if r.phase is None else float(r.phase))
             f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {phase:12.6f}\n")
             n += 1
     return n
 
-def write_shelx_fcf(out_fcf: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0, data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None, resolution_d_min: float = 0.0) -> int:
+def write_shelx_fcf(
+    out_fcf: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0,
+    data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None,
+    resolution_d_min: float = 0.0, calc_by_hkl: Optional[Dict[Tuple[int, int, int], Tuple[float, float]]] = None,
+) -> int:
     """ShelX/Jana-compatible .fcf reflection list (CIF loop, list format 4: h k l
-    F_squared_meas sigma F_squared_calc phase_calc). F_squared_calc is not available
-    before reconstruction, so it is written equal to F_squared_meas as a neutral
-    placeholder; phase is 0 unless supplied by the selected HKL mode -- same
-    convention as the standardized HKL export this is a sibling of."""
+    F_squared_meas sigma F_squared_calc phase_calc). calc_by_hkl, when given, maps
+    (h, k, l) -> (F_squared_calc, phase_calc_deg) read by FFT from a reconstructed XPLOR
+    map (see xplor_fft_predictions); without it, F_squared_calc is written equal to
+    F_squared_meas and phase_calc to 0 as neutral placeholders (no reconstruction available)."""
     out_fcf.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
     d_min = max(0.0, float(resolution_d_min or 0.0))
     n = 0
     with out_fcf.open("w", encoding="utf-8") as f:
         f.write(f"# Phase Studio {__version__} ShelX-compatible FCF export (list format 4).\n")
-        f.write("# F_squared_calc is written equal to F_squared_meas as a placeholder (not yet reconstructed);\n")
-        f.write("# phase_calc is 0.0 unless supplied by the selected HKL mode.\n")
+        if calc_by_hkl:
+            f.write("# F_squared_calc and phase_calc are read by FFT from the reconstructed map.\n")
+        else:
+            f.write("# F_squared_calc is written equal to F_squared_meas and phase_calc to 0.0 as placeholders (no reconstruction available).\n")
         f.write("loop_\n")
         for tag in ("_refln_index_h", "_refln_index_k", "_refln_index_l", "_refln_F_squared_meas",
                     "_refln_F_squared_sigma", "_refln_F_squared_calc", "_refln_phase_calc"):
@@ -2273,10 +2726,35 @@ def write_shelx_fcf(out_fcf: Path, reflections: Sequence[Reflection], i_over_sig
                 intensity = value * value
                 sigma_f = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
                 sigma_i = 2.0 * value * sigma_f
-            phase = 0.0 if r.phase is None else float(r.phase)
-            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {intensity:14.7f} {phase:12.6f}\n")
+            calc = calc_by_hkl.get((int(r.h), int(r.k), int(r.l))) if calc_by_hkl else None
+            intensity_calc = float(calc[0]) if calc is not None else intensity
+            phase = float(calc[1]) if calc is not None else 0.0
+            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {intensity_calc:14.7f} {phase:12.6f}\n")
             n += 1
     return n
+
+def export_phased_reflections_from_map(
+    map_export_format: str, out_path_base: Path, xplor_map: Path, reflections: Sequence[Reflection],
+    i_over_sigma_min: float, data_mode: str, cell: gemmi.UnitCell, resolution_d_min: float,
+    log: Callable[[str], None],
+) -> Optional[Path]:
+    """Map format's 'HKL reflections with phases' / 'ShelX (fcf)' options: read F_calc and
+    phase_calc for every observed hkl by FFT from a just-reconstructed XPLOR map (the same
+    technique the SharpED phase-recycling methods use), then write them alongside |Fobs|.
+    Called once per Superflip map, exactly like the ccp4/jana extra-format options."""
+    fmt = normalize_map_export_format(map_export_format)
+    if fmt not in {"hkl_phases", "shelx_fcf"}:
+        return None
+    calc_by_hkl = xplor_fft_predictions(xplor_map, [(int(r.h), int(r.k), int(r.l)) for r in reflections])
+    if fmt == "hkl_phases":
+        out_path = out_path_base.with_name(out_path_base.name + "_phased.hkl")
+        n = write_standardized_hkl_with_phase(out_path, reflections, i_over_sigma_min, data_mode, cell=cell, resolution_d_min=resolution_d_min, calc_by_hkl=calc_by_hkl)
+        log(f"Phased HKL export (phases from {xplor_map.name}): {out_path} ({n} reflections)")
+    else:
+        out_path = out_path_base.with_name(out_path_base.name + ".fcf")
+        n = write_shelx_fcf(out_path, reflections, i_over_sigma_min, data_mode, cell=cell, resolution_d_min=resolution_d_min, calc_by_hkl=calc_by_hkl)
+        log(f"ShelX FCF export (phases from {xplor_map.name}): {out_path} ({n} reflections)")
+    return out_path
 
 def reflection_value_as_intensity(reflection: Reflection, data_mode: str) -> float:
     value = max(0.0, float(reflection.value))
@@ -2445,6 +2923,51 @@ def xplor_map_correlation(map_a: Path, map_b: Path) -> Optional[float]:
     except Exception:
         return None
 
+def select_omit_test_set(reflections: Sequence[Reflection], seed_text: str, fraction: float = 0.05) -> FrozenSet[Tuple[int, int, int]]:
+    """Pick a fixed random subset of hkl (default 5%) to exclude from omit-map
+    Superflip/SharpED runs and to evaluate R_free against. Seeded from Superflip's
+    own Random seed when it is a plain integer, otherwise from a fixed constant, so
+    the same test set is reused for every cycle of a run (comparable cycle to cycle)
+    regardless of how many times it is (re)selected."""
+    hkls = sorted({(int(r.h), int(r.k), int(r.l)) for r in reflections})
+    if not hkls:
+        return frozenset()
+    seed_text = str(seed_text or "").strip()
+    seed = int(seed_text) if seed_text.isdigit() else 987654321
+    rng = np.random.default_rng(seed)
+    count = max(1, round(len(hkls) * max(0.0, min(1.0, fraction))))
+    chosen = rng.choice(len(hkls), size=min(count, len(hkls)), replace=False)
+    return frozenset(hkls[i] for i in chosen.tolist())
+
+def compute_rfree(reflections: Sequence[Reflection], test_hkls: FrozenSet[Tuple[int, int, int]], data_mode: str, predictions: Dict[Tuple[int, int, int], Tuple[float, float]]) -> Optional[float]:
+    """Crystallographic R_free: sum(|Fobs - k*Fcalc|) / sum(|Fobs|) over only the
+    excluded test-set reflections, with k the least-squares scale factor between
+    them. Fcalc/phase_calc come from `predictions` (see xplor_fft_predictions),
+    read from a map that never saw the test set during reconstruction."""
+    fobs: List[float] = []
+    fcalc: List[float] = []
+    for r in reflections:
+        hkl = (int(r.h), int(r.k), int(r.l))
+        if hkl not in test_hkls:
+            continue
+        prediction = predictions.get(hkl)
+        if prediction is None:
+            continue
+        fobs.append(math.sqrt(reflection_value_as_intensity(r, data_mode)))
+        fcalc.append(math.sqrt(max(0.0, prediction[0])))
+    if len(fobs) < 3:
+        return None
+    fobs_arr = np.asarray(fobs, dtype=np.float64)
+    fcalc_arr = np.asarray(fcalc, dtype=np.float64)
+    denom = float(np.sum(fcalc_arr * fcalc_arr))
+    if denom <= 1e-12:
+        return None
+    k = float(np.sum(fobs_arr * fcalc_arr)) / denom
+    fobs_sum = float(np.sum(fobs_arr))
+    if fobs_sum <= 1e-12:
+        return None
+    return float(np.sum(np.abs(fobs_arr - k * fcalc_arr)) / fobs_sum)
+
 def candidate_missing_hkls_from_bounds(reflections: Sequence[Reflection], cell: gemmi.UnitCell, resolution_d_min: float) -> List[Tuple[int, int, int]]:
     if not reflections:
         return []
@@ -2481,11 +3004,17 @@ def apply_map_feedback_to_reflections(
     intensity_damping: float,
     intensity_max_i_over_sigma: float,
     log: Callable[[str], None],
-) -> List[Reflection]:
+) -> Tuple[List[Reflection], Optional[float]]:
+    """Returns (updated_reflections, intensity_correction_avg_change_percent),
+    the latter being the mean, across reflections actually corrected this
+    call, of |after - before| / before * 100 -- i.e. the average percent
+    change in intensity from map-based correction alone (add_missing
+    reflections are new, not changed, so they never contribute) -- or None
+    when correct_intensities is off or nothing was corrected."""
     mode = normalize_reflection_data_mode(data_mode)
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     if not current:
-        return current
+        return current, None
     existing_keys = [(int(r.h), int(r.k), int(r.l)) for r in current]
     predictions = xplor_fft_predictions(feedback_map, existing_keys)
     ratios: List[float] = []
@@ -2498,6 +3027,7 @@ def apply_map_feedback_to_reflections(
     corrected = 0
     damping = max(0.0, min(1.0, float(intensity_damping or 0.0)))
     max_i_over_sigma = max(0.0, float(intensity_max_i_over_sigma or 0.0))
+    change_percentages: List[float] = []
     if correct_intensities and damping > 0:
         corrected_reflections: List[Reflection] = []
         for r in current:
@@ -2515,9 +3045,12 @@ def apply_map_feedback_to_reflections(
                 phase = r.phase if r.phase is not None else (map_phase if reflection_mode_has_phase(mode) else None)
                 corrected_reflections.append(Reflection(r.h, r.k, r.l, value, r.sigma, phase))
                 corrected += 1
+                if obs_i > 1e-12:
+                    change_percentages.append(abs(new_i - obs_i) / obs_i * 100.0)
             else:
                 corrected_reflections.append(r)
         current = corrected_reflections
+    avg_change_percent = sum(change_percentages) / len(change_percentages) if change_percentages else None
     added = 0
     if add_missing and missing_percent_limit > 0:
         max_add = int(math.floor(len(current) * max(0.0, float(missing_percent_limit)) / 100.0))
@@ -2542,9 +3075,225 @@ def apply_map_feedback_to_reflections(
     log(
         "Map feedback: "
         f"scale={scale:.6g}, corrected={corrected}, added_missing={added}, "
-        f"intensity_max_i_over_sigma={max_i_over_sigma:g}, reflections={len(current)}"
+        f"intensity_max_i_over_sigma={max_i_over_sigma:g}, reflections={len(current)}, "
+        f"avg_intensity_change={'n/a' if avg_change_percent is None else f'{avg_change_percent:.2f}%'}"
     )
-    return current
+    return current, avg_change_percent
+
+def bragg_two_theta_deg(d_value: float, wavelength: float) -> Optional[float]:
+    """Bragg angle 2theta in degrees; None (not raised) for a reflection that is
+    geometrically inaccessible at this wavelength, so one bad hkl does not abort
+    overlap grouping for the rest of the data set."""
+    if wavelength <= 0 or not math.isfinite(wavelength) or d_value <= 0 or not math.isfinite(d_value):
+        return None
+    argument = wavelength / (2.0 * d_value)
+    if argument > 1.0 + 1e-9:
+        return None
+    return float(math.degrees(2.0 * math.asin(min(1.0, argument))))
+
+def assign_powder_overlap_groups(
+    reflections: Sequence[Reflection], cell: gemmi.UnitCell, wavelength: float, separation_factor: float,
+) -> Dict[Tuple[int, int, int], int]:
+    """Group reflections whose Bragg peaks overlap in a powder pattern: sorted by
+    2theta, neighbors are joined transitively into the same group while
+    delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2, matching Superflip's
+    own fwhmseparation convention. FWHM is read from each reflection's sigma
+    field (that is where the 'hkl I/F fwhm' data modes store it). A reflection
+    with no FWHM value or an inaccessible 2theta is left ungrouped (group 0).
+    Returns hkl -> group id, 0 meaning "not part of any overlap group"."""
+    entries: List[Tuple[Tuple[int, int, int], float, float]] = []
+    for r in reflections:
+        if r.sigma is None:
+            continue
+        d_value = reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l))
+        angle = bragg_two_theta_deg(d_value, wavelength)
+        if angle is None:
+            continue
+        entries.append(((int(r.h), int(r.k), int(r.l)), angle, max(0.0, float(r.sigma))))
+    groups: Dict[Tuple[int, int, int], int] = {}
+    if len(entries) < 2:
+        return groups
+    entries.sort(key=lambda item: item[1])
+    group_id = 0
+    current_component: List[Tuple[Tuple[int, int, int], float, float]] = [entries[0]]
+    for previous, current in zip(entries, entries[1:]):
+        delta = current[1] - previous[1]
+        threshold = separation_factor * (previous[2] + current[2]) / 2.0
+        if delta < threshold:
+            current_component.append(current)
+        else:
+            if len(current_component) > 1:
+                group_id += 1
+                for key, _angle, _fwhm in current_component:
+                    groups[key] = group_id
+            current_component = [current]
+    if len(current_component) > 1:
+        group_id += 1
+        for key, _angle, _fwhm in current_component:
+            groups[key] = group_id
+    return groups
+
+def write_powder_repartitioning_log(
+    log_path: Path, cell: gemmi.UnitCell, mode: str, by_group: Dict[int, List[Reflection]],
+    before: Sequence[Reflection], after: Sequence[Reflection], wavelength: float, separation_factor: float,
+    mix: float, fallback_groups: int, feedback_map: Path, group_avg_change_percent: Dict[int, float],
+    avg_change_percent: Optional[float],
+) -> None:
+    """Write a human-readable per-cycle log of powder overlap repartitioning:
+    how many groups were considered, their average size, the average per-group
+    intensity change, and the observed (before) vs. redistributed (after)
+    values for the first 3 groups sorted by d-spacing, largest d (lowest
+    2theta) first."""
+    before_by_key = {(int(r.h), int(r.k), int(r.l)): r for r in before}
+    after_by_key = {(int(r.h), int(r.k), int(r.l)): r for r in after}
+    group_count = len(by_group)
+    total_members = sum(len(members) for members in by_group.values())
+    avg_size = total_members / group_count if group_count else 0.0
+
+    def group_d(members: List[Reflection]) -> float:
+        ds = [reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) for r in members]
+        ds = [d for d in ds if d and math.isfinite(d)]
+        return sum(ds) / len(ds) if ds else 0.0
+
+    ordered_groups = sorted(by_group.items(), key=lambda item: group_d(item[1]), reverse=True)
+    avg_change_text = "n/a" if avg_change_percent is None else f"{avg_change_percent:.2f}%"
+    lines: List[str] = [
+        "Powder overlap repartitioning",
+        f"feedback map: {feedback_map}",
+        f"wavelength={wavelength:g} A  separation_factor={separation_factor:g}  mix={mix:g}",
+        f"groups considered: {group_count}",
+        f"average group size: {avg_size:.2f} reflections/group ({total_members} reflections total in groups)",
+        f"average intensity change per group: {avg_change_text}",
+        f"map-fallback groups (no usable map signal): {fallback_groups}",
+        "",
+        f"First {min(3, len(ordered_groups))} groups by d-spacing (largest d / lowest 2θ first):",
+    ]
+    for gid, members in ordered_groups[:3]:
+        d_avg = group_d(members)
+        change = group_avg_change_percent.get(gid)
+        change_text = "n/a" if change is None else f"{change:.2f}%"
+        lines.append(f"\nGroup {gid}  (avg d = {d_avg:.4f} A, {len(members)} reflections, avg intensity change = {change_text}):")
+        lines.append(f"  {'h':>4} {'k':>4} {'l':>4} {'d (A)':>9} {'FWHM':>9} {'before':>14} {'after':>14} {'change':>9}")
+        sorted_members = sorted(
+            members, key=lambda r: reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)), reverse=True
+        )
+        for r in sorted_members:
+            key = (int(r.h), int(r.k), int(r.l))
+            d_value = reflection_d_spacing(cell, *key)
+            before_r = before_by_key.get(key)
+            after_r = after_by_key.get(key)
+            fwhm_text = f"{before_r.sigma:.4f}" if before_r is not None and before_r.sigma is not None else "n/a"
+            before_value = before_r.value if before_r is not None else float("nan")
+            after_value = after_r.value if after_r is not None else float("nan")
+            before_intensity = reflection_value_as_intensity(before_r, mode) if before_r is not None else 0.0
+            after_intensity = reflection_value_as_intensity(after_r, mode) if after_r is not None else 0.0
+            member_change_text = (
+                f"{(after_intensity - before_intensity) / before_intensity * 100.0:.2f}%"
+                if before_intensity > 1e-12 else "n/a"
+            )
+            lines.append(
+                f"  {r.h:>4} {r.k:>4} {r.l:>4} {d_value:>9.4f} {fwhm_text:>9} {before_value:>14.4f} {after_value:>14.4f} {member_change_text:>9}"
+            )
+    try:
+        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    except OSError:
+        pass
+
+def redistribute_overlap_reflections(
+    reflections: Sequence[Reflection], data_mode: str, feedback_map: Path, cell: gemmi.UnitCell,
+    wavelength: float, separation_factor: float, mix: float, log: Callable[[str], None],
+    log_path: Optional[Path] = None,
+) -> Tuple[List[Reflection], Optional[float]]:
+    """Powder overlap repartitioning: within each 2theta/FWHM overlap group (see
+    assign_powder_overlap_groups), keep the observed group-total intensity fixed
+    but replace each member's share of it with a blend of its own observed ratio
+    and the ratio implied by intensities calculated by FFT from feedback_map
+    (mix=0 keeps the observed split, mix=1 uses the map split entirely) --
+    the same technique used to deblur overlapping reflections in Le Bail powder
+    extractions before phase retrieval. Groups where the map has no usable
+    signal for any member fall back to the observed split unchanged.
+
+    When log_path is given, a detailed per-cycle log is written there: how many
+    groups were considered, their average size, and the observed (before) vs.
+    redistributed (after) values for the first 3 groups sorted by d-spacing.
+
+    Returns (updated_reflections, avg_change_percent), where avg_change_percent
+    is the mean, across groups, of each group's average member-wise absolute
+    intensity change |after - before| / before * 100 -- i.e. the average
+    percent change in intensity per overlap group -- or None if there were no
+    overlap groups to redistribute."""
+    mode = normalize_reflection_data_mode(data_mode)
+    current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
+    groups = assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
+    if not groups:
+        log("Overlap repartitioning: no overlap groups found (need at least two reflections with FWHM and accessible 2θ).")
+        if log_path is not None:
+            try:
+                log_path.write_text(
+                    "Powder overlap repartitioning\n"
+                    f"feedback map: {feedback_map}\n"
+                    f"wavelength={wavelength:g} Å  separation_factor={separation_factor:g}  mix={mix:g}\n"
+                    "No overlap groups found (need at least two reflections with FWHM and accessible 2θ).\n",
+                    encoding="utf-8",
+                )
+            except OSError:
+                pass
+        return current, None
+    by_group: Dict[int, List[Reflection]] = {}
+    for r in current:
+        gid = groups.get((int(r.h), int(r.k), int(r.l)), 0)
+        if gid:
+            by_group.setdefault(gid, []).append(r)
+    all_keys = [(int(r.h), int(r.k), int(r.l)) for group in by_group.values() for r in group]
+    predictions = xplor_fft_predictions(feedback_map, all_keys)
+    mix = max(0.0, min(1.0, float(mix)))
+    redistributed: Dict[Tuple[int, int, int], float] = {}
+    fallback_groups = 0
+    group_avg_change_percent: Dict[int, float] = {}
+    for gid, members in by_group.items():
+        observed = [reflection_value_as_intensity(r, mode) for r in members]
+        target = float(sum(observed))
+        map_intensities = [max(0.0, predictions.get((int(r.h), int(r.k), int(r.l)), (0.0, 0.0))[0]) for r in members]
+        map_sum = float(sum(map_intensities))
+        observed_ratios = [(value / target if target > 0 else 1.0 / len(members)) for value in observed]
+        if map_sum <= 1e-30:
+            fallback_groups += 1
+            ratios = observed_ratios
+        else:
+            map_ratios = [value / map_sum for value in map_intensities]
+            ratios = [(1.0 - mix) * o + mix * m for o, m in zip(observed_ratios, map_ratios)]
+        member_changes: List[float] = []
+        for r, ratio, before_intensity in zip(members, ratios, observed):
+            new_intensity = target * ratio
+            redistributed[(int(r.h), int(r.k), int(r.l))] = new_intensity
+            if before_intensity > 1e-12:
+                member_changes.append(abs(new_intensity - before_intensity) / before_intensity * 100.0)
+        if member_changes:
+            group_avg_change_percent[gid] = sum(member_changes) / len(member_changes)
+    avg_change_percent = (
+        sum(group_avg_change_percent.values()) / len(group_avg_change_percent) if group_avg_change_percent else None
+    )
+    updated: List[Reflection] = []
+    for r in current:
+        key = (int(r.h), int(r.k), int(r.l))
+        if key in redistributed:
+            updated.append(Reflection(r.h, r.k, r.l, value_from_intensity(redistributed[key], mode), r.sigma, r.phase))
+        else:
+            updated.append(r)
+    log(
+        "Overlap repartitioning: "
+        f"groups={len(by_group)}, reflections_redistributed={len(redistributed)}, "
+        f"map_fallback_groups={fallback_groups}, mix={mix:g}, wavelength={wavelength:g} A, "
+        f"separation_factor={separation_factor:g}, "
+        f"avg_intensity_change_per_group={'n/a' if avg_change_percent is None else f'{avg_change_percent:.2f}%'}"
+    )
+    if log_path is not None:
+        write_powder_repartitioning_log(
+            log_path, cell, mode, by_group, current, updated, wavelength, separation_factor, mix, fallback_groups,
+            feedback_map, group_avg_change_percent, avg_change_percent,
+        )
+        log(f"Overlap repartitioning: detailed log written to {log_path}")
+    return updated, avg_change_percent
 
 def wants_xplor_modelfile(value: str) -> bool:
     return "xplor" in str(value or "").strip().lower()
@@ -2562,6 +3311,43 @@ def normalize_modelfile_source(value: str) -> str:
     if wants_xplor_modelfile(text):
         return "deblurred_xplor"
     return "deblurred_edma_cif"
+
+def make_run_scoped_dedup_log(
+    base_log: Callable[..., None],
+    seen: set,
+    dedupe_prefixes: Tuple[str, ...],
+) -> Callable[..., None]:
+    """Wrap a log callable so a message starting with one of dedupe_prefixes
+    is logged at its normal level only the first time it is seen (per
+    `seen`, a plain set the caller creates fresh once per workflow run);
+    every later, byte-identical occurrence is demoted to DETAIL instead of
+    repeating at full prominence once per cycle. Every other message, and
+    every UNIQUE occurrence of a deduped one, passes through unchanged --
+    nothing is ever suppressed, only its repeat prominence."""
+
+    def wrapped(message: object, *args, **kwargs) -> None:
+        text = str(message)
+        if text.startswith(dedupe_prefixes):
+            if text in seen:
+                kwargs.setdefault("level", "DETAIL")
+            else:
+                seen.add(text)
+        base_log(message, *args, **kwargs)
+
+    return wrapped
+
+def modelfile_source_display_label(value: str) -> str:
+    """Canonical user-facing text for a Next-cycle model token -- the same
+    labels the GUI combo itself shows (see _add_combo_with_values() call
+    site), so a normal-facing log line never leaks the internal token."""
+    token = normalize_modelfile_source(value)
+    if token == "none":
+        return "None"
+    if token == "superflip_xplor":
+        return f"{result_map_label('superflip')} (XPLOR)"
+    if token == "deblurred_xplor":
+        return f"{result_map_label('deblurred')} (XPLOR)"
+    return f"{result_structure_label('deblurred')} (EDMA CIF)"
 
 def normalize_reconstruction_mode(value: str) -> str:
     """Canonical internal code behind the "Phasing method" combo. "superflip" (GUI
@@ -2868,9 +3654,9 @@ def blend_xplor_maps(previous_model: Path, deblurred_map: Path, output_map: Path
     old_map = read_xplor_map(previous_model)
     new_map = read_xplor_map(deblurred_map)
     if old_map.grid != new_map.grid or old_map.axis_order.strip().upper() != new_map.axis_order.strip().upper():
-        raise RuntimeError("Cannot damp XPLOR modelfile: previous model and deblurred map have different grids")
+        raise RuntimeError(f"Cannot damp XPLOR modelfile: previous model and {result_map_label('deblurred').lower()} have different grids")
     if len(old_map.cell) != len(new_map.cell) or any(abs(a - b) > 1e-3 for a, b in zip(old_map.cell, new_map.cell)):
-        raise RuntimeError("Cannot damp XPLOR modelfile: previous model and deblurred map have different cells")
+        raise RuntimeError(f"Cannot damp XPLOR modelfile: previous model and {result_map_label('deblurred').lower()} have different cells")
     blended = ((factor - 1.0) * old_map.data + new_map.data) / factor
     out = XplorMap(
         title=f"damped model factor {factor:g}",
@@ -2991,7 +3777,7 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Pat
                         pass
             reflections.append(record)
     if not reflections:
-        raise ValueError(f"No fbegin/endf reflection block was found in Jana .inflip: {inflip_path}")
+        raise ValueError(f"No fbegin/endf reflection block was found in Jana2020 .inflip: {inflip_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
     out = output_dir / f"{Path(inflip_path).stem}_embedded_reflections.hkl"
     out.write_text(
@@ -3037,16 +3823,16 @@ def parse_inflip_crystallography(inflip_path: Path) -> Tuple[gemmi.UnitCell, gem
         elif key == "composition" and len(parts) > 1:
             composition = " ".join(parts[1:]).strip() or composition
     if cell_values is None:
-        raise ValueError(f"Jana .inflip does not contain a readable cell keyword: {inflip_path}")
+        raise ValueError(f"Jana2020 .inflip does not contain a readable cell keyword: {inflip_path}")
     if not hm:
-        raise ValueError(f"Jana .inflip does not contain a spacegroup keyword: {inflip_path}")
+        raise ValueError(f"Jana2020 .inflip does not contain a spacegroup keyword: {inflip_path}")
     if not composition:
-        raise ValueError(f"Jana .inflip does not contain a composition keyword: {inflip_path}")
+        raise ValueError(f"Jana2020 .inflip does not contain a composition keyword: {inflip_path}")
     sg = get_spacegroup_from_number(hm) if re.fullmatch(r"\d+(?:\.0+)?", str(hm).strip()) else None
     if sg is None:
         sg = resolve_spacegroup_symbol(hm)
     if sg is None:
-        raise ValueError(f"Jana .inflip contains an unrecognized space group: {hm}")
+        raise ValueError(f"Jana2020 .inflip contains an unrecognized space group: {hm}")
     low = hm.lower().replace("'", "").replace('"', "").replace(" ", "")
     if "21/n" in low:
         hm_out = "P 21/n"
@@ -3075,7 +3861,7 @@ def resolve_crystal_metadata(
     resolved_source = normalize_metadata_source(source)
     if resolved_source == METADATA_SOURCE_INFLIP:
         if jana_inflip is None or not Path(jana_inflip).is_file():
-            raise ValueError("Crystal metadata is incomplete. Select a readable Jana .inflip file.")
+            raise ValueError("Crystal metadata is incomplete. Select a readable Jana2020 .inflip file.")
         path = Path(jana_inflip).expanduser().resolve()
         cell, spacegroup, hm, composition = parse_inflip_crystallography(path)
         return CrystalMetadata(cell, spacegroup, hm, composition, resolved_source, path)
@@ -3131,6 +3917,7 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
     saw_dataformat_amplitude = False
     saw_dataformat_intensity = False
     saw_dataformat_phase = False
+    saw_dataformat_fwhm = False
     sample_widths: List[int] = []
     in_block = False
     try:
@@ -3144,6 +3931,7 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
                 saw_dataformat_intensity = "intensity" in items
                 saw_dataformat_amplitude = "amplitude" in items
                 saw_dataformat_phase = "phase" in items
+                saw_dataformat_fwhm = "fwhm" in items
             if key == "fbegin":
                 in_block = True
                 continue
@@ -3161,6 +3949,8 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
         return REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA if saw_dataformat_intensity else REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
     if saw_dataitemwidths and sample_widths and max(sample_widths) >= 6:
         return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+    if saw_dataformat_fwhm:
+        return REFLECTION_DATA_MODE_INTENSITY_FWHM if saw_dataformat_intensity else REFLECTION_DATA_MODE_AMPLITUDE_FWHM
     if saw_dataformat_intensity:
         return REFLECTION_DATA_MODE_INTENSITY
     if saw_dataformat_amplitude:
@@ -3179,6 +3969,87 @@ def resolve_reflection_data_mode_from_sources(
     if inflip_mode and inflip_mode != REFLECTION_DATA_MODE_AUTO:
         return inflip_mode
     return resolve_reflection_data_mode(hkl_path, mode)
+
+
+def resolve_hkl_analysis_inputs(request: HklAnalysisRequest) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
+    """Resolve an HklAnalysisRequest into the concrete HKL file/cell/symmetry/
+    data-mode a load or completeness analysis needs. Plain function operating
+    only on its request argument (no QMainWindow/self needed) so any caller
+    -- the main GUI's own Validate HKL/Analyze completeness, or the Jana
+    Wizard's input summary/data-mode detection -- can call it directly."""
+    work_dir = Path(request.work_text).expanduser().resolve() if request.work_text else Path.cwd()
+    jana_path = Path(request.jana_text).expanduser().resolve() if request.jana_text else None
+    use_inflip_hkl = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
+    if use_inflip_hkl:
+        if jana_path is None or not jana_path.is_file():
+            raise FileNotFoundError("Jana2020 .inflip is required to test or analyze embedded HKL data.")
+        hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
+        source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
+    else:
+        if not request.hkl_text:
+            raise FileNotFoundError("Select an external HKL file or a Jana2020 .inflip with embedded reflections.")
+        hkl_path = Path(request.hkl_text).expanduser().resolve()
+        if not hkl_path.is_file():
+            raise FileNotFoundError(f"HKL file not found: {hkl_path}")
+        source_note = f"HKL source: {hkl_path}"
+    metadata = request.metadata
+    if metadata is None:
+        raise ValueError("Crystal metadata is incomplete. Provide unit-cell, symmetry and composition information.")
+    cell = metadata.cell
+    sg = metadata.spacegroup
+    hm = metadata.spacegroup_hm
+    metadata_name = metadata.source_path if metadata.source_path is not None else "manual input"
+    source_note += f"; cell/symmetry source: {metadata_name}"
+    if use_inflip_hkl:
+        data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
+    else:
+        data_mode = resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
+    return hkl_path, data_mode, cell, sg, hm, source_note
+
+
+def build_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResult:
+    """Plain-function equivalent of resolve_hkl_analysis_inputs() that also
+    reads and merges the reflections -- see resolve_hkl_analysis_inputs()."""
+    hkl_path, data_mode, cell, sg, hm, source_note = resolve_hkl_analysis_inputs(request)
+    value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
+    reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
+    unique = merge_duplicate_reflections(reflections)
+    return HklLoadResult(
+        hkl_path=hkl_path,
+        data_mode=data_mode,
+        cell=cell,
+        spacegroup=sg,
+        spacegroup_hm=hm,
+        source_note=source_note,
+        value_col=value_col,
+        sigma_col=sigma_col,
+        include_000=include_000,
+        reflections=reflections,
+        unique_reflections=unique,
+    )
+
+
+def build_hkl_analysis_request_from_inflip(
+    inflip_path: Path,
+    reference_file: Optional[Path] = None,
+    work_dir: Optional[Path] = None,
+) -> HklAnalysisRequest:
+    """Build the HklAnalysisRequest a Jana2020-.inflip-only caller (the Jana
+    Wizard) needs, without requiring a full IterativeSuperflipPipelineQtGUI
+    instance. Mirrors what the main GUI's _collect_hkl_analysis_request()
+    computes for its own "Jana2020 .inflip" input mode: crystal metadata is
+    always resolved from the .inflip itself (never manual entry or a
+    reference-file override, since the Wizard has no such controls)."""
+    metadata = resolve_crystal_metadata(METADATA_SOURCE_INFLIP, jana_inflip=inflip_path)
+    return HklAnalysisRequest(
+        INPUT_MODE_INFLIP,
+        "",
+        str(inflip_path),
+        str(reference_file) if reference_file is not None else "",
+        str(work_dir) if work_dir is not None else "",
+        REFLECTION_DATA_MODE_AUTO,
+        metadata,
+    )
 
 
 def write_reference_cif_from_inflip(inflip_path: Path, output_cif: Path) -> Path:
@@ -3244,8 +4115,7 @@ def define_m80_inflip_from_model(header_lines: Sequence[str], base_name: str, mo
 def write_text_lines_platform(path: Path, lines: Sequence[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     text = "\r\n".join(str(line) for line in lines).rstrip("\r\n") + "\r\n"
-    encoding = "mbcs" if os.name == "nt" else (locale.getpreferredencoding(False) or "utf-8")
-    path.write_bytes(text.encode(encoding, errors="replace"))
+    path.write_bytes(text.encode(text_encoding(), errors="replace"))
 
 
 def return_phase_studio_result_to_jana(
@@ -3256,7 +4126,7 @@ def return_phase_studio_result_to_jana(
     map_source: str = "deblurred",
 ) -> None:
     if not cfg.jana_return_to_jana or cfg.jana_inflip is None:
-        raise RuntimeError("Jana2020 hand-off requires a Jana .inflip primary input.")
+        raise RuntimeError("Jana2020 handoff requires a Jana2020 .inflip primary input.")
     inflip_path = Path(cfg.jana_inflip)
     if not inflip_path.is_file():
         raise RuntimeError(f"Jana2020 .inflip no longer exists: {inflip_path}")
@@ -3266,17 +4136,17 @@ def return_phase_studio_result_to_jana(
     if source_key.startswith("super"):
         source_map = Path(result.superflip_map)
         target_map = jana_cwd / f"{base_name}-phase-studio-superflip-cycle_{int(result.cycle):03d}.xplor"
-        source_label = "Superflip map"
+        source_label = result_map_label("superflip")
     else:
         source_map = Path(result.deblur_map)
         target_map = jana_cwd / f"{base_name}-deb.xplor"
-        source_label = "deblurred map"
+        source_label = result_map_label("deblurred")
     if not source_map.is_file():
-        raise RuntimeError(f"Selected Jana2020 hand-off map not found: {source_map}")
+        raise RuntimeError(f"Selected Jana2020 handoff map not found: {source_map}")
     if source_map.resolve() != target_map.resolve():
         shutil.copy2(source_map, target_map)
-    log(f"Jana2020 hand-off source: cycle {int(result.cycle):03d}, {source_label}")
-    log(f"Jana2020 hand-off map: {target_map}")
+    log(f"Jana2020 handoff source: cycle {int(result.cycle):03d}, {source_label}")
+    log(f"Jana2020 handoff map: {target_map}")
     original = Path(str(cfg.superflip_exe)).expanduser()
     calc_dir = original.parent / "deblurrer"
     calc_inflip = calc_dir / "calc_m80.inflip"
@@ -3291,8 +4161,9 @@ def return_phase_studio_result_to_jana(
         log=log,
         stop_event=stop_event,
         allow_foreground=True,
+        hide_console=True,
     )
-    log("Jana2020 final Superflip hand-off completed.")
+    log("Jana2020 final Superflip handoff completed.")
 
 
 
@@ -3350,6 +4221,9 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
         "derivesymmetry": "derivesymmetry",
         "electrons": "electrons",
         "dataitemwidths": "dataitemwidths",
+        "lambda": "powder_wavelength",
+        "wavelength": "powder_wavelength",
+        "fwhmseparation": "powder_separation_factor",
     }
     text = Path(inflip_path).read_text(encoding="utf-8", errors="replace")
     for raw in text.splitlines():
@@ -3397,6 +4271,10 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
                 settings["reflection_data_mode"] = REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA
             elif "amplitude" in items and "phase" in items:
                 settings["reflection_data_mode"] = REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+            elif "intensity" in items and "fwhm" in items:
+                settings["reflection_data_mode"] = REFLECTION_DATA_MODE_INTENSITY_FWHM
+            elif "amplitude" in items and "fwhm" in items:
+                settings["reflection_data_mode"] = REFLECTION_DATA_MODE_AMPLITUDE_FWHM
             elif "intensity" in items:
                 settings["reflection_data_mode"] = REFLECTION_DATA_MODE_INTENSITY
             elif "amplitude" in items and "dummy" in items:
@@ -3437,6 +4315,35 @@ def parse_inflip_settings(inflip_path: Path) -> Dict[str, str]:
     if extra:
         settings["extra_superflip_keywords"] = "\n".join(extra)
     return settings
+
+def resolve_powder_wavelength(
+    manual_value: float, inflip_path: Optional[Path], reference_cif_path: Optional[Path],
+) -> Tuple[float, str]:
+    """Resolve the powder-repartitioning wavelength.
+
+    Priority: a manually entered nonzero value wins outright; otherwise the Jana
+    .inflip file's lambda/wavelength line; otherwise the reference file's
+    _diffrn_radiation_wavelength CIF tag. Returns (value, source_description).
+    """
+    if manual_value > 0:
+        return manual_value, "manual entry"
+    if inflip_path is not None and inflip_path.is_file():
+        try:
+            settings = parse_inflip_settings(inflip_path)
+        except Exception:
+            settings = {}
+        value = parse_cif_number(settings.get("powder_wavelength", ""), 0.0)
+        if value > 0:
+            return value, f".inflip file ({inflip_path.name})"
+    if reference_cif_path is not None and reference_cif_path.is_file():
+        try:
+            raw = raw_cif_value(reference_cif_path, ["_diffrn_radiation_wavelength", "_diffrn_radiation.wavelength"])
+        except Exception:
+            raw = ""
+        value = parse_cif_number(raw, 0.0)
+        if value > 0:
+            return value, f"reference file ({reference_cif_path.name})"
+    return 0.0, "none"
 
 def normalize_output_format(value: str) -> str:
     fmt = str(value or "xplor").strip().lower()
@@ -3566,7 +4473,15 @@ def superflip_normalize_keyword_lines(normalize: str, nresshells: int, log: Opti
     if not mode or mode in {"none", "no", "off", "omit", "local"}:
         return []
     if log:
-        log(f"Superflip normalize value {normalize!r} may be unsupported by this executable; omitting normalize keyword.")
+        # Phase Studio never emits a normalize keyword: this function returns no
+        # lines for every value. The previous "may be unsupported by this
+        # executable" implied a per-executable capability check that is not
+        # performed, so it is stated as what actually happens instead -- no
+        # claim of certainty about the binary, and no vague hedge either.
+        log(
+            f"Superflip normalize value {normalize!r} is not passed to Superflip; "
+            "the normalize keyword is omitted for compatibility."
+        )
     return []
 
 def write_structure_cif(
@@ -3845,21 +4760,6 @@ def write_superflip_symmetry_input(
         if voxel_line:
             f.write(voxel_line + "\n")
 
-def _allow_external_process_foreground(process_id: int) -> bool:
-    """Let a newly launched Windows process use normal native foreground rules.
-
-    This grants permission once; it neither activates a window nor polls for one.
-    Other platforms deliberately keep their default window-manager behaviour.
-    """
-    if sys.platform != "win32" or int(process_id) <= 0:
-        return False
-    try:
-        import ctypes
-
-        user32 = ctypes.windll.user32  # type: ignore[attr-defined]
-        return bool(user32.AllowSetForegroundWindow(int(process_id)))
-    except Exception:
-        return False
 
 
 def run_command(
@@ -3870,7 +4770,26 @@ def run_command(
     timeout: Optional[int] = None,
     stop_event: Optional[threading.Event] = None,
     allow_foreground: bool = False,
+    on_output_line: Optional[Callable[[str], None]] = None,
+    hide_console: bool = False,
 ) -> int:
+    """Run an external command, writing its complete raw stdout/stderr to
+    log_path unchanged, byte for byte (including any bare '\\r' console
+    overwrite sequences some tools emit) -- this is a live-streaming reader,
+    not a filter, and never alters what a diagnostic log-file comparison
+    would see.
+
+    on_output_line, when given, is called with each decoded line as it
+    arrives WHILE the process is still running (best-effort progress
+    observation only; a raised exception from it is swallowed so a parsing
+    bug can never fail the run or block stop_event/timeout handling).
+
+    hide_console=True starts the child without a visible console window on
+    Windows (see process_utils.no_console_popen_kwargs). It changes nothing
+    else: the command line, working directory, captured stdout/stderr, exit
+    code and stop_event/timeout termination all behave identically. Opt in
+    per call site rather than globally -- a console that IS part of the user
+    interface must keep showing."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
     display_cmd = [Path(str(cmd[0])).name] if cmd else []
     for argument in cmd[1:]:
@@ -3881,11 +4800,34 @@ def run_command(
         except Exception:
             display_cmd.append(text)
     log("  $ " + " ".join(display_cmd))
-    with log_path.open("w", encoding="utf-8", errors="replace") as lf:
+    with log_path.open("wb") as lf:
+        def relay(raw_bytes: bytes) -> None:
+            lf.write(raw_bytes)
+            if on_output_line is not None:
+                try:
+                    on_output_line(raw_bytes.decode("utf-8", errors="replace"))
+                except Exception:
+                    pass
+
         try:
-            proc = subprocess.Popen(list(cmd), cwd=str(cwd), stdout=lf, stderr=subprocess.STDOUT, text=True)
+            launch_kwargs: Dict[str, object] = {}
+            if hide_console:
+                # No console window for a GUI-launched calculation process.
+                # stdin is pointed at DEVNULL only in this branch: the hidden
+                # console has no reachable input, so an unexpected prompt
+                # would otherwise block invisibly and forever instead of
+                # failing fast into the log below.
+                launch_kwargs.update(no_console_popen_kwargs())
+                launch_kwargs["stdin"] = subprocess.DEVNULL
+            proc = subprocess.Popen(
+                list(cmd),
+                cwd=str(cwd),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                **launch_kwargs,
+            )
             if allow_foreground:
-                _allow_external_process_foreground(proc.pid)
+                allow_external_process_foreground(proc.pid)
         except OSError as exc:
             exe = str(cmd[0]) if cmd else "<empty command>"
             if getattr(exc, "winerror", None) == 4551:
@@ -3898,24 +4840,82 @@ def run_command(
                 )
             else:
                 message = f"Could not start external command: {' '.join(str(x) for x in cmd)}\n{exc}"
-            lf.write(message + "\n")
+            lf.write((message + "\n").encode("utf-8", errors="replace"))
             raise RuntimeError(message) from exc
+
+        # A dedicated reader thread drains the pipe with blocking readline()
+        # calls -- pipes/threads are used instead of select()/pty so this
+        # works identically on a Windows PyInstaller build. The main loop
+        # below never blocks on it (queue.get(timeout=...)), so stop_event
+        # and the timeout deadline stay checked at the same ~0.2s cadence as
+        # before, regardless of how much (or how little) output arrives.
+        line_queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
+
+        def reader() -> None:
+            try:
+                stream = proc.stdout
+                if stream is not None:
+                    for raw_bytes in iter(stream.readline, b""):
+                        line_queue.put(raw_bytes)
+            except Exception:
+                pass
+            finally:
+                line_queue.put(None)
+
+        reader_thread = threading.Thread(target=reader, daemon=True)
+        reader_thread.start()
+
         deadline = None if timeout is None else time.monotonic() + float(timeout)
+        reader_done = False
         while proc.poll() is None:
             if stop_event is not None and stop_event.is_set():
-                lf.write("\nImmediate stop requested by user.\n")
+                lf.write(b"\nImmediate stop requested by user.\n")
                 proc.terminate()
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.wait(timeout=5)
+                while True:
+                    try:
+                        raw_bytes = line_queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if raw_bytes is None:
+                        break
+                    relay(raw_bytes)
                 raise RuntimeError(f"Immediate stop requested; terminated command: {' '.join(str(x) for x in cmd)}")
             if deadline is not None and time.monotonic() > deadline:
                 proc.kill()
                 proc.wait(timeout=5)
                 raise RuntimeError(f"Command timed out after {timeout} seconds: {' '.join(str(x) for x in cmd)}")
-            time.sleep(0.2)
+            drained_any = False
+            while True:
+                try:
+                    raw_bytes = line_queue.get_nowait()
+                except queue.Empty:
+                    break
+                if raw_bytes is None:
+                    reader_done = True
+                    break
+                relay(raw_bytes)
+                drained_any = True
+            if not drained_any:
+                time.sleep(0.2)
+        # The process has exited; drain whatever the reader thread already
+        # queued (or is about to finish queueing), bounded so a stalled
+        # reader can never hang command completion.
+        if not reader_done:
+            drain_deadline = time.monotonic() + 5.0
+            while time.monotonic() < drain_deadline:
+                try:
+                    raw_bytes = line_queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if raw_bytes is None:
+                    break
+                relay(raw_bytes)
+        reader_thread.join(timeout=2.0)
     if proc.returncode != 0:
         tail = ""
         try:
@@ -3962,7 +4962,7 @@ def warn_if_windows_unsigned_exe(exe: str, label: str) -> str:
         pass
     return ""
 
-def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext, observed_hkl: Path, model_file: Optional[Path], reference_file: Optional[Path], reference_format: str, superflip_exe: str, perform_algorithm: str, output_format: str, write_auxiliary_outputs: bool, export_superflip_xplor: bool, export_superflip_ccp4: bool, export_superflip_jana: bool, voxel: str, bestdensities_count: int, bestdensities_metric: str, bestdensities_symmetry: bool, polish: bool, maxcycles: int, repeatmode: int, randomseed: str, delta: str, weakratio: str, biso: str, reflection_data_mode: str, normalize: str, nresshells: int, missing: str, searchsymmetry: str, derivesymmetry: str, electrons: str, dataitemwidths: str, extra_superflip_keywords: str, log: Callable[[str], None], stop_event: Optional[threading.Event] = None) -> Path:
+def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext, observed_hkl: Path, model_file: Optional[Path], reference_file: Optional[Path], reference_format: str, superflip_exe: str, perform_algorithm: str, output_format: str, write_auxiliary_outputs: bool, export_superflip_xplor: bool, export_superflip_ccp4: bool, export_superflip_jana: bool, voxel: str, bestdensities_count: int, bestdensities_metric: str, bestdensities_symmetry: bool, polish: bool, maxcycles: int, repeatmode: int, randomseed: str, delta: str, weakratio: str, biso: str, reflection_data_mode: str, normalize: str, nresshells: int, missing: str, searchsymmetry: str, derivesymmetry: str, electrons: str, dataitemwidths: str, extra_superflip_keywords: str, log: Callable[[str], None], stop_event: Optional[threading.Event] = None, on_output_line: Optional[Callable[[str], None]] = None) -> Path:
     cycle_dir.mkdir(parents=True, exist_ok=True)
     output_name = f"{prefix}.xplor"
     inp = cycle_dir / f"{prefix}.inflip"
@@ -3998,7 +4998,7 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
     if reference_file is not None:
         suffix = ".xplor" if str(reference_format or "").strip().lower() == "xplor" else reference_file.suffix.lower()
         # Keep the Superflip referencefile separate from ref_ctx.work_ref_cif.
-        # In Jana .inflip mode ref_ctx.work_ref_cif can be a synthetic metadata-only CIF
+        # In Jana2020 .inflip mode ref_ctx.work_ref_cif can be a synthetic metadata-only CIF
         # named referencefile.cif with zero atoms.  Using the same filename would overwrite
         # the explicit user-selected Superflip reference CIF and Superflip would stop with
         # "no atoms found in the CIF file".
@@ -4026,6 +5026,8 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
         log=log,
         stop_event=stop_event,
         allow_foreground=True,
+        on_output_line=on_output_line,
+        hide_console=True,
     )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
@@ -4092,6 +5094,7 @@ def run_superflip_symmetrize_map(
         log=log,
         stop_event=stop_event,
         allow_foreground=True,
+        hide_console=True,
     )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
@@ -4136,6 +5139,7 @@ def run_sharped_deblur(
     log: Callable[[str], None],
     stop_event: Optional[threading.Event] = None,
     progress: Optional[Callable[[str], None]] = None,
+    map_value_exponent: float = SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
 ) -> Path:
     output_map.parent.mkdir(parents=True, exist_ok=True)
     log_path = output_map.parent / f"{output_map.stem}.sharped.log"
@@ -4165,7 +5169,7 @@ def run_sharped_deblur(
     log_both(f"SharpED server HTTP timeout: {timeout} seconds")
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("Immediate stop requested.")
-    if max_upload_mb <= 0 and "jana.fzu.cz" in str(base_url).lower():
+    if max_upload_mb <= 0 and normalize_server_url(base_url) == DEFAULT_SERVER_URL:
         input_bytes = int(Path(input_map).stat().st_size)
         public_limit_bytes = 100_000_000
         if input_bytes > public_limit_bytes:
@@ -4177,21 +5181,49 @@ def run_sharped_deblur(
     upload_map = prepare_xplor_for_sharped_upload(input_map, output_map.parent, max_upload_mb, log_both)
     if upload_map != input_map:
         log_both(f"SharpED upload map: {upload_map}")
-    client = SharpEDServerClient(base_url=base_url, timeout=float(timeout))
-    selected_model = model.strip()
-    if not selected_model or selected_model.lower() in {"default", "server default", "sharped default"}:
-        models = client.get_models(log=log_both)
-        selected_model = models.default_model or "SharpED latest"
-        if models.models:
-            log_both("SharpED server models: " + ", ".join(models.models))
-        log_both(f"SharpED server default model: {selected_model}")
 
+    # Reversible map-value scaling. Exactly one forward transform happens here,
+    # on the very last file handed to the client, and exactly one inverse
+    # transform happens below on the file the server actually returned -- once
+    # per SharpED request, regardless of retries, polling or download probing
+    # inside SharpEDServerClient.execute(). For the default exponent 1.0 (and
+    # for the explicit 0.0 bypass) nothing at all runs and `upload_map` stays
+    # the untouched file the pre-feature workflow uploaded.
+    exponent = normalize_map_value_exponent(map_value_exponent)
+    scaling_active = not map_value_scaling_is_identity(exponent)
+    exponent_note = describe_map_value_exponent(exponent)
+    if exponent_note:
+        log_both(exponent_note)
+    if scaling_active:
+        # Written to a separate file: `input_map` is the Superflip/recycled map
+        # the rest of the workflow still needs in its original value domain.
+        scaled_upload_map = output_map.parent / f"{output_map.stem}.sharped_input.xplor"
+        source_map = read_xplor_map(upload_map)
+        write_xplor_map(
+            scaled_upload_map,
+            XplorMap(
+                title=source_map.title,
+                grid=source_map.grid,
+                cell=source_map.cell,
+                axis_order=source_map.axis_order,
+                data=apply_signed_power(source_map.data, exponent),
+            ),
+            title=source_map.title,
+        )
+        del source_map
+        # The size check above ran on the pre-transform file; re-run the very
+        # same existing check on the file that is actually uploaded, so a
+        # re-serialized map cannot slip past the configured upload limit.
+        upload_map = prepare_xplor_for_sharped_upload(scaled_upload_map, output_map.parent, max_upload_mb, log_both)
+        log_both(f"SharpED map value detail: exponent {exponent:.3f} applied to {scaled_upload_map.name}")
+
+    client = SharpEDServerClient(base_url=base_url, timeout=float(timeout))
     client.execute(
         file_path=upload_map,
         bearer_token=api_token.strip(),
         out_path=output_map,
         elements=elements.strip() or "C N O",
-        model=selected_model,
+        model=model,
         outres=outres,
         poll_seconds=poll_seconds,
         max_polls=max_polls,
@@ -4201,6 +5233,23 @@ def run_sharped_deblur(
     if not output_map.is_file() or output_map.stat().st_size == 0:
         raise RuntimeError(f"SharpED did not create output map: {output_map}")
     log_both(f"[SharpED] Downloaded {output_map.name}")
+    if scaling_active:
+        # Read back what the server produced (never a cached copy of the
+        # upload) and undo the transform in place, before EDMA, symmetrization,
+        # metrics, phase recycling, export or the Jana2020 hand-off see it.
+        returned_map = read_xplor_map(output_map)
+        write_xplor_map(
+            output_map,
+            XplorMap(
+                title=returned_map.title,
+                grid=returned_map.grid,
+                cell=returned_map.cell,
+                axis_order=returned_map.axis_order,
+                data=invert_signed_power(returned_map.data, exponent),
+            ),
+            title=returned_map.title,
+        )
+        log_both(f"SharpED map value detail: inverse exponent 1/{exponent:.3f} applied to {output_map.name}")
     return output_map
 
 def parse_edma_coo(coo_file: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -4288,11 +5337,22 @@ def scaled_element_quotas(target_counts: Sequence[Tuple[str, int]], n_items: int
                 quotas[elem] = 1
     return quotas
 
-def assign_elements_by_reference_composition(density: np.ndarray, ref_atoms: Sequence[AtomSite]) -> List[str]:
+def assign_elements_by_reference_composition(
+    density: np.ndarray, ref_atoms: Sequence[AtomSite], composition: str = ""
+) -> List[str]:
     if density is None or len(density) == 0:
         return []
     counts, order = atom_element_counts(ref_atoms)
     target_counts = [(elem, counts[elem]) for elem in order if counts.get(elem, 0) > 0]
+    if not target_counts:
+        # No reference-structure atom sites to draw element counts from --
+        # the common case when the run has no external reference file, just
+        # an entered composition. Fall back to that composition itself
+        # instead of dropping straight to the generic Ag/B density-threshold
+        # placeholder below, so the written CIF's elements match what was
+        # actually entered/declared, the same way EDMA's own m40 output
+        # already does via its own "composition" keyword.
+        target_counts = parse_composition_counts(composition)
     quotas = scaled_element_quotas(target_counts, len(density))
     if not quotas:
         return assign_elements_by_density(density, heavy="Ag", light="B")
@@ -4357,6 +5417,7 @@ def run_edma_on_xplor(
     chlimlist: str = "0.0057 relative",
     extra_edma_keywords: str = "",
     structure_format: str = "cif",
+    write_m40: bool = True,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     inp = out_dir / f"{prefix}_edma.inp"
@@ -4385,8 +5446,6 @@ def run_edma_on_xplor(
             fullcell_value = "no"
         f.write(f"scale fractional\nmaxima {maxima_value}\nfullcell {fullcell_value}\n")
         f.write(f"plimit {float(absolute_plimit):g}\n")
-        # Jana-format peaks (m40) are written unconditionally alongside the CIF/XYZ/PDB
-        # bundle; it costs nothing and keeps the atom-count/charge settings below meaningful.
         f.write(f"composition {ref_ctx.composition}\n")
         if str(numberofatoms or "").strip():
             f.write(f"numberofatoms {str(numberofatoms).strip()}\n")
@@ -4395,17 +5454,34 @@ def run_edma_on_xplor(
             f.write(f"chlimit {str(chlimit).strip()}\n")
         if str(chlimlist or "").strip():
             f.write(f"chlimlist {str(chlimlist).strip()}\n")
-        f.write("m40forjana yes\n")
-        f.write(f"writem40 {outbase}.m40\n")
+        if write_m40:
+            # Jana-format peaks (m40), requested only when this run could
+            # actually be handed off to Jana2020 (a jana_inflip is
+            # configured) -- otherwise it is just another per-cycle file
+            # nothing will ever read.
+            f.write("m40forjana yes\n")
+            f.write(f"writem40 {outbase}.m40\n")
         for line in clean_keyword_lines(extra_edma_keywords):
             f.write(line + "\n")
-    map_label = "Deblurred map" if "deblur" in prefix.lower() else "Superflip map"
+    map_label = result_map_label("deblurred" if "deblur" in prefix.lower() else "superflip")
     log(f"[EDMA] {map_label} · threshold {plimit_sigma:g} σ")
     if map_sigma is None:
         log(f"  plimit={float(absolute_plimit):g}")
     else:
         log(f"  map σ={map_sigma:g} · plimit={float(absolute_plimit):g}")
-    run_command([edma_exe, inp.name], cwd=out_dir, log_path=edma_log, log=log, stop_event=stop_event)
+    # EDMA is a console executable started by the GUI; its console window is
+    # not part of the user interface (all of its output is captured into
+    # edma_log below), so it runs hidden. Command line, working directory,
+    # captured output, exit-code handling and stop_event termination are
+    # deliberately unchanged.
+    run_command(
+        [edma_exe, inp.name],
+        cwd=out_dir,
+        log_path=edma_log,
+        log=log,
+        stop_event=stop_event,
+        hide_console=True,
+    )
     log_text = edma_log.read_text(encoding="utf-8", errors="replace") if edma_log.is_file() else ""
     lower_log = log_text.lower()
     edma_failed = (
@@ -4425,7 +5501,7 @@ def run_edma_on_xplor(
         write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], structure_format)
         return cif
     frac, dens = symmetry_merge_peaks(frac, dens, ref_ctx, merge_distance_a)
-    elements = assign_elements_by_reference_composition(dens, ref_ctx.atoms)
+    elements = assign_elements_by_reference_composition(dens, ref_ctx.atoms, ref_ctx.composition)
     atoms = [AtomSite(label=f"{elements[i]}{i+1}", element=elements[i], frac=frac[i], density=float(dens[i])) for i in range(len(frac))]
     write_structure_bundle(cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms, structure_format)
     return cif
@@ -4571,6 +5647,18 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
             "superflip_success_rate_percent",
             "superflip_mean_cycles",
             "recycle_map_correlation",
+            "omit_superflip_correlation",
+            "omit_superflip_rfree",
+            "omit_deblur_correlation",
+            "omit_deblur_rfree",
+            "superflip_recall",
+            "superflip_precision",
+            "superflip_heavy_atom_count",
+            "deblur_recall",
+            "deblur_precision",
+            "deblur_heavy_atom_count",
+            "powder_repartition_avg_change_percent",
+            "intensity_correction_avg_change_percent",
         ])
         for r in results:
             w.writerow([
@@ -4594,6 +5682,18 @@ def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
                 "" if r.superflip_success_rate is None else r.superflip_success_rate,
                 "" if r.superflip_mean_cycles is None else r.superflip_mean_cycles,
                 "" if r.recycle_map_correlation is None else r.recycle_map_correlation,
+                "" if r.omit_superflip_correlation is None else r.omit_superflip_correlation,
+                "" if r.omit_superflip_rfree is None else r.omit_superflip_rfree,
+                "" if r.omit_deblur_correlation is None else r.omit_deblur_correlation,
+                "" if r.omit_deblur_rfree is None else r.omit_deblur_rfree,
+                "" if r.superflip_recall is None else r.superflip_recall,
+                "" if r.superflip_precision is None else r.superflip_precision,
+                "" if r.superflip_heavy_atom_count is None else r.superflip_heavy_atom_count,
+                "" if r.deblur_recall is None else r.deblur_recall,
+                "" if r.deblur_precision is None else r.deblur_precision,
+                "" if r.deblur_heavy_atom_count is None else r.deblur_heavy_atom_count,
+                "" if r.powder_repartition_avg_change_percent is None else r.powder_repartition_avg_change_percent,
+                "" if r.intensity_correction_avg_change_percent is None else r.intensity_correction_avg_change_percent,
             ])
 
 
@@ -4633,6 +5733,79 @@ class MiddleElidedLabel(QLabel):
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
         self._update_elided_text()
+
+
+class FlowLayout(QLayout):
+    """A left-to-right row that wraps to additional lines instead of
+    shrinking its children -- used for the Help navigation link row, whose
+    settings page is deliberately width-flexible (QSizePolicy.Ignored) and
+    can otherwise end up narrower than the full "Setup / Input / Workflow /
+    ... " link row needs, silently eliding several link labels at once.
+    Wrapping guarantees every label always renders in full. Standard Qt
+    FlowLayout recipe (Qt's own "Flow Layout" example), trimmed to what this
+    app needs."""
+
+    def __init__(self, parent: Optional[QWidget] = None, margin: int = 0, spacing: int = 4) -> None:
+        super().__init__(parent)
+        self._items: List[object] = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+
+    def addItem(self, item) -> None:  # noqa: N802 - Qt override
+        self._items.append(item)
+
+    def count(self) -> int:  # noqa: N802 - Qt override
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: N802 - Qt override
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):  # noqa: N802 - Qt override
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):  # noqa: N802 - Qt override
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt override
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt override
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect) -> None:  # noqa: N802 - Qt override
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):  # noqa: N802 - Qt override
+        return self.minimumSize()
+
+    def minimumSize(self):  # noqa: N802 - Qt override
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        left, top, right, bottom = self.getContentsMargins()
+        size += QSize(left + right, top + bottom)
+        return size
+
+    def _do_layout(self, rect, test_only: bool) -> int:
+        left, top, right, bottom = self.getContentsMargins()
+        effective_rect = rect.adjusted(left, top, -right, -bottom)
+        x, y = effective_rect.x(), effective_rect.y()
+        line_height = 0
+        spacing = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            next_x = x + hint.width() + spacing
+            if next_x - spacing > effective_rect.right() and line_height > 0:
+                x = effective_rect.x()
+                y += line_height + spacing
+                next_x = x + hint.width() + spacing
+                line_height = 0
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = next_x
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + bottom
 
 
 class PathRow(QWidget):
@@ -4703,10 +5876,10 @@ class PathRow(QWidget):
         self.edit.setToolTip(tooltip)
 
 INPUT_TOOLTIPS = {
-    "input_source_mode": "Choose whether reflections come from Jana .inflip, selected overrides, or an external HKL file.",
+    "input_source_mode": "Choose whether reflections come from Jana2020 .inflip, selected overrides, or an external HKL file.",
     "jana_inflip": "Jana2020 Superflip input file. In Jana modes its fbegin/endf reflection block is the default HKL source, and its cell/space-group/composition keywords can provide the reference metadata.",
     "hkl": "External reflection file. In Jana override mode it replaces only the fbegin/endf reflection block; in external mode it is the required reflection source.",
-    "metadata_source": "Authoritative source for unit cell, space group and composition.",
+    "metadata_source": "Selects the authoritative source for unit-cell, space-group and composition metadata, independently of the reflection-data source -- for example, External HKL input with metadata taken from a Jana2020 .inflip or reference structure.",
     "manual_cell_a": "Manual unit-cell length a in angstrom.",
     "manual_cell_b": "Manual unit-cell length b in angstrom.",
     "manual_cell_c": "Manual unit-cell length c in angstrom.",
@@ -4721,8 +5894,8 @@ INPUT_TOOLTIPS = {
     "work_dir": "Output directory for generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics.",
     "superflip_exe": "Absolute path to the original Jana2020 Superflip executable. Default: C:\\Jana2020\\SUPERFLIP\\superflip_original.exe. Do not select the Phase Studio wrapper named superflip.exe.",
     "edma_exe": "Absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps. Default: C:\\Jana2020\\SUPERFLIP\\EDMA.exe.",
-    "workflow_preset": "Applies a bundle of starting values for a common crystallographic workflow. 'Recommended' is a general-purpose baseline (matches the built-in defaults); the others tune settings for a specific sample type. All values remain individually editable afterward, and 'custom' leaves everything untouched.",
-    "cycles": "Number of iterative Superflip -> EDMA -> SharpED -> EDMA cycles to run.",
+    "workflow_preset": "Applies a bundle of starting values for a common crystallographic workflow. 'Recommended' is a general-purpose baseline (matches the built-in defaults); the others tune settings for a specific sample type. All values remain individually editable afterward, and 'Custom' leaves everything untouched.",
+    "cycles": "Number of iterative Superflip → EDMA → SharpED → EDMA cycles to run.",
     "composition_override": "Optional Superflip composition string. Leave blank to derive composition from the reference CIF formula or atom list.",
     "plimit_superflip": "Peak threshold as a multiplier of the XPLOR map sigma. Phase Studio converts it to EDMA's absolute 'plimit <value>'.",
     "plimit_deblur": "Peak threshold as a multiplier of the XPLOR map sigma. Phase Studio converts it to EDMA's absolute 'plimit <value>'.",
@@ -4736,21 +5909,22 @@ INPUT_TOOLTIPS = {
     "extra_edma_keywords": "Additional raw EDMA keyword lines appended to the generated EDMA input. Use this for documented EDMA options not exposed above.",
     "damping_factor": "Inverse XPLOR damping value 1/x. 1.0 means no damping; 0.5 is equivalent to the previous factor 2.0; 0.25 is equivalent to factor 4.0. Disabled/ignored for CIF or none.",
     "modelfile_source": "Authoritative source for cycle 2 and later. none forces the run to one cycle; superflip_xplor cycles without SharpED deblurring; deblurred_xplor uses the SharpED XPLOR map; deblurred_edma_cif ignores XPLOR damping.",
-    "reconstruction_mode": "Superflip runs the standard charge-flipping cycle every cycle (unchanged default). '1st Superflip, then SharpED (beta)' runs Superflip only once, then each cycle deblurs with SharpED, reads phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle; it does not work well with some models. 'SharpED (experimental)' skips Superflip entirely and starts cycle 1 from |Fobs| with independent random phases; it does not work yet and is intended for development, not production use. Hidden unless 'Show beta and experimental features' is enabled on Advanced -> Setup.",
+    "reconstruction_mode": "Superflip runs the standard charge-flipping cycle every cycle (unchanged default). '1st Superflip, then SharpED (beta)' runs Superflip only once, then each cycle deblurs with SharpED, reads phi_calc by FFT from that SharpED map for every measured hkl, and recomposes a map from |Fobs| + phi_calc for the next cycle; it does not work well with some models. 'SharpED (experimental)' skips Superflip entirely and starts cycle 1 from |Fobs| with independent random phases; it does not work yet and is intended for development, not production use. Hidden unless 'Show beta and experimental features' is enabled on Advanced -> Setup.",
     "run_edma_recycle_final": "Only used by the '1st Superflip, then SharpED (beta)' and 'SharpED (experimental)' phasing methods: run EDMA peak extraction and structure export once, on the final cycle's |Fobs|+phi_calc map.",
     "exclude_atoms": "Optional atom labels to remove from CIF modelfiles before the next Superflip cycle. Use comma, semicolon or whitespace separation.",
-    "run_edma_superflip": "Run EDMA peak search on the raw Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
-    "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the deblurred map is a copy of the Superflip map.",
+    "run_edma_superflip": "Run EDMA peak search on the Superflip XPLOR map and write CIF, XYZ and PDB structure exports.",
+    "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the SharpED map is a copy of the Superflip map.",
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
-    "run_edma_deblurred": "Run EDMA peak search on the deblurred XPLOR map. Disable this when you only want map export or raw Superflip EDMA results.",
+    "run_edma_deblurred": "Run EDMA peak search on the SharpED XPLOR map. Disable this when you only want map export or Superflip EDMA results.",
+    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip validation and SharpED validation tabs' omit-map correlation series (full map vs. omit map); together with R_free, this also feeds the phase-recycling result selector's Selection score, helping identify the most suitable map among the recycling cycles. Roughly doubles Superflip/SharpED time per cycle.",
+    "compute_omit_rfree": "Also compute R_free from the excluded 5% holdout: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Feeds the phase-recycling result selector's Selection score alongside OMIT correlation, helping rank cycles and choose the most suitable map. Requires 'Compute OMIT validation maps'.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
-    "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save the observed reflections as h k l I/F² sigma phase(deg) -- phase is 0 unless supplied by the selected input mode -- in the standardized text format or a ShelX/Jana-compatible .fcf file.",
+    "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save, for each cycle's Superflip map, the observed |Fobs|/intensity together with phases (and, for ShelX, calculated F squared) read by FFT from that map, in a standardized text file or a ShelX/Jana-compatible .fcf file.",
     "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
     "referencefile_mode": "Internal automatic setting derived from External reference file. Phase Studio writes only referencefile and lets Superflip infer jana/xplor/ccp4/cif from the filename.",
     "voxel": "Superflip voxel grid. The default omit/blank skips the keyword. Use three integers, for example 180 80 160, or AUTO to compute a 0.2 A grid from the unit cell.",
     "bestdensities_count": "First argument of bestdensities: how many best density maps Superflip keeps.",
-    "bestdensities_metric": "Second argument of bestdensities: rvalue, peakiness, symmetry or reference.",
-    "bestdensities_symmetry": "Adds the 'symmetry' modifier to 'bestdensities 1', biasing saved-density selection toward symmetry-consistent solutions.",
+    "bestdensities_metric": "Second argument of bestdensities: rvalue, peakiness, symmetry or reference. 'symmetry' biases saved-density selection toward symmetry-consistent solutions.",
     "polish": "Adds 'polish yes' to the Superflip input, enabling Superflip's final polishing/refinement stage when supported by the executable.",
     "maxcycles": "Maximum number of Superflip iterations per run.",
     "repeatmode": "Superflip repeatmode parameter controlling repeated independent attempts and convergence sampling.",
@@ -4758,7 +5932,7 @@ INPUT_TOOLTIPS = {
     "delta": "Superflip delta keyword. AUTO lets Superflip estimate the flip threshold.",
     "weakratio": "Superflip weakratio keyword.",
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
-    "reflection_data_mode": "Exact HKL column order. 'set from inflip' imports dataformat from Jana; the four HKL modes accept I or F followed by sigma, optionally with phase in degrees before sigma. Phase Studio converts phase to Superflip turns and retains sigma for diagnostics.",
+    "reflection_data_mode": "Exact HKL column order. 'set from inflip' imports dataformat from Jana. hkl I sigma/hkl F sigma/hkl I phase sigma/hkl F phase sigma accept I or F followed by a genuine sigma, optionally with phase in degrees before sigma; Phase Studio converts phase to Superflip turns and retains sigma for diagnostics. hkl I fwhm/hkl F fwhm are for data whose second column is a peak-shape FWHM (e.g. Le Bail powder extraction), not a measurement uncertainty -- I/sigma(I)-style statistics are hidden or relabeled I/FWHM for these, since an I/FWHM ratio is not a signal-to-noise ratio.",
     "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle model instead.",
     "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
@@ -4770,17 +5944,25 @@ INPUT_TOOLTIPS = {
     "electrons": "Superflip electrons keyword. Leave blank to omit.",
     "dataitemwidths": "Not required for generated inputs because Phase Studio writes whitespace-separated fbegin records.",
     "extra_superflip_keywords": "Additional raw Superflip keyword lines inserted before fbegin. Use this for advanced/manual keywords not represented by a widget.",
-    "map_feedback_missing_from_cycle": "First completed cycle whose final map is used to add missing reflections for the next cycle. Use 0 to disable missing-reflection completion.",
+    "map_feedback_missing_enabled": "Enables missing-reflection completion. When off, the fields below are ignored.",
+    "map_feedback_missing_from_cycle": "First completed cycle whose map is used to add missing reflections for the next cycle.",
     "map_feedback_missing_percent_limit": "Maximum number of added missing reflections, expressed as a percent of the current HKL count. This prevents map feedback from overwhelming measured data.",
-    "map_feedback_intensity_from_cycle": "First completed cycle whose final map is used to damp observed intensities for the next cycle. Use 0 to disable intensity correction.",
+    "map_feedback_intensity_enabled": "Enables map-based intensity correction. When off, the fields below are ignored.",
+    "map_feedback_intensity_from_cycle": "First completed cycle whose map is used to damp observed intensities for the next cycle.",
     "map_feedback_intensity_damping": "Damping factor for map-based intensity correction. 0 keeps observed data; 1 replaces them by scaled map-derived intensities.",
     "map_feedback_intensity_max_i_over_sigma": "Apply map-based intensity correction only to non-zero reflections with value/sigma below this limit. Use 0 to correct all non-zero reflections.",
-    "sharped_base_url": "SharpED inference server base URL. The C++ reference client uses https://jana.fzu.cz.",
+    "redistribute_overlaps": "Enables powder overlap repartitioning: each cycle, redistribute the combined observed intensity of overlapping-reflection groups (hkl I/F fwhm data only) between their members, using intensities calculated by FFT from that cycle's processed map. When off, the fields below are ignored.",
+    "powder_redistribution_from_cycle": "First completed cycle whose map is used to redistribute overlapping powder reflections for the next cycle.",
+    "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected first from the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
+    "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2θ-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
+    "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
+    "sharped_base_url": "SharpED inference server base URL. The current service is https://sharped.fzu.cz.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
     "show_beta_features": "When off (default), beta and experimental Phasing methods and the settings that only apply to them are hidden entirely from the Basic tabs, not just disabled. Enable to make them selectable.",
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
     "sharped_elements": "Chemical elements sent to the SharpED server. Leave blank to derive unique non-H elements from the reference composition.",
-    "sharped_outres": "Output resolution sent as the outres multipart field.",
+    "sharped_outres": "Requested output sampling/resolution of the SharpED density map.",
+    "sharped_map_value_exponent": "Reversible signed power transform sign(x)·|x|^a applied to map values before SharpED and inverted automatically on the returned SharpED map; 1.0 leaves values unchanged and 0 disables the transform. Only voxel values are affected — grid, cell, symmetry, format and the SharpED request itself are untouched.",
     "sharped_max_upload_mb": "Maximum XPLOR map size uploaded to the SharpED server in megabytes. Use 100 MB for the current public server limit. If voxel is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits. Set 0 to disable this check.",
     "sharped_timeout_seconds": "HTTP timeout in seconds for SharpED model query, upload, status and download requests. Phase Studio enforces at least 600 seconds for large XPLOR uploads.",
     "sharped_poll_seconds": "Seconds between status polling requests.",
@@ -4892,6 +6074,97 @@ def create_phase_studio_app_icon(size: int = 64) -> QIcon:
     return QIcon(target)
 
 
+def apply_phase_studio_app_icon(app: "QApplication") -> None:
+    """Stamp the Phase Studio icon onto the whole application.
+
+    Set on the QApplication rather than per window: QWidget.windowIcon() falls
+    back to the application icon, so this is what gives the Jana2020 Wizard,
+    the result selector and every other top-level dialog a real title-bar,
+    taskbar and Alt+Tab icon instead of the generic Qt fallback. Uses the one
+    existing icon helper -- no second asset, no per-window duplication.
+    """
+    try:
+        if app is not None and app.windowIcon().isNull():
+            app.setWindowIcon(create_phase_studio_app_icon(256))
+    except Exception:
+        # A missing icon must never prevent the application from starting.
+        pass
+
+
+def create_phase_studio_brand_header() -> QWidget:
+    """The "PHASE STUDIO" branded header (logo, title, version badge,
+    subtitle) -- shared by the main window and any other Phase Studio
+    surface (the Jana2020 Wizard, its result selector, ...) that should
+    visually read as the same application rather than a generic dialog."""
+    brand_header = QWidget()
+    brand_header.setObjectName("brandHeader")
+    brand_layout = QHBoxLayout(brand_header)
+    brand_layout.setContentsMargins(12, 6, 12, 7)
+    brand_layout.setSpacing(10)
+    brand_logo = QLabel()
+    brand_logo.setObjectName("brandLogo")
+    brand_logo_pixmap = create_phase_studio_logo_pixmap(58)
+    brand_logo.setPixmap(brand_logo_pixmap)
+    brand_logo.setFixedSize(brand_logo_pixmap.size())
+    brand_logo.setToolTip("Phase Studio")
+    brand_text_layout = QVBoxLayout()
+    brand_text_layout.setContentsMargins(0, 0, 0, 0)
+    brand_text_layout.setSpacing(1)
+    brand_title_row = QHBoxLayout()
+    brand_title_row.setSpacing(8)
+    brand_title = QLabel("PHASE STUDIO")
+    brand_title.setObjectName("brandTitle")
+    version_badge = QLabel(__version__)
+    version_badge.setObjectName("versionBadge")
+    version_badge.setAlignment(Qt.AlignCenter)
+    brand_title_row.addWidget(brand_title, 1)
+    brand_title_row.addWidget(version_badge)
+    brand_subtitle = QLabel("Superflip · SharpED · EDMA workflow")
+    brand_subtitle.setObjectName("brandSubtitle")
+    brand_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    brand_text_layout.addLayout(brand_title_row)
+    brand_text_layout.addWidget(brand_subtitle)
+    brand_layout.addWidget(brand_logo, 0, Qt.AlignVCenter)
+    brand_layout.addLayout(brand_text_layout, 1)
+    return brand_header
+
+
+def create_phase_studio_context_banner(title: str, subtitle: str, badge: Optional[QWidget] = None) -> QWidget:
+    """A compact navy context banner using the same visual language as the
+    main window's "RUN OVERVIEW" banner (#dashboardHeader/#dashboardTitle/
+    #dashboardSubtitle in ui_style.py), reused for Jana2020 Wizard page
+    context and the Jana2020 result selector so both read as the same
+    application as the main window rather than an unrelated dialog."""
+    banner = QWidget()
+    banner.setObjectName("dashboardHeader")
+    banner_layout = QHBoxLayout(banner)
+    banner_layout.setContentsMargins(12, 5, 12, 5)
+    banner_text = QVBoxLayout()
+    banner_text.setSpacing(0)
+    banner_title = QLabel(title)
+    banner_title.setObjectName("dashboardTitle")
+    banner_subtitle = QLabel(subtitle)
+    banner_subtitle.setObjectName("dashboardSubtitle")
+    banner_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+    banner_text.addWidget(banner_title)
+    banner_text.addWidget(banner_subtitle)
+    banner_layout.addLayout(banner_text, 1)
+    if badge is not None:
+        banner_layout.addWidget(badge)
+    return banner
+
+
+def apply_safe_dialog_geometry(dialog: QWidget, width: int, height: int) -> None:
+    """Int-based convenience wrapper around the existing
+    fit_dialog_to_available_screen() (frame-aware: measures the dialog's
+    actual native frame, not an approximate margin, and double-clamps after
+    the window manager settles) -- the one shared safe top-level-window
+    geometry helper for the Jana2020 Wizard, the Jana2020 result selector,
+    HKL Validation/Completeness, and any other Phase Studio dialog, rather
+    than each maintaining its own hard-coded/partial sizing logic."""
+    fit_dialog_to_available_screen(dialog, QSize(width, height))
+
+
 class WorkflowDiagram(QWidget):
     """Compact native-Qt overview of the optional reconstruction branches."""
 
@@ -4923,7 +6196,7 @@ class WorkflowDiagram(QWidget):
             margin = 8.0
             top_boxes, bottom_boxes = self._diagram_geometry(width)
             top_labels = ("Reflections", "Superflip", "XPLOR map", "SharpED")
-            bottom_labels = ("EDMA", "Processed map", "Next-cycle model", "Jana2020")
+            bottom_labels = ("EDMA", "SharpED map", "Next-cycle model", "Jana2020")
             diagram_font = painter.font()
             diagram_font.setPointSizeF(8.5)
             painter.setFont(diagram_font)
@@ -4976,10 +6249,433 @@ class WorkflowDiagram(QWidget):
         finally:
             painter.end()
 
+
+def format_metric_hover_value(value: float) -> str:
+    """Magnitude-adaptive display formatting for a hover-tooltip number.
+    Display only -- never used for the stored/plotted metric value itself."""
+    magnitude = abs(float(value))
+    if magnitude >= 1000:
+        return f"{value:,.0f}"
+    if magnitude >= 100:
+        return f"{value:.1f}"
+    if magnitude >= 10:
+        return f"{value:.2f}"
+    return f"{value:.3f}"
+
+
+def robust_detail_range(values: Sequence[Optional[float]], min_points: int = 4) -> Optional[Tuple[float, float]]:
+    """Display-only robust y-range covering the main body of ``values`` (a
+    padded IQR fence around the median), for a "Detail" viewport that stays
+    readable when one extreme outlier would otherwise dominate the full
+    autoscaled range. Never modifies, discards or recalculates any stored
+    metric value -- points outside the returned range are simply outside the
+    current viewport, exactly like an ordinary zoom. Returns None when there
+    are too few finite points for a robust range to mean anything."""
+    finite = np.asarray(
+        [float(v) for v in values if v is not None and np.isfinite(float(v))], dtype=float
+    )
+    if finite.size < min_points:
+        return None
+    q1, q3 = np.percentile(finite, [25, 75])
+    iqr = q3 - q1
+    pad = iqr * 1.5 if iqr > 1e-9 else max(abs(float(np.median(finite))), 1.0) * 0.1
+    lo, hi = q1 - pad, q3 + pad
+    if hi - lo < 1e-9:
+        hi = lo + max(abs(lo), 1.0) * 0.05
+    return (float(lo), float(hi))
+
+
+class MetricsPlotInteraction:
+    """Reusable hover/zoom/pan/reset controller for one Reconstruction
+    Metrics tab's Matplotlib canvas.
+
+    _render_metrics_tab() tears down and rebuilds the tab's Axes on every
+    refresh (figure.clear() + add_subplot), so this controller intentionally
+    holds no reference to a specific Axes/artist across redraws -- it looks
+    up the CURRENT Axes and CURRENT series data through the callables passed
+    to __init__ every time an event fires, and notify_redraw_start() drops
+    any hover state pointing at an Axes that is about to be destroyed.
+    """
+
+    HOVER_RADIUS_PX = 9.0
+    ZOOM_FACTOR = 1.3
+    AXIS_EDGE_PX = 22.0
+
+    def __init__(
+        self,
+        key: str,
+        canvas: "FigureCanvas",
+        get_axes: Callable[[], object],
+        get_series: Callable[[], List[Tuple[str, List[int], List[Optional[float]], List[Optional[float]], str]]],
+        *,
+        supports_detail: bool = False,
+        on_state_changed: Optional[Callable[[str], None]] = None,
+        request_rerender: Optional[Callable[[], None]] = None,
+    ) -> None:
+        self.key = key
+        self.canvas = canvas
+        self._get_axes = get_axes
+        self._get_series = get_series
+        self.supports_detail = supports_detail
+        self.on_state_changed = on_state_changed
+        self.request_rerender = request_rerender
+        self.user_modified = False
+        self.mode = "full"
+        self.detail_available = False
+        self._stored_xlim: Optional[Tuple[float, float]] = None
+        self._stored_ylim: Optional[Tuple[float, float]] = None
+        self._drag: Optional[dict] = None
+        self._hover_annotation = None
+        self._hover_ring = None
+        self._hover_cycle: Optional[int] = None
+        canvas.mpl_connect("scroll_event", self._on_scroll)
+        canvas.mpl_connect("button_press_event", self._on_press)
+        canvas.mpl_connect("motion_notify_event", self._on_motion)
+        canvas.mpl_connect("button_release_event", self._on_release)
+        canvas.mpl_connect("figure_leave_event", self._on_leave)
+
+    # ----- external API used by _render_metrics_tab() and the control row -----
+
+    def notify_redraw_start(self) -> None:
+        """Call at the very top of each render pass, before figure.clear()."""
+        self._hover_annotation = None
+        self._hover_ring = None
+        self._hover_cycle = None
+
+    def apply_limits(
+        self,
+        ax,
+        full_xlim: Tuple[float, float],
+        full_ylim: Tuple[float, float],
+        detail_ylim: Optional[Tuple[float, float]],
+    ) -> str:
+        """Set the Axes' x/y limits for this render pass, honoring a stored
+        manual zoom/pan (section 16: live updates must not reset it) or an
+        active Detail mode, falling back to the freshly computed full-range
+        limits otherwise. Returns which view is actually in effect."""
+        self.detail_available = detail_ylim is not None
+        if not self.detail_available and self.mode == "detail":
+            self.mode = "full"
+        if self.user_modified and self._stored_xlim is not None and self._stored_ylim is not None:
+            ax.set_xlim(self._stored_xlim)
+            ax.set_ylim(self._stored_ylim)
+            return "manual"
+        if self.mode == "detail" and detail_ylim is not None:
+            ax.set_xlim(full_xlim)
+            ax.set_ylim(detail_ylim)
+            return "detail"
+        ax.set_xlim(full_xlim)
+        ax.set_ylim(full_ylim)
+        return "full"
+
+    def reset_view(self) -> None:
+        self.user_modified = False
+        self.mode = "full"
+        self._stored_xlim = None
+        self._stored_ylim = None
+        self._request_rerender()
+        self._notify()
+
+    def set_mode(self, mode: str) -> None:
+        if mode == self.mode and not self.user_modified:
+            return
+        self.mode = mode
+        self.user_modified = False
+        self._stored_xlim = None
+        self._stored_ylim = None
+        self._request_rerender()
+        self._notify()
+
+    # ----- internal -----
+
+    def _request_rerender(self) -> None:
+        if self.request_rerender is not None:
+            try:
+                self.request_rerender()
+            except Exception:
+                pass
+
+    def _notify(self) -> None:
+        if self.on_state_changed is not None:
+            try:
+                self.on_state_changed(self.key)
+            except Exception:
+                pass
+
+    def _mark_user_modified(self, ax) -> None:
+        self.user_modified = True
+        self._stored_xlim = tuple(ax.get_xlim())
+        self._stored_ylim = tuple(ax.get_ylim())
+
+    def _axis_targets(self, ax, event) -> Tuple[bool, bool]:
+        # Cursor proximity to the axes edges (display/pixel space, so this is
+        # DPI- and zoom-independent) decides whether to zoom one axis or both.
+        try:
+            bbox = ax.get_window_extent()
+        except Exception:
+            return True, True
+        near_bottom = event.y is not None and (event.y - bbox.y0) <= self.AXIS_EDGE_PX
+        near_left = event.x is not None and (event.x - bbox.x0) <= self.AXIS_EDGE_PX
+        if near_bottom and not near_left:
+            return True, False
+        if near_left and not near_bottom:
+            return False, True
+        return True, True
+
+    def _on_scroll(self, event) -> None:
+        ax = self._get_axes()
+        if ax is None or event.inaxes is not ax or event.xdata is None or event.ydata is None:
+            return
+        factor = (1.0 / self.ZOOM_FACTOR) if event.button == "up" else self.ZOOM_FACTOR
+        zoom_x, zoom_y = self._axis_targets(ax, event)
+        if zoom_x:
+            xlim = ax.get_xlim()
+            x = event.xdata
+            ax.set_xlim(x - (x - xlim[0]) * factor, x + (xlim[1] - x) * factor)
+        if zoom_y:
+            ylim = ax.get_ylim()
+            y = event.ydata
+            ax.set_ylim(y - (y - ylim[0]) * factor, y + (ylim[1] - y) * factor)
+        self._mark_user_modified(ax)
+        self._hide_tooltip()
+        self.canvas.draw_idle()
+        self._notify()
+
+    def _on_press(self, event) -> None:
+        ax = self._get_axes()
+        if ax is None or event.inaxes is not ax:
+            return
+        if event.dblclick:
+            self.reset_view()
+            return
+        if event.button not in (1, 2):
+            return
+        self._drag = {
+            "button": event.button,
+            "x_px": event.x,
+            "y_px": event.y,
+            "xlim": ax.get_xlim(),
+            "ylim": ax.get_ylim(),
+        }
+        self._hide_tooltip()
+        try:
+            self.canvas.setCursor(Qt.ClosedHandCursor)
+        except Exception:
+            pass
+
+    def _on_motion(self, event) -> None:
+        ax = self._get_axes()
+        if ax is None:
+            return
+        if self._drag is not None:
+            if event.button in (1, 2):
+                self._do_pan(ax, event)
+            else:
+                self._end_drag()
+            return
+        if event.inaxes is not ax:
+            self._hide_tooltip()
+            return
+        self._update_hover(ax, event)
+
+    def _do_pan(self, ax, event) -> None:
+        drag = self._drag
+        if drag is None or event.x is None or event.y is None:
+            return
+        inv = ax.transData.inverted()
+        x0_data, y0_data = inv.transform((drag["x_px"], drag["y_px"]))
+        x1_data, y1_data = inv.transform((event.x, event.y))
+        dx = x0_data - x1_data
+        dy = y0_data - y1_data
+        xlim = drag["xlim"]
+        ylim = drag["ylim"]
+        ax.set_xlim(xlim[0] + dx, xlim[1] + dx)
+        ax.set_ylim(ylim[0] + dy, ylim[1] + dy)
+        self._mark_user_modified(ax)
+        self.canvas.draw_idle()
+
+    def _on_release(self, event) -> None:
+        self._end_drag()
+
+    def _end_drag(self) -> None:
+        if self._drag is not None:
+            self._drag = None
+            try:
+                self.canvas.setCursor(Qt.ArrowCursor)
+            except Exception:
+                pass
+            self._notify()
+
+    def _on_leave(self, event) -> None:
+        self._hide_tooltip()
+        self._end_drag()
+
+    # ----- hover tooltip -----
+
+    def _update_hover(self, ax, event) -> None:
+        if event.x is None or event.y is None:
+            self._hide_tooltip()
+            return
+        cycle, best_dist, anchor = self._nearest_cycle(ax, event)
+        if cycle is None or best_dist > self.HOVER_RADIUS_PX:
+            self._hide_tooltip()
+            return
+        if cycle == self._hover_cycle and self._hover_annotation is not None:
+            return
+        self._show_tooltip(ax, cycle, anchor)
+
+    def _nearest_cycle(self, ax, event) -> Tuple[Optional[int], float, Optional[Tuple[float, float]]]:
+        # Hit-testing is done in DISPLAY (pixel) space against the actually
+        # PLOTTED values (which for the normalized-score tabs is the 0-1
+        # score, not the raw metric) so proximity behaves consistently after
+        # zoom/pan and across DPI scales; the raw value used for the tooltip
+        # TEXT is looked up separately in _show_tooltip(). ``anchor`` is the
+        # exact (x, y) of the single closest marker, in data coordinates, for
+        # both the tooltip anchor and the hover-highlight ring.
+        best_cycle: Optional[int] = None
+        best_dist = float("inf")
+        best_anchor: Optional[Tuple[float, float]] = None
+        for _label, cycles, plotted_values, _raw_values, _unit in self._get_series():
+            xs: List[float] = []
+            ys: List[float] = []
+            for c, v in zip(cycles, plotted_values):
+                if v is None:
+                    continue
+                fv = float(v)
+                if not np.isfinite(fv):
+                    continue
+                xs.append(float(c))
+                ys.append(fv)
+            if not xs:
+                continue
+            disp = ax.transData.transform(np.column_stack([xs, ys]))
+            dists = np.hypot(disp[:, 0] - event.x, disp[:, 1] - event.y)
+            idx = int(np.argmin(dists))
+            if dists[idx] < best_dist:
+                best_dist = float(dists[idx])
+                best_cycle = int(round(xs[idx]))
+                best_anchor = (xs[idx], ys[idx])
+        return best_cycle, best_dist, best_anchor
+
+    def _tooltip_offset(self, ax, anchor_x: float, anchor_y: float) -> Tuple[float, float, str, str]:
+        """Pick which corner the tooltip grows toward (offset direction plus
+        matching text alignment) from how close the anchor point sits to each
+        edge of the plotting area, in display/pixel space -- proximity-based
+        rather than measuring the not-yet-rendered annotation's exact size,
+        but enough to keep "Cycle N" and the rest of the box on screen for
+        points near the top (y=Best) or right edge (near the legend)."""
+        offset = 11.0
+        try:
+            bbox = ax.get_window_extent()
+            disp = ax.transData.transform((anchor_x, anchor_y))
+            fx = (disp[0] - bbox.x0) / max(1.0, bbox.width)
+            fy = (disp[1] - bbox.y0) / max(1.0, bbox.height)
+        except Exception:
+            fx = fy = 0.0
+        go_left = fx > 0.62
+        go_down = fy > 0.68
+        dx = -offset if go_left else offset
+        dy = -offset if go_down else offset
+        ha = "right" if go_left else "left"
+        va = "top" if go_down else "bottom"
+        return dx, dy, ha, va
+
+    def _show_tooltip(self, ax, cycle: int, anchor: Optional[Tuple[float, float]]) -> None:
+        if anchor is None:
+            self._hide_tooltip()
+            return
+        lines = [f"Cycle {cycle}"]
+        for label, cycles, _plotted_values, raw_values, unit in self._get_series():
+            value = None
+            for c, v in zip(cycles, raw_values):
+                if c == cycle and v is not None and np.isfinite(float(v)):
+                    value = float(v)
+                    break
+            if value is None:
+                continue
+            clean_label = label.replace("(%)", "").strip()
+            lines.append(f"{clean_label}: {format_metric_hover_value(value)}{unit}")
+        if len(lines) <= 1:
+            self._hide_tooltip()
+            return
+        text = "\n".join(lines)
+        anchor_x, anchor_y = anchor
+        # Anchor to the data point itself (axes data coordinates); the offset
+        # direction and text alignment flip based on how close the point is
+        # to each edge of the plotting area (in display/pixel space, so it
+        # works after zoom/pan and at any DPI), so the tooltip -- including
+        # its "Cycle N" heading -- stays fully on screen instead of being
+        # clipped near the top (e.g. a point at y=Best) or the right edge
+        # (e.g. a point near the legend).
+        dx, dy, ha, va = self._tooltip_offset(ax, anchor_x, anchor_y)
+        if self._hover_annotation is None or self._hover_annotation.axes is not ax:
+            self._hover_annotation = ax.annotate(
+                text,
+                xy=(anchor_x, anchor_y),
+                xytext=(dx, dy),
+                textcoords="offset points",
+                ha=ha,
+                va=va,
+                fontsize=7.3,
+                color="#14204a",
+                linespacing=1.5,
+                bbox=dict(boxstyle="square,pad=0.35", facecolor="#f5f9ff", edgecolor="#2264b8", linewidth=0.9),
+                zorder=12,
+                annotation_clip=False,
+            )
+        else:
+            self._hover_annotation.set_text(text)
+            self._hover_annotation.xy = (anchor_x, anchor_y)
+            self._hover_annotation.set_position((dx, dy))
+            self._hover_annotation.set_ha(ha)
+            self._hover_annotation.set_va(va)
+            self._hover_annotation.set_visible(True)
+        # A restrained ring around just the hovered marker -- visual hierarchy
+        # stays line < markers < hover-highlighted marker, no new permanent color.
+        if self._hover_ring is None or self._hover_ring.axes is not ax:
+            (self._hover_ring,) = ax.plot(
+                [anchor_x],
+                [anchor_y],
+                marker="o",
+                markersize=9.5,
+                markerfacecolor="none",
+                markeredgecolor="#001170",
+                markeredgewidth=1.3,
+                linestyle="none",
+                zorder=11,
+            )
+        else:
+            self._hover_ring.set_data([anchor_x], [anchor_y])
+            self._hover_ring.set_visible(True)
+        self._hover_cycle = cycle
+        self.canvas.draw_idle()
+
+    def _hide_tooltip(self) -> None:
+        changed = False
+        if self._hover_annotation is not None:
+            try:
+                self._hover_annotation.set_visible(False)
+                changed = True
+            except Exception:
+                pass
+        if self._hover_ring is not None:
+            try:
+                self._hover_ring.set_visible(False)
+                changed = True
+            except Exception:
+                pass
+        if changed:
+            self.canvas.draw_idle()
+        self._hover_cycle = None
+
+
 class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
+        # Standalone default; _sync_window_title() (called once jana_wizard_context
+        # exists, below, mirroring _sync_jana_action_button()) sets the
+        # Jana2020-launched title instead when that context applies.
+        self.setWindowTitle(f"Phase Studio {__version__}")
         self.setWindowIcon(create_phase_studio_app_icon(64))
         self.resize(1420, 880)
         self.msg_queue: "queue.Queue[Tuple[str, object]]" = queue.Queue()
@@ -4998,11 +6694,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.deblur_atoms_for_plot: List[AtomSite] = []
         self.structure_cell: Optional[gemmi.UnitCell] = None
         self.structure_axes: List[object] = []
+        self._structure_interactive_axes: List[object] = []
         self._structure_depth_artists: List[StructureDepthArtists] = []
         self.structure_elev = 20.0
         self.structure_azim = 35.0
-        self._structure_rotation_source: Optional[object] = None
+        # Zoom/pan is shared by the panels exactly like rotation is, and like
+        # elev/azim it survives a re-render. Matplotlib's 3D zoom (right drag)
+        # and pan (middle drag) both work by rewriting the axes' 3D limits, so
+        # one pair of remembered limit triples covers both: the base limits the
+        # cell geometry produces, and the limits currently displayed. The base
+        # acts as a fingerprint -- when a new cell makes it change, the stored
+        # view is stale and is dropped instead of being applied to a different
+        # crystal.
+        self.structure_view_base_limits: Optional[Tuple[Tuple[float, float], ...]] = None
+        self.structure_view_limits: Optional[Tuple[Tuple[float, float], ...]] = None
+        self._structure_view_drag_source: Optional[object] = None
         self._configuration_locked = False
+        self.jana_wizard_context = JanaWizardContext()
+        # One-shot guard so the Wizard Phase-recycling selector opens exactly
+        # once per completed run. Reset when a new run starts, so a second run
+        # in the same session opens it again.
+        self._jana_auto_selector_shown = False
+        self._workflow_log_once: set = set()
         self._run_status = "READY"
         self._cycle_progress_state: Optional[CycleProgressState] = None
         self._syncing_metadata_controls = False
@@ -5085,6 +6798,39 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         w.lineEdit().setCursor(Qt.CursorShape.ArrowCursor)
         w.setInsertPolicy(QComboBox.NoInsert)
         idx = w.findText(default)
+        if idx >= 0:
+            w.setCurrentIndex(idx)
+        form.addRow(label, w)
+        self.inputs[key] = w
+        self._apply_input_tooltip(key, w)
+        self._apply_form_label_tooltip(form, w, key)
+
+    def _add_combo_with_values(
+        self,
+        form: QFormLayout,
+        key: str,
+        label: str,
+        items: Sequence[Tuple[str, str]],
+        default_value: str,
+    ) -> None:
+        """Like _add_combo, but each item's user-facing text (items[i][1]) is
+        independent of the internal token stored as its Qt userData
+        (items[i][0]) -- _combo_value()/_set_widget_value_from_string() read
+        and write that token via currentData()/findData(), never by parsing
+        the display text. Use this instead of _add_combo whenever a combo's
+        internal values are not already presentable as-is (e.g. raw file-role
+        tokens like "deblurred_xplor")."""
+        w = QComboBox()
+        for value, text in items:
+            w.addItem(text, value)
+        w.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        w.setMinimumContentsLength(18)
+        w.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        w.setEditable(True)
+        w.lineEdit().setReadOnly(True)
+        w.lineEdit().setCursor(Qt.CursorShape.ArrowCursor)
+        w.setInsertPolicy(QComboBox.NoInsert)
+        idx = w.findData(default_value)
         if idx >= 0:
             w.setCurrentIndex(idx)
         form.addRow(label, w)
@@ -5184,6 +6930,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "Input": "input",
                 "Workflow": "workflow",
                 "Output": "output",
+                "Map feedback": "map_feedback",
                 "Help": None,
             }.get(name, "setup")
         name = self.advanced_tabs.tabText(self.advanced_tabs.currentIndex())
@@ -5192,7 +6939,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "Superflip": "superflip",
             "EDMA": "edma",
             "SharpED": "sharped",
-            "Map feedback": "map_feedback",
             "Help": None,
         }.get(name, "adv_setup")
 
@@ -5259,37 +7005,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         left_layout.setSpacing(8)
         self.main_splitter.addWidget(left)
 
-        brand_header = QWidget()
-        brand_header.setObjectName("brandHeader")
-        brand_layout = QHBoxLayout(brand_header)
-        brand_layout.setContentsMargins(12, 6, 12, 7)
-        brand_layout.setSpacing(10)
-        brand_logo = QLabel()
-        brand_logo.setObjectName("brandLogo")
-        brand_logo_pixmap = create_phase_studio_logo_pixmap(58)
-        brand_logo.setPixmap(brand_logo_pixmap)
-        brand_logo.setFixedSize(brand_logo_pixmap.size())
-        brand_logo.setToolTip("Phase Studio")
-        brand_text_layout = QVBoxLayout()
-        brand_text_layout.setContentsMargins(0, 0, 0, 0)
-        brand_text_layout.setSpacing(1)
-        brand_title_row = QHBoxLayout()
-        brand_title_row.setSpacing(8)
-        brand_title = QLabel("PHASE STUDIO")
-        brand_title.setObjectName("brandTitle")
-        version_badge = QLabel(__version__)
-        version_badge.setObjectName("versionBadge")
-        version_badge.setAlignment(Qt.AlignCenter)
-        brand_title_row.addWidget(brand_title, 1)
-        brand_title_row.addWidget(version_badge)
-        brand_subtitle = QLabel("Superflip · SharpED · EDMA workflow")
-        brand_subtitle.setObjectName("brandSubtitle")
-        brand_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        brand_text_layout.addLayout(brand_title_row)
-        brand_text_layout.addWidget(brand_subtitle)
-        brand_layout.addWidget(brand_logo, 0, Qt.AlignVCenter)
-        brand_layout.addLayout(brand_text_layout, 1)
-        left_layout.addWidget(brand_header)
+        left_layout.addWidget(create_phase_studio_brand_header())
 
         category_tabs = QTabWidget()
         category_tabs.setObjectName("categoryTabs")
@@ -5306,73 +7022,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.help_section_advanced: Dict[str, bool] = {}
         left_layout.addWidget(category_tabs, 1)
 
-        def add_settings_tab(name: str, advanced: bool = False) -> QVBoxLayout:
-            scroll = QScrollArea()
-            scroll.setObjectName("settingsScrollArea")
-            scroll.setWidgetResizable(True)
-            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-            if advanced:
-                scroll.setViewportMargins(0, 2, 0, 0)
-            page = QWidget()
-            page.setObjectName("settingsPage")
-            page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-            layout = QVBoxLayout(page)
-            layout.setContentsMargins(
-                CONFIG_PAGE_MARGIN_HORIZONTAL,
-                CONFIG_PAGE_MARGIN_VERTICAL + (2 if advanced else 0),
-                CONFIG_PAGE_MARGIN_HORIZONTAL,
-                CONFIG_PAGE_MARGIN_VERTICAL,
-            )
-            layout.setSpacing(CONFIG_MAJOR_SECTION_SPACING)
-            scroll.setWidget(page)
-            (advanced_tabs if advanced else basic_tabs).addTab(scroll, name)
-            if name == "Help":
-                if advanced:
-                    self.help_scroll_advanced = scroll
-                    self.help_page_advanced = page
-                else:
-                    self.help_scroll_basic = scroll
-                    self.help_page_basic = page
-            return layout
-
-        def add_form_group(page_layout: QVBoxLayout, title: str, guide_anchor: Optional[str] = None) -> QFormLayout:
-            if guide_anchor:
-                box = QGroupBox()
-                box.setObjectName("guidedSettingsGroup")
-                box_layout = QVBoxLayout(box)
-                box_layout.setContentsMargins(*CONFIG_GUIDED_GROUP_MARGINS)
-                box_layout.setSpacing(CONFIG_GUIDED_GROUP_SPACING)
-                heading_row = QHBoxLayout()
-                heading = QLabel(title)
-                heading.setObjectName("inlineGroupTitle")
-                guide = QToolButton()
-                guide.setObjectName("guideLink")
-                guide.setText("Open guide")
-                guide.setCursor(Qt.PointingHandCursor)
-                guide.setToolTip("Open the relevant section in Help (F1).")
-                guide.clicked.connect(lambda _checked=False, target=guide_anchor: self._open_help_section(target))
-                heading_row.addWidget(heading, 1)
-                heading_row.addWidget(guide)
-                form_widget = QWidget()
-                form = self._configure_form(QFormLayout(form_widget))
-                box_layout.addLayout(heading_row)
-                box_layout.addWidget(form_widget)
-                page_layout.addWidget(box)
-                return form
-            box = QGroupBox(title)
-            box.setObjectName("settingsGroup")
-            form = self._configure_form(QFormLayout(box))
-            page_layout.addWidget(box)
-            return form
-
-        def settings_callout(title: str, text: str) -> QLabel:
-            label = QLabel(f"<b>{title}</b><br>{text}")
-            label.setObjectName("settingsCallout")
-            label.setTextFormat(Qt.RichText)
-            label.setWordWrap(True)
-            label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            return label
-
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(8, 4, 6, 4)
@@ -5385,79 +7034,794 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.main_splitter.setStretchFactor(1, 7)
         self.main_splitter.setSizes([520, 900])
 
-        dashboard_header = QWidget()
-        dashboard_header.setObjectName("dashboardHeader")
-        dashboard_layout = QHBoxLayout(dashboard_header)
-        dashboard_layout.setContentsMargins(12, 5, 12, 5)
-        dashboard_text = QVBoxLayout()
-        dashboard_text.setSpacing(0)
-        dashboard_title = QLabel("RUN OVERVIEW")
-        dashboard_title.setObjectName("dashboardTitle")
-        dashboard_subtitle = QLabel("Reconstruction progress and results")
-        dashboard_subtitle.setObjectName("dashboardSubtitle")
-        dashboard_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        dashboard_text.addWidget(dashboard_title)
-        dashboard_text.addWidget(dashboard_subtitle)
         self.status_badge = QLabel("READY")
         self.status_badge.setObjectName("statusBadge")
         self.status_badge.setAlignment(Qt.AlignCenter)
-        dashboard_layout.addLayout(dashboard_text, 1)
-        dashboard_layout.addWidget(self.status_badge)
-        right_layout.addWidget(dashboard_header)
-
-        def make_result_section(title: str) -> Tuple[QWidget, QVBoxLayout]:
-            section = QWidget()
-            section.setObjectName("resultSection")
-            section_layout = QVBoxLayout(section)
-            section_layout.setContentsMargins(4, 4, 4, 4)
-            section_layout.setSpacing(3)
-            label = QLabel(title)
-            label.setObjectName("sectionLabel")
-            section_layout.addWidget(label)
-            return section, section_layout
-
-        def add_help_section(page_layout: QVBoxLayout, anchor: str, title: str, body_html: str, *, advanced: bool = False) -> QVBoxLayout:
-            box = QGroupBox(title)
-            box.setObjectName("helpSection")
-            box_layout = QVBoxLayout(box)
-            box_layout.setContentsMargins(10, 12, 10, 8)
-            body = QLabel(body_html)
-            body.setObjectName("helpSectionBody")
-            body.setTextFormat(Qt.RichText)
-            body.setWordWrap(True)
-            body.setOpenExternalLinks(True)
-            body.setTextInteractionFlags(Qt.TextBrowserInteraction)
-            body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-            box_layout.addWidget(body)
-            page_layout.addWidget(box)
-            self.help_sections[anchor] = box
-            self.help_section_advanced[anchor] = advanced
-            return box_layout
-
-        def add_help_callout(section_layout: QVBoxLayout, label: str, text: str) -> None:
-            callout = QLabel(f"<b>{label}</b><br>{text}")
-            callout.setObjectName("helpCallout")
-            callout.setTextFormat(Qt.RichText)
-            callout.setWordWrap(True)
-            section_layout.addWidget(callout)
-
-        def add_back_to_contents(section_layout: QVBoxLayout, *, advanced: bool = False) -> None:
-            row = QHBoxLayout()
-            row.addStretch(1)
-            link = QToolButton()
-            link.setObjectName("helpNavLink")
-            link.setText("↑ Contents")
-            link.setCursor(Qt.PointingHandCursor)
-            scroll_attr = "help_scroll_advanced" if advanced else "help_scroll_basic"
-            link.clicked.connect(lambda: getattr(self, scroll_attr).verticalScrollBar().setValue(0))
-            row.addWidget(link)
-            section_layout.addLayout(row)
-
-        cwd = Path.cwd()
+        right_layout.addWidget(create_phase_studio_context_banner(
+            "RUN OVERVIEW", "Phasing progress and results", badge=self.status_badge
+        ))
 
         # Basic / Input
-        input_tab = add_settings_tab("Input")
-        data_input_form = add_form_group(input_tab, "Data input")
+        self._build_input_tab()
+        # Basic / Workflow
+        self._build_workflow_tab()
+
+        # Basic / Output
+        self._build_output_tab()
+
+        # Basic / Map feedback
+        self._build_map_feedback_tab()
+
+        # Basic / Help
+        self._build_basic_help_tab()
+
+        self._build_advanced_setup_tab()
+        self._build_advanced_superflip_tab()
+        self._build_advanced_edma_tab()
+        self._build_advanced_sharped_tab()
+        self._build_advanced_help_tab()
+
+        # Persistent actions
+        self._build_run_controls(left_layout)
+
+        # Right-side resizable scientific dashboard
+        self.result_splitter = QSplitter(Qt.Vertical)
+        self.result_splitter.setObjectName("resultSplitter")
+        self.result_splitter.setHandleWidth(3)
+        self.result_splitter.setChildrenCollapsible(False)
+        right_layout.addWidget(self.result_splitter, 1)
+
+        self._build_metrics_section()
+        self._build_structure_comparison_section()
+        self._build_execution_log_section()
+        self._last_log_record: Optional[ExecutionLogRecord] = None
+        self._append_execution_log("Ready. Select an input to begin.")
+        self._update_action_states()
+        self._update_plot()
+        self._update_structure_views()
+        self._sync_input_source_mode_widgets()
+        self._sync_workflow_widgets()
+        self._sync_map_feedback_widgets()
+        self._sync_normalization_widgets()
+
+    def _build_basic_help_tab(self) -> None:
+        basic_help_tab = self._add_settings_tab("Help")
+        basic_contents_row = FlowLayout(spacing=4)
+        basic_contents_label = QLabel("CONTENTS")
+        basic_contents_label.setObjectName("helpContentsLabel")
+        basic_contents_row.addWidget(basic_contents_label)
+        for link_text, anchor in (
+            ("Setup", "setup"), ("Input", "input"), ("Workflow", "workflow"),
+            ("Output", "output"), ("Map feedback", "map_feedback"), ("Jana2020", "jana_integration"), ("About", "about"),
+        ):
+            link = QToolButton()
+            link.setObjectName("helpNavLink")
+            link.setText(link_text)
+            link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            link.setCursor(Qt.PointingHandCursor)
+            link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
+            basic_contents_row.addWidget(link)
+        basic_help_tab.addLayout(basic_contents_row)
+        setup_help_layout = self._add_help_section(basic_help_tab, "setup", "Phase Studio guide", """
+            <h3>1. Select the input</h3>
+            <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
+            <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana2020 .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
+            <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
+            <h3>2. Choose a reconstruction preset</h3>
+            <p><b>Workflow preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
+            <ul><li><b>Recommended</b> (default): a general-purpose baseline that matches the built-in defaults.</li>
+            <li><b>small molecule:</b> settings intended as a starting point for small-molecule data.</li>
+            <li><b>inorganic:</b> settings intended as a starting point for inorganic materials.</li>
+            <li><b>MOF atomic resolution:</b> settings intended as a starting point for atomic-resolution framework data.</li>
+            <li><b>MOF medium resolution:</b> settings intended as a starting point for medium-resolution framework data.</li>
+            <li><b>Custom:</b> applies nothing; a placeholder for manually configured values.</li></ul>
+            <p>Applying a preset changes multiple controls. Review the resulting values and adapt them to the dataset; a preset is not a universal scientific recommendation.</p>
+            <p><b>Phasing method</b> defaults to the standard Superflip cycle. Two SharpED phase-recycling methods, one beta and one experimental, are hidden by default; enable <b>Show beta and experimental features</b> on Advanced &rarr; Setup to make them selectable.</p>
+            <h3>3. Configure the iterative workflow</h3>
+            <p><b>observed reflections &rarr; Superflip &rarr; XPLOR map &rarr; EDMA and/or SharpED &rarr; deblurred XPLOR &rarr; EDMA &rarr; next-cycle model</b></p>
+            <p>The exact branches depend on <b>Basic &rarr; Workflow &rarr; Optional processing</b>. The next-cycle source can be Superflip XPLOR, SharpED/deblurred XPLOR, deblurred EDMA CIF, or <b>none</b>. Selecting none forces a one-cycle run.</p>
+            <h3>4. Inspect each cycle</h3>
+            <p>Review convergence metrics, structure previews, detected atom/peak counts, reference agreement when available, Superflip versus SharpED results, and the execution log. Phase Studio does not replace final crystallographic refinement.</p>
+            <h3>5. Return the selected result to Jana2020</h3>
+            <p>After a successful run, <b>Send to Jana2020</b> lets you select a completed cycle and map source. Final interpretation and refinement remain in Jana2020.</p>
+        """)
+        setup_help_layout.insertWidget(1, WorkflowDiagram())
+        self._add_help_callout(setup_help_layout, "Tip", "Validate the reflection interpretation and review the selected preset values before starting a run.", kind="tip")
+        self._add_back_to_contents(setup_help_layout)
+        input_help_layout = self._add_help_section(basic_help_tab, "input", "Input reference", """
+            <h3>Data input</h3>
+            <p><b>Input mode</b> chooses the reflection source: <b>Jana2020 .inflip</b>, <b>Jana2020 .inflip with overrides</b>, or <b>External HKL</b>. In Jana modes, the .inflip file's fbegin/endf block is the default HKL source and its cell/space-group/composition keywords can provide crystallographic metadata; External mode uses reflection data loaded independently of Jana2020 and requires metadata from another source.</p>
+            <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
+            <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
+            <p><b>HKL format</b> is the exact column order of the reflection data. <code>set from inflip</code> imports the format from Jana, including a <code>dataformat ... fwhm</code> line; the other modes accept intensity or amplitude followed by sigma, optionally with a phase column in degrees before sigma. <b>hkl I fwhm</b> and <b>hkl F fwhm</b> are for data whose second column is a peak-shape FWHM (e.g. from a Le Bail powder extraction) rather than a genuine uncertainty -- Validate HKL and Analyze completeness relabel sigma-based columns and statistics accordingly (I/FWHM instead of I/&sigma;(I)) and hide the I/&sigma;(I)=3 significance threshold, which does not apply to FWHM data.</p>
+            <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
+            <h3>Crystal metadata</h3>
+            <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana2020 .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
+            <p>When <b>Manual</b> is selected: <b>a, b, c</b> (&Aring;) and <b>alpha, beta, gamma</b> (&deg;) are the unit-cell parameters; <b>Number</b> (1-230) or <b>Symbol</b> identifies the space group; <b>Composition</b> uses Superflip syntax, for example <code>Ag196 S108 O40 B1000</code>.</p>
+            <h3>Reference and initial model</h3>
+            <p><b>Reference file</b> is an optional external reference: CIF/INS/RES files can supply metadata and atom sites used for comparison metrics; Jana/XPLOR/CCP4 maps can serve as a Superflip reference density (referencefile keyword), which also anchors the reciprocal-space origin from cycle 2 onward when no explicit reference is chosen.</p>
+            <p><b>Initial model (cycle 1)</b> is an optional external density or structure model that seeds the first Superflip cycle. Supported inputs are XPLOR, CCP4 and CIF.</p>
+        """)
+        self._add_back_to_contents(input_help_layout)
+        workflow_help_layout = self._add_help_section(basic_help_tab, "workflow", "Workflow reference", """
+            <h3>Reconstruction</h3>
+            <p><b>Workflow preset</b> applies a bundle of starting values in one step; every value stays individually editable afterward. <b>Recommended</b> (default) is a general-purpose baseline matching the built-in defaults; the MOF/small-molecule/inorganic presets tune values for a specific sample type; <b>Custom</b> applies nothing.</p>
+            <p><b>Cycles</b> is the number of iterative Superflip &rarr; EDMA &rarr; SharpED &rarr; EDMA cycles to run. The effective count is forced to 1 when Next-cycle model is <code>none</code>.</p>
+            <p><b>Phasing method</b> chooses the reconstruction algorithm:</p>
+            <ul>
+                <li><b>Superflip</b> (default) &mdash; the standard charge-flipping cycle: Superflip runs every cycle, seeded by Next-cycle model.</li>
+                <li><b>1st Superflip, then SharpED (beta)</b> &mdash; Superflip runs only once, on cycle 1. Every following cycle deblurs the previous map with SharpED, calculates phases by FFT from that deblurred map for every measured reflection (expanded over the full space-group symmetry), and recomposes a map from |Fobs| with those phases for the next cycle. Does not work well with some models.</li>
+                <li><b>SharpED (experimental)</b> &mdash; the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases. Not production-ready; can take hundreds of cycles to converge, if it converges at all.</li>
+            </ul>
+            <p>Both recycling methods are hidden unless <b>Show beta and experimental features</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize SharpED map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. The convergence graph adds a <b>Map correlation</b> series for these methods (each cycle's recomposed map compared with the previous cycle's).</p>
+            <p><b>Next-cycle model</b> (Superflip phasing method only) is the authoritative source for cycle 2 onward: <b>None</b> forces a one-cycle run; <b>Superflip map (XPLOR)</b> cycles without SharpED processing; <b>SharpED map (XPLOR)</b> uses the SharpED-processed XPLOR map; <b>SharpED structure (EDMA CIF)</b> uses the EDMA structure extracted from the SharpED map and ignores XPLOR damping.</p>
+            <p><b>XPLOR damping (1/x)</b> (Superflip phasing method, XPLOR next-cycle models only) is the inverse damping factor: 1.0 means no damping, 0.5 is equivalent to the previous factor 2.0, 0.25 to factor 4.0.</p>
+            <p><b>Excluded atoms</b> removes selected atom labels from CIF modelfiles before the next Superflip cycle (comma/semicolon/whitespace-separated); it does not apply to XPLOR-only model paths.</p>
+            <h3>SharpED model</h3>
+            <p><b>Model</b> is the SharpED server model name sent with every deblurring request; <b>Refresh models</b> fetches the current list from the configured server and updates this selector. Server URL and API token are on Advanced &rarr; Setup; elements, output resolution, map value exponent and network/upload settings are on Advanced &rarr; SharpED.</p>
+            <h3>Optional processing</h3>
+            <p>Under <b>Superflip cycle</b> (used when Phasing method is Superflip):</p>
+            <ul>
+                <li><b>Run EDMA on Superflip map</b> &mdash; peak-search the Superflip XPLOR map and export CIF/XYZ/PDB.</li>
+                <li><b>Run SharpED</b> &mdash; process the Superflip map with the SharpED server. If disabled, the SharpED map used downstream is just a copy of the Superflip map.</li>
+                <li><b>Symmetrize SharpED map with Superflip (beta)</b> &mdash; after SharpED processing, run Superflip in symmetry mode (no charge flipping) with the SharpED map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
+                <li><b>Run EDMA on SharpED map</b> &mdash; peak-search the SharpED (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
+                <li><b>Compute OMIT validation maps (5% holdout)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip validation</b> and <b>SharpED validation</b> tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
+                <li><b>Calculate R_free on the 5% holdout</b> &mdash; requires the option above; also computes R_free (the crystallographic R-factor between the excluded reflections' observed |F| and |F| calculated by FFT from the omit map) for both the omit-map series.</li>
+            </ul>
+            <p>Under <b>Phase-recycling methods</b> (used by the two beta/experimental Phasing methods):</p>
+            <ul><li><b>Run EDMA on final map</b> &mdash; run EDMA once, on the last cycle's recomposed |Fobs|+phi_calc map.</li></ul>
+        """)
+        self._add_back_to_contents(workflow_help_layout)
+        output_help_layout = self._add_help_section(basic_help_tab, "output", "Output reference", """
+            <h3>Output</h3>
+            <p><b>Working directory</b> is where Phase Studio writes generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics. Use a dedicated directory per run when reproducibility matters.</p>
+            <p><b>Map format</b> adds one extra saved output on top of the XPLOR map that is always kept internally for EDMA, SharpED and Superflip: <code>ccp4</code> or <code>jana</code> save an extra CCP4 map or Jana m80/m81 density+reflection files; <b>HKL reflections with phases</b> and <b>ShelX (fcf)</b> instead save, for each cycle's Superflip map, the observed reflections (h k l, intensity/F&sup2;, sigma) together with phases &mdash; and, for ShelX, calculated F&sup2; &mdash; read by FFT from that map, as a standardized text file or a ShelX/Jana-compatible .fcf file, in place of an extra density map.</p>
+            <p><b>Structure format</b> adds one extra saved structure format on top of the CIF that is always kept internally for metrics and next-cycle modelfiles: <code>xyz</code> or <code>pdb</code>.</p>
+        """)
+        self._add_back_to_contents(output_help_layout)
+        map_feedback_layout = self._add_help_section(basic_help_tab, "map_feedback", "Map feedback reference", """
+            <p>Each of the three mechanisms below has its own <b>Enable</b> checkbox at the top of its group; unchecking it grays out the rest of that group and skips the mechanism entirely. <b>Start after cycle</b> keeps its own 1-999 range regardless of the current <b>Cycles</b> value (Basic &rarr; Workflow), so it can be set up ahead of raising Cycles; the fields below it stay grayed out with a hint whenever the current Cycles value cannot reach the configured starting cycle.</p>
+            <h3>Missing-reflection completion</h3>
+            <p><b>Start after cycle</b> is the first completed cycle whose map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
+            <h3>Intensity correction</h3>
+            <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
+            <h3>Powder overlap repartitioning</h3>
+            <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
+        """)
+        self._add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.", kind="warning")
+        self._add_back_to_contents(map_feedback_layout)
+        jana_integration_layout = self._add_help_section(basic_help_tab, "jana_integration", "Jana2020 integration", """
+            <p>Phase Studio can install itself as Jana2020's active Superflip launcher, so that Jana2020's own
+            "Superflip" action opens the Phase Studio Jana2020 Wizard instead of running Superflip directly.
+            This is entirely optional and separate from using Phase Studio as a standalone application.</p>
+            <h3>Install to Jana2020</h3>
+            <p>When Phase Studio is launched normally (not from the Jana2020 Wizard), the third main-window button
+            reads <b>Install to Jana2020</b> and opens the Jana2020 integration dialog. It detects an existing
+            Jana2020 installation (starting with <code>C:\\Jana2020</code>), or a folder can be selected manually.
+            Installing:</p>
+            <ul>
+                <li>preserves Jana2020's existing Superflip executable as <code>superflip_original.exe</code>,</li>
+                <li>installs the Phase Studio Jana2020 launcher as <code>superflip.exe</code> in its place, together with its required runtime files,</li>
+                <li>leaves <code>EDMA.exe</code> and all Jana2020 crystallographic project data unchanged.</li>
+            </ul>
+            <p>Nothing is modified merely by opening the dialog; only pressing <b>Install integration</b> (or
+            <b>Update integration</b>/<b>Repair</b> once already installed) changes anything on disk, and only inside
+            the selected Jana2020 <code>SUPERFLIP</code> folder.</p>
+            <h3>Reversibility</h3>
+            <p><b>Remove integration</b>, inside the same dialog, restores the preserved <code>superflip_original.exe</code>
+            back to <code>superflip.exe</code> and removes the Phase Studio-owned launcher and its runtime files.
+            Jana2020 then runs its own original Superflip exactly as before Phase Studio was ever installed.</p>
+            <h3>Send to Jana2020</h3>
+            <p>When Phase Studio is instead launched <i>from</i> the Jana2020 Wizard (via the installed launcher, or
+            "Open full configuration"), the same button reads <b>Send to Jana2020</b> and opens the existing
+            Superflip/SharpED cycle-result selection and handoff dialog described above -- unrelated to installing
+            or removing the integration itself.</p>
+        """)
+        self._add_help_callout(jana_integration_layout, "Note", "Installing or removing the Jana2020 integration only manages the superflip.exe launcher inside the selected Jana2020 SUPERFLIP folder. It never modifies crystallographic project data, and a completed Phase Studio run is never required to install, update, repair or remove it.")
+        self._add_back_to_contents(jana_integration_layout)
+        about_layout = self._add_help_section(basic_help_tab, "about", "About Phase Studio", """
+            <h2>Phase Studio</h2>
+            <p>Phase Studio is a crystallographic reconstruction workflow integrating Superflip, SharpED and EDMA with Jana2020-oriented workflows.</p>
+            <h3>Developed at</h3>
+            <p>Department of Structure Analysis<br>Institute of Physics of the Czech Academy of Sciences</p>
+            <h3>Authors and contacts</h3>
+            <p><b>Jiří Zelenka</b><br><a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>
+            <p><b>Jan Rohlíček</b><br><a href="mailto:rohlicek@fzu.cz">rohlicek@fzu.cz</a></p>
+            <p><b>Monika Kučeráková</b></p><p><b>Zdeněk Buk</b></p>
+            <p><b>General contact</b><br><a href="mailto:sharped@fzu.cz">sharped@fzu.cz</a></p>
+            <h3>Project resources</h3>
+        """)
+        for resource_name, resource_url, resource_tip in (
+            ("Department of Structure Analysis", "https://www.fzu.cz/en/research/divisions-and-departments/division-3/department-19", "Open the department website"),
+            ("SharpED project and API token", "https://sharped.fzu.cz/", "Open the SharpED project and API-token page"),
+            ("Phase Studio source code", "https://github.com/ji-ze/Phase-Studio", "Open the Phase Studio source repository"),
+        ):
+            resource_row = QHBoxLayout()
+            resource_row.addWidget(QLabel(resource_name))
+            resource_row.addWidget(self._external_link_icon(resource_url, resource_tip))
+            resource_row.addStretch(1)
+            about_layout.addLayout(resource_row)
+        self._add_back_to_contents(about_layout)
+        basic_help_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
+        basic_help_tab.addStretch(1)
+
+    def _build_advanced_setup_tab(self) -> None:
+        setup_tab = self._add_settings_tab("Setup", advanced=True)
+        self._create_settings_page_header(setup_tab, "Setup", "adv_setup")
+        programs_form = self._add_form_group(setup_tab, "External programs")
+        self._add_path(programs_form, "superflip_exe", "Superflip executable", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
+        self._add_path(programs_form, "edma_exe", "EDMA executable", r"C:\Jana2020\SUPERFLIP\EDMA.exe", "file", "Executables (*.exe);;All files (*)")
+        program_links = QVBoxLayout()
+        program_links.setSpacing(3)
+        for program_name, tooltip in (
+            ("Superflip website", "Open the official Superflip website"),
+            ("EDMA website", "Open the official EDMA website"),
+        ):
+            program_row = QHBoxLayout()
+            program_row.addWidget(QLabel(program_name))
+            program_row.addWidget(self._external_link_icon("https://superflip.fzu.cz/", tooltip))
+            program_row.addStretch(1)
+            program_links.addLayout(program_row)
+        programs_form.addRow("Downloads", program_links)
+
+        sharped_api_form = self._add_form_group(setup_tab, "SharpED connection")
+        self._add_text(sharped_api_form, "sharped_base_url", "Server URL", DEFAULT_SERVER_URL)
+        self._add_text(sharped_api_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
+        try:
+            self.inputs["sharped_api_token"].setEchoMode(QLineEdit.Password)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        token_link_row = QHBoxLayout()
+        token_link_row.addWidget(QLabel("Get SharpED token"))
+        token_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
+        token_link_row.addStretch(1)
+        sharped_api_form.addRow("", token_link_row)
+
+        interface_form = self._add_form_group(setup_tab, "Interface")
+        self._add_checkbox(interface_form, "show_beta_features", "Show beta and experimental features", False, align_with_fields=True)
+        try:
+            self.inputs["show_beta_features"].toggled.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        interface_form.addRow("", self._secondary_help(
+            "Off by default. Enable this option to expose experimental phasing methods and their "
+            "method-specific settings, hidden entirely rather than just disabled while it is off."
+        ))
+        setup_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
+        setup_tab.addStretch(1)
+
+    def _build_advanced_superflip_tab(self) -> None:
+        superflip_tab = self._add_settings_tab("Superflip", advanced=True)
+        self._create_settings_page_header(superflip_tab, "Superflip", "superflip")
+        calculation_form = self._add_form_group(superflip_tab, "Calculation")
+        self._add_combo(calculation_form, "perform_algorithm", "Algorithm", ["CF", "AAR", "lde", "general", "fourier", "symmetry"], "CF")
+        self.inputs["perform_algorithm"].setToolTip(
+            INPUT_TOOLTIPS["perform_algorithm"]
+        )  # type: ignore[attr-defined]
+        self._add_spin(calculation_form, "maxcycles", "Maximum iterations", 2000, 1, 100000, 100)
+        self._add_spin(calculation_form, "repeatmode", "Repeat mode", 10, 1, 10000, 1)
+        self._add_text(calculation_form, "randomseed", "Random seed", "AUTO")
+        self._add_text(calculation_form, "delta", "Delta", "AUTO")
+        self._add_text(calculation_form, "weakratio", "Weak ratio", "0.000")
+        self._add_text(calculation_form, "biso", "Biso", "0.000")
+        self._add_checkbox(calculation_form, "polish", "Enable final polish", True, align_with_fields=True)
+
+        density_form = self._add_form_group(superflip_tab, "Density / solution selection")
+        self._add_text(density_form, "voxel", "Voxel grid", "")
+        self._add_spin(density_form, "bestdensities_count", "Stored best densities", 1, 1, 100, 1)
+        self._add_combo(density_form, "bestdensities_metric", "Density selection metric", ["rvalue", "peakiness", "symmetry", "reference"], "symmetry")
+        self._add_combo(density_form, "searchsymmetry", "Search symmetry", ["average", "shift", "no"], "average")
+        self._add_text(density_form, "derivesymmetry", "Derive symmetry", "yes")
+
+        reflection_form = self._add_form_group(superflip_tab, "Reflection handling")
+        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum observed value/σ", 2.0, 0.0, 100.0, 0.5, 3)
+        self._add_dspin(reflection_form, "resolution_d_min", "High-resolution cutoff dmin (Å)", 0.0, 0.0, 20.0, 0.1, 3)
+        self._add_combo(reflection_form, "normalize", "Normalization", ["none", "local", "atoms", "wilson"], "atoms")
+        try:
+            self.inputs["normalize"].currentTextChanged.connect(self._sync_normalization_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self._add_spin(reflection_form, "nresshells", "Resolution shells", 100, 0, 100000, 10)
+        self._add_text(reflection_form, "missing", "Missing reflections", "bound 0.5 2.5")
+        self._add_text(reflection_form, "electrons", "Electrons", "")
+
+        reference_density_form = self._add_form_group(superflip_tab, "Reference density")
+        reference_density_form.addRow(self._secondary_help(
+            "The referencefile keyword is automatic: it is written only when a reference file is selected on Model, or "
+            "from cycle 2 onward when none is selected, using the previous cycle's EDMA CIF (or its XPLOR map if EDMA "
+            "produced no usable peaks) so Superflip keeps a fixed origin in reciprocal space between cycles."
+        ))
+        reference_density_form.addRow(self._secondary_help(
+            "dataitemwidths is unnecessary because Phase Studio writes whitespace-separated fbegin/endf records."
+        ))
+
+        additional_sf_form = self._add_form_group(superflip_tab, "Additional keywords")
+        self._add_multiline(additional_sf_form, "extra_superflip_keywords", "Extra Superflip keywords", "", 110)
+        self.load_inflip_btn = QPushButton("Load settings from .inflip")
+        self.load_inflip_btn.setToolTip("Read Superflip keyword settings from an existing .inflip file. Reflection data blocks are ignored.")
+        self.load_inflip_btn.clicked.connect(self.load_inflip_settings_dialog)
+        additional_sf_form.addRow("", self.load_inflip_btn)
+        superflip_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
+        superflip_tab.addStretch(1)
+
+    def _build_advanced_edma_tab(self) -> None:
+        edma_tab = self._add_settings_tab("EDMA", advanced=True)
+        self._create_settings_page_header(edma_tab, "EDMA", "edma")
+        peak_form = self._add_form_group(edma_tab, "Peak extraction")
+        self._add_dspin(peak_form, "plimit_superflip", "Superflip threshold", 0.5, 0.0, 100.0, 0.1, 3)
+        self._add_dspin(peak_form, "plimit_deblur", "SharpED threshold (σ)", 0.5, 0.0, 100.0, 0.1, 3)
+        self._add_text(peak_form, "edma_maxima", "Maxima selection", "all")
+        self._add_text(peak_form, "edma_numberofatoms", "Atom-count mode", "composition")
+
+        symmetry_form = self._add_form_group(edma_tab, "Symmetry and peak positions")
+        self._add_dspin(symmetry_form, "merge_distance", "Merge distance (Å)", 0.75, 0.0, 10.0, 0.05, 3)
+        self._add_combo(symmetry_form, "edma_fullcell", "Full-cell", ["no", "yes"], "no")
+        self._add_checkbox(symmetry_form, "edma_centerofcharge", "Use center of charge", True, align_with_fields=True)
+
+        chemical_form = self._add_form_group(edma_tab, "Chemical filtering")
+        self._add_text(chemical_form, "edma_chlimit", "Charge limit", "0.2500")
+        self._add_text(chemical_form, "edma_chlimlist", "Charge-list threshold", "0.0057 relative")
+
+        edma_extra_form = self._add_form_group(edma_tab, "Additional keywords")
+        self._add_multiline(edma_extra_form, "extra_edma_keywords", "Extra EDMA keywords", "", 110)
+        edma_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
+        edma_tab.addStretch(1)
+
+    def _build_advanced_sharped_tab(self) -> None:
+        sharped_advanced_tab = self._add_settings_tab("SharpED", advanced=True)
+        self._create_settings_page_header(sharped_advanced_tab, "SharpED", "sharped")
+        inference_form = self._add_form_group(sharped_advanced_tab, "Inference")
+        self._add_text(inference_form, "sharped_elements", "Elements", "")
+        self.inputs["sharped_elements"].setPlaceholderText("Auto from composition")  # type: ignore[attr-defined]
+        self._add_dspin(inference_form, "sharped_outres", "Output resolution (Å)", 0.2, 0.001, 10.0, 0.05, 4)
+        self._add_dspin(
+            inference_form, "sharped_map_value_exponent", "Map value exponent",
+            SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
+            SHARPED_MAP_VALUE_EXPONENT_MIN, SHARPED_MAP_VALUE_EXPONENT_MAX, 0.05, 3,
+        )
+
+        network_form = self._add_form_group(sharped_advanced_tab, "Transfer and network")
+        self._add_dspin(network_form, "sharped_max_upload_mb", "Upload limit (MB)", 100.0, 0.0, 100000.0, 10.0, 1)
+        self._add_spin(network_form, "sharped_timeout_seconds", "HTTP timeout (s)", 600, 600, 7200, 60)
+        self._add_spin(network_form, "sharped_poll_seconds", "Polling interval (s)", 2, 1, 3600, 1)
+        self._add_spin(network_form, "sharped_max_polls", "Maximum polls", -1, -1, 1000000, 1)
+        max_polls_widget = self.inputs.get("sharped_max_polls")
+        if isinstance(max_polls_widget, QSpinBox):
+            max_polls_widget.setSpecialValueText("Unlimited")
+        sharped_advanced_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
+        sharped_advanced_tab.addStretch(1)
+
+    def _build_advanced_help_tab(self) -> None:
+        advanced_help_tab = self._add_settings_tab("Help", advanced=True)
+        advanced_contents_row = FlowLayout(spacing=4)
+        advanced_contents_label = QLabel("CONTENTS")
+        advanced_contents_label.setObjectName("helpContentsLabel")
+        advanced_contents_row.addWidget(advanced_contents_label)
+        for link_text, anchor in (
+            ("Setup", "adv_setup"), ("Superflip", "superflip"), ("EDMA", "edma"),
+            ("SharpED", "sharped"), ("Keywords", "keyword_reference"),
+        ):
+            link = QToolButton()
+            link.setObjectName("helpNavLink")
+            link.setText(link_text)
+            link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+            link.setCursor(Qt.PointingHandCursor)
+            link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
+            advanced_contents_row.addWidget(link)
+        advanced_help_tab.addLayout(advanced_contents_row)
+        adv_setup_help_layout = self._add_help_section(advanced_help_tab, "adv_setup", "Setup reference", """
+            <h3>External programs</h3>
+            <p><b>Superflip executable</b> is the absolute path to the original Jana2020 Superflip executable (default <code>C:\\Jana2020\\SUPERFLIP\\superflip_original.exe</code>). Do not select the Phase Studio wrapper named superflip.exe.</p>
+            <p><b>EDMA executable</b> is the absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps (default <code>C:\\Jana2020\\SUPERFLIP\\EDMA.exe</code>).</p>
+            <p>Superflip and EDMA are external third-party programs, distributed by their own authors and not bundled with Phase Studio. Both are normally installed with Jana2020; if a path is not configured, Phase Studio looks for them in <code>C:\\Jana2020\\SUPERFLIP</code> when a workflow starts and fills the path in automatically. Official downloads: <a href="https://superflip.fzu.cz/download/superflip_win.zip">superflip_win.zip</a> and <a href="https://superflip.fzu.cz/download/EDMA_win.zip">EDMA_win.zip</a>; license information at <a href="https://superflip.fzu.cz/">superflip.fzu.cz</a>.</p>
+            <p>Requirements are checked immediately before a workflow starts, and only for the stages that workflow actually uses -- a workflow that never runs EDMA is never asked for EDMA.</p>
+            <h3>SharpED connection</h3>
+            <p><b>Server URL</b> is the SharpED inference-server base URL; the current service is <code>https://sharped.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
+            <p>SharpED processing needs an active Jana2020 or SharpED account. Sign in at <a href="https://sharped.fzu.cz/sharp-ed">sharped.fzu.cz/sharp-ed</a> and create a token with <b>Create token</b>, then paste it into <b>API token</b> above.</p>
+            <h3>Interface</h3>
+            <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize SharpED map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
+        """, advanced=True)
+        self._add_back_to_contents(adv_setup_help_layout, advanced=True)
+        superflip_help_layout = self._add_help_section(advanced_help_tab, "superflip", "Superflip guide", """
+            <h3>What Superflip does</h3>
+            <p>Superflip is the density-reconstruction and phase-retrieval stage. Phase Studio prepares reflections, crystallographic metadata and input, executes Superflip, then uses its density map for direct inspection, EDMA peak extraction, SharpED processing and iterative feedback.</p>
+            <h3>Calculation</h3>
+            <p><b>Algorithm</b> maps to Superflip's <code>perform</code> keyword; common values are <code>CF</code> (normal charge-flipping, used by the presets), <code>lde</code>, <code>general</code>, <code>fourier</code> and <code>symmetry</code>; <code>AAR</code> is kept for executables that support it.</p>
+            <p><b>Maximum iterations</b> limits one Superflip run. <b>Repeat mode</b> controls repeated independent attempts and convergence sampling. <b>Random seed</b> initializes random numbers; use a fixed value for reproducibility or Superflip's automatic syntax. <b>Delta</b> (<code>AUTO</code> lets Superflip estimate the flip threshold), <b>Weak ratio</b> and <b>Biso</b> (overall isotropic B-factor used to sharpen the map; 0.000 disables sharpening) are advanced parameters normally left at preset/default values. <b>Enable final polish</b> adds <code>polish yes</code>, activating Superflip's final polishing stage when supported.</p>
+            <h3>Density / solution selection</h3>
+            <p><b>Voxel grid</b> is the Superflip <code>voxel</code> keyword: blank omits it; three integers set an explicit grid; <code>AUTO</code> computes a 0.2 &Aring; grid from the unit cell.</p>
+            <p><b>Stored best densities</b> and <b>Density selection metric</b> are the two arguments of <code>bestdensities</code> &mdash; how many best density maps Superflip keeps, and whether it selects by rvalue, peakiness, symmetry or reference agreement. Selecting <b>symmetry</b> biases selection toward symmetry-consistent solutions.</p>
+            <p><b>Search symmetry</b> maps to <code>searchsymmetry</code> (<code>no</code>, <code>shift</code> or <code>average</code>). <b>Derive symmetry</b> maps to <code>derivesymmetry</code> (commonly <code>yes</code>, <code>no</code> or <code>use</code>, depending on the Superflip version).</p>
+            <h3>Reflection handling</h3>
+            <p><b>Minimum observed value/&sigma;</b> filters weak observed reflections before writing the Superflip HKL block. <b>High-resolution cutoff d<sub>min</sub> (&Aring;)</b> is an optional resolution cutoff; 0 keeps all reflections. <b>Normalization</b> is an optional reflection-normalization keyword (<code>none</code> is the safest default for the Windows executable). <b>Resolution shells</b> is used only when a supported normalization keyword is written. <b>Missing reflections</b> supplies Superflip's <code>missing</code> line, for example bounds for missing reflections. <b>Electrons</b> is Superflip's <code>electrons</code> keyword; leave blank to omit it.</p>
+            <h3>Reference density</h3>
+            <p>The <code>referencefile</code> keyword is written automatically: from the selected Reference file when one is chosen on Basic &rarr; Input, or from cycle 2 onward when none is selected, using the previous cycle's EDMA CIF (or its XPLOR map if EDMA produced no usable peaks). This keeps Superflip's origin fixed in reciprocal space between cycles. <code>dataitemwidths</code> is unnecessary and not exposed, because Phase Studio always writes whitespace-separated fbegin/endf records.</p>
+            <h3>Additional keywords</h3>
+            <p><b>Extra Superflip keywords</b> lets expert users append documented keyword lines, inserted before <code>fbegin</code>, that are not represented by a dedicated control. <b>Load settings from .inflip</b> reads Superflip keyword settings from an existing .inflip file (reflection data blocks are ignored).</p>
+            <h3>Output</h3>
+            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Basic &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020.</p>
+        """, advanced=True)
+        self._add_help_callout(superflip_help_layout, "Starting point", "CF and the supplied preset values are initial settings only; choose parameters appropriate for the dataset and intended method.", kind="tip")
+        self._add_back_to_contents(superflip_help_layout, advanced=True)
+        edma_help_layout = self._add_help_section(advanced_help_tab, "edma", "EDMA guide", """
+            <h3>What EDMA does in Phase Studio</h3>
+            <p>EDMA extracts density maxima from an XPLOR map. Phase Studio uses these maxima to create structural models and exports, independently for the Superflip map and the SharpED map when enabled.</p>
+            <h3>Peak extraction</h3>
+            <p><b>Superflip threshold</b> and <b>SharpED threshold (&sigma;)</b> are multipliers of the corresponding map sigma; Phase Studio converts each multiplier to EDMA's absolute <code>plimit</code> for that map. A higher threshold is stricter; a lower threshold includes more maxima &mdash; there is no universal correct value. <b>Maxima selection = all</b> requests all maxima above plimit; advanced users may enter more restrictive documented EDMA syntax. <b>Atom-count mode = composition</b> requests atom counts consistent with the chemical composition.</p>
+            <h3>Symmetry and peak positions</h3>
+            <p><b>Merge distance</b> is the tolerance (&Aring;) used when reducing maxima to one representative per full space-group orbit for the CIF asymmetric unit. <b>Full-cell = no</b> requests symmetry-independent maxima when the supplied symmetry is correct; <code>yes</code> lists the full unit cell. <b>Use center of charge</b> refines peak positions to the center of charge of each density basin before export.</p>
+            <h3>Chemical filtering</h3>
+            <p><b>Charge limit</b> is the minimum integrated charge for exported maxima; useful for suppressing noise peaks in rough or over-sharpened maps. <b>Charge-list threshold</b> supplies EDMA's <code>chlimlist</code> setting, for example <code>0.0057 relative</code>, used together with atom-count/composition-based export.</p>
+            <h3>Additional keywords</h3>
+            <p><b>Extra EDMA keywords</b> appends documented EDMA options not represented by a dedicated control.</p>
+        """, advanced=True)
+        self._add_help_callout(edma_help_layout, "Important", "Select each EDMA threshold for its map and assess the resulting peaks; there is no universal threshold.", kind="warning")
+        self._add_back_to_contents(edma_help_layout, advanced=True)
+        sharped_help_layout = self._add_help_section(advanced_help_tab, "sharped", "SharpED guide", """
+            <h3>What SharpED does</h3>
+            <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
+            <p><b>Model</b> selection is on Basic &rarr; Workflow. Server connection is on Advanced &rarr; Setup (server URL/API token); elements, output resolution, map value exponent and upload/network settings are on Advanced &rarr; SharpED (everything else below).</p>
+            <h3>1. Server connection</h3>
+            <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
+            <h3>2. Model and elements</h3>
+            <p><b>Model</b> (Basic &rarr; Workflow) is sent to the server; <b>Refresh models</b> updates the selector; <code>default</code> uses the server default. <b>Elements</b> are sent to SharpED; when blank, Phase Studio derives unique non-hydrogen elements from the reference composition.</p>
+            <h3>3. Output resolution</h3>
+            <p><b>Output resolution (&Aring;)</b> is the requested sampling/resolution of the SharpED density map.</p>
+            <h3>4. Map value exponent</h3>
+            <p><b>Map value exponent</b> <i>a</i> applies a reversible signed power transform to the voxel values of the map sent to SharpED, and the exact inverse transform to the map SharpED returns. Forward: <code>sign(x)&middot;|x|<sup>a</sup></code>. Inverse: <code>sign(x)&middot;|x|<sup>1/a</sup></code>. The transform is signed because density maps contain negative voxel values, for which a plain <code>x<sup>a</sup></code> is not real-valued.</p>
+            <p>Qualitatively, <i>a</i> &lt; 1 compresses the dynamic range of the absolute map values, <i>a</i> = 1 (the default) leaves the map unchanged, and <i>a</i> &gt; 1 expands the dynamic range. <i>a</i> = 0 disables the transform entirely &mdash; <code>x<sup>0</sup></code> discards the magnitude and cannot be inverted, so it is treated as a bypass rather than as a transform.</p>
+            <p>Only voxel values are affected. Grid, origin, cell, symmetry, map dimensions, map format, metadata and the SharpED request parameters are all unchanged, and everything downstream of SharpED (EDMA, symmetrization, metrics, phase recycling, visualization, export and the Jana2020 hand-off) always sees values in the original map-value domain. No normalization, shifting, clipping or rescaling of any kind is added.</p>
+            <p>This is an experimental preprocessing option offered for exploration. Phase Studio makes no claim that any particular exponent improves crystallographic results; the default of 1.000 reproduces the standard workflow exactly.</p>
+            <h3>5. Upload and network</h3>
+            <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check (confirm the actual limit with the configured service). If Voxel grid is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits under this limit. <b>HTTP timeout</b> covers model queries, upload, status and download requests and is enforced at 600 seconds minimum. <b>Polling interval</b> sets the delay between status checks. <b>Maximum polls</b> limits those checks; <b>-1</b> means no fixed polling limit.</p>
+            <h3>6. SharpED in iterative workflows</h3>
+            <p><b>Run SharpED</b> (Basic &rarr; Workflow &rarr; Optional processing) enables server processing; if disabled, the SharpED map used downstream is a copy of the Superflip map. <b>Symmetrize SharpED map with Superflip (beta)</b> performs symmetry averaging, not another charge-flipping reconstruction. Next-cycle model's <b>SharpED map (XPLOR)</b> option feeds the SharpED map into the next cycle; <b>SharpED structure (EDMA CIF)</b> feeds its EDMA structure instead.</p>
+            <h3>7. Phase-recycling methods (beta/experimental)</h3>
+            <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features</b> (Advanced &rarr; Setup) to select them. Neither is production-ready.</p>
+        """, advanced=True)
+        sharped_link_row = QHBoxLayout()
+        sharped_link_row.addWidget(QLabel("SharpED project and API token"))
+        sharped_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
+        sharped_link_row.addStretch(1)
+        sharped_help_layout.addLayout(sharped_link_row)
+        self._add_help_callout(sharped_help_layout, "Important", "SharpED processing requires a valid API token and network access.", kind="warning")
+        self._add_back_to_contents(sharped_help_layout, advanced=True)
+        keyword_html = html.escape(SUPERFLIP_KEYWORD_REFERENCE).replace("\n", "<br>")
+        keyword_help_layout = self._add_help_section(
+            advanced_help_tab,
+            "keyword_reference",
+            "Advanced Superflip keyword reference",
+            f'<p style="font-family: Cascadia Mono, Consolas, monospace; color: #2264b8;">{keyword_html}</p>',
+            advanced=True,
+        )
+        self._add_back_to_contents(keyword_help_layout, advanced=True)
+        advanced_help_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
+        advanced_help_tab.addStretch(1)
+
+    def _build_run_controls(self, left_layout: QVBoxLayout) -> None:
+        primary_buttons = QHBoxLayout()
+        primary_buttons.setSpacing(8)
+        secondary_buttons = QHBoxLayout()
+        secondary_buttons.setSpacing(8)
+        self.run_btn = QPushButton("Run phasing")
+        self.continue_btn = QPushButton("Continue run")
+        self.stop_btn = QPushButton("Stop after current cycle")
+        self.stop_now_btn = QPushButton("Stop immediately")
+        self.clear_btn = QPushButton("Clear results")
+        # Third primary action is context-sensitive: "Send to Jana2020" (a
+        # result-hand-off action) when launched from the Jana2020 Wizard,
+        # "Install to Jana2020" (an application-integration action, no run
+        # required) for a normal standalone launch. handoff_btn is kept as a
+        # compatibility alias -- existing call sites that disable it during
+        # an active run (start_run/continue_run/error/cancel) stay correct
+        # unchanged in both contexts, since "disable while running" applies
+        # to either meaning of the button.
+        self.jana_action_btn = QPushButton("Install to Jana2020")
+        self.handoff_btn = self.jana_action_btn
+        self.run_btn.setObjectName("primaryButton")
+        self.continue_btn.setObjectName("continueButton")
+        self.jana_action_btn.setObjectName("handoffButton")
+        self.stop_btn.setObjectName("stopAfterButton")
+        self.stop_now_btn.setObjectName("stopNowButton")
+        self.clear_btn.setObjectName("clearButton")
+        for action_button in (self.run_btn, self.continue_btn, self.stop_btn, self.stop_now_btn, self.clear_btn, self.jana_action_btn):
+            action_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.continue_btn.setEnabled(False)
+        self.run_btn.setToolTip("Start the complete iterative crystallographic reconstruction workflow.")
+        self.continue_btn.setToolTip(
+            "Resume the previous run exactly where it stopped or finished, reusing the same metadata, "
+            "reflections and cycle feedback. If it already reached the configured cycle count, increase "
+            "Cycles above the completed count first."
+        )
+        self.stop_btn.setToolTip("Request a graceful stop after the currently running cycle has completed.")
+        self.stop_now_btn.setToolTip("Terminate the currently running external Superflip/EDMA process and stop the workflow as soon as possible.")
+        self.clear_btn.setToolTip("Clear the log panel and reset the plotted metrics for the current GUI session.")
+        self.run_btn.clicked.connect(self.start_run)
+        self.continue_btn.clicked.connect(self.continue_run)
+        self.stop_btn.clicked.connect(self.request_stop_after_cycle)
+        self.stop_now_btn.clicked.connect(self.request_immediate_stop)
+        self.clear_btn.clicked.connect(self.clear_log_plot)
+        self.jana_action_btn.clicked.connect(self._on_jana_action_clicked)
+        primary_buttons.addWidget(self.run_btn, 1)
+        primary_buttons.addWidget(self.continue_btn, 1)
+        primary_buttons.addWidget(self.jana_action_btn, 1)
+        secondary_buttons.addWidget(self.stop_btn, 2)
+        secondary_buttons.addWidget(self.stop_now_btn, 1)
+        secondary_buttons.addWidget(self.clear_btn, 1)
+        left_layout.addLayout(primary_buttons)
+        left_layout.addLayout(secondary_buttons)
+        # jana_wizard_context is still its standalone default at this point
+        # in construction (a Wizard launch sets it right after this window
+        # is constructed, then calls _sync_jana_action_button() again itself
+        # -- see launch_phase_studio_from_jana()'s build_window()), so this
+        # call establishes the correct standalone label/state immediately
+        # for every OTHER launch path.
+        self._sync_jana_action_button()
+        self._sync_window_title()
+
+        self.run_status_panel = QWidget()
+        self.run_status_panel.setObjectName("runStatusPanel")
+        run_status_layout = QVBoxLayout(self.run_status_panel)
+        run_status_layout.setContentsMargins(8, 6, 8, 7)
+        run_status_layout.setSpacing(3)
+        run_status_title = QLabel("RUN STATUS")
+        run_status_title.setObjectName("runStatusTitle")
+        run_status_layout.addWidget(run_status_title)
+        overall_progress_header = QHBoxLayout()
+        self.overall_progress_label = QLabel("Overall")
+        self.overall_progress_label.setObjectName("progressSectionLabel")
+        self.overall_progress_value = QLabel("Idle")
+        self.overall_progress_value.setObjectName("progressStageCounter")
+        self.overall_progress_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        overall_progress_header.addWidget(self.overall_progress_label)
+        overall_progress_header.addStretch(1)
+        overall_progress_header.addWidget(self.overall_progress_value)
+        run_status_layout.addLayout(overall_progress_header)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.setFormat("Idle")
+        self.progress_bar.setToolTip("Cycle-level progress indicator for the iterative workflow.")
+        run_status_layout.addWidget(self.progress_bar)
+        current_cycle_header = QHBoxLayout()
+        current_cycle_label = QLabel("Current cycle")
+        current_cycle_label.setObjectName("progressSectionLabel")
+        self.current_cycle_stage_counter = QLabel("Idle")
+        self.current_cycle_stage_counter.setObjectName("progressStageCounter")
+        self.current_cycle_stage_counter.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        current_cycle_header.addWidget(current_cycle_label)
+        current_cycle_header.addStretch(1)
+        current_cycle_header.addWidget(self.current_cycle_stage_counter)
+        run_status_layout.addLayout(current_cycle_header)
+        self.current_cycle_detail = QLabel("Idle")
+        self.current_cycle_detail.setObjectName("currentCycleDetail")
+        self.current_cycle_detail.setWordWrap(True)
+        run_status_layout.addWidget(self.current_cycle_detail)
+        # Secondary, subordinate line for Superflip's own live repeatmode
+        # progress (e.g. "Superflip repeat 17 of 50"). Hidden whenever there
+        # is nothing live to show: repeatmode==1, a non-Superflip stage, or
+        # between cycles -- see _apply_cycle_progress_state(). Grouped into
+        # its own tight sub-layout (1px) so the label reads as visually
+        # attached to its bar, distinct from the normal 3px spacing between
+        # otherwise-unrelated Run Status rows.
+        self.superflip_repeat_group = QWidget()
+        superflip_repeat_layout = QVBoxLayout(self.superflip_repeat_group)
+        superflip_repeat_layout.setContentsMargins(0, 0, 0, 0)
+        superflip_repeat_layout.setSpacing(1)
+        self.superflip_repeat_detail = QLabel("")
+        self.superflip_repeat_detail.setObjectName("superflipRepeatDetail")
+        self.superflip_repeat_detail.setWordWrap(True)
+        superflip_repeat_layout.addWidget(self.superflip_repeat_detail)
+        self.superflip_repeat_progress = QProgressBar()
+        self.superflip_repeat_progress.setObjectName("superflipRepeatProgress")
+        self.superflip_repeat_progress.setRange(0, 1)
+        self.superflip_repeat_progress.setValue(0)
+        self.superflip_repeat_progress.setTextVisible(False)
+        self.superflip_repeat_progress.setFixedHeight(6)
+        self.superflip_repeat_progress.setToolTip("Superflip's own repeatmode attempt counter for the running Superflip stage -- subordinate to the stage progress above.")
+        superflip_repeat_layout.addWidget(self.superflip_repeat_progress)
+        self.superflip_repeat_group.setVisible(False)
+        run_status_layout.addWidget(self.superflip_repeat_group)
+        self.current_cycle_progress = QProgressBar()
+        self.current_cycle_progress.setObjectName("currentCycleProgress")
+        self.current_cycle_progress.setRange(0, 1)
+        self.current_cycle_progress.setValue(0)
+        self.current_cycle_progress.setTextVisible(False)
+        self.current_cycle_progress.setToolTip("Stage-based progress for the active cycle; this is not an elapsed-time estimate.")
+        run_status_layout.addWidget(self.current_cycle_progress)
+        self.configuration_lock_hint = QLabel("Configuration locked while the calculation is running.")
+        self.configuration_lock_hint.setObjectName("configurationLockHint")
+        self.configuration_lock_hint.setVisible(False)
+        run_status_layout.addWidget(self.configuration_lock_hint)
+        left_layout.addWidget(self.run_status_panel)
+        self._set_run_status("Ready")
+
+    def _build_metrics_section(self) -> None:
+        metrics_section, metrics_layout = self._make_result_section("WORKFLOW METRICS")
+        self.metrics_tabs = QTabWidget()
+        self.metrics_tabs.setObjectName("metricsTabs")
+        # Some tab names are genuinely long ("Powder repartitioning"); scroll
+        # rather than silently elide several of them at once when the panel
+        # is narrow.
+        self.metrics_tabs.setUsesScrollButtons(True)
+        self.metrics_tabs.tabBar().setElideMode(Qt.ElideNone)
+        self.metrics_figures: Dict[str, Figure] = {}
+        self.metrics_axes: Dict[str, object] = {}
+        self.metrics_canvases: Dict[str, FigureCanvas] = {}
+        self.metrics_interactions: Dict[str, MetricsPlotInteraction] = {}
+        self._metrics_hover_series: Dict[str, list] = {}
+        self._metrics_last_render_args: Dict[str, dict] = {}
+        self._metrics_tab_keys: List[str] = []
+        metrics_tab_tooltips = {
+            "superflip": (
+                "Reference match, SF RMSD, Recall and Precision compare directly against a supplied reference "
+                "structure (Recall/Precision: heavy, i.e. non-H/He, atoms matched within EDMA's Merge distance), so "
+                "they only appear when one is provided. Without a reference, Heavy atoms found (a simple count) "
+                "appears instead as a fallback progress indicator."
+            ),
+            "deblur": (
+                "SharpED RMSD, Recall and Precision compare directly against a supplied reference structure (Recall/"
+                "Precision: heavy, i.e. non-H/He, atoms matched within EDMA's Merge distance), so they only appear "
+                "when one is provided. Without a reference, Heavy atoms found appears instead as a fallback progress "
+                "indicator. Map correlation only appears for the SharpED phase-recycling phasing methods."
+            ),
+            "powder_repartition": (
+                "Average, across overlap groups, of each group's mean member-wise intensity change caused by that "
+                "cycle's powder overlap repartitioning (Basic -> Map feedback). Only appears when repartitioning is "
+                "enabled; lower is better, since it should shrink toward 0% as the map increasingly agrees with the "
+                "observed data. Each cycle's point reflects the repartitioning that fed its input, so it lags one "
+                "cycle behind the repartitioning run itself."
+            ),
+            "intensity_correction": (
+                "Average, across corrected reflections, of the intensity change caused by that cycle's map-based "
+                "intensity correction (Basic -> Map feedback -> Intensity correction). Only appears when intensity "
+                "correction is enabled; lower is better, since it should shrink toward 0% as the map increasingly "
+                "agrees with the observed data. Each cycle's point reflects the correction that fed its input, so it "
+                "lags one cycle behind the correction run itself."
+            ),
+            "superflip_omit": "OMIT maps + R_free cross-validation for the Superflip map.",
+            "deblur_omit": "OMIT maps + R_free cross-validation for the SharpED map.",
+        }
+        self._metrics_detail_supported_keys = {"powder_repartition", "intensity_correction"}
+        for key, title in (
+            ("superflip", "Superflip"),
+            ("deblur", "SharpED"),
+            ("superflip_omit", "Superflip validation"),
+            ("deblur_omit", "SharpED validation"),
+            ("powder_repartition", "Powder repartitioning"),
+            ("intensity_correction", "Intensity correction"),
+        ):
+            # Each page is now JUST the canvas -- the interaction controls
+            # (hint / Full range / Detail / Reset view) live once in the
+            # QTabWidget's own corner, not a second per-tab toolbar row, so
+            # every pixel of page height goes to the plot itself.
+            page = QWidget()
+            page_layout = QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.setSpacing(0)
+
+            figure = Figure(figsize=(7.5, 3.5), dpi=100)
+            canvas = FigureCanvas(figure)
+            canvas.setObjectName("metricsCanvas")
+            canvas.setMinimumHeight(140)
+            canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            canvas.mpl_connect("resize_event", lambda _event, k=key: self._layout_metrics_figure(k))
+            canvas.setToolTip("")
+            canvas.setFocusPolicy(Qt.ClickFocus)
+            page_layout.addWidget(canvas, 1)
+            tab_index = self.metrics_tabs.addTab(page, title)
+            if key in metrics_tab_tooltips:
+                self.metrics_tabs.setTabToolTip(tab_index, metrics_tab_tooltips[key])
+            self._metrics_tab_keys.append(key)
+            self.metrics_figures[key] = figure
+            self.metrics_axes[key] = figure.add_subplot(111)
+            self.metrics_canvases[key] = canvas
+            self.metrics_interactions[key] = MetricsPlotInteraction(
+                key,
+                canvas,
+                get_axes=(lambda k=key: self.metrics_axes.get(k)),
+                get_series=(lambda k=key: self._metrics_hover_series.get(k, [])),
+                supports_detail=(key in self._metrics_detail_supported_keys),
+                on_state_changed=self._on_metrics_view_changed,
+                request_rerender=(lambda k=key: self._replay_metrics_tab(k)),
+            )
+        # ----- Shared interaction control strip: its own row, ABOVE the tab
+        # bar, rather than a QTabWidget corner widget sharing the tab bar's
+        # own horizontal strip -- 6 scientific tab names (some, like "Powder
+        # repartitioning", genuinely long) need that whole strip for
+        # themselves, or Qt silently elides several of them at once. Always
+        # acts on whichever tab is currently selected. -----
+        metrics_toolbar = QWidget()
+        metrics_toolbar_layout = QHBoxLayout(metrics_toolbar)
+        metrics_toolbar_layout.setContentsMargins(6, 0, 4, 4)
+        metrics_toolbar_layout.setSpacing(6)
+        self.metrics_hint_label = QLabel("Wheel zoom · Drag pan · Double-click reset")
+        self.metrics_hint_label.setObjectName("metricsHintLabel")
+        metrics_toolbar_layout.addWidget(self.metrics_hint_label)
+        metrics_toolbar_layout.addStretch(1)
+        self.metrics_full_range_btn = QPushButton("Full range")
+        self.metrics_detail_btn = QPushButton("Detail")
+        for btn in (self.metrics_full_range_btn, self.metrics_detail_btn):
+            btn.setObjectName("metricsViewToggle")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.PointingHandCursor)
+        metrics_mode_group = QButtonGroup(metrics_toolbar)
+        metrics_mode_group.setExclusive(True)
+        metrics_mode_group.addButton(self.metrics_full_range_btn)
+        metrics_mode_group.addButton(self.metrics_detail_btn)
+        self.metrics_full_range_btn.setChecked(True)
+        self.metrics_full_range_btn.setToolTip("Show every value using the normal full y range.")
+        self.metrics_detail_btn.setToolTip(
+            "Focus the y range on the main body of values (robust to a single outlying cycle). "
+            "Points outside the current view are not deleted -- they are simply off-screen."
+        )
+        self.metrics_full_range_btn.clicked.connect(lambda _checked=False: self._set_metrics_view_mode(self._current_metrics_key(), "full"))
+        self.metrics_detail_btn.clicked.connect(lambda _checked=False: self._set_metrics_view_mode(self._current_metrics_key(), "detail"))
+        metrics_toolbar_layout.addWidget(self.metrics_full_range_btn)
+        metrics_toolbar_layout.addWidget(self.metrics_detail_btn)
+        self.metrics_reset_btn = QPushButton("Reset view")
+        self.metrics_reset_btn.setObjectName("metricsControlButton")
+        self.metrics_reset_btn.setCursor(Qt.PointingHandCursor)
+        self.metrics_reset_btn.setToolTip("Return to the automatically calculated full-data view.")
+        self.metrics_reset_btn.setEnabled(False)
+        self.metrics_reset_btn.clicked.connect(lambda _checked=False: self._reset_metrics_view(self._current_metrics_key()))
+        metrics_toolbar_layout.addWidget(self.metrics_reset_btn)
+        metrics_layout.addWidget(metrics_toolbar)
+        metrics_layout.addWidget(self.metrics_tabs, 1)
+        self.metrics_tabs.currentChanged.connect(self._on_metrics_tab_changed)
+        self._on_metrics_tab_changed(self.metrics_tabs.currentIndex())
+        self.result_splitter.addWidget(metrics_section)
+
+    def _build_structure_comparison_section(self) -> None:
+        structure_section, structure_layout = self._make_result_section("STRUCTURE COMPARISON")
+        self.structure_rotation_hint = QLabel(
+            "Drag to rotate · right-drag to zoom · middle-drag to pan — all views stay in sync"
+            " · Hydrogen and helium atoms hidden"
+        )
+        self.structure_rotation_hint.setObjectName("structureRotationHint")
+        self.structure_rotation_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.structure_rotation_hint.setVisible(False)
+        structure_layout.addWidget(self.structure_rotation_hint)
+        self.structure_figure = Figure(figsize=(7.5, 3.0), dpi=100)
+        self.structure_canvas = FigureCanvas(self.structure_figure)
+        self.structure_canvas.setObjectName("structureCanvas")
+        self.structure_canvas.setMinimumHeight(260)
+        self.structure_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.structure_canvas.setToolTip("")
+        self.structure_canvas.mpl_connect("button_press_event", self._begin_structure_view_drag)
+        self.structure_canvas.mpl_connect("motion_notify_event", self._sync_structure_view_from_event)
+        self.structure_canvas.mpl_connect("button_release_event", self._finish_structure_view_drag)
+        self.structure_canvas.mpl_connect("resize_event", lambda _event: self._layout_structure_figure())
+        structure_layout.addWidget(self.structure_canvas, 1)
+        self.result_splitter.addWidget(structure_section)
+
+    def _build_execution_log_section(self) -> None:
+        log_section, log_layout = self._make_result_section("EXECUTION LOG")
+        self.log_text = QTextEdit()
+        self.log_text.setObjectName("executionLog")
+        self.log_text.setReadOnly(True)
+        self.log_text.setLineWrapMode(QTextEdit.NoWrap)
+        self.log_text.setMinimumHeight(100)
+        self.log_text.setToolTip("")
+        log_layout.addWidget(self.log_text, 1)
+        self.result_splitter.addWidget(log_section)
+        self.result_splitter.setStretchFactor(0, 2)
+        self.result_splitter.setStretchFactor(1, 6)
+        self.result_splitter.setStretchFactor(2, 2)
+        self.result_splitter.setSizes([155, 425, 120])
+
+    # ----- Basic-tab builders, one per tab, called in order from _build_ui.
+    # Each assigns the same self.* attributes, connects the same signals, and
+    # keeps the same widget defaults/tooltips/object names as before this
+    # extraction (2026 maintainability refactor) -- purely a code-motion out
+    # of _build_ui's own body, no behavior change. -----
+
+    def _build_input_tab(self) -> None:
+        input_tab = self._add_settings_tab("Input")
+        self._create_settings_page_header(input_tab, "Data input", "input")
+        data_input_form = self._add_form_group(input_tab, "")
         self._add_combo(
             data_input_form,
             "input_source_mode",
@@ -5481,18 +7845,32 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "reflection_data_mode",
             "HKL format",
             [
-                REFLECTION_DATA_MODE_SET_FROM_INFLIP,
-                REFLECTION_DATA_MODE_INTENSITY,
-                REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
-                REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
-                REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+                format_reflection_data_mode(REFLECTION_DATA_MODE_SET_FROM_INFLIP),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM),
             ],
-            REFLECTION_DATA_MODE_SET_FROM_INFLIP,
+            format_reflection_data_mode(REFLECTION_DATA_MODE_SET_FROM_INFLIP),
         )
+        try:
+            self.inputs["reflection_data_mode"].currentTextChanged.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        # jana_inflip already gets a dedicated on_change handler
+        # (_jana_inflip_path_changed, assigned further below) which also
+        # refreshes map-feedback gating; hkl has no such handler of its own,
+        # so give it one here rather than silently overwriting whichever of
+        # the two assignments runs last.
+        hkl_row = self.inputs.get("hkl")
+        if hasattr(hkl_row, "on_change"):
+            hkl_row.on_change = self._hkl_path_changed
         hkl_button_row = QHBoxLayout()
         self.test_hkl_btn = QPushButton("Validate HKL")
         self.analyze_hkl_btn = QPushButton("Analyze completeness")
-        self.test_hkl_btn.setToolTip("Parse the selected HKL or Jana .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
+        self.test_hkl_btn.setToolTip("Parse the selected HKL or Jana2020 .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
         self.analyze_hkl_btn.setToolTip("Open completeness and data-statistics plots for the selected HKL data.")
         self.test_hkl_btn.clicked.connect(self.test_hkl_load_dialog)
         self.analyze_hkl_btn.clicked.connect(self.open_hkl_completeness_dialog)
@@ -5500,7 +7878,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         hkl_button_row.addWidget(self.analyze_hkl_btn)
         data_input_form.addRow("", hkl_button_row)
 
-        metadata_form = add_form_group(input_tab, "Crystal metadata")
+        metadata_form = self._add_form_group(input_tab, "Crystal metadata")
         self._add_combo(
             metadata_form,
             "metadata_source",
@@ -5520,11 +7898,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metadata_summary_layout = self._configure_form(QFormLayout(self.metadata_summary_panel))
         self.metadata_cell_summary = QLabel("No metadata loaded.")
         self.metadata_cell_summary.setWordWrap(True)
+        self.metadata_cell_angles_summary = QLabel("")
+        self.metadata_cell_angles_summary.setWordWrap(True)
         self.metadata_spacegroup_summary = QLabel("")
         self.metadata_spacegroup_summary.setWordWrap(True)
         self.metadata_composition_summary = QLabel("")
         self.metadata_composition_summary.setWordWrap(True)
-        metadata_summary_layout.addRow("Cell", self.metadata_cell_summary)
+        metadata_summary_layout.addRow("Cell lengths", self.metadata_cell_summary)
+        metadata_summary_layout.addRow("Cell angles", self.metadata_cell_angles_summary)
         metadata_summary_layout.addRow("Space group", self.metadata_spacegroup_summary)
         metadata_summary_layout.addRow("Composition", self.metadata_composition_summary)
         metadata_form.addRow("", self.metadata_summary_panel)
@@ -5630,58 +8011,81 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.metadata_error_panel.setVisible(False)
         metadata_form.addRow("", self.metadata_error_panel)
 
-        reference_form = add_form_group(input_tab, "Reference and initial model")
-        self._add_path(reference_form, "reference_cif", "Reference file", "", "file", "Reference files (*.cif *.ins *.res *.m80 *.m81 *.jana *.xplor *.ccp4 *.map);;CIF structures (*.cif *.ins *.res);;Jana density maps (*.m80 *.m81 *.jana);;XPLOR maps (*.xplor);;CCP4 maps (*.ccp4 *.map);;All files (*)")
+        reference_form = self._add_form_group(input_tab, "Reference and initial model")
+        # Slightly tighter top margin than the shared subsection default so
+        # this section's heading is visible sooner below Crystal metadata's
+        # summary in a normal 1080p window -- scoped to this one group via a
+        # dynamic property, not a change to every subsection's spacing.
+        reference_form.parentWidget().setProperty("tightTop", True)
+        # "Reference model", not "Reference structure": this selector validly
+        # accepts either a structure model or a density map (see
+        # REFERENCE_FILE_SUFFIXES), so naming it a structure was misleading.
+        self._add_path(reference_form, "reference_cif", "Reference model", "", "file", supported_reference_filters())
         self.inputs["jana_inflip"].on_change = self._jana_inflip_path_changed  # type: ignore[attr-defined]
         self.inputs["reference_cif"].on_change = self._reference_path_changed  # type: ignore[attr-defined]
-        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", "Model/map files (*.xplor *.ccp4 *.cif);;All files (*)")
+        self._add_path(reference_form, "first_cycle_modelfile", "Initial model (cycle 1)", "", "file", supported_model_filters())
+        input_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         input_tab.addStretch(1)
 
-        # Basic / Workflow
-        workflow_tab = add_settings_tab("Workflow")
-        workflow_form = add_form_group(workflow_tab, "Reconstruction", "setup")
+    def _build_workflow_tab(self) -> None:
+        workflow_tab = self._add_settings_tab("Workflow")
+        self._create_settings_page_header(workflow_tab, "Reconstruction", "workflow")
+        workflow_form = self._add_form_group(workflow_tab, "")
         self._workflow_form = workflow_form
-        self._add_combo(workflow_form, "workflow_preset", "Starting preset", ["Recommended", "custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "Recommended")
+        self._add_combo(workflow_form, "workflow_preset", "Workflow preset", ["Recommended", "Custom", "MOF atomic resolution", "MOF medium resolution", "small molecule", "inorganic"], "Recommended")
         try:
             self.inputs["workflow_preset"].currentTextChanged.connect(self._apply_workflow_preset)  # type: ignore[attr-defined]
         except Exception:
             pass
         self._add_spin(workflow_form, "cycles", "Cycles", 5, 1, 999, 1)
         self.inputs["cycles"].valueChanged.connect(self._update_plot)  # type: ignore[attr-defined]
+        self.inputs["cycles"].valueChanged.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
+        self.inputs["cycles"].valueChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         self._add_combo(workflow_form, "reconstruction_mode", "Phasing method", ["Superflip", "1st Superflip, then SharpED (beta)", "SharpED (experimental)"], "Superflip")
         try:
             self.inputs["reconstruction_mode"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
             pass
-        self.reconstruction_mode_warning = settings_callout("", "")
+        self.reconstruction_mode_warning = self._settings_callout("", "", kind="warning")
         self.reconstruction_mode_warning.setVisible(False)
         workflow_form.addRow("", self.reconstruction_mode_warning)
-        self._add_combo(workflow_form, "modelfile_source", "Next-cycle model", ["superflip_xplor", "deblurred_xplor", "deblurred_edma_cif", "none"], "deblurred_xplor")
+        self.single_cycle_note = self._settings_callout("Single-cycle run", "Next-cycle settings are inactive.")
+        self.single_cycle_note.setVisible(False)
+        workflow_form.addRow("", self.single_cycle_note)
+        self._add_combo_with_values(
+            workflow_form,
+            "modelfile_source",
+            "Next-cycle model",
+            [
+                ("superflip_xplor", f"{result_map_label('superflip')} (XPLOR)"),
+                ("deblurred_xplor", f"{result_map_label('deblurred')} (XPLOR)"),
+                ("deblurred_edma_cif", f"{result_structure_label('deblurred')} (EDMA CIF)"),
+                ("none", "None"),
+            ],
+            "deblurred_xplor",
+        )
         try:
             self.inputs["modelfile_source"].currentTextChanged.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
         except Exception:
             pass
         self._add_dspin(workflow_form, "damping_factor", "XPLOR damping (1/x)", 0.3, 0.001, 1.0, 0.05, 3)
         self._add_text(workflow_form, "exclude_atoms", "Excluded atoms", "none")
-        workflow_note = settings_callout(
+        workflow_note = self._settings_callout(
             "Note",
-            "Next-cycle model is authoritative: 'none' forces a one-cycle run. "
-            "superflip_xplor cycles without SharpED deblurring; XPLOR damping is active for XPLOR modes only. "
-            "Both are ignored when Phasing method is not Superflip: the methods below define their own next-cycle map."
+            "Next-cycle model determines how subsequent cycles are initialized. Selecting None "
+            "limits the workflow to a single cycle. XPLOR damping applies only to XPLOR-based recycling."
         )
+        workflow_note.setProperty("compactPadding", True)
         workflow_form.addRow("", workflow_note)
-        recycle_note = settings_callout(
+        self.recycle_note = self._settings_callout(
             "Phasing method",
-            "Superflip is the standard iterative charge-flipping cycle (unchanged). "
-            "1st Superflip, then SharpED (beta) runs Superflip only once, then each cycle deblurs the previous map with "
-            "SharpED, calculates phi_calc by FFT from that deblurred map for every measured hkl, and recomposes a map "
-            "from |Fobs| + phi_calc for the next cycle's SharpED input. "
-            "SharpED (experimental) skips Superflip entirely: cycle 1 starts from |Fobs| with independent random phases instead."
+            "Beta/experimental methods recycle phases through SharpED instead of iterative Superflip cycling. "
+            "See Open guide above for exactly how each method differs."
         )
-        workflow_form.addRow("", recycle_note)
+        workflow_form.addRow("", self.recycle_note)
 
-        model_form = add_form_group(workflow_tab, "SharpED model", "sharped")
-        self._add_combo(model_form, "sharped_model", "Model", ["koala 2.0"], "koala 2.0")
+        model_form = self._add_form_group(workflow_tab, "SharpED model")
+        self._add_combo(model_form, "sharped_model", "Model", ["default"], "default")
         try:
             self.inputs["sharped_model"].lineEdit().setReadOnly(False)  # type: ignore[attr-defined]
             self.inputs["sharped_model"].lineEdit().setCursor(Qt.CursorShape.IBeamCursor)  # type: ignore[attr-defined]
@@ -5691,579 +8095,265 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
         self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
         model_form.addRow("", self.refresh_models_btn)
-        model_form.addRow("", self._secondary_help(
-            "Server URL and API token are in Advanced → Setup. Elements, output resolution and transfer/network settings are in Advanced → SharpED."
-        ))
+        self.sharped_model_status = QLabel("Model information not loaded.")
+        self.sharped_model_status.setWordWrap(True)
+        model_form.addRow("", self.sharped_model_status)
+        self._sync_sharped_catalog()
+        settings_links_row = QHBoxLayout()
+        settings_links_row.setSpacing(10)
+        connection_settings_link = QToolButton()
+        connection_settings_link.setObjectName("settingsNavLink")
+        connection_settings_link.setText("Connection settings →")
+        connection_settings_link.setCursor(Qt.PointingHandCursor)
+        connection_settings_link.setToolTip("Open Advanced → Setup (server URL, API token).")
+        connection_settings_link.clicked.connect(lambda _checked=False: self._open_configuration_page("Setup", advanced=True))
+        inference_settings_link = QToolButton()
+        inference_settings_link.setObjectName("settingsNavLink")
+        inference_settings_link.setText("Inference settings →")
+        inference_settings_link.setCursor(Qt.PointingHandCursor)
+        inference_settings_link.setToolTip("Open Advanced → SharpED (elements, output resolution, map value exponent, network/upload settings).")
+        inference_settings_link.clicked.connect(lambda _checked=False: self._open_configuration_page("SharpED", advanced=True))
+        settings_links_row.addWidget(connection_settings_link)
+        settings_links_row.addWidget(inference_settings_link)
+        settings_links_row.addStretch(1)
+        model_form.addRow("", settings_links_row)
 
-        optional_form = add_form_group(workflow_tab, "Optional processing")
+        optional_form = self._add_form_group(workflow_tab, "Optional processing")
         self._optional_form = optional_form
         superflip_stages_label = QLabel("Superflip cycle")
         superflip_stages_label.setObjectName("inlineGroupTitle")
         optional_form.addRow(superflip_stages_label)
         self._add_checkbox(optional_form, "run_edma_superflip", "Run EDMA on Superflip map", True, align_with_fields=True)
-        self._add_checkbox(optional_form, "run_sharped", "Run SharpED deblurring", True, align_with_fields=True)
-        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize processed map with Superflip (beta)", False, align_with_fields=True)
-        self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on processed map", True, align_with_fields=True)
-        recycle_stages_label = QLabel("Phase-recycling methods")
-        recycle_stages_label.setObjectName("inlineGroupTitle")
-        optional_form.addRow(recycle_stages_label)
+        self._add_checkbox(optional_form, "run_sharped", "Run SharpED", True, align_with_fields=True)
+        self._add_checkbox(optional_form, "symmetrize_deblurred_map", "Symmetrize SharpED map with Superflip (beta)", False, align_with_fields=True)
+        self._add_checkbox(optional_form, "run_edma_deblurred", "Run EDMA on SharpED map", True, align_with_fields=True)
+        self._add_checkbox(optional_form, "compute_omit_maps", "Compute OMIT validation maps (5% holdout)", False, align_with_fields=True)
+        self._add_checkbox(optional_form, "compute_omit_rfree", "Calculate R_free on the 5% holdout", False, align_with_fields=True)
+        try:
+            self.inputs["compute_omit_maps"].toggled.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.recycle_stages_label = QLabel("Phase-recycling methods")
+        self.recycle_stages_label.setObjectName("inlineGroupTitle")
+        optional_form.addRow(self.recycle_stages_label)
         self._add_checkbox(optional_form, "run_edma_recycle_final", "Run EDMA on final map", False, align_with_fields=True)
+        workflow_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         workflow_tab.addStretch(1)
 
-        # Basic / Output
-        output_tab = add_settings_tab("Output")
-        output_form = add_form_group(output_tab, "Output")
+    def _build_output_tab(self) -> None:
+        # A fresh Path.cwd() here (rather than a value threaded in from
+        # _build_ui) is equivalent: it is only ever read once, during
+        # construction, to seed the default working-directory text.
+        cwd = Path.cwd()
+        output_tab = self._add_settings_tab("Output")
+        self._create_settings_page_header(output_tab, "Output", "output")
+        output_form = self._add_form_group(output_tab, "")
         self._add_path(output_form, "work_dir", "Working directory", str(cwd / "iterative_superflip_qt_run"), "dir")
         self._add_combo(output_form, "map_export_format", "Map format", ["xplor", "ccp4", "jana", "HKL reflections with phases", "ShelX (fcf)"], "xplor")
         self._add_combo(output_form, "structure_export_format", "Structure format", ["cif", "xyz", "pdb"], "cif")
-        output_form.addRow("", self._secondary_help(
-            "XPLOR and CIF are always kept internally for EDMA, SharpED and next-cycle modelfiles; ccp4/jana add one "
-            "extra saved density map on top for external use or Jana2020. HKL reflections with phases and ShelX (fcf) "
-            "instead save the observed reflections (phase is 0 unless supplied by the selected HKL mode) in place of "
-            "an extra density map."
+        output_form.addRow("", self._settings_callout(
+            "Note",
+            "Internal XPLOR maps and CIF structures required by the workflow are retained automatically. "
+            "The selected formats control additional files for external use. "
+            "HKL reflections with phases and ShelX (fcf) save reflection data instead of an extra map."
         ))
+        output_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         output_tab.addStretch(1)
 
-        # Basic / Help
-        basic_help_tab = add_settings_tab("Help")
-        basic_contents_row = QHBoxLayout()
-        basic_contents_row.setSpacing(4)
-        basic_contents_label = QLabel("CONTENTS")
-        basic_contents_label.setObjectName("helpContentsLabel")
-        basic_contents_row.addWidget(basic_contents_label)
-        for link_text, anchor in (
-            ("Setup", "setup"), ("Input", "input"), ("Workflow", "workflow"),
-            ("Output", "output"), ("About", "about"),
-        ):
-            link = QToolButton()
-            link.setObjectName("helpNavLink")
-            link.setText(link_text)
-            link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-            link.setCursor(Qt.PointingHandCursor)
-            link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
-            basic_contents_row.addWidget(link)
-        basic_contents_row.addStretch(1)
-        basic_help_tab.addLayout(basic_contents_row)
-        setup_help_layout = add_help_section(basic_help_tab, "setup", "Systematic setup guide", """
-            <h3>1. Select the input</h3>
-            <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
-            <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
-            <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
-            <h3>2. Choose a starting preset</h3>
-            <p><b>Starting preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
-            <ul><li><b>Recommended</b> (default): a general-purpose baseline that matches the built-in defaults.</li>
-            <li><b>small molecule:</b> settings intended as a starting point for small-molecule data.</li>
-            <li><b>inorganic:</b> settings intended as a starting point for inorganic materials.</li>
-            <li><b>MOF atomic resolution:</b> settings intended as a starting point for atomic-resolution framework data.</li>
-            <li><b>MOF medium resolution:</b> settings intended as a starting point for medium-resolution framework data.</li>
-            <li><b>custom:</b> applies nothing; a placeholder for manually configured values.</li></ul>
-            <p>Applying a preset changes multiple controls. Review the resulting values and adapt them to the dataset; a preset is not a universal scientific recommendation.</p>
-            <p><b>Phasing method</b> defaults to the standard Superflip cycle. Two SharpED phase-recycling methods, one beta and one experimental, are hidden by default; enable <b>Show beta and experimental features in settings</b> on Advanced &rarr; Setup to make them selectable.</p>
-            <h3>3. Configure the iterative workflow</h3>
-            <p><b>observed reflections &rarr; Superflip &rarr; XPLOR map &rarr; EDMA and/or SharpED &rarr; deblurred XPLOR &rarr; EDMA &rarr; next-cycle model</b></p>
-            <p>The exact branches depend on <b>Basic &rarr; Workflow &rarr; Optional processing</b>. The next-cycle source can be Superflip XPLOR, SharpED/deblurred XPLOR, deblurred EDMA CIF, or <b>none</b>. Selecting none forces a one-cycle run.</p>
-            <h3>4. Inspect each cycle</h3>
-            <p>Review convergence metrics, structure previews, detected atom/peak counts, reference agreement when available, raw Superflip versus SharpED results, and the execution log. Phase Studio does not replace final crystallographic refinement.</p>
-            <h3>5. Return the selected result to Jana2020</h3>
-            <p>After a successful run, <b>Send to Jana2020</b> lets you select a completed cycle and map source. Final interpretation and refinement remain in Jana2020.</p>
-        """)
-        setup_help_layout.insertWidget(1, WorkflowDiagram())
-        add_help_callout(setup_help_layout, "Tip", "Validate the reflection interpretation and review the selected preset values before starting a run.")
-        add_back_to_contents(setup_help_layout)
-        input_help_layout = add_help_section(basic_help_tab, "input", "Input reference", """
-            <h3>Data input</h3>
-            <p><b>Input mode</b> chooses the reflection source: <b>Jana .inflip</b>, <b>Jana .inflip with overrides</b>, or <b>External HKL</b>. In Jana modes, the .inflip file's fbegin/endf block is the default HKL source and its cell/space-group/composition keywords can provide crystallographic metadata; External mode uses reflection data loaded independently of Jana2020 and requires metadata from another source.</p>
-            <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
-            <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
-            <p><b>HKL format</b> is the exact column order of the reflection data. <code>set from inflip</code> imports the format from Jana; the other modes accept intensity or amplitude followed by sigma, optionally with a phase column in degrees before sigma.</p>
-            <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
-            <h3>Crystal metadata</h3>
-            <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
-            <p>When <b>Manual</b> is selected: <b>a, b, c</b> (&Aring;) and <b>alpha, beta, gamma</b> (&deg;) are the unit-cell parameters; <b>Number</b> (1-230) or <b>Symbol</b> identifies the space group; <b>Composition</b> uses Superflip syntax, for example <code>Ag196 S108 O40 B1000</code>.</p>
-            <h3>Reference and initial model</h3>
-            <p><b>Reference file</b> is an optional external reference: CIF/INS/RES files can supply metadata and atom sites used for comparison metrics; Jana/XPLOR/CCP4 maps can serve as a Superflip reference density (referencefile keyword), which also anchors the reciprocal-space origin from cycle 2 onward when no explicit reference is chosen.</p>
-            <p><b>Initial model (cycle 1)</b> is an optional external density or structure model that seeds the first Superflip cycle. Supported inputs are XPLOR, CCP4 and CIF.</p>
-        """)
-        add_back_to_contents(input_help_layout)
-        workflow_help_layout = add_help_section(basic_help_tab, "workflow", "Workflow reference", """
-            <h3>Reconstruction</h3>
-            <p><b>Starting preset</b> applies a bundle of starting values in one step; every value stays individually editable afterward. <b>Recommended</b> (default) is a general-purpose baseline matching the built-in defaults; the MOF/small-molecule/inorganic presets tune values for a specific sample type; <b>custom</b> applies nothing.</p>
-            <p><b>Cycles</b> is the number of iterative Superflip &rarr; EDMA &rarr; SharpED &rarr; EDMA cycles to run. The effective count is forced to 1 when Next-cycle model is <code>none</code>.</p>
-            <p><b>Phasing method</b> chooses the reconstruction algorithm:</p>
-            <ul>
-                <li><b>Superflip</b> (default) &mdash; the standard charge-flipping cycle: Superflip runs every cycle, seeded by Next-cycle model.</li>
-                <li><b>1st Superflip, then SharpED (beta)</b> &mdash; Superflip runs only once, on cycle 1. Every following cycle deblurs the previous map with SharpED, calculates phases by FFT from that deblurred map for every measured reflection (expanded over the full space-group symmetry), and recomposes a map from |Fobs| with those phases for the next cycle. Does not work well with some models.</li>
-                <li><b>SharpED (experimental)</b> &mdash; the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases. Not production-ready; can take hundreds of cycles to converge, if it converges at all.</li>
-            </ul>
-            <p>Both recycling methods are hidden unless <b>Show beta and experimental features in settings</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize processed map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. The convergence graph adds a <b>Map correlation</b> series for these methods (each cycle's recomposed map compared with the previous cycle's).</p>
-            <p><b>Next-cycle model</b> (Superflip phasing method only) is the authoritative source for cycle 2 onward: <code>none</code> forces a one-cycle run; <code>superflip_xplor</code> cycles without SharpED deblurring; <code>deblurred_xplor</code> uses the SharpED-processed XPLOR map; <code>deblurred_edma_cif</code> uses the EDMA structure extracted from the deblurred map and ignores XPLOR damping.</p>
-            <p><b>XPLOR damping (1/x)</b> (Superflip phasing method, XPLOR next-cycle models only) is the inverse damping factor: 1.0 means no damping, 0.5 is equivalent to the previous factor 2.0, 0.25 to factor 4.0.</p>
-            <p><b>Excluded atoms</b> removes selected atom labels from CIF modelfiles before the next Superflip cycle (comma/semicolon/whitespace-separated); it does not apply to XPLOR-only model paths.</p>
-            <h3>SharpED model</h3>
-            <p><b>Model</b> is the SharpED server model name sent with every deblurring request; <b>Refresh models</b> fetches the current list from the configured server and updates this selector. Server URL and API token are on Advanced &rarr; Setup; elements, output resolution and network/upload settings are on Advanced &rarr; SharpED.</p>
-            <h3>Optional processing</h3>
-            <p>Under <b>Superflip cycle</b> (used when Phasing method is Superflip):</p>
-            <ul>
-                <li><b>Run EDMA on Superflip map</b> &mdash; peak-search the raw Superflip XPLOR map and export CIF/XYZ/PDB.</li>
-                <li><b>Run SharpED deblurring</b> &mdash; process the Superflip map with the SharpED server. If disabled, the "deblurred" map used downstream is just a copy of the Superflip map.</li>
-                <li><b>Symmetrize processed map with Superflip (beta)</b> &mdash; after deblurring, run Superflip in symmetry mode (no charge flipping) with the deblurred map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
-                <li><b>Run EDMA on processed map</b> &mdash; peak-search the deblurred (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
-            </ul>
-            <p>Under <b>Phase-recycling methods</b> (used by the two beta/experimental Phasing methods):</p>
-            <ul><li><b>Run EDMA on final map</b> &mdash; run EDMA once, on the last cycle's recomposed |Fobs|+phi_calc map.</li></ul>
-        """)
-        add_back_to_contents(workflow_help_layout)
-        output_help_layout = add_help_section(basic_help_tab, "output", "Output reference", """
-            <h3>Output</h3>
-            <p><b>Working directory</b> is where Phase Studio writes generated HKL files, Superflip inputs, maps, EDMA results, logs and metrics. Use a dedicated directory per run when reproducibility matters.</p>
-            <p><b>Map format</b> adds one extra saved output on top of the XPLOR map that is always kept internally for EDMA, SharpED and Superflip: <code>ccp4</code> or <code>jana</code> save an extra CCP4 map or Jana m80/m81 density+reflection files; <b>HKL reflections with phases</b> and <b>ShelX (fcf)</b> instead save the observed reflections (h k l, intensity/F&sup2;, sigma, phase &mdash; phase is 0 unless supplied by the selected HKL mode) as a standardized text file or a ShelX/Jana-compatible .fcf file, in place of an extra density map.</p>
-            <p><b>Structure format</b> adds one extra saved structure format on top of the CIF that is always kept internally for metrics and next-cycle modelfiles: <code>xyz</code> or <code>pdb</code>.</p>
-        """)
-        add_back_to_contents(output_help_layout)
-        about_layout = add_help_section(basic_help_tab, "about", "About Phase Studio", """
-            <h2>Phase Studio</h2>
-            <p>Phase Studio is a crystallographic reconstruction workflow integrating Superflip, SharpED and EDMA with Jana2020-oriented workflows.</p>
-            <h3>Developed at</h3>
-            <p>Department of Structure Analysis<br>Institute of Physics of the Czech Academy of Sciences</p>
-            <h3>Authors and contacts</h3>
-            <p><b>Jiří Zelenka</b><br><a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>
-            <p><b>Jan Rohlíček</b><br><a href="mailto:rohlicek@fzu.cz">rohlicek@fzu.cz</a></p>
-            <p><b>Monika Kučeráková</b></p><p><b>Zdeněk Buk</b></p>
-            <p><b>General contact</b><br><a href="mailto:sharped@fzu.cz">sharped@fzu.cz</a></p>
-            <h3>Project resources</h3>
-        """)
-        for resource_name, resource_url, resource_tip in (
-            ("Department of Structure Analysis", "https://www.fzu.cz/en/research/divisions-and-departments/division-3/department-19", "Open the department website"),
-            ("SharpED project and API token", "https://sharped.fzu.cz/", "Open the SharpED project and API-token page"),
-            ("Phase Studio source code", "https://github.com/ji-ze/Phase-Studio", "Open the Phase Studio source repository"),
-        ):
-            resource_row = QHBoxLayout()
-            resource_row.addWidget(QLabel(resource_name))
-            resource_row.addWidget(self._external_link_icon(resource_url, resource_tip))
-            resource_row.addStretch(1)
-            about_layout.addLayout(resource_row)
-        add_back_to_contents(about_layout)
-        basic_help_tab.addStretch(1)
-
-        # Advanced / Setup
-        setup_tab = add_settings_tab("Setup", advanced=True)
-        programs_form = add_form_group(setup_tab, "External programs")
-        self._add_path(programs_form, "superflip_exe", "Superflip executable", r"C:\Jana2020\SUPERFLIP\superflip_original.exe", "file", "Executables (*.exe);;All files (*)")
-        self._add_path(programs_form, "edma_exe", "EDMA executable", r"C:\Jana2020\SUPERFLIP\EDMA.exe", "file", "Executables (*.exe);;All files (*)")
-        program_links = QVBoxLayout()
-        program_links.setSpacing(3)
-        for program_name, tooltip in (
-            ("Superflip website", "Open the official Superflip website"),
-            ("EDMA website", "Open the official EDMA website"),
-        ):
-            program_row = QHBoxLayout()
-            program_row.addWidget(QLabel(program_name))
-            program_row.addWidget(self._external_link_icon("https://superflip.fzu.cz/", tooltip))
-            program_row.addStretch(1)
-            program_links.addLayout(program_row)
-        programs_form.addRow("Downloads", program_links)
-
-        sharped_api_form = add_form_group(setup_tab, "SharpED API")
-        self._add_text(sharped_api_form, "sharped_base_url", "Server URL", "https://jana.fzu.cz")
-        self._add_text(sharped_api_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
-        try:
-            self.inputs["sharped_api_token"].setEchoMode(QLineEdit.Password)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        token_link_row = QHBoxLayout()
-        token_link_row.addWidget(QLabel("Get SharpED token"))
-        token_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
-        token_link_row.addStretch(1)
-        sharped_api_form.addRow("", token_link_row)
-
-        interface_form = add_form_group(setup_tab, "Interface")
-        self._add_checkbox(interface_form, "show_beta_features", "Show beta and experimental features in settings", False, align_with_fields=True)
-        try:
-            self.inputs["show_beta_features"].toggled.connect(self._sync_workflow_widgets)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        interface_form.addRow("", self._secondary_help(
-            "Off by default: beta and experimental Phasing methods (and settings that only apply to them) are hidden "
-            "entirely, not just disabled. Enable this to make them selectable again."
-        ))
-        setup_tab.addStretch(1)
-
-        # Advanced / Superflip
-        superflip_tab = add_settings_tab("Superflip", advanced=True)
-        calculation_form = add_form_group(superflip_tab, "Calculation", "superflip")
-        self._add_combo(calculation_form, "perform_algorithm", "Algorithm", ["CF", "AAR", "lde", "general", "fourier", "symmetry"], "CF")
-        self.inputs["perform_algorithm"].setToolTip(
-            INPUT_TOOLTIPS["perform_algorithm"]
-        )  # type: ignore[attr-defined]
-        self._add_spin(calculation_form, "maxcycles", "Maximum iterations", 2000, 1, 100000, 100)
-        self._add_spin(calculation_form, "repeatmode", "Repeat mode", 10, 1, 10000, 1)
-        self._add_text(calculation_form, "randomseed", "Random seed", "AUTO")
-        self._add_text(calculation_form, "delta", "Delta", "AUTO")
-        self._add_text(calculation_form, "weakratio", "Weak ratio", "0.000")
-        self._add_text(calculation_form, "biso", "Biso", "0.000")
-        self._add_checkbox(calculation_form, "polish", "Enable final polish", True, align_with_fields=True)
-
-        density_form = add_form_group(superflip_tab, "Density / solution selection")
-        self._add_text(density_form, "voxel", "Voxel grid", "")
-        self._add_spin(density_form, "bestdensities_count", "Best densities: count", 1, 1, 100, 1)
-        self._add_combo(density_form, "bestdensities_metric", "Best-density metric", ["rvalue", "peakiness", "symmetry", "reference"], "rvalue")
-        self._add_checkbox(density_form, "bestdensities_symmetry", "Use symmetry for best densities", True, align_with_fields=True)
-        self.inputs["bestdensities_symmetry"].setToolTip(
-            INPUT_TOOLTIPS["bestdensities_symmetry"]
-        )  # type: ignore[attr-defined]
-        self._add_combo(density_form, "searchsymmetry", "Search symmetry", ["average", "shift", "no"], "average")
-        self._add_text(density_form, "derivesymmetry", "Derive symmetry", "yes")
-
-        reflection_form = add_form_group(superflip_tab, "Reflection handling")
-        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum value/σ", 2.0, 0.0, 100.0, 0.5, 3)
-        self._add_dspin(reflection_form, "resolution_d_min", "d_min cutoff (Å)", 0.0, 0.0, 20.0, 0.1, 3)
-        self._add_combo(reflection_form, "normalize", "Normalization", ["none", "local", "atoms", "wilson"], "atoms")
-        self._add_spin(reflection_form, "nresshells", "Resolution shells", 100, 0, 100000, 10)
-        self._add_text(reflection_form, "missing", "Missing-reflection keyword", "bound 0.5 2.5")
-        self._add_text(reflection_form, "electrons", "Electrons", "")
-
-        reference_density_form = add_form_group(superflip_tab, "Reference density")
-        reference_density_form.addRow(self._secondary_help(
-            "The referencefile keyword is automatic: it is written only when a reference file is selected on Model, or "
-            "from cycle 2 onward when none is selected, using the previous cycle's EDMA CIF (or its XPLOR map if EDMA "
-            "produced no usable peaks) so Superflip keeps a fixed origin in reciprocal space between cycles."
-        ))
-        reference_density_form.addRow(self._secondary_help(
-            "dataitemwidths is unnecessary because Phase Studio writes whitespace-separated fbegin/endf records."
-        ))
-
-        additional_sf_form = add_form_group(superflip_tab, "Additional keywords")
-        self._add_multiline(additional_sf_form, "extra_superflip_keywords", "Extra Superflip keywords", "", 110)
-        self.load_inflip_btn = QPushButton("Load settings from .inflip")
-        self.load_inflip_btn.setToolTip("Read Superflip keyword settings from an existing .inflip file. Reflection data blocks are ignored.")
-        self.load_inflip_btn.clicked.connect(self.load_inflip_settings_dialog)
-        additional_sf_form.addRow("", self.load_inflip_btn)
-        superflip_tab.addStretch(1)
-
-        # Advanced / EDMA
-        edma_tab = add_settings_tab("EDMA", advanced=True)
-        peak_form = add_form_group(edma_tab, "Peak extraction", "edma")
-        self._add_dspin(peak_form, "plimit_superflip", "Superflip threshold", 0.5, 0.0, 100.0, 0.1, 3)
-        self._add_dspin(peak_form, "plimit_deblur", "SharpED threshold (σ)", 0.5, 0.0, 100.0, 0.1, 3)
-        self._add_text(peak_form, "edma_maxima", "Maxima selection", "all")
-        self._add_text(peak_form, "edma_numberofatoms", "Atom-count mode", "composition")
-
-        symmetry_form = add_form_group(edma_tab, "Symmetry and peak positions")
-        self._add_dspin(symmetry_form, "merge_distance", "Merge distance (Å)", 0.75, 0.0, 10.0, 0.05, 3)
-        self._add_combo(symmetry_form, "edma_fullcell", "Full-cell", ["no", "yes"], "no")
-        self._add_checkbox(symmetry_form, "edma_centerofcharge", "Use center of charge", True, align_with_fields=True)
-
-        chemical_form = add_form_group(edma_tab, "Chemical filtering")
-        self._add_text(chemical_form, "edma_chlimit", "Charge limit", "0.2500")
-        self._add_text(chemical_form, "edma_chlimlist", "Charge-list threshold", "0.0057 relative")
-
-        edma_extra_form = add_form_group(edma_tab, "Additional keywords")
-        self._add_multiline(edma_extra_form, "extra_edma_keywords", "Extra EDMA keywords", "", 110)
-        edma_tab.addStretch(1)
-
-        # Advanced / SharpED
-        sharped_advanced_tab = add_settings_tab("SharpED", advanced=True)
-        inference_form = add_form_group(sharped_advanced_tab, "Inference")
-        self._add_text(inference_form, "sharped_elements", "Elements", "")
-        self.inputs["sharped_elements"].setPlaceholderText("Auto from composition")  # type: ignore[attr-defined]
-        self._add_dspin(inference_form, "sharped_outres", "Output resolution", 0.2, 0.001, 10.0, 0.05, 4)
-
-        network_form = add_form_group(sharped_advanced_tab, "Transfer and network")
-        self._add_dspin(network_form, "sharped_max_upload_mb", "Upload limit (MB)", 100.0, 0.0, 100000.0, 10.0, 1)
-        self._add_spin(network_form, "sharped_timeout_seconds", "HTTP timeout (s)", 600, 600, 7200, 60)
-        self._add_spin(network_form, "sharped_poll_seconds", "Polling interval (s)", 2, 1, 3600, 1)
-        self._add_spin(network_form, "sharped_max_polls", "Maximum polls", -1, -1, 1000000, 1)
-        network_form.addRow("", self._secondary_help("Use -1 for no fixed polling limit."))
-        sharped_advanced_tab.addStretch(1)
-
-        # Advanced / Map feedback
-        feedback_tab = add_settings_tab("Map feedback", advanced=True)
-        feedback_tab.addWidget(settings_callout(
+    def _build_map_feedback_tab(self) -> None:
+        feedback_tab = self._add_settings_tab("Map feedback")
+        self._create_settings_page_header(feedback_tab, "Map feedback", "map_feedback")
+        feedback_tab.addWidget(self._settings_callout(
             "Warning",
-            "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later "
-            "cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.",
+            "The operations on this page modify the reflection data supplied to subsequent cycles. "
+            "Results from these cycles should therefore be validated against the original measured data.",
+            kind="warning",
         ))
-        missing_feedback_form = add_form_group(feedback_tab, "Missing-reflection completion", "map_feedback")
-        self._add_spin(missing_feedback_form, "map_feedback_missing_from_cycle", "Start after cycle", 0, 0, 999, 1)
-        self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Added limit (%)", 0.0, 0.0, 100.0, 1.0, 3)
-        missing_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables missing-reflection completion."))
+        missing_feedback_form = self._add_form_group(feedback_tab, "Missing-reflection completion")
+        self._add_checkbox(missing_feedback_form, "map_feedback_missing_enabled", "Enable missing-reflection completion", False, align_with_fields=True)
+        self._add_spin(missing_feedback_form, "map_feedback_missing_from_cycle", "Start after cycle", 1, 1, 999, 1)
+        self._add_dspin(missing_feedback_form, "map_feedback_missing_percent_limit", "Maximum added reflections (%)", 0.0, 0.0, 100.0, 1.0, 3)
 
-        intensity_feedback_form = add_form_group(feedback_tab, "Intensity correction")
-        self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 0, 0, 999, 1)
+        intensity_feedback_form = self._add_form_group(feedback_tab, "Intensity correction")
+        self._add_checkbox(intensity_feedback_form, "map_feedback_intensity_enabled", "Enable intensity correction", False, align_with_fields=True)
+        self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 1, 1, 999, 1)
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
-        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply below value/σ", 0.0, 0.0, 1000.0, 0.5, 3)
-        intensity_feedback_form.addRow("", settings_callout("Note", "Cycle 0 disables correction; value/σ = 0 applies to all non-zero reflections."))
+        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply when value/σ <", 0.0, 0.0, 1000.0, 0.5, 3)
+        intensity_feedback_form.addRow("", self._settings_callout("Note", "At 0, correction applies to all non-zero reflections."))
+
+        powder_feedback_form = self._add_form_group(feedback_tab, "Powder overlap repartitioning")
+        self._add_checkbox(powder_feedback_form, "redistribute_overlaps", "Enable powder overlap repartitioning (FWHM data)", False, align_with_fields=True)
+        self._add_spin(powder_feedback_form, "powder_redistribution_from_cycle", "Start after cycle", 1, 1, 999, 1)
+        self._add_dspin(powder_feedback_form, "powder_wavelength", "Wavelength (Å)", 0.0, 0.0, 10.0, 0.01, 5)
+        self._add_dspin(powder_feedback_form, "powder_separation_factor", "Separation factor", 0.2, 0.001, 100.0, 0.05, 3)
+        self._add_dspin(powder_feedback_form, "powder_redistribution_mix", "Map ratio mix", 1.0, 0.0, 1.0, 0.05, 3)
+        powder_feedback_form.addRow("", self._settings_callout(
+            "Note",
+            "Available only for FWHM reflection data. Wavelength is detected automatically when possible. "
+            "Repartitioning preserves the total observed intensity of each overlap group."
+        ))
+        for key in ("map_feedback_missing_enabled", "map_feedback_intensity_enabled", "redistribute_overlaps"):
+            try:
+                self.inputs[key].toggled.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        for key in ("map_feedback_missing_from_cycle", "map_feedback_intensity_from_cycle", "powder_redistribution_from_cycle"):
+            try:
+                self.inputs[key].valueChanged.connect(self._sync_map_feedback_widgets)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        feedback_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         feedback_tab.addStretch(1)
 
-        # Advanced / Help
-        advanced_help_tab = add_settings_tab("Help", advanced=True)
-        advanced_contents_row = QHBoxLayout()
-        advanced_contents_row.setSpacing(4)
-        advanced_contents_label = QLabel("CONTENTS")
-        advanced_contents_label.setObjectName("helpContentsLabel")
-        advanced_contents_row.addWidget(advanced_contents_label)
-        for link_text, anchor in (
-            ("Setup", "adv_setup"), ("Superflip", "superflip"), ("EDMA", "edma"),
-            ("SharpED", "sharped"), ("Feedback", "map_feedback"), ("Keywords", "keyword_reference"),
-        ):
-            link = QToolButton()
-            link.setObjectName("helpNavLink")
-            link.setText(link_text)
-            link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-            link.setCursor(Qt.PointingHandCursor)
-            link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
-            advanced_contents_row.addWidget(link)
-        advanced_contents_row.addStretch(1)
-        advanced_help_tab.addLayout(advanced_contents_row)
-        adv_setup_help_layout = add_help_section(advanced_help_tab, "adv_setup", "Setup reference", """
-            <h3>External programs</h3>
-            <p><b>Superflip executable</b> is the absolute path to the original Jana2020 Superflip executable (default <code>C:\\Jana2020\\SUPERFLIP\\superflip_original.exe</code>). Do not select the Phase Studio wrapper named superflip.exe.</p>
-            <p><b>EDMA executable</b> is the absolute path to the Jana2020 EDMA executable used for peak extraction and structure export from XPLOR density maps (default <code>C:\\Jana2020\\SUPERFLIP\\EDMA.exe</code>).</p>
-            <h3>SharpED API</h3>
-            <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> is sent as <code>Authorization: Bearer</code> during upload/status/download requests and is never written to logs or error messages.</p>
-            <h3>Interface</h3>
-            <p><b>Show beta and experimental features in settings</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize processed map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
-        """, advanced=True)
-        add_back_to_contents(adv_setup_help_layout, advanced=True)
-        superflip_help_layout = add_help_section(advanced_help_tab, "superflip", "Superflip guide", """
-            <h3>What Superflip does</h3>
-            <p>Superflip is the density-reconstruction and phase-retrieval stage. Phase Studio prepares reflections, crystallographic metadata and input, executes Superflip, then uses its density map for direct inspection, EDMA peak extraction, SharpED processing and iterative feedback.</p>
-            <h3>Calculation</h3>
-            <p><b>Algorithm</b> maps to Superflip's <code>perform</code> keyword; common values are <code>CF</code> (normal charge-flipping, used by the presets), <code>lde</code>, <code>general</code>, <code>fourier</code> and <code>symmetry</code>; <code>AAR</code> is kept for executables that support it.</p>
-            <p><b>Maximum iterations</b> limits one Superflip run. <b>Repeat mode</b> controls repeated independent attempts and convergence sampling. <b>Random seed</b> initializes random numbers; use a fixed value for reproducibility or Superflip's automatic syntax. <b>Delta</b> (<code>AUTO</code> lets Superflip estimate the flip threshold), <b>Weak ratio</b> and <b>Biso</b> (overall isotropic B-factor used to sharpen the map; 0.000 disables sharpening) are advanced parameters normally left at preset/default values. <b>Enable final polish</b> adds <code>polish yes</code>, activating Superflip's final polishing stage when supported.</p>
-            <h3>Density / solution selection</h3>
-            <p><b>Voxel grid</b> is the Superflip <code>voxel</code> keyword: blank omits it; three integers set an explicit grid; <code>AUTO</code> computes a 0.2 &Aring; grid from the unit cell.</p>
-            <p><b>Best densities: count</b> and <b>Best-density metric</b> are the two arguments of <code>bestdensities</code> &mdash; how many best density maps Superflip keeps, and whether it selects by rvalue, peakiness, symmetry or reference. <b>Use symmetry for best densities</b> adds the <code>symmetry</code> modifier, biasing selection toward symmetry-consistent solutions.</p>
-            <p><b>Search symmetry</b> maps to <code>searchsymmetry</code> (<code>no</code>, <code>shift</code> or <code>average</code>). <b>Derive symmetry</b> maps to <code>derivesymmetry</code> (commonly <code>yes</code>, <code>no</code> or <code>use</code>, depending on the Superflip version).</p>
-            <h3>Reflection handling</h3>
-            <p><b>Minimum value/&sigma;</b> filters weak observed reflections before writing the Superflip HKL block. <b>d<sub>min</sub> cutoff</b> is an optional resolution cutoff in &Aring;ngstrom; 0 keeps all reflections. <b>Normalization</b> is an optional reflection-normalization keyword (<code>none</code> is the safest default for the Windows executable). <b>Resolution shells</b> is used only when a supported normalization keyword is written. <b>Missing-reflection keyword</b> supplies Superflip's <code>missing</code> line, for example bounds for missing reflections. <b>Electrons</b> is Superflip's <code>electrons</code> keyword; leave blank to omit it.</p>
-            <h3>Reference density</h3>
-            <p>The <code>referencefile</code> keyword is written automatically: from the selected Reference file when one is chosen on Basic &rarr; Input, or from cycle 2 onward when none is selected, using the previous cycle's EDMA CIF (or its XPLOR map if EDMA produced no usable peaks). This keeps Superflip's origin fixed in reciprocal space between cycles. <code>dataitemwidths</code> is unnecessary and not exposed, because Phase Studio always writes whitespace-separated fbegin/endf records.</p>
-            <h3>Additional keywords</h3>
-            <p><b>Extra Superflip keywords</b> lets expert users append documented keyword lines, inserted before <code>fbegin</code>, that are not represented by a dedicated control. <b>Load settings from .inflip</b> reads Superflip keyword settings from an existing .inflip file (reflection data blocks are ignored).</p>
-            <h3>Output</h3>
-            <p>XPLOR (map) and CIF (structure) are always produced internally because EDMA, SharpED and later-cycle modelfiles consume them; the <b>Map format</b> and <b>Structure format</b> choices on Basic &rarr; Output add one extra saved format on top for external inspection, molecular-graphics viewers or Jana2020.</p>
-        """, advanced=True)
-        add_help_callout(superflip_help_layout, "Starting point", "CF and the supplied preset values are initial settings only; choose parameters appropriate for the dataset and intended method.")
-        add_back_to_contents(superflip_help_layout, advanced=True)
-        edma_help_layout = add_help_section(advanced_help_tab, "edma", "EDMA guide", """
-            <h3>What EDMA does in Phase Studio</h3>
-            <p>EDMA extracts density maxima from an XPLOR map. Phase Studio uses these maxima to create structural models and exports, independently for the raw Superflip map and the SharpED/deblurred map when enabled.</p>
-            <h3>Peak extraction</h3>
-            <p><b>Superflip threshold</b> and <b>SharpED threshold (&sigma;)</b> are multipliers of the corresponding map sigma; Phase Studio converts each multiplier to EDMA's absolute <code>plimit</code> for that map. A higher threshold is stricter; a lower threshold includes more maxima &mdash; there is no universal correct value. <b>Maxima selection = all</b> requests all maxima above plimit; advanced users may enter more restrictive documented EDMA syntax. <b>Atom-count mode = composition</b> requests atom counts consistent with the chemical composition.</p>
-            <h3>Symmetry and peak positions</h3>
-            <p><b>Merge distance</b> is the tolerance (&Aring;) used when reducing maxima to one representative per full space-group orbit for the CIF asymmetric unit. <b>Full-cell = no</b> requests symmetry-independent maxima when the supplied symmetry is correct; <code>yes</code> lists the full unit cell. <b>Use center of charge</b> refines peak positions to the center of charge of each density basin before export.</p>
-            <h3>Chemical filtering</h3>
-            <p><b>Charge limit</b> is the minimum integrated charge for exported maxima; useful for suppressing noise peaks in rough or over-sharpened maps. <b>Charge-list threshold</b> supplies EDMA's <code>chlimlist</code> setting, for example <code>0.0057 relative</code>, used together with atom-count/composition-based export.</p>
-            <h3>Additional keywords</h3>
-            <p><b>Extra EDMA keywords</b> appends documented EDMA options not represented by a dedicated control.</p>
-        """, advanced=True)
-        add_help_callout(edma_help_layout, "Important", "Select each EDMA threshold for its map and assess the resulting peaks; there is no universal threshold.")
-        add_back_to_contents(edma_help_layout, advanced=True)
-        sharped_help_layout = add_help_section(advanced_help_tab, "sharped", "SharpED guide", """
-            <h3>What SharpED does</h3>
-            <p>SharpED processes and deblurs the XPLOR density map from Superflip. After EDMA extraction the result can be inspected in Structure Comparison, used for EDMA, optionally symmetrized, used as a next-cycle XPLOR model, or handed to Jana2020. If server processing is disabled, the workflow continues without a genuinely processed SharpED result.</p>
-            <p><b>Model</b> selection is on Basic &rarr; Workflow. Server connection is on Advanced &rarr; Setup (server URL/API token); elements, output resolution and upload/network settings are on Advanced &rarr; SharpED (everything else below).</p>
-            <h3>1. Server connection</h3>
-            <p><b>Server URL</b> is the inference-server address. <b>API token</b> authenticates server requests. Obtain a token from the SharpED project and API-token page.</p>
-            <h3>2. Model and elements</h3>
-            <p><b>Model</b> (Basic &rarr; Workflow) is sent to the server; <b>Refresh models</b> updates the selector; <code>default</code> uses the server default. <b>Elements</b> are sent to SharpED; when blank, Phase Studio derives unique non-hydrogen elements from the reference composition.</p>
-            <h3>3. Output resolution</h3>
-            <p><b>Output resolution</b> is sent to the server as the <code>outres</code> field.</p>
-            <h3>4. Upload and network</h3>
-            <p><b>Upload limit</b> checks XPLOR size locally; its application default is 100 MB and 0 disables this local check (confirm the actual limit with the configured service). If Voxel grid is empty/omit, Phase Studio can add a coarser Superflip voxel keyword before map calculation so the native Superflip XPLOR fits under this limit. <b>HTTP timeout</b> covers model queries, upload, status and download requests and is enforced at 600 seconds minimum. <b>Polling interval</b> sets the delay between status checks. <b>Maximum polls</b> limits those checks; <b>-1</b> means no fixed polling limit.</p>
-            <h3>5. SharpED in iterative workflows</h3>
-            <p><b>Run SharpED deblurring</b> (Basic &rarr; Workflow &rarr; Optional processing) enables server processing; if disabled, the "deblurred" map used downstream is a copy of the Superflip map. <b>Symmetrize processed map with Superflip (beta)</b> performs symmetry averaging, not another charge-flipping reconstruction. <code>deblurred_xplor</code> (Next-cycle model) feeds the processed map into the next cycle; <code>deblurred_edma_cif</code> feeds its EDMA structure instead.</p>
-            <h3>6. Phase-recycling methods (beta/experimental)</h3>
-            <p><b>1st Superflip, then SharpED (beta)</b> and <b>SharpED (experimental)</b> use SharpED for phase recycling instead of iterative Superflip cycling. They are hidden from the Phasing method list by default; check <b>Show beta and experimental features in settings</b> (Advanced &rarr; Setup) to select them. Neither is production-ready.</p>
-        """, advanced=True)
-        sharped_link_row = QHBoxLayout()
-        sharped_link_row.addWidget(QLabel("SharpED project and API token"))
-        sharped_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
-        sharped_link_row.addStretch(1)
-        sharped_help_layout.addLayout(sharped_link_row)
-        add_help_callout(sharped_help_layout, "Important", "SharpED processing requires a valid API token and network access.")
-        add_back_to_contents(sharped_help_layout, advanced=True)
-        map_feedback_layout = add_help_section(advanced_help_tab, "map_feedback", "Map feedback", """
-            <h3>Missing-reflection completion</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to add missing reflections for the next cycle; 0 disables missing-reflection completion. <b>Added limit (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
-            <h3>Intensity correction</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose final map is used to damp observed intensities for the next cycle; 0 disables intensity correction. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply below value/&sigma;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections.</p>
-        """, advanced=True)
-        add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles. Cycle 0 disables the corresponding mechanism.")
-        add_back_to_contents(map_feedback_layout, advanced=True)
-        keyword_html = html.escape(SUPERFLIP_KEYWORD_REFERENCE).replace("\n", "<br>")
-        keyword_help_layout = add_help_section(
-            advanced_help_tab,
-            "keyword_reference",
-            "Advanced Superflip keyword reference",
-            f'<p style="font-family: Cascadia Mono, Consolas, monospace; color: #2264b8;">{keyword_html}</p>',
-            advanced=True,
+    # ----- Shared UI-construction helpers used across _build_ui's tab/section
+    # builder methods below. Extracted from local closures that used to live
+    # inline in _build_ui (2026 maintainability refactor); behavior is
+    # unchanged, they are just callable as self._X() from more than one
+    # builder method now instead of only within one giant function's scope. -----
+
+    def _add_settings_tab(self, name: str, advanced: bool = False) -> QVBoxLayout:
+        scroll = QScrollArea()
+        scroll.setObjectName("settingsScrollArea")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        if advanced:
+            scroll.setViewportMargins(0, 2, 0, 0)
+        page = QWidget()
+        page.setObjectName("settingsPage")
+        page.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(
+            CONFIG_PAGE_MARGIN_HORIZONTAL,
+            CONFIG_PAGE_MARGIN_VERTICAL + (2 if advanced else 0),
+            CONFIG_PAGE_MARGIN_HORIZONTAL,
+            CONFIG_PAGE_MARGIN_VERTICAL,
         )
-        add_back_to_contents(keyword_help_layout, advanced=True)
-        advanced_help_tab.addStretch(1)
+        layout.setSpacing(CONFIG_MAJOR_SECTION_SPACING)
+        scroll.setWidget(page)
+        (self.advanced_tabs if advanced else self.basic_tabs).addTab(scroll, name)
+        if name == "Help":
+            if advanced:
+                self.help_scroll_advanced = scroll
+                self.help_page_advanced = page
+            else:
+                self.help_scroll_basic = scroll
+                self.help_page_basic = page
+        return layout
 
-        # Persistent actions
-        primary_buttons = QHBoxLayout()
-        primary_buttons.setSpacing(8)
-        secondary_buttons = QHBoxLayout()
-        secondary_buttons.setSpacing(8)
-        self.run_btn = QPushButton("Run phasing")
-        self.continue_btn = QPushButton("Continue")
-        self.stop_btn = QPushButton("Stop after current cycle")
-        self.stop_now_btn = QPushButton("Stop immediately")
-        self.clear_btn = QPushButton("Clear results")
-        self.handoff_btn = QPushButton("Send to Jana2020")
-        self.run_btn.setObjectName("primaryButton")
-        self.continue_btn.setObjectName("continueButton")
-        self.handoff_btn.setObjectName("handoffButton")
-        self.stop_btn.setObjectName("stopAfterButton")
-        self.stop_now_btn.setObjectName("stopNowButton")
-        self.clear_btn.setObjectName("clearButton")
-        for action_button in (self.run_btn, self.continue_btn, self.stop_btn, self.stop_now_btn, self.clear_btn, self.handoff_btn):
-            action_button.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        self.handoff_btn.setEnabled(False)
-        self.continue_btn.setEnabled(False)
-        self.run_btn.setToolTip("Start the complete iterative crystallographic reconstruction workflow.")
-        self.continue_btn.setToolTip(
-            "Resume the previous run exactly where it stopped or finished, reusing the same metadata, "
-            "reflections and cycle feedback. If it already reached the configured cycle count, increase "
-            "Cycles above the completed count first."
-        )
-        self.stop_btn.setToolTip("Request a graceful stop after the currently running cycle has completed.")
-        self.stop_now_btn.setToolTip("Terminate the currently running external Superflip/EDMA process and stop the pipeline as soon as possible.")
-        self.clear_btn.setToolTip("Clear the log panel and reset the plotted metrics for the current GUI session.")
-        self.handoff_btn.setToolTip("After a completed run started from a Jana .inflip, select a cycle and pass either its Superflip map or deblurred map back to Jana2020.")
-        self.run_btn.clicked.connect(self.start_run)
-        self.continue_btn.clicked.connect(self.continue_run)
-        self.stop_btn.clicked.connect(self.request_stop_after_cycle)
-        self.stop_now_btn.clicked.connect(self.request_immediate_stop)
-        self.clear_btn.clicked.connect(self.clear_log_plot)
-        self.handoff_btn.clicked.connect(self.open_jana_handoff_dialog)
-        primary_buttons.addWidget(self.run_btn, 1)
-        primary_buttons.addWidget(self.continue_btn, 1)
-        primary_buttons.addWidget(self.handoff_btn, 1)
-        secondary_buttons.addWidget(self.stop_btn, 2)
-        secondary_buttons.addWidget(self.stop_now_btn, 1)
-        secondary_buttons.addWidget(self.clear_btn, 1)
-        left_layout.addLayout(primary_buttons)
-        left_layout.addLayout(secondary_buttons)
+    def _create_settings_page_header(self, page_layout: QVBoxLayout, title: str, guide_target: Optional[str] = None) -> None:
+        """The one consistent LEVEL 1 heading every Basic/Advanced
+        configuration subpage uses: page title on the left, exactly one
+        "Open guide" action on the right when this page has corresponding
+        Help content, with a subtle separator below (2026 UI hierarchy
+        pass). Subsections within the page (_add_form_group) no longer
+        carry their own guide links -- a page has at most one."""
+        header_row = QHBoxLayout()
+        header_row.setSpacing(8)
+        heading = QLabel(title)
+        heading.setObjectName("pageHeading")
+        header_row.addWidget(heading, 1)
+        if guide_target:
+            guide = QToolButton()
+            guide.setObjectName("guideLink")
+            guide.setText("Open guide")
+            guide.setCursor(Qt.PointingHandCursor)
+            guide.setToolTip("Open the relevant section in Help (F1).")
+            guide.clicked.connect(lambda _checked=False, target=guide_target: self._open_help_section(target))
+            header_row.addWidget(guide)
+        page_layout.addLayout(header_row)
+        rule = QFrame()
+        rule.setObjectName("pageHeadingRule")
+        rule.setFixedHeight(2)
+        rule.setFrameShape(QFrame.NoFrame)
+        page_layout.addWidget(rule)
 
-        self.run_status_panel = QWidget()
-        self.run_status_panel.setObjectName("runStatusPanel")
-        run_status_layout = QVBoxLayout(self.run_status_panel)
-        run_status_layout.setContentsMargins(8, 6, 8, 7)
-        run_status_layout.setSpacing(3)
-        run_status_title = QLabel("RUN STATUS")
-        run_status_title.setObjectName("runStatusTitle")
-        run_status_layout.addWidget(run_status_title)
-        overall_progress_header = QHBoxLayout()
-        self.overall_progress_label = QLabel("Overall")
-        self.overall_progress_label.setObjectName("progressSectionLabel")
-        self.overall_progress_value = QLabel("Idle")
-        self.overall_progress_value.setObjectName("progressStageCounter")
-        self.overall_progress_value.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        overall_progress_header.addWidget(self.overall_progress_label)
-        overall_progress_header.addStretch(1)
-        overall_progress_header.addWidget(self.overall_progress_value)
-        run_status_layout.addLayout(overall_progress_header)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 1)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(False)
-        self.progress_bar.setFormat("Idle")
-        self.progress_bar.setToolTip("Cycle-level progress indicator for the iterative pipeline.")
-        run_status_layout.addWidget(self.progress_bar)
-        current_cycle_header = QHBoxLayout()
-        current_cycle_label = QLabel("Current cycle")
-        current_cycle_label.setObjectName("progressSectionLabel")
-        self.current_cycle_stage_counter = QLabel("Idle")
-        self.current_cycle_stage_counter.setObjectName("progressStageCounter")
-        self.current_cycle_stage_counter.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        current_cycle_header.addWidget(current_cycle_label)
-        current_cycle_header.addStretch(1)
-        current_cycle_header.addWidget(self.current_cycle_stage_counter)
-        run_status_layout.addLayout(current_cycle_header)
-        self.current_cycle_detail = QLabel("Idle")
-        self.current_cycle_detail.setObjectName("currentCycleDetail")
-        self.current_cycle_detail.setWordWrap(True)
-        run_status_layout.addWidget(self.current_cycle_detail)
-        self.current_cycle_progress = QProgressBar()
-        self.current_cycle_progress.setObjectName("currentCycleProgress")
-        self.current_cycle_progress.setRange(0, 1)
-        self.current_cycle_progress.setValue(0)
-        self.current_cycle_progress.setTextVisible(False)
-        self.current_cycle_progress.setToolTip("Stage-based progress for the active cycle; this is not an elapsed-time estimate.")
-        run_status_layout.addWidget(self.current_cycle_progress)
-        self.configuration_lock_hint = QLabel("Configuration locked while the pipeline is running.")
-        self.configuration_lock_hint.setObjectName("configurationLockHint")
-        self.configuration_lock_hint.setVisible(False)
-        run_status_layout.addWidget(self.configuration_lock_hint)
-        left_layout.addWidget(self.run_status_panel)
-        self._set_run_status("Ready")
+    def _add_form_group(self, page_layout: QVBoxLayout, title: str) -> QFormLayout:
+        """One consistent LEVEL 2 subsection heading (bold navy title, plain
+        separator via QGroupBox's own QSS chrome) -- or, when title is empty,
+        a bare form with no heading/border at all, for a page's own leading
+        fields that already sit directly under that page's LEVEL 1 heading
+        (_create_settings_page_header) and so need no heading of their own.
+        No subsection carries its own "Open guide" link any more -- a page
+        has exactly one, in its LEVEL 1 heading."""
+        if not title:
+            form_widget = QWidget()
+            form_widget.setObjectName("bareSettingsGroup")
+            form = self._configure_form(QFormLayout(form_widget))
+            page_layout.addWidget(form_widget)
+            return form
+        box = QGroupBox(title)
+        box.setObjectName("settingsGroup")
+        form = self._configure_form(QFormLayout(box))
+        page_layout.addWidget(box)
+        return form
 
-        # Right-side resizable scientific dashboard
-        self.result_splitter = QSplitter(Qt.Vertical)
-        self.result_splitter.setObjectName("resultSplitter")
-        self.result_splitter.setHandleWidth(3)
-        self.result_splitter.setChildrenCollapsible(False)
-        right_layout.addWidget(self.result_splitter, 1)
+    def _settings_callout(self, title: str, text: str, kind: str = "note") -> QLabel:
+        """kind is one of "warning" (scientific caveat, always prominent),
+        "note" (concise operational clarification, the default) or "tip"
+        (optional workflow advice, visually the lightest) -- see
+        QLabel#settingsCallout's kind-specific QSS rules in ui_style.py.
+        Callers that mutate the label's text later via setText() (e.g. the
+        Phasing-method warning, whose message depends on the selected
+        method) keep whatever kind was set here at construction."""
+        label = QLabel(f"<b>{title}</b><br>{text}" if title else text)
+        label.setObjectName("settingsCallout")
+        label.setProperty("calloutKind", kind)
+        label.setTextFormat(Qt.RichText)
+        label.setWordWrap(True)
+        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        return label
 
-        metrics_section, metrics_layout = make_result_section("SUPERFLIP CONVERGENCE")
-        self.figure = Figure(figsize=(7.5, 3.5), dpi=100)
-        self.ax = self.figure.add_subplot(111)
-        self.canvas = FigureCanvas(self.figure)
-        self.canvas.setObjectName("metricsCanvas")
-        self.canvas.setMinimumHeight(140)
-        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.canvas.mpl_connect("resize_event", lambda _event: self._layout_metrics_figure())
-        self.canvas.setToolTip("")
-        metrics_layout.addWidget(self.canvas, 1)
-        self.result_splitter.addWidget(metrics_section)
+    def _make_result_section(self, title: str) -> Tuple[QWidget, QVBoxLayout]:
+        section = QWidget()
+        section.setObjectName("resultSection")
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(4, 4, 4, 4)
+        section_layout.setSpacing(3)
+        label = QLabel(title)
+        label.setObjectName("sectionLabel")
+        section_layout.addWidget(label)
+        return section, section_layout
 
-        structure_section, structure_layout = make_result_section("STRUCTURE COMPARISON")
-        self.structure_rotation_hint = QLabel("Drag to rotate all views · H hidden")
-        self.structure_rotation_hint.setObjectName("structureRotationHint")
-        self.structure_rotation_hint.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        self.structure_rotation_hint.setVisible(False)
-        structure_layout.addWidget(self.structure_rotation_hint)
-        self.structure_figure = Figure(figsize=(7.5, 3.0), dpi=100)
-        self.structure_canvas = FigureCanvas(self.structure_figure)
-        self.structure_canvas.setObjectName("structureCanvas")
-        self.structure_canvas.setMinimumHeight(260)
-        self.structure_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.structure_canvas.setToolTip("")
-        self.structure_canvas.mpl_connect("button_press_event", self._begin_structure_rotation)
-        self.structure_canvas.mpl_connect("motion_notify_event", self._sync_structure_view_from_event)
-        self.structure_canvas.mpl_connect("button_release_event", self._finish_structure_rotation)
-        self.structure_canvas.mpl_connect("resize_event", lambda _event: self._layout_structure_figure())
-        structure_layout.addWidget(self.structure_canvas, 1)
-        self.result_splitter.addWidget(structure_section)
+    def _add_help_section(self, page_layout: QVBoxLayout, anchor: str, title: str, body_html: str, *, advanced: bool = False) -> QVBoxLayout:
+        box = QGroupBox(title)
+        box.setObjectName("helpSection")
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(10, 12, 10, 8)
+        body = QLabel(body_html)
+        body.setObjectName("helpSectionBody")
+        body.setTextFormat(Qt.RichText)
+        body.setWordWrap(True)
+        body.setOpenExternalLinks(True)
+        body.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        body.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        box_layout.addWidget(body)
+        page_layout.addWidget(box)
+        self.help_sections[anchor] = box
+        self.help_section_advanced[anchor] = advanced
+        return box_layout
 
-        log_section, log_layout = make_result_section("EXECUTION LOG")
-        self.log_text = QTextEdit()
-        self.log_text.setObjectName("executionLog")
-        self.log_text.setReadOnly(True)
-        self.log_text.setLineWrapMode(QTextEdit.NoWrap)
-        self.log_text.setMinimumHeight(100)
-        self.log_text.setToolTip("")
-        log_layout.addWidget(self.log_text, 1)
-        self.result_splitter.addWidget(log_section)
-        self.result_splitter.setStretchFactor(0, 2)
-        self.result_splitter.setStretchFactor(1, 6)
-        self.result_splitter.setStretchFactor(2, 2)
-        self.result_splitter.setSizes([155, 425, 120])
-        self._last_log_record: Optional[ExecutionLogRecord] = None
-        self._append_execution_log("Ready. Select Jana .inflip, Jana .inflip with overrides, or external HKL input mode.")
-        self._append_execution_log(
-            "Defaults: later-cycle Superflip modelfiles can use raw Superflip XPLOR, deblurred XPLOR, or EDMA CIF.",
-            level="DETAIL",
-        )
-        self._update_action_states()
-        self._update_plot()
-        self._update_structure_views()
-        self._sync_input_source_mode_widgets()
-        self._sync_workflow_widgets()
+    def _add_help_callout(self, section_layout: QVBoxLayout, label: str, text: str, kind: str = "note") -> None:
+        """Same warning/note/tip kind system as _settings_callout(), applied
+        to Help-page callouts -- Basic and Advanced Help intentionally share
+        this one callout style rather than each having its own."""
+        callout = QLabel(f"<b>{label}</b><br>{text}")
+        callout.setObjectName("helpCallout")
+        callout.setProperty("calloutKind", kind)
+        callout.setTextFormat(Qt.RichText)
+        callout.setWordWrap(True)
+        section_layout.addWidget(callout)
+
+    def _add_back_to_contents(self, section_layout: QVBoxLayout, *, advanced: bool = False) -> None:
+        row = QHBoxLayout()
+        row.addStretch(1)
+        link = QToolButton()
+        link.setObjectName("helpNavLink")
+        link.setText("↑ Contents")
+        link.setCursor(Qt.PointingHandCursor)
+        scroll_attr = "help_scroll_advanced" if advanced else "help_scroll_basic"
+        link.clicked.connect(lambda: getattr(self, scroll_attr).verticalScrollBar().setValue(0))
+        row.addWidget(link)
+        section_layout.addLayout(row)
 
     def _metadata_source_value(self) -> str:
         return normalize_metadata_source(
@@ -6310,6 +8400,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._metadata_source_user_selected = False
             self._set_metadata_source(METADATA_SOURCE_INFLIP)
         self._sync_metadata_source_widgets()
+        # A different .inflip file can declare a different embedded dataformat
+        # (e.g. FWHM vs. plain intensity), which gates powder overlap
+        # repartitioning -- refresh that alongside the metadata sync above.
+        self._sync_map_feedback_widgets()
+        self.save_settings()
+
+    def _hkl_path_changed(self) -> None:
+        # Mirrors _jana_inflip_path_changed()'s map-feedback refresh: an
+        # external HKL file's detected format also gates powder overlap
+        # repartitioning (FWHM-carrying data only).
+        self._sync_map_feedback_widgets()
         self.save_settings()
 
     def _reference_path_changed(self) -> None:
@@ -6399,14 +8500,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
 
     @staticmethod
-    def _metadata_summary_values(metadata: CrystalMetadata) -> Tuple[str, str, str]:
+    def _metadata_summary_values(metadata: CrystalMetadata) -> Tuple[str, str, str, str]:
         cell = metadata.cell
-        cell_text = (
-            f"{cell.a:.5f} × {cell.b:.5f} × {cell.c:.5f} Å · "
-            f"{cell.alpha:.3f}°, {cell.beta:.3f}°, {cell.gamma:.3f}°"
-        )
+        # Lengths and angles are split into their own rows (rather than one long
+        # line) so the summary does not wrap awkwardly at typical panel widths.
+        lengths_text = f"{cell.a:.5f} × {cell.b:.5f} × {cell.c:.5f} Å"
+        angles_text = f"α {cell.alpha:.3f}° × β {cell.beta:.3f}° × γ {cell.gamma:.3f}°"
         group_text = f"{compact_spacegroup_symbol(metadata.spacegroup)} (#{metadata.spacegroup.number})"
-        return cell_text, group_text, metadata.composition
+        return lengths_text, angles_text, group_text, metadata.composition
 
     def _manual_metadata_value_changed(self, *_args) -> None:
         if self._syncing_metadata_controls or self._metadata_source_value() != METADATA_SOURCE_MANUAL:
@@ -6422,23 +8523,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._set_metadata_error(exc)
 
     def _set_metadata_error(self, error: object) -> None:
+        # Run stays clickable even with invalid metadata: start_run()'s own
+        # get_config() call raises the same underlying error, reported
+        # through the normal error dialog on click -- instead of a silently
+        # inert button that gives the user no indication of what to fix.
         report = build_error_report(error, subsystem="Crystal metadata", operation="Resolve crystal metadata")
         self._metadata_valid = False
         self._metadata_error_report = report
         if hasattr(self, "metadata_error_text"):
             self.metadata_error_text.setText(f"{report.title}\n{report.guidance}")
             self.metadata_error_panel.setVisible(True)
-        if hasattr(self, "run_btn"):
-            self.run_btn.setEnabled(False)
 
     def _clear_metadata_error(self) -> None:
         self._metadata_valid = True
         self._metadata_error_report = None
         if hasattr(self, "metadata_error_panel"):
             self.metadata_error_panel.setVisible(False)
-        if hasattr(self, "run_btn"):
-            active = str(getattr(self, "_run_status", "READY")).upper() in {"RUNNING", "STOPPING"}
-            self.run_btn.setEnabled(not active)
 
     def _show_metadata_error_details(self) -> None:
         report = self._metadata_error_report
@@ -6457,14 +8557,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         try:
             metadata = self._resolve_crystal_metadata_from_inputs()
-            cell_text, group_text, composition = self._metadata_summary_values(metadata)
-            self.metadata_cell_summary.setText(cell_text)
+            lengths_text, angles_text, group_text, composition = self._metadata_summary_values(metadata)
+            self.metadata_cell_summary.setText(lengths_text)
+            self.metadata_cell_angles_summary.setText(angles_text)
             self.metadata_spacegroup_summary.setText(group_text)
             self.metadata_composition_summary.setText(composition)
             self.metadata_summary_panel.setVisible(True)
             self._clear_metadata_error()
         except Exception as exc:
             self.metadata_cell_summary.setText("")
+            self.metadata_cell_angles_summary.setText("")
             self.metadata_spacegroup_summary.setText("")
             self.metadata_composition_summary.setText("")
             self.metadata_summary_panel.setVisible(False)
@@ -6498,6 +8600,54 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 symmetrize_widget.setVisible(show_beta)
             if not show_beta and symmetrize_widget.isChecked():
                 symmetrize_widget.setChecked(False)
+        # The "Phasing method" note only has something to explain once another
+        # method besides Superflip can actually be picked; and the
+        # "Phase-recycling methods" group (Run EDMA on final map) only applies
+        # to those same beta/experimental methods -- hide both, not just
+        # disable them, right alongside the combo items themselves.
+        recycle_note_widget = getattr(self, "recycle_note", None)
+        if recycle_note_widget is not None:
+            recycle_note_widget.setVisible(show_beta)
+            if hasattr(self, "_workflow_form"):
+                try:
+                    self._workflow_form.setRowVisible(recycle_note_widget, show_beta)
+                except Exception:
+                    pass
+        recycle_stages_label_widget = getattr(self, "recycle_stages_label", None)
+        if recycle_stages_label_widget is not None:
+            recycle_stages_label_widget.setVisible(show_beta)
+            if hasattr(self, "_optional_form"):
+                try:
+                    self._optional_form.setRowVisible(recycle_stages_label_widget, show_beta)
+                except Exception:
+                    pass
+        recycle_final_widget = self.inputs.get("run_edma_recycle_final")
+        if isinstance(recycle_final_widget, QCheckBox):
+            if hasattr(self, "_optional_form"):
+                try:
+                    self._optional_form.setRowVisible(recycle_final_widget, show_beta)
+                except Exception:
+                    recycle_final_widget.setVisible(show_beta)
+            else:
+                recycle_final_widget.setVisible(show_beta)
+            if not show_beta and recycle_final_widget.isChecked():
+                recycle_final_widget.setChecked(False)
+
+    def _sync_normalization_widgets(self, *_args) -> None:
+        # nresshells (Resolution shells) is only meaningful for "local" normalization.
+        mode = str(self._combo_value("normalize") if "normalize" in self.inputs else "").strip().lower()
+        is_local = mode == "local"
+        widget = self.inputs.get("nresshells")
+        if hasattr(widget, "setEnabled"):
+            widget.setEnabled(is_local)  # type: ignore[attr-defined]
+        if hasattr(widget, "setToolTip"):
+            widget.setToolTip(  # type: ignore[attr-defined]
+                INPUT_TOOLTIPS.get("nresshells", "") if is_local
+                else "Ignored: Resolution shells is used only when Normalization is 'local'."
+            )
+        label = self.input_labels.get("nresshells")
+        if label is not None:
+            label.setEnabled(is_local)
 
     def _sync_workflow_widgets(self) -> None:
         if self._configuration_locked:
@@ -6511,7 +8661,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("symmetrize_deblurred_map", "Ignored: symmetry averaging is not part of the selected Phasing method."),
             ("run_edma_superflip", "Ignored: EDMA after the Superflip map is not part of the selected Phasing method."),
             ("run_sharped", "Ignored: the selected Phasing method always deblurs with SharpED every cycle."),
-            ("run_edma_deblurred", "Ignored: EDMA after the deblurred map is not part of the selected Phasing method; use Run EDMA on final map instead."),
+            ("run_edma_deblurred", "Ignored: EDMA after the SharpED map is not part of the selected Phasing method; use Run EDMA on final map instead."),
+            ("compute_omit_maps", "Ignored: omit maps are only computed for the standard Superflip cycle."),
         ):
             widget = self.inputs.get(key)
             if hasattr(widget, "setEnabled"):
@@ -6521,6 +8672,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 label.setEnabled(not is_recycling)
             if hasattr(widget, "setToolTip"):
                 widget.setToolTip(tooltip_when_disabled if is_recycling else INPUT_TOOLTIPS.get(key, ""))  # type: ignore[attr-defined]
+        omit_rfree_widget = self.inputs.get("compute_omit_rfree")
+        omit_maps_enabled = not is_recycling and self._check_value("compute_omit_maps")
+        if isinstance(omit_rfree_widget, QCheckBox):
+            omit_rfree_widget.setEnabled(omit_maps_enabled)
+            omit_rfree_widget.setToolTip(
+                INPUT_TOOLTIPS.get("compute_omit_rfree", "") if omit_maps_enabled
+                else "Ignored: requires 'Compute omit maps' to be enabled."
+            )
+            if not omit_maps_enabled and omit_rfree_widget.isChecked():
+                omit_rfree_widget.setChecked(False)
         recycle_final_widget = self.inputs.get("run_edma_recycle_final")
         if hasattr(recycle_final_widget, "setEnabled"):
             recycle_final_widget.setEnabled(is_recycling)  # type: ignore[attr-defined]
@@ -6555,6 +8716,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 except Exception:
                     pass
         if is_recycling:
+            note_widget = getattr(self, "single_cycle_note", None)
+            if note_widget is not None:
+                note_widget.setVisible(False)
+                if hasattr(self, "_workflow_form"):
+                    try:
+                        self._workflow_form.setRowVisible(note_widget, False)
+                    except Exception:
+                        pass
             self._update_plot()
             return
         mode = normalize_modelfile_source(self._combo_value("modelfile_source") if "modelfile_source" in self.inputs else "")
@@ -6573,15 +8742,41 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             cycles_label = self.input_labels.get("cycles")
             if cycles_label is not None:
                 cycles_label.setEnabled(mode != "none")
+        single_cycle = mode != "none" and max(1, self._spin_value("cycles") if "cycles" in self.inputs else 1) <= 1
+        single_cycle_tooltip = "Used only when more than one reconstruction cycle is requested."
+        note_widget = getattr(self, "single_cycle_note", None)
+        if note_widget is not None:
+            note_widget.setVisible(single_cycle)
+            if hasattr(self, "_workflow_form"):
+                try:
+                    self._workflow_form.setRowVisible(note_widget, single_cycle)
+                except Exception:
+                    pass
+        modelfile_widget = self.inputs.get("modelfile_source")
+        # Next-cycle model stays editable even at Cycles=1 when it is itself the
+        # reason the run is forced to one cycle (mode == "none"), so the user can
+        # always change away from "none" to re-enable multi-cycle runs.
+        if hasattr(modelfile_widget, "setEnabled"):
+            modelfile_widget.setEnabled(not single_cycle)  # type: ignore[attr-defined]
+        modelfile_label = self.input_labels.get("modelfile_source")
+        if modelfile_label is not None:
+            modelfile_label.setEnabled(not single_cycle)
+        if hasattr(modelfile_widget, "setToolTip"):
+            modelfile_widget.setToolTip(  # type: ignore[attr-defined]
+                single_cycle_tooltip if single_cycle else INPUT_TOOLTIPS.get("modelfile_source", "")
+            )
         if isinstance(damping_widget, QDoubleSpinBox):
-            damping_widget.setEnabled(mode in {"superflip_xplor", "deblurred_xplor"})
+            damping_mode_ok = mode in {"superflip_xplor", "deblurred_xplor"}
+            damping_widget.setEnabled(damping_mode_ok and not single_cycle)
             damping_label = self.input_labels.get("damping_factor")
             if damping_label is not None:
-                damping_label.setEnabled(mode in {"superflip_xplor", "deblurred_xplor"})
-            if mode in {"superflip_xplor", "deblurred_xplor"}:
-                damping_widget.setToolTip(INPUT_TOOLTIPS.get("damping_factor", ""))
-            else:
+                damping_label.setEnabled(damping_mode_ok and not single_cycle)
+            if not damping_mode_ok:
                 damping_widget.setToolTip("XPLOR damping is used only when Next-cycle model is superflip_xplor or deblurred_xplor.")
+            elif single_cycle:
+                damping_widget.setToolTip(single_cycle_tooltip)
+            else:
+                damping_widget.setToolTip(INPUT_TOOLTIPS.get("damping_factor", ""))
         if isinstance(symmetrize_widget, QCheckBox):
             symmetrize_widget.setEnabled(mode != "superflip_xplor")
             symmetrize_label = self.input_labels.get("symmetrize_deblurred_map")
@@ -6593,6 +8788,92 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 symmetrize_widget.setToolTip(INPUT_TOOLTIPS.get("symmetrize_deblurred_map", ""))
         self._update_plot()
 
+    def _sync_map_feedback_widgets(self) -> None:
+        if self._configuration_locked:
+            return
+        groups = (
+            ("map_feedback_missing_enabled", "Enable missing-reflection completion",
+             "map_feedback_missing_from_cycle", ("map_feedback_missing_percent_limit",)),
+            ("map_feedback_intensity_enabled", "Enable intensity correction",
+             "map_feedback_intensity_from_cycle", (
+                 "map_feedback_intensity_damping", "map_feedback_intensity_max_i_over_sigma",
+             )),
+            ("redistribute_overlaps", "Enable powder overlap repartitioning",
+             "powder_redistribution_from_cycle", (
+                 "powder_wavelength", "powder_separation_factor", "powder_redistribution_mix",
+             )),
+        )
+        # "Start after cycle" fields deliberately keep their own full range
+        # (1-999) regardless of the current Cycles value: Cycles is often
+        # still at its default of 1 while the user is setting these up ahead
+        # of increasing it, and clamping the spin box's maximum to the
+        # current Cycles value made it un-editable (min==max==1) in exactly
+        # that common case. The pipeline itself already tolerates a
+        # start-after-cycle beyond the actual run length as a harmless no-op.
+        cycles_value = max(1, self._spin_value("cycles")) if "cycles" in self.inputs else 1
+        # Powder overlap repartitioning only makes sense for FWHM-carrying
+        # reflection data (hkl I fwhm / hkl F fwhm); gate the checkbox itself
+        # on that, on top of (not instead of) its own checked state below.
+        # A disabled-but-still-checked box reads as "queued but blocked" and
+        # is confusing/misleading, so it is force-unchecked (not just grayed)
+        # the moment it becomes unavailable -- an unavailable feature must
+        # look and behave exactly like "off", never "on but you can't touch
+        # it". _validate_run_config() still blocks Run if it is somehow
+        # checked against non-FWHM data (e.g. a stale saved setting), as a
+        # last-resort safety net, not the primary mechanism.
+        redistribute_checkbox = self.inputs.get("redistribute_overlaps")
+        if isinstance(redistribute_checkbox, QCheckBox):
+            has_fwhm_data = reflection_mode_has_fwhm(self._resolve_configured_data_mode_for_ui())
+            if not has_fwhm_data and redistribute_checkbox.isChecked():
+                redistribute_checkbox.setChecked(False)
+            redistribute_checkbox.setEnabled(has_fwhm_data)
+            redistribute_label = self.input_labels.get("redistribute_overlaps")
+            if redistribute_label is not None:
+                redistribute_label.setEnabled(has_fwhm_data)
+            redistribute_checkbox.setToolTip(
+                INPUT_TOOLTIPS.get("redistribute_overlaps", "") if has_fwhm_data
+                else "Requires FWHM-carrying reflection data (hkl I fwhm / hkl F fwhm); no FWHM format is currently detected for the configured HKL source."
+            )
+        else:
+            has_fwhm_data = True
+        for checkbox_key, checkbox_label, from_cycle_key, other_field_keys in groups:
+            checkbox = self.inputs.get(checkbox_key)
+            checkbox_enabled = bool(checkbox.isChecked()) if isinstance(checkbox, QCheckBox) else True
+            if checkbox_key == "redistribute_overlaps":
+                checkbox_enabled = checkbox_enabled and has_fwhm_data
+            from_cycle_widget = self.inputs.get(from_cycle_key)
+            if hasattr(from_cycle_widget, "setEnabled"):
+                from_cycle_widget.setEnabled(checkbox_enabled)  # type: ignore[attr-defined]
+            from_cycle_label = self.input_labels.get(from_cycle_key)
+            if from_cycle_label is not None:
+                from_cycle_label.setEnabled(checkbox_enabled)
+            if hasattr(from_cycle_widget, "setToolTip"):
+                from_cycle_widget.setToolTip(  # type: ignore[attr-defined]
+                    INPUT_TOOLTIPS.get(from_cycle_key, "") if checkbox_enabled
+                    else f"Ignored: requires '{checkbox_label}' to be enabled."
+                )
+            # Feedback starting at cycle N is first applied to the reflections
+            # used for cycle N+1 -- so the mechanism can only ever act while
+            # Cycles allows at least one cycle from that starting point onward.
+            from_cycle_value = int(from_cycle_widget.value()) if isinstance(from_cycle_widget, QSpinBox) else 1
+            reachable = cycles_value >= from_cycle_value
+            fields_active = checkbox_enabled and reachable
+            for field_key in other_field_keys:
+                widget = self.inputs.get(field_key)
+                if hasattr(widget, "setEnabled"):
+                    widget.setEnabled(fields_active)  # type: ignore[attr-defined]
+                label = self.input_labels.get(field_key)
+                if label is not None:
+                    label.setEnabled(fields_active)
+                if hasattr(widget, "setToolTip"):
+                    if not checkbox_enabled:
+                        tooltip = f"Ignored: requires '{checkbox_label}' to be enabled."
+                    elif not reachable:
+                        tooltip = "Requires a subsequent reconstruction cycle."
+                    else:
+                        tooltip = INPUT_TOOLTIPS.get(field_key, "")
+                    widget.setToolTip(tooltip)  # type: ignore[attr-defined]
+
     def _sync_input_source_mode_widgets(self) -> None:
         if self._configuration_locked:
             return
@@ -6600,10 +8881,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         jana_enabled = mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} or self._metadata_source_value() == METADATA_SOURCE_INFLIP
         override_enabled = mode == INPUT_MODE_INFLIP_OVERRIDES
         external_enabled = mode == INPUT_MODE_EXTERNAL
+        reflection_data_mode_enabled = mode != INPUT_MODE_INFLIP
         for key, enabled in (
             ("jana_inflip", jana_enabled),
             ("hkl", override_enabled or external_enabled),
             ("reference_cif", True),
+            ("reflection_data_mode", reflection_data_mode_enabled),
         ):
             widget = self.inputs.get(key)
             if hasattr(widget, "setEnabled"):
@@ -6611,7 +8894,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             label = self.input_labels.get(key)
             if label is not None:
                 label.setEnabled(bool(enabled))
+        reflection_data_mode_widget = self.inputs.get("reflection_data_mode")
+        if hasattr(reflection_data_mode_widget, "setToolTip"):
+            reflection_data_mode_widget.setToolTip(  # type: ignore[attr-defined]
+                "Ignored: the dataformat keyword is read directly from the Jana2020 .inflip file."
+                if not reflection_data_mode_enabled else INPUT_TOOLTIPS.get("reflection_data_mode", "")
+            )
+        jana_inflip_widget = self.inputs.get("jana_inflip")
+        if isinstance(jana_inflip_widget, PathRow):
+            jana_inflip_widget.set_tooltip(
+                INPUT_TOOLTIPS.get("jana_inflip", "") if jana_enabled
+                else "Not used in External HKL mode."
+            )
+        hkl_widget = self.inputs.get("hkl")
+        if isinstance(hkl_widget, PathRow):
+            hkl_widget.set_tooltip(
+                INPUT_TOOLTIPS.get("hkl", "") if (override_enabled or external_enabled)
+                else "Not used with the Jana2020 .inflip input mode; reflections come from the .inflip file."
+            )
         self._sync_metadata_source_widgets()
+        self._sync_map_feedback_widgets()
 
     def _set_configuration_locked(self, locked: bool) -> None:
         locked = bool(locked)
@@ -6648,7 +8950,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if isinstance(widget, QTextEdit):
             return widget.toPlainText()
         if isinstance(widget, QComboBox):
-            return widget.currentText()
+            # Internal-token combos (e.g. Next-cycle model) store the saved
+            # token as Qt item data, distinct from the display text shown to
+            # the user -- see _add_combo_with_values(). Combos whose items
+            # are their own value simply have no data on the current item
+            # and fall through to the display text as before.
+            data = widget.currentData()
+            return str(data) if data is not None else widget.currentText()
         if isinstance(widget, QCheckBox):
             return "true" if widget.isChecked() else "false"
         if isinstance(widget, (QSpinBox, QDoubleSpinBox)):
@@ -6657,6 +8965,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _set_widget_value_from_string(self, widget: object, value: str) -> None:
         value = "" if value is None else str(value)
+        if widget is self.inputs.get("sharped_base_url"):
+            value = normalize_server_url(value)
+        if widget is self.inputs.get("sharped_model"):
+            value = model_selection(value)
+            catalog = current_model_catalog(self._line_value("sharped_base_url"))
+            if catalog is not None:
+                self._sync_sharped_catalog()
+                if value not in catalog.models:
+                    value = "default"
         try:
             if isinstance(widget, PathRow):
                 widget.set_value(value)
@@ -6665,7 +8982,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif isinstance(widget, QTextEdit):
                 widget.setPlainText(value)
             elif isinstance(widget, QComboBox):
-                idx = widget.findText(value)
+                # Internal-token combos (userData != display text, e.g. the
+                # Next-cycle model combo) are matched by data first; combos
+                # whose items are their own value (the common case) simply
+                # have no data to match and fall through to findText().
+                idx = widget.findData(value)
+                if idx < 0:
+                    idx = widget.findText(value)
+                if idx < 0:
+                    # Case-insensitive fallback so a saved value survives a
+                    # display-only capitalization change to a combo item
+                    # (e.g. an old "custom" setting still matches "Custom").
+                    idx = widget.findText(value, Qt.MatchFixedString)
                 if idx >= 0:
                     widget.setCurrentIndex(idx)
                 elif hasattr(widget, "setCurrentText"):
@@ -6686,7 +9014,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             value = self.settings.value(f"inputs/{key}", None)
             if value is not None:
                 if key == "reflection_data_mode":
-                    value = normalize_reflection_data_mode(str(value))
+                    # The combo's items are the human-readable display labels
+                    # (see REFLECTION_DATA_MODE_DISPLAY_LABELS), not the raw
+                    # internal tokens, so a saved value -- whether an old raw
+                    # token from before that change or a display label saved
+                    # since -- must be normalized then re-formatted to match
+                    # an actual item, or findText() below fails to locate it
+                    # and the saved HKL format selection is silently lost.
+                    value = format_reflection_data_mode(normalize_reflection_data_mode(str(value)))
                 self._set_widget_value_from_string(widget, str(value))
 
         # Migrate legacy generic executable names to the Jana2020 installation
@@ -6706,6 +9041,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             current = self._widget_value_as_string(widget).strip()
             if current.lower() in generic_values[key]:
                 self._set_widget_value_from_string(widget, default_path)
+        # Backward compatibility with older GUI versions that had a separate
+        # "Use symmetry for best densities" checkbox instead of "symmetry"
+        # being a normal Density selection metric option.
+        legacy_bestdensities_symmetry = str(self.settings.value("inputs/bestdensities_symmetry", "")).strip().lower() in {"1", "true", "yes", "on"}
+        if legacy_bestdensities_symmetry and "bestdensities_metric" in self.inputs:
+            self._set_widget_value_from_string(self.inputs["bestdensities_metric"], "symmetry")
         # Backward compatibility with older GUI versions that had one common
         # EDMA plimit field named "plimit".
         old_plimit = self.settings.value("inputs/plimit", None)
@@ -6798,58 +9139,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metadata = self._resolve_crystal_metadata_from_inputs()
         return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode, metadata)
 
-    def _resolve_hkl_analysis_inputs(self, request: HklAnalysisRequest) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
-        work_dir = Path(request.work_text).expanduser().resolve() if request.work_text else Path.cwd()
-        jana_path = Path(request.jana_text).expanduser().resolve() if request.jana_text else None
-        use_inflip_hkl = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
-        if use_inflip_hkl:
-            if jana_path is None or not jana_path.is_file():
-                raise FileNotFoundError("Jana .inflip is required to test or analyze embedded HKL data.")
-            hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
-            source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
-        else:
-            if not request.hkl_text:
-                raise FileNotFoundError("Select an external HKL file or a Jana .inflip with embedded reflections.")
-            hkl_path = Path(request.hkl_text).expanduser().resolve()
-            if not hkl_path.is_file():
-                raise FileNotFoundError(f"HKL file not found: {hkl_path}")
-            source_note = f"HKL source: {hkl_path}"
-        metadata = request.metadata
-        if metadata is None:
-            raise ValueError("Crystal metadata is incomplete. Provide unit-cell, symmetry and composition information.")
-        cell = metadata.cell
-        sg = metadata.spacegroup
-        hm = metadata.spacegroup_hm
-        metadata_name = metadata.source_path if metadata.source_path is not None else "manual input"
-        source_note += f"; cell/symmetry source: {metadata_name}"
-        if use_inflip_hkl:
-            data_mode = embedded_reflection_data_mode_from_inflip(jana_path) or resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
-        else:
-            data_mode = resolve_reflection_data_mode_from_sources(hkl_path, request.configured_mode, jana_path)
-        return hkl_path, data_mode, cell, sg, hm, source_note
-
-    def _hkl_analysis_inputs(self) -> Tuple[Path, str, gemmi.UnitCell, gemmi.SpaceGroup, str, str]:
-        return self._resolve_hkl_analysis_inputs(self._collect_hkl_analysis_request())
-
-    def _build_hkl_load_result(self, request: HklAnalysisRequest) -> HklLoadResult:
-        hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
-        value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
-        reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
-        unique = merge_duplicate_reflections(reflections)
-        return HklLoadResult(
-            hkl_path=hkl_path,
-            data_mode=data_mode,
-            cell=cell,
-            spacegroup=sg,
-            spacegroup_hm=hm,
-            source_note=source_note,
-            value_col=value_col,
-            sigma_col=sigma_col,
-            include_000=include_000,
-            reflections=reflections,
-            unique_reflections=unique,
-        )
-
     def _set_hkl_task_running(self, running: bool) -> None:
         for button_name in ("test_hkl_btn", "analyze_hkl_btn"):
             button = getattr(self, button_name, None)
@@ -6859,7 +9148,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         run_is_idle = str(getattr(self, "_run_status", "READY")).upper() == "READY"
         if running and not pipeline_active and run_is_idle:
             self.progress_bar.setRange(0, 0)
-            self._set_overall_progress_text("HKL analysis...")
+            self._set_overall_progress_text("HKL analysis…")
         elif not running and not pipeline_active and run_is_idle:
             self.progress_bar.setRange(0, 1)
             self.progress_bar.setValue(0)
@@ -6904,7 +9193,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
 
         def worker() -> object:
-            return self._build_hkl_load_result(request)
+            return build_hkl_load_result(request)
 
         self._start_hkl_background_task("HKL validation", worker, "hkl_load_result")
 
@@ -6964,19 +9253,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             source_layout.setSpacing(5)
             source_value = MiddleElidedLabel(hkl_path.name)
             source_value.setObjectName("diagnosticSummaryValue")
-            source_value.setToolTip(str(hkl_path))
+            source_value.setToolTip(wrap_path_tooltip(str(hkl_path)))
             source_layout.addWidget(source_value, 1)
             copy_path = QToolButton()
             copy_path.setObjectName("diagnosticTextAction")
             copy_path.setText("Copy path")
-            copy_path.setToolTip(str(hkl_path))
+            copy_path.setToolTip("Copy the full reflection-source path.")
             copy_path.clicked.connect(lambda: QApplication.clipboard().setText(str(hkl_path)))
             source_layout.addWidget(copy_path)
 
             values = (
                 ("Source", source_row),
-                ("Format", QLabel(data_mode)),
-                ("Unit cell", QLabel(f"{cell.a:.5g}  {cell.b:.5g}  {cell.c:.5g}  {cell.alpha:.4g}  {cell.beta:.4g}  {cell.gamma:.4g}")),
+                ("Format", QLabel(format_reflection_data_mode(data_mode))),
+                ("Unit cell", QLabel(
+                    f"{cell.a:.5g} × {cell.b:.5g} × {cell.c:.5g} Å · "
+                    f"{cell.alpha:.4g}° × {cell.beta:.4g}° × {cell.gamma:.4g}°"
+                )),
                 ("Space group", QLabel(spacegroup_hm)),
             )
             for index, (label_text, value_widget) in enumerate(values):
@@ -7006,20 +9298,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         source_layout.setSpacing(7)
         source_value = QLabel(hkl_path.name)
         source_value.setObjectName("diagnosticSummaryValue")
-        source_value.setToolTip(str(hkl_path))
+        source_value.setToolTip(wrap_path_tooltip(str(hkl_path)))
         source_layout.addWidget(source_value)
         copy_path = QToolButton()
         copy_path.setObjectName("diagnosticTextAction")
         copy_path.setText("Copy path")
-        copy_path.setToolTip(str(hkl_path))
+        copy_path.setToolTip("Copy the full reflection-source path.")
         copy_path.clicked.connect(lambda: QApplication.clipboard().setText(str(hkl_path)))
         source_layout.addWidget(copy_path)
         source_layout.addStretch(1)
         form.addRow("Source", source_row)
 
         rows = [
-            ("Format", data_mode),
-            ("Unit cell", f"{cell.a:.5g}  {cell.b:.5g}  {cell.c:.5g}  {cell.alpha:.4g}  {cell.beta:.4g}  {cell.gamma:.4g}"),
+            ("Format", format_reflection_data_mode(data_mode)),
+            ("Unit cell", f"{cell.a:.5g} × {cell.b:.5g} × {cell.c:.5g} Å · {cell.alpha:.4g}° × {cell.beta:.4g}° × {cell.gamma:.4g}°"),
             ("Space group", spacegroup_hm),
         ]
         rows.extend(extra_rows)
@@ -7115,29 +9407,35 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         value_label = reflection_value_label(data_mode)
         sigma_label = reflection_sigma_label(data_mode)
         snr_label = reflection_primary_snr_label(data_mode)
+        is_fwhm_mode = reflection_mode_has_fwhm(data_mode)
+        derived_ios_label = "Derived I/FWHM" if is_fwhm_mode else "Derived I/σ"
 
         dialog = QDialog(self)
         dialog.setObjectName("hklValidationDialog")
         dialog.setWindowTitle("HKL Validation")
         dialog.resize(1060, 680)
-        dialog.setMinimumSize(820, 520)
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(9)
         layout.addWidget(self._diagnostic_header("HKL VALIDATION", "Reflection parsing and input diagnostics", "VALID"))
+        column_summary = (
+            f"{value_label}: column {value_col} · {sigma_label}: column "
+            f"{sigma_col if sigma_col is not None else 'none'} · "
+            f"(0 0 0): {'included' if include_000 else 'excluded'}"
+        )
         layout.addWidget(self._diagnostic_input_summary(
             hkl_path,
             data_mode,
             cell,
-            hm,
+            f"{compact_spacegroup_symbol(result.spacegroup)} (#{result.spacegroup.number})",
             source_note,
-            (("Columns", f"value {value_col}  ·  sigma {sigma_col if sigma_col is not None else 'none'}  ·  include 000 {'yes' if include_000 else 'no'}"),),
+            (("Columns", column_summary),),
         ))
         layout.addWidget(self._diagnostic_metric_grid((
             (f"{len(reflections):,}", "Parsed"),
             (f"{len(unique):,}", "Unique"),
-            (f"{sigma_count:,} / {len(reflections):,}", sigma_label),
-            (f"{phase_count:,} / {len(reflections):,}", "Phase values"),
+            (f"{sigma_count:,} / {len(reflections):,}", f"{sigma_label} coverage"),
+            (f"{phase_count:,} / {len(reflections):,}", "Phase coverage"),
         )))
 
         sample_header = QHBoxLayout()
@@ -7151,41 +9449,87 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sample_header.addWidget(sample_count)
         layout.addLayout(sample_header)
 
-        headers = ["h", "k", "l", value_label, sigma_label, "Phase (°)", snr_label, "Derived I/σ", "d (Å)", "sinθ/λ"]
+        # "Derived I/sigma" is categorically not applicable to FWHM data (every
+        # row would read n/a, since FWHM is not a genuine sigma to propagate
+        # error from) -- hide the column entirely rather than fill it with dashes.
+        headers = ["h", "k", "l", value_label, sigma_label, "Phase (°)", snr_label]
+        if not is_fwhm_mode:
+            headers.append(derived_ios_label)
+        headers.extend(["d (Å)", "sinθ/λ"])
+        sigma_column_index = headers.index(sigma_label)
         table = QTableWidget(rows, len(headers))
         self._configure_diagnostic_table(table)
         table.setHorizontalHeaderLabels(headers)
+        if not is_fwhm_mode:
+            sigma_header_item = table.horizontalHeaderItem(sigma_column_index)
+            if sigma_header_item is not None:
+                sigma_header_item.setToolTip(
+                    "~value marks a theoretical estimate (Poisson counting statistics, "
+                    "σ ≈ √value) shown only because no measured uncertainty was parsed "
+                    "for that reflection; it is not measured data."
+                )
         for column in range(3):
             table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
         for column in range(3, len(headers)):
             table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
+        estimated_sigma_color = QColor("#7183a6")
         for row, reflection in enumerate(reflections[:rows]):
             d_spacing = reflection_d_spacing(cell, int(reflection.h), int(reflection.k), int(reflection.l))
             stl = reflection_sintheta_over_lambda(cell, int(reflection.h), int(reflection.k), int(reflection.l))
             primary_snr = reflection_primary_signal_to_noise(reflection, data_mode)
-            derived_ios = reflection_signal_to_noise(reflection, data_mode)
-            values = [
-                str(int(reflection.h)), str(int(reflection.k)), str(int(reflection.l)),
-                f"{float(reflection.value):.7g}",
-                "n/a" if reflection.sigma is None else f"{float(reflection.sigma):.7g}",
-                "n/a" if reflection.phase is None else f"{float(reflection.phase):.7g}",
-                "n/a" if primary_snr is None else f"{float(primary_snr):.7g}",
-                "n/a" if derived_ios is None else f"{float(derived_ios):.7g}",
-                "n/a" if not math.isfinite(d_spacing) else f"{d_spacing:.5g}",
-                f"{stl:.5g}",
+
+            sigma_is_estimated = False
+            if reflection.sigma is not None:
+                sigma_text = f"{float(reflection.sigma):.7g}"
+            elif is_fwhm_mode:
+                sigma_text = "—"
+            else:
+                # No measured uncertainty was parsed for this reflection: show a
+                # theoretical Poisson counting-statistics estimate (sigma ~= sqrt
+                # of the observed intensity/amplitude) instead of leaving it blank,
+                # clearly marked with "~" so it is never mistaken for measured data.
+                theoretical_sigma = math.sqrt(abs(float(reflection.value)))
+                sigma_text = f"~{theoretical_sigma:.7g}"
+                sigma_is_estimated = True
+
+            row_values: List[Tuple[str, bool]] = [
+                (str(int(reflection.h)), False),
+                (str(int(reflection.k)), False),
+                (str(int(reflection.l)), False),
+                (f"{float(reflection.value):.7g}", False),
+                (sigma_text, sigma_is_estimated),
+                ("—" if reflection.phase is None else f"{float(reflection.phase):.7g}", False),
+                ("—" if primary_snr is None else f"{float(primary_snr):.7g}", False),
             ]
-            for column, text_value in enumerate(values):
+            if not is_fwhm_mode:
+                derived_ios = reflection_signal_to_noise(reflection, data_mode)
+                row_values.append(("—" if derived_ios is None else f"{float(derived_ios):.7g}", False))
+            row_values.append(("—" if not math.isfinite(d_spacing) else f"{d_spacing:.5g}", False))
+            row_values.append((f"{stl:.5g}", False))
+
+            for column, (text_value, is_estimate) in enumerate(row_values):
                 item = QTableWidgetItem(text_value)
                 item.setTextAlignment(Qt.AlignCenter if column < 3 else Qt.AlignRight | Qt.AlignVCenter)
+                if is_estimate:
+                    font = item.font()
+                    font.setItalic(True)
+                    item.setFont(font)
+                    item.setForeground(estimated_sigma_color)
+                    item.setToolTip(
+                        "Theoretical estimate (σ ≈ √value, Poisson counting statistics) -- "
+                        "no measured uncertainty was parsed for this reflection."
+                    )
                 table.setItem(row, column, item)
         layout.addWidget(table, 1)
 
         summary_text = (
             "HKL VALIDATION\n"
-            f"Source: {hkl_path}\nFormat: {data_mode}\n"
-            f"Unit cell: {cell.a:.5g} {cell.b:.5g} {cell.c:.5g} {cell.alpha:.4g} {cell.beta:.4g} {cell.gamma:.4g}\n"
+            f"Source: {hkl_path}\nFormat: {format_reflection_data_mode(data_mode)}\n"
+            f"Unit cell: {cell.a:.5g} × {cell.b:.5g} × {cell.c:.5g} Å · "
+            f"{cell.alpha:.4g}° × {cell.beta:.4g}° × {cell.gamma:.4g}°\n"
             f"Space group: {hm}\nParsed: {len(reflections):,}\nUnique: {len(unique):,}\n"
-            f"{sigma_label}: {sigma_count:,}/{len(reflections):,}\nPhase values: {phase_count:,}/{len(reflections):,}"
+            f"{sigma_label} coverage: {sigma_count:,}/{len(reflections):,}\n"
+            f"Phase coverage: {phase_count:,}/{len(reflections):,}"
         )
         footer = QHBoxLayout()
         copy_summary = QPushButton("Copy summary")
@@ -7200,10 +9544,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         dialog.hkl_table = table  # type: ignore[attr-defined]
         dialog.summary_text = summary_text  # type: ignore[attr-defined]
         dialog.full_source_path = str(hkl_path)  # type: ignore[attr-defined]
+        fit_dialog_to_available_screen(dialog, QSize(1060, 680))
         return dialog
 
     def _show_hkl_load_result_dialog(self, payload: object) -> None:
         dialog = self._build_hkl_validation_dialog(payload)  # type: ignore[arg-type]
+        # A second, deferred fit once the native window is fully realized
+        # (matches _show_hkl_completeness_dialog): the first fit's frame
+        # measurement can be inaccurate before the window manager settles.
+        QTimer.singleShot(0, lambda: fit_dialog_to_available_screen(dialog, QSize(1060, 680)))
         dialog.exec()
 
     def open_hkl_completeness_dialog(self) -> None:
@@ -7214,7 +9563,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
 
         def worker() -> object:
-            hkl_path, data_mode, cell, sg, hm, source_note = self._resolve_hkl_analysis_inputs(request)
+            hkl_path, data_mode, cell, sg, hm, source_note = resolve_hkl_analysis_inputs(request)
             analysis = analyze_hkl_data(hkl_path, data_mode, cell, sg, hm, source_note)
             return analysis
 
@@ -7236,6 +9585,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         d_full = format_resolution_d(analysis.d_full_98)
         sigma_label = reflection_sigma_label(analysis.data_mode)
         signal_label = reflection_primary_snr_label(analysis.data_mode)
+        is_fwhm_mode = reflection_mode_has_fwhm(analysis.data_mode)
         raw_sigma_count = sum(1 for r in analysis.reflections_raw if r.sigma is not None)
         unique_sigma_count = sum(1 for r in analysis.reflections_unique if r.sigma is not None)
         phase_count = sum(1 for r in analysis.reflections_raw if r.phase is not None)
@@ -7250,40 +9600,65 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             for b in analysis.bins
             if math.isfinite(float(b["center"])) and math.isfinite(float(b["mean_signal_to_noise"]))
         ]
-        for idx, (stl, signal) in enumerate(signal_points):
-            if signal >= signal_threshold:
-                continue
-            if idx > 0:
-                prev_stl, prev_signal = signal_points[idx - 1]
-                if prev_signal >= signal_threshold and stl > prev_stl and not math.isclose(signal, prev_signal):
-                    fraction = (signal_threshold - prev_signal) / (signal - prev_signal)
-                    threshold_stl = prev_stl + fraction * (stl - prev_stl)
+        # The I/sigma(I) = 3 significance convention does not apply to FWHM data:
+        # FWHM is a peak-shape parameter (e.g. from a Le Bail powder extraction),
+        # not a measurement uncertainty, so an I/FWHM ratio is not comparable in
+        # scale or meaning to a genuine signal-to-noise ratio. Skip the threshold
+        # entirely rather than presenting a number that looks like one but isn't.
+        if not is_fwhm_mode:
+            for idx, (stl, signal) in enumerate(signal_points):
+                if signal >= signal_threshold:
+                    continue
+                if idx > 0:
+                    prev_stl, prev_signal = signal_points[idx - 1]
+                    if prev_signal >= signal_threshold and stl > prev_stl and not math.isclose(signal, prev_signal):
+                        fraction = (signal_threshold - prev_signal) / (signal - prev_signal)
+                        threshold_stl = prev_stl + fraction * (stl - prev_stl)
+                    else:
+                        threshold_stl = stl
                 else:
                     threshold_stl = stl
-            else:
-                threshold_stl = stl
-            break
-        if threshold_stl is not None and threshold_stl > 0:
-            threshold_d = 1.0 / (2.0 * threshold_stl)
-        threshold_d_text = format_resolution_d(threshold_d)
+                break
+            if threshold_stl is not None and threshold_stl > 0:
+                threshold_d = 1.0 / (2.0 * threshold_stl)
+        threshold_d_text = "n/a (not meaningful for FWHM)" if is_fwhm_mode else format_resolution_d(threshold_d)
         input_summary = self._diagnostic_input_summary(
             analysis.hkl_path,
             analysis.data_mode,
             analysis.cell,
-            analysis.spacegroup_hm,
+            f"{compact_spacegroup_symbol(analysis.spacegroup)} (#{analysis.spacegroup.number})",
             analysis.source_note,
             compact=True,
         )
         layout.addWidget(input_summary)
-        metrics_panel = self._diagnostic_metric_grid((
+        if is_fwhm_mode:
+            fwhm_note = QLabel(
+                "<b>FWHM data</b><br>FWHM is a peak-shape parameter, not a measurement uncertainty. "
+                "I/FWHM is shown only as a descriptive intensity-to-width measure; I/&sigma;(I)-based "
+                "significance thresholds do not apply and are omitted below."
+            )
+            fwhm_note.setObjectName("helpCallout")
+            fwhm_note.setTextFormat(Qt.RichText)
+            fwhm_note.setWordWrap(True)
+            layout.addWidget(fwhm_note)
+        metric_cards = [
             (f"{len(analysis.reflections_unique):,}", "Unique reflections"),
             (d_min_text, "d_min"),
             (d_full, "d at 98% cumulative completeness"),
             (median_signal, f"Median {signal_label}"),
-            (threshold_d_text, f"d where mean {signal_label} < {signal_threshold:.1f}"),
+        ]
+        if not is_fwhm_mode:
+            # A significance threshold on I/FWHM would misrepresent it as a
+            # conventional I/sigma(I)-style signal-to-noise ratio; omit the
+            # card entirely rather than show a prose fallback as a metric value.
+            metric_cards.append((threshold_d_text, f"d where mean {signal_label} < {signal_threshold:.1f}"))
+        metric_cards.extend([
             (f"{phase_count:,} / {len(analysis.reflections_raw):,}", "Phase-value coverage"),
             (f"{raw_sigma_count:,} / {len(analysis.reflections_raw):,}", f"{sigma_label} coverage"),
-        ), compact=True, row_columns=(7,))
+        ])
+        metrics_panel = self._diagnostic_metric_grid(
+            metric_cards, compact=True, row_columns=(len(metric_cards),)
+        )
         layout.addWidget(metrics_panel)
 
         content_splitter = QSplitter(Qt.Vertical)
@@ -7317,6 +9692,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             top=0.942,
         )
 
+        resize_hooks: Dict[str, Callable[[], None]] = {}
+
         def adjust_plot_bottom_margin(event) -> None:
             # Preserve a readable, unclipped histogram xlabel when the splitter
             # compresses the canvas: Matplotlib margins are fractional, while
@@ -7348,6 +9725,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         transform=figure.transFigure,
                     )
                 canvas.draw_idle()
+            # Re-evaluate d_min/d_98 label placement for the new canvas size:
+            # their screen-space separation (not their scientific values)
+            # determines whether the labels can be shown side by side.
+            relayout_guides = resize_hooks.get("relayout_guides")
+            if relayout_guides is not None:
+                relayout_guides()
 
         layout_resize_cid = canvas.mpl_connect("resize_event", adjust_plot_bottom_margin)
         resolution_grid = plot_grid[0, 0].subgridspec(
@@ -7365,9 +9748,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         mean_signal = [float(b["mean_signal_to_noise"]) if math.isfinite(float(b["mean_signal_to_noise"])) else np.nan for b in analysis.bins]
         signal_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
         signal_values = [float(v) for v in signal_values if v is not None and math.isfinite(float(v))]
-        signal_math_label = r"$I/\sigma(I)$"
-        mean_signal_math_label = r"Mean $I/\sigma(I)$"
-        threshold_math_label = rf"$I/\sigma(I) = {signal_threshold:.1f}$"
+        if is_fwhm_mode:
+            fwhm_numerator = "F" if reflection_mode_is_amplitude(analysis.data_mode) else "I"
+            signal_math_label = rf"${fwhm_numerator}/\mathrm{{FWHM}}$"
+            mean_signal_math_label = rf"Mean ${fwhm_numerator}/\mathrm{{FWHM}}$"
+            threshold_math_label = None
+        else:
+            signal_math_label = r"$I/\sigma(I)$"
+            mean_signal_math_label = r"Mean $I/\sigma(I)$"
+            threshold_math_label = rf"$I/\sigma(I) = {signal_threshold:.1f}$"
         resolution_math_label = r"$\sin\theta/\lambda$"
         d_min_stl = 1.0 / (2.0 * analysis.d_min) if analysis.d_min > 0 else None
         d_full_stl = 1.0 / (2.0 * analysis.d_full_98) if analysis.d_full_98 is not None and analysis.d_full_98 > 0 else None
@@ -7396,21 +9785,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             zorder=3,
         )
         ax_completeness.axhline(98.0, color="#001170", linewidth=1.0, linestyle="--", zorder=3)
-        reference_labels: List[Tuple[float, str]] = []
+        d_min_label = r"$d_{\mathrm{min}}$"
+        d_98_label = r"$d_{98}$"
         d_min_artist = None
         d_full_artist = None
         if d_min_stl is not None:
             d_min_artist = ax_completeness.axvline(
-                d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label=r"$d_{\mathrm{min}}$"
+                d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label=d_min_label
             )
             ax_signal.axvline(d_min_stl, color="#001170", linewidth=1.1, linestyle="-")
-            reference_labels.append((d_min_stl, r"$d_{\mathrm{min}}$" + "\n" + d_min_plot_text))
         if d_full_stl is not None:
             d_full_artist = ax_completeness.axvline(
-                d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label="d at 98%"
+                d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label=d_98_label
             )
             ax_signal.axvline(d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":")
-            reference_labels.append((d_full_stl, f"98%\n{d_full_plot_text}"))
         ax_completeness.set_ylabel("Completeness (%)", labelpad=8, fontsize=9)
         shared_ylabel_x = -0.075
         ax_completeness.yaxis.set_label_coords(shared_ylabel_x, 0.5)
@@ -7428,14 +9816,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             zorder=3,
             label=mean_signal_math_label,
         )
-        threshold_artist = ax_signal.axhline(
-            signal_threshold,
-            color="#2264b8",
-            linewidth=1.0,
-            linestyle="--",
-            zorder=2,
-            label=threshold_math_label,
-        )
+        threshold_artist = None
+        if not is_fwhm_mode:
+            threshold_artist = ax_signal.axhline(
+                signal_threshold,
+                color="#2264b8",
+                linewidth=1.0,
+                linestyle="--",
+                zorder=2,
+                label=threshold_math_label,
+            )
         ax_signal.set_ylabel(mean_signal_math_label, labelpad=8, fontsize=9)
         ax_signal.yaxis.set_label_coords(shared_ylabel_x, 0.5)
         ax_signal.set_xlabel(resolution_math_label, labelpad=2)
@@ -7460,29 +9850,101 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 color="#52658b",
                 fontsize=7.0,
             )
-        ordered_labels = sorted(reference_labels, key=lambda item: item[0])
-        for x_position, label_text in ordered_labels:
-            ax_completeness.annotate(
-                label_text,
-                xy=(x_position, 0.99),
-                xycoords=ax_completeness.get_xaxis_transform(),
-                xytext=(0, -1.0),
-                textcoords="offset points",
-                ha="center",
-                va="top",
-                color="#14204a",
-                fontsize=7.2,
-                bbox={"boxstyle": "square,pad=0.16", "facecolor": "#ffffff", "edgecolor": "none", "alpha": 0.88},
-                annotation_clip=False,
-            )
-        legend_handles = [completeness_artist, mean_artist, threshold_artist]
-        legend_labels = ["Completeness", mean_signal_math_label, threshold_math_label]
+        guide_annotation_artists: List[object] = []
+
+        def place_resolution_guide_annotations() -> None:
+            """Place the d_min/d_98 labels, avoiding overlap regardless of the
+            current canvas size. The scientific values (d_min_plot_text,
+            d_full_plot_text) are never altered here -- only where and how the
+            two labels are drawn depends on their current screen-space gap."""
+            for artist in guide_annotation_artists:
+                try:
+                    artist.remove()
+                except Exception:
+                    pass
+            guide_annotation_artists.clear()
+
+            entries: List[Tuple[float, str, str]] = []
+            if d_min_stl is not None:
+                entries.append((d_min_stl, d_min_label, d_min_plot_text))
+            if d_full_stl is not None:
+                entries.append((d_full_stl, d_98_label, d_full_plot_text))
+            if not entries:
+                return
+
+            def annotate_one(x: float, text: str, ha: str, dx: float) -> None:
+                guide_annotation_artists.append(
+                    ax_completeness.annotate(
+                        text,
+                        xy=(x, 0.99),
+                        xycoords=ax_completeness.get_xaxis_transform(),
+                        xytext=(dx, -1.0),
+                        textcoords="offset points",
+                        ha=ha,
+                        va="top",
+                        color="#14204a",
+                        fontsize=7.2,
+                        bbox={"boxstyle": "square,pad=0.16", "facecolor": "#ffffff", "edgecolor": "none", "alpha": 0.88},
+                        annotation_clip=False,
+                    )
+                )
+
+            if len(entries) == 1:
+                x, short_label, value_text = entries[0]
+                annotate_one(x, f"{short_label}\n{value_text}", "center", 0.0)
+                return
+
+            entries.sort(key=lambda item: item[0])
+            (x_left, label_left, text_left), (x_right, label_right, text_right) = entries
+            # A real draw is needed so transData reflects the canvas size the
+            # labels will actually be rendered at (including after a resize).
+            try:
+                figure.canvas.draw()
+            except Exception:
+                pass
+            px_left = ax_completeness.transData.transform((x_left, 0.0))[0]
+            px_right = ax_completeness.transData.transform((x_right, 0.0))[0]
+            pixel_gap = abs(px_right - px_left)
+            merge_threshold_px = 10.0
+            collision_threshold_px = 62.0
+            if pixel_gap < merge_threshold_px:
+                # Case C: the two guide positions are visually indistinguishable
+                # at this plot width. Report both scientific values together in
+                # one box rather than drawing two illegibly close labels; the
+                # values themselves are unchanged and still shown independently
+                # in the summary cards and CSV export.
+                x_mid = (x_left + x_right) / 2.0
+                annotate_one(
+                    x_mid,
+                    f"{label_left} = {text_left}\n{label_right} = {text_right}",
+                    "center",
+                    0.0,
+                )
+            elif pixel_gap < collision_threshold_px:
+                # Case B: close but distinguishable -- push the two labels apart
+                # so their boxes clear each other while each stays visually
+                # anchored (via the small xytext offset) to its own guide line.
+                annotate_one(x_left, f"{label_left}\n{text_left}", "right", -8.0)
+                annotate_one(x_right, f"{label_right}\n{text_right}", "left", 8.0)
+            else:
+                # Case A: well separated -- centered placement, as before.
+                for x, label, text in entries:
+                    annotate_one(x, f"{label}\n{text}", "center", 0.0)
+
+        place_resolution_guide_annotations()
+        resize_hooks["relayout_guides"] = place_resolution_guide_annotations
+
+        legend_handles = [completeness_artist, mean_artist]
+        legend_labels = ["Completeness", mean_signal_math_label]
+        if threshold_artist is not None:
+            legend_handles.append(threshold_artist)
+            legend_labels.append(threshold_math_label)
         if d_full_artist is not None:
             legend_handles.append(d_full_artist)
-            legend_labels.append("d at 98%")
+            legend_labels.append(d_98_label)
         if d_min_artist is not None:
             legend_handles.append(d_min_artist)
-            legend_labels.append(r"$d_{\mathrm{min}}$")
+            legend_labels.append(d_min_label)
         legend_column = plot_grid[0, 1].get_position(figure)
         legend_anchor = (
             legend_column.x0 + 0.008,
@@ -7508,7 +9970,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             histogram_weights = np.full(len(signal_values), 100.0 / float(histogram_denominator), dtype=np.float64)
             ax_histogram.hist(signal_values, bins=histogram_bins, weights=histogram_weights, color="#44b7ff", alpha=0.82)
         else:
-            ax_histogram.text(0.5, 0.5, "No sigma values available", transform=ax_histogram.transAxes, ha="center", va="center")
+            no_signal_text = (
+                f"No {reflection_primary_snr_label(analysis.data_mode)} values available"
+                if is_fwhm_mode else "No sigma values available"
+            )
+            ax_histogram.text(0.5, 0.5, no_signal_text, transform=ax_histogram.transAxes, ha="center", va="center")
         histogram_title_artist = ax_histogram.set_title(
             "REFLECTION DISTRIBUTION",
             loc="left",
@@ -7546,11 +10012,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         table.setHorizontalHeaderLabels(headers)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         for row, item in enumerate(analysis.bins):
+            theory_count = int(item["theory"])
             values = [
                 f"{float(item['lo']):.4g} - {float(item['hi']):.4g}",
                 str(int(item["observed"])),
-                str(int(item["theory"])),
-                f"{float(item['completeness']):.2f}",
+                str(theory_count),
+                # Completeness is undefined with no theoretical reflections in the shell.
+                "—" if theory_count == 0 else f"{float(item['completeness']):.2f}",
                 "n/a" if not math.isfinite(float(item["mean_signal_to_noise"])) else f"{float(item['mean_signal_to_noise']):.3g}",
             ]
             for column, text_value in enumerate(values):
@@ -7568,9 +10036,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         summary_text = (
             "HKL COMPLETENESS\n"
-            f"Source: {analysis.hkl_path}\nFormat: {analysis.data_mode}\n"
+            f"Source: {analysis.hkl_path}\nFormat: {format_reflection_data_mode(analysis.data_mode)}\n"
             f"Unit cell: {analysis.cell.a:.5g} {analysis.cell.b:.5g} {analysis.cell.c:.5g} {analysis.cell.alpha:.4g} {analysis.cell.beta:.4g} {analysis.cell.gamma:.4g}\n"
-            f"Space group: {analysis.spacegroup_hm}\nParsed / unique: {len(analysis.reflections_raw):,} / {len(analysis.reflections_unique):,}\n"
+            f"Space group: {compact_spacegroup_symbol(analysis.spacegroup)} (#{analysis.spacegroup.number})\nParsed / unique: {len(analysis.reflections_raw):,} / {len(analysis.reflections_unique):,}\n"
             f"{sigma_label} coverage: {raw_sigma_count:,}/{len(analysis.reflections_raw):,} raw; {unique_sigma_count:,}/{len(analysis.reflections_unique):,} unique\n"
             f"Phase values: {phase_count:,}/{len(analysis.reflections_raw):,}\n"
             f"d_min: {d_min_text}\nd at 98% cumulative completeness: {d_full}\n"
@@ -7674,6 +10142,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         widget = self.inputs.get(key)
         if widget is None or not hasattr(widget, "currentText"):
             return ""
+        if hasattr(widget, "currentData"):
+            data = widget.currentData()  # type: ignore[attr-defined]
+            if data is not None:
+                return str(data)
         return widget.currentText().strip()  # type: ignore[attr-defined]
 
     def _check_value(self, key: str) -> bool:
@@ -7702,6 +10174,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def clear_log_plot(self) -> None:
         self.log_text.clear()
+        self.log_text.horizontalScrollBar().setValue(0)
         self._last_log_record = None
         self.results.clear()
         self.reference_atoms_for_plot.clear()
@@ -7716,9 +10189,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_stage_counter.setText("Idle")
         self.current_cycle_progress.setRange(0, 1)
         self.current_cycle_progress.setValue(0)
+        self._apply_superflip_repeat_state(None)
         self._set_run_status("Ready")
-        if hasattr(self, "handoff_btn"):
-            self.handoff_btn.setEnabled(False)
+        self._sync_jana_action_button()
         self.last_run_config = None
         self._update_plot()
         self._update_structure_views()
@@ -7741,7 +10214,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             record.subsystem.lower() == "sharped"
             and re.search(r"(?:server status:|\]\s*(?:processing|completed|uploading|downloading))", record.text, re.IGNORECASE)
         )
-        if repeatable_status and self._last_log_record == record:
+        # Consecutive, byte-identical INFO/SUCCESS/DETAIL lines are almost always
+        # presentation noise (e.g. a settings-loading step logged from more than
+        # one code path with the same summary), not new information. WARNING,
+        # ERROR and STEP lines are never suppressed this way, even if repeated,
+        # since a recurring warning is meaningful on every cycle it appears.
+        duplicate_informational = record.level.upper() in {"INFO", "SUCCESS", "DETAIL"}
+        if (repeatable_status or duplicate_informational) and self._last_log_record == record:
             return False
 
         scroll_bar = self.log_text.verticalScrollBar()
@@ -7754,16 +10233,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         block_format.setLineHeight(112.0, QTextBlockFormat.ProportionalHeight.value)
         cursor.setBlockFormat(block_format)
         text_format = QTextCharFormat()
-        colors = {
-            "INFO": "#14204a",
-            "STEP": "#001170",
-            "SUCCESS": "#2264b8",
-            "WARNING": "#8a5a00",
-            "ERROR": "#b42318",
-            "COMMAND": "#52658b",
-            "DETAIL": "#7183a6",
-        }
-        text_format.setForeground(QColor(colors.get(record.level, "#001170")))
+        # Three visual levels, not one color per log level: NORMAL (INFO,
+        # STEP, SUCCESS, COMMAND -- day-to-day output), DETAIL (secondary,
+        # de-emphasized), WARNING/ERROR (always prominent). The underlying
+        # level is unchanged and still written in full to the on-disk log;
+        # this only simplifies the on-screen color scheme.
+        prominent_colors = {"WARNING": "#8a5a00", "ERROR": "#b42318"}
+        if record.level in prominent_colors:
+            log_color = prominent_colors[record.level]
+        elif record.level == "DETAIL":
+            log_color = "#7183a6"
+        else:
+            log_color = "#14204a"
+        text_format.setForeground(QColor(log_color))
         workflow_subsystem = record.subsystem.casefold() in {"superflip", "sharped", "edma"}
         workflow_heading = (
             record.level not in {"DETAIL", "COMMAND"}
@@ -7781,7 +10263,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._last_log_record = record
         return True
 
+    # Compatibility/configuration notices that describe a STABLE property of
+    # the current executable or settings, so they say exactly the same thing on
+    # every Superflip call. They were emitted for the normal calculation, again
+    # for the OMIT calculation, and again for every cycle -- on a 5-cycle OMIT
+    # run that is the same three lines up to twenty times, burying the
+    # scientifically interesting output. They are reported once per workflow.
+    # Matching is on the full message text, so a genuinely NEW warning (a
+    # different keyword, a different value) is still reported the first time it
+    # appears. The per-process Superflip/EDMA log files keep every occurrence.
+    LOG_ONCE_PER_WORKFLOW_PREFIXES = (
+        "Superflip normalize value",
+        "Superflip executable does not support",
+        "  Ignored duplicate/managed Superflip keyword",
+    )
+
     def log(self, message: str, *, level: str = "", subsystem: str = "") -> None:
+        text = str(message)
+        if text.startswith(self.LOG_ONCE_PER_WORKFLOW_PREFIXES):
+            seen = getattr(self, "_workflow_log_once", None)
+            if seen is None:
+                seen = set()
+                self._workflow_log_once = seen
+            if text in seen:
+                return
+            seen.add(text)
         work_dir = self.last_run_config.work_dir if self.last_run_config is not None else None
         self.msg_queue.put(("log", classify_log_record(
             message,
@@ -7828,12 +10334,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_progress.setValue(completed_stages)
         display_text = state.display_text()
         if self.stop_after_cycle.is_set():
-            stop_detail = "Stopping immediately..." if self.stop_now.is_set() else "Stopping after current cycle..."
+            stop_detail = "Stopping immediately…" if self.stop_now.is_set() else "Stopping after current cycle…"
             display_text = f"{display_text} · {stop_detail}"
         self.current_cycle_detail.setText(display_text)
         self.current_cycle_stage_counter.setText(
-            "Completed" if state.complete else f"Stage {state.stage_index} / {stage_total}"
+            "Completed" if state.complete else f"Stage {state.stage_index} of {stage_total}"
         )
+        self._apply_superflip_repeat_state(state)
+
+    def _apply_superflip_repeat_state(self, state: Optional[CycleProgressState]) -> None:
+        sub_total = None if state is None else state.sub_total
+        sub_index = None if state is None else state.sub_index
+        if state is None or state.complete or sub_total is None or sub_index is None or int(sub_total) <= 1:
+            self.superflip_repeat_group.setVisible(False)
+            return
+        sub_total = int(sub_total)
+        sub_index = max(1, min(int(sub_index), sub_total))
+        self.superflip_repeat_detail.setText(f"Superflip repeat {sub_index} of {sub_total}")
+        self.superflip_repeat_progress.setRange(0, sub_total)
+        self.superflip_repeat_progress.setValue(sub_index)
+        self.superflip_repeat_group.setVisible(True)
 
     def _annotate_cycle_progress(self, detail: str) -> None:
         state = self._cycle_progress_state
@@ -7846,21 +10366,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _set_terminal_cycle_state(self, terminal: str) -> None:
         """Preserve the last reached stage without retaining active-state wording."""
         state = self._cycle_progress_state
+        self._apply_superflip_repeat_state(None)
         if state is None:
             self.current_cycle_progress.setRange(0, 1)
             self.current_cycle_progress.setValue(0)
             self.current_cycle_stage_counter.setText(terminal)
-            self.current_cycle_detail.setText("Stopped by user" if terminal == "Stopped" else terminal)
+            self.current_cycle_detail.setText("Stopped after current cycle" if terminal == "Stopped" else terminal)
             return
 
         stage_total = max(1, int(state.stage_total))
         stage_index = max(1, min(stage_total, int(state.stage_index)))
         self.current_cycle_progress.setRange(0, stage_total)
         self.current_cycle_progress.setValue(max(self.current_cycle_progress.value(), stage_index))
-        self.current_cycle_stage_counter.setText(f"{terminal} at stage {stage_index} / {stage_total}")
-        parts = [f"Cycle {state.cycle_index} / {state.cycle_total}", state.stage_name]
-        if terminal != "Stopped" and state.sub_index is not None and state.sub_total is not None:
-            parts.append(f"repeat {state.sub_index} / {state.sub_total}")
+        self.current_cycle_stage_counter.setText(f"{terminal} at stage {stage_index} of {stage_total}")
+        parts = [f"Cycle {state.cycle_index} of {state.cycle_total}", state.stage_name]
         parts.append("stopped by user" if terminal == "Stopped" else terminal.lower())
         self.current_cycle_detail.setText(" · ".join(parts))
 
@@ -7877,9 +10396,44 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_now.clear()
         self._set_run_status("Cancelled")
         self.run_btn.setText("Run phasing")
-        self.handoff_btn.setEnabled(False)
         self._update_action_states()
-        self._append_execution_log("Pipeline cancelled by the user.", level="WARNING", subsystem="Pipeline")
+        self._append_execution_log(
+            "Workflow cancelled by the user.", level="WARNING", subsystem="Workflow"
+        )
+
+    def _finish_stopped_run(self, completed_cycles: int) -> None:
+        """Terminal state for "Stop after current cycle": the requested cycle
+        finished normally, so every completed result stays valid and usable.
+
+        Deliberately distinct from _finish_cancelled_run(): calling this a
+        cancellation told the user their completed, scientifically valid
+        cycles had been thrown away, which is not what happened.
+        """
+        self.worker = None
+        completed = max(int(completed_cycles), len(self.results))
+        total_cycles = max(1, int(getattr(self.last_run_config, "cycles", 1)), completed)
+        self.progress_bar.setRange(0, total_cycles)
+        self.progress_bar.setValue(min(completed, total_cycles))
+        self._set_overall_progress_text("Stopped")
+        self._set_terminal_cycle_state("Stopped")
+        self.stop_after_cycle.clear()
+        self.stop_now.clear()
+        self._set_run_status("Stopped")
+        self.run_btn.setText("Run phasing")
+        self.run_btn.setEnabled(True)
+        self._update_action_states()
+        self._append_execution_log(
+            f"Workflow stopped after cycle {completed} as requested.",
+            level="WARNING",
+            subsystem="Workflow",
+        )
+        self._append_execution_log(
+            "Completed results are available.",
+            subsystem="Workflow",
+        )
+        # A partially completed workflow is still a usable result set: the
+        # Jana2020 hand-off stays available for whatever finished.
+        self._sync_jana_action_button()
 
     def _set_run_status(self, status: str) -> None:
         normalized = str(status).strip().upper() or "READY"
@@ -7889,6 +10443,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "COMPLETED": "COMPLETE",
             "FAILED": "ERROR",
             "CANCELED": "CANCELLED",
+            # A graceful "Stop after current cycle" is its own terminal state:
+            # the cycle completed and its results are valid. It must never be
+            # folded into CANCELLED, which means an immediate interruption.
+            "STOP": "STOPPED",
+            # The pipeline is still RUNNING for button-enablement purposes while a
+            # stop is pending; the "stopping" badge is shown separately via
+            # _show_stopping_badge() without changing the stored _run_status.
             "STOPPING": "RUNNING",
         }.get(normalized, normalized)
         self._run_status = normalized
@@ -7898,7 +10459,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.status_badge.style().unpolish(self.status_badge)
             self.status_badge.style().polish(self.status_badge)
         self._update_action_states()
-        if hasattr(self, "canvas") and not getattr(self, "results", []):
+        # Refreshes only the metrics tabs' state-aware empty-state text (never
+        # overwrites real plotted data, since it's gated on there being no
+        # results yet); this was previously dead code checking a
+        # self.canvas attribute that is never actually set anywhere.
+        if hasattr(self, "metrics_canvases") and not getattr(self, "results", []):
             self._update_plot()
         if hasattr(self, "structure_canvas"):
             self._update_structure_views()
@@ -7908,7 +10473,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         active = status == "RUNNING"
         self._set_configuration_locked(active)
         if hasattr(self, "run_btn"):
-            self.run_btn.setEnabled(not active and bool(getattr(self, "_metadata_valid", False)))
+            # Invalid crystal metadata does not disable Run: start_run()'s
+            # own get_config() call raises the same underlying error, which
+            # is already reported through the normal error dialog on click.
+            self.run_btn.setEnabled(not active)
         if hasattr(self, "continue_btn"):
             self.continue_btn.setEnabled(not active and getattr(self, "_resume_state", None) is not None)
         if hasattr(self, "stop_btn"):
@@ -7919,37 +10487,120 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             has_results = bool(getattr(self, "results", []))
             has_log = bool(hasattr(self, "log_text") and self.log_text.toPlainText().strip())
             self.clear_btn.setEnabled(not active and (has_results or has_log))
-        if active and hasattr(self, "handoff_btn"):
-            self.handoff_btn.setEnabled(False)
+        self._sync_jana_action_button()
+
+    def _jana_wizard_handoff_available(self) -> bool:
+        """Whether a Jana2020 Wizard hand-off/result-selector action is
+        currently meaningful: only for a session actually launched from the
+        Wizard (Full configuration or Phase recycling), with a completed run
+        whose results came from a Jana2020 .inflip. A standalone session that
+        happens to load a .inflip manually must never satisfy this."""
+        return bool(
+            self.results
+            and self.last_run_config
+            and self.last_run_config.jana_inflip is not None
+            and self.jana_wizard_context.launched_from_jana_wizard
+            and self.jana_wizard_context.launch_mode in ("full_configuration", "phase_recycling")
+        )
+
+    def _sync_window_title(self) -> None:
+        """Single source of truth for the window title, driven entirely by
+        launch context (jana_wizard_context.launched_from_jana_wizard) --
+        never inferred from whether a .inflip happens to be loaded. Mirrors
+        _sync_jana_action_button()'s "Install to Jana2020" / "Send to
+        Jana2020" pattern."""
+        if self.jana_wizard_context.launched_from_jana_wizard:
+            self.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
+        else:
+            self.setWindowTitle(f"Phase Studio {__version__}")
+
+    def _sync_jana_action_button(self) -> None:
+        """Single source of truth for the third primary action button's
+        label/tooltip/enabled state, driven entirely by launch context
+        (jana_wizard_context.launched_from_jana_wizard) -- never inferred
+        from whether a .inflip happens to be loaded."""
+        if not hasattr(self, "jana_action_btn"):
+            return
+        active = str(getattr(self, "_run_status", "READY")).upper() == "RUNNING"
+        if self.jana_wizard_context.launched_from_jana_wizard:
+            self.jana_action_btn.setText("Send to Jana2020")
+            self.jana_action_btn.setToolTip(
+                "After a run launched from the Jana2020 Wizard completes, select a cycle and either its "
+                "Superflip or SharpED result for handoff back to Jana2020."
+            )
+            self.jana_action_btn.setEnabled((not active) and self._jana_wizard_handoff_available())
+        else:
+            self.jana_action_btn.setText("Install to Jana2020")
+            self.jana_action_btn.setToolTip(
+                "Install, update, repair or remove the Phase Studio Jana2020 launcher inside a Jana2020 "
+                "installation (Jana2020\\SUPERFLIP). Available at any time; no completed run is required."
+            )
+            # An application-integration action, not a result action (spec
+            # section 3): enabled in normal READY state, disabled only while
+            # a calculation is actively running, so files used by Jana/
+            # Superflip are not modified during an active Phase Studio run.
+            self.jana_action_btn.setEnabled(not active)
+
+    def _on_jana_action_clicked(self) -> None:
+        """Dispatches the third primary action according to launch context:
+        the existing Jana2020 result hand-off for a Wizard-launched session,
+        or the Jana2020 integration management dialog for a standalone one."""
+        if self.jana_wizard_context.launched_from_jana_wizard:
+            self.open_jana_handoff_dialog()
+        else:
+            self.open_install_to_jana_dialog()
+
+    def _show_stopping_badge(self) -> None:
+        # Cosmetic only: the pipeline is still RUNNING for _update_action_states()
+        # purposes (stop/stop-now button enablement, configuration lock) until the
+        # worker actually exits, but the visible status badge should reflect that a
+        # stop was requested rather than sitting on "RUNNING" with no feedback.
+        if hasattr(self, "status_badge"):
+            self.status_badge.setText("STOPPING")
+            self.status_badge.setProperty("runState", "stopping")
+            self.status_badge.style().unpolish(self.status_badge)
+            self.status_badge.style().polish(self.status_badge)
 
     def request_stop_after_cycle(self) -> None:
         self.stop_after_cycle.set()
-        self._annotate_cycle_progress("Stopping after current cycle...")
+        self._annotate_cycle_progress("Stopping after current cycle…")
         self._update_action_states()
+        self._show_stopping_badge()
         self.log("Stop after current cycle requested.", level="DETAIL")
 
     def request_immediate_stop(self) -> None:
         self.stop_after_cycle.set()
         self.stop_now.set()
-        self._annotate_cycle_progress("Stopping immediately...")
+        self._annotate_cycle_progress("Stopping immediately…")
         self._update_action_states()
+        self._show_stopping_badge()
         self.log("Immediate stop requested.", level="DETAIL")
+
+    def _sync_sharped_catalog(self) -> None:
+        widget = self.inputs.get("sharped_model")
+        if not isinstance(widget, QComboBox):
+            return
+        status = sync_model_catalog(widget, self._line_value("sharped_base_url"))
+        if status is not None:
+            self.sharped_model_status.setText(status)
 
     def refresh_sharped_models(self) -> None:
         base_widget = self.inputs.get("sharped_base_url")
         timeout_widget = self.inputs.get("sharped_timeout_seconds")
-        base_url = base_widget.text().strip() if isinstance(base_widget, QLineEdit) else "https://jana.fzu.cz"
+        base_url = base_widget.text().strip() if isinstance(base_widget, QLineEdit) else DEFAULT_SERVER_URL
         timeout = 20
         if isinstance(timeout_widget, QSpinBox):
             timeout = max(5, min(60, int(timeout_widget.value())))
 
+        self.sharped_model_status.setText("Loading models…")
+
         def worker() -> None:
             try:
-                client = SharpEDServerClient(base_url=base_url or "https://jana.fzu.cz", timeout=float(timeout))
+                client = SharpEDServerClient(base_url=base_url or DEFAULT_SERVER_URL, timeout=float(timeout))
                 models = client.get_models()
-                self.msg_queue.put(("sharped_models", (models.default_model, models.models)))
-            except Exception as exc:
-                self.msg_queue.put(("log", f"SharpED model refresh failed: {exc}"))
+                self.msg_queue.put(("sharped_models", (normalize_server_url(base_url), models)))
+            except Exception:
+                self.msg_queue.put(("sharped_models_failed", normalize_server_url(base_url)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -7974,7 +10625,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("symmetrize_deblurred_map", "false")
             set_value("run_edma_deblurred", "true")
             set_value("run_edma_recycle_final", "false")
-            set_value("sharped_model", "koala 2.0")
+            set_value("compute_omit_maps", "false")
+            set_value("compute_omit_rfree", "false")
+            set_value("map_feedback_missing_enabled", "false")
+            set_value("map_feedback_missing_from_cycle", "1")
+            set_value("map_feedback_intensity_enabled", "false")
+            set_value("map_feedback_intensity_from_cycle", "1")
+            set_value("redistribute_overlaps", "false")
+            set_value("powder_redistribution_from_cycle", "1")
+            set_value("powder_wavelength", "0.0")
+            set_value("powder_separation_factor", "0.2")
+            set_value("powder_redistribution_mix", "1.0")
+            set_value("sharped_model", "default")
             set_value("perform_algorithm", "CF")
             set_value("maxcycles", "2000")
             set_value("repeatmode", "10")
@@ -7985,8 +10647,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("polish", "true")
             set_value("voxel", "")
             set_value("bestdensities_count", "1")
-            set_value("bestdensities_metric", "rvalue")
-            set_value("bestdensities_symmetry", "true")
+            set_value("bestdensities_metric", "symmetry")
             set_value("searchsymmetry", "average")
             set_value("derivesymmetry", "yes")
             set_value("resolution_d_min", "0.0")
@@ -7998,32 +10659,34 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("plimit_deblur", "0.5")
             set_value("map_export_format", "xplor")
         elif "atomic" in name:
-            set_value("reflection_data_mode", REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA)
+            set_value("reflection_data_mode", format_reflection_data_mode(REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA))
             set_value("modelfile_source", "deblurred_xplor")
             set_value("plimit_superflip", "3.0")
             set_value("plimit_deblur", "3.0")
             set_value("resolution_d_min", "0.9")
-            set_value("bestdensities_symmetry", "true")
+            set_value("bestdensities_metric", "symmetry")
             set_value("map_export_format", "jana")
         elif "medium" in name:
-            set_value("reflection_data_mode", REFLECTION_DATA_MODE_AUTO)
+            set_value("reflection_data_mode", format_reflection_data_mode(REFLECTION_DATA_MODE_AUTO))
             set_value("modelfile_source", "deblurred_edma_cif")
             set_value("plimit_superflip", "0.5")
             set_value("plimit_deblur", "0.5")
             set_value("resolution_d_min", "0.0")
         elif "small" in name:
-            set_value("reflection_data_mode", REFLECTION_DATA_MODE_INTENSITY)
+            set_value("reflection_data_mode", format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY))
             set_value("modelfile_source", "deblurred_edma_cif")
             set_value("plimit_superflip", "0.5")
             set_value("plimit_deblur", "0.5")
             set_value("bestdensities_metric", "rvalue")
         elif "inorganic" in name:
-            set_value("reflection_data_mode", REFLECTION_DATA_MODE_AUTO)
+            set_value("reflection_data_mode", format_reflection_data_mode(REFLECTION_DATA_MODE_AUTO))
             set_value("modelfile_source", "deblurred_edma_cif")
             set_value("plimit_superflip", "1.0")
             set_value("plimit_deblur", "1.0")
-            set_value("bestdensities_symmetry", "true")
+            set_value("bestdensities_metric", "symmetry")
         self._sync_workflow_widgets()
+        self._sync_map_feedback_widgets()
+        self._sync_normalization_widgets()
 
     def _open_configuration_page(self, name: str, *, advanced: bool = False) -> None:
         self.category_tabs.setCurrentIndex(1 if advanced else 0)
@@ -8055,13 +10718,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             row = self.inputs.get("work_dir")
             return [ErrorAction("Choose folder…", row.browse, True)] if isinstance(row, PathRow) else []
         if category == "sharped_authentication":
-            return [ErrorAction("Open SharpED API settings", lambda: self._open_configuration_page("Setup", advanced=True), True)]
+            return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("Setup", advanced=True), True)]
         if category.startswith("sharped_"):
             return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED", advanced=True), True)]
         if category == "input_validation":
             actions = [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
             if "SharpED" in report.summary:
-                actions.append(ErrorAction("Open SharpED API settings", lambda: self._open_configuration_page("Setup", advanced=True)))
+                actions.append(ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("Setup", advanced=True)))
             return actions
         if category in {"hkl_invalid", "metadata", "unit_cell", "space_group", "composition", "inflip"}:
             return [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
@@ -8069,8 +10732,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _show_error_report(self, report: ErrorReport, *, write_log: bool = True) -> str:
         if write_log and hasattr(self, "log_text"):
+            # The concise line is enough for the normal workflow log; the full
+            # diagnostic (including any traceback) is not duplicated here -- it
+            # stays fully available via the error dialog's "Show details".
             self._append_execution_log(report.title + ".", level="ERROR", subsystem=report.subsystem)
-            self._append_execution_log(report.diagnostic_block(), level="DETAIL", subsystem=report.subsystem)
         return show_phase_studio_error(self, report, self._error_actions(report))
 
     def _handle_pipeline_error(self, report: ErrorReport) -> None:
@@ -8088,11 +10753,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_overall_progress_text("Error")
         self._set_terminal_cycle_state("Error")
         self.run_btn.setText("Run phasing")
-        self.handoff_btn.setEnabled(False)
         self._update_action_states()
         self._show_error_report(report)
 
     def _poll_queue(self) -> None:
+        self._sync_sharped_catalog()
         try:
             processed = 0
             while processed < 250:
@@ -8134,23 +10799,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self.structure_cell = gemmi.UnitCell(*values)
                         self._update_structure_views()
                 elif kind == "sharped_models":
-                    default_model, models = payload  # type: ignore[misc]
-                    widget = self.inputs.get("sharped_model")
-                    if isinstance(widget, QComboBox):
-                        current = widget.currentText().strip() or "default"
-                        widget.blockSignals(True)
-                        widget.clear()
-                        values = ["default"]
-                        if default_model:
-                            values.append(str(default_model))
-                        for model in list(models):
-                            if model not in values:
-                                values.append(model)
-                        widget.addItems(values)
-                        idx = widget.findText(current)
-                        widget.setCurrentIndex(idx if idx >= 0 else 0)
-                        widget.blockSignals(False)
-                    self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
+                    source, catalog = payload
+                    if source != normalize_server_url(self._line_value("sharped_base_url")):
+                        continue
+                    self._sync_sharped_catalog()
+                    self._append_execution_log(
+                        f"[SharpED] Models refreshed from server · {len(catalog.models)} available · default: {catalog.default_model}",
+                        level="SUCCESS", subsystem="SharpED")
+                elif kind == "sharped_models_failed":
+                    if payload != normalize_server_url(self._line_value("sharped_base_url")):
+                        continue
+                    self._sync_sharped_catalog()
+                    self.sharped_model_status.setText(
+                        "Model refresh failed · " + self.sharped_model_status.text()
+                        if current_model_catalog(payload) else "Model refresh failed · no model information available.")
+                    self._append_execution_log("[SharpED] Model refresh failed · keeping previous catalog if available", subsystem="SharpED")
                 elif kind == "hkl_load_result":
                     parsed_count = len(payload.reflections) if isinstance(payload, HklLoadResult) else 0
                     unique_count = len(payload.unique_reflections) if isinstance(payload, HklLoadResult) else 0
@@ -8182,7 +10845,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 elif kind == "handoff_done":
                     self._set_run_status("Transferred")
                     self._append_execution_log(
-                        "Jana2020 hand-off completed. Phase Studio will close automatically.",
+                        "Jana2020 handoff completed. Phase Studio will close automatically.",
                         level="SUCCESS",
                         subsystem="Jana2020",
                     )
@@ -8190,7 +10853,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     QTimer.singleShot(400, QApplication.instance().quit)
                 elif kind == "handoff_error":
                     self._set_run_status("Error")
-                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, subsystem="Jana2020", operation="Jana2020 hand-off")
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, subsystem="Jana2020", operation="Jana2020 handoff")
                     self._show_error_report(report)
                     self.handoff_btn.setEnabled(bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None))
                 elif kind == "progress_setup":
@@ -8200,8 +10863,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.progress_bar.setValue(0)
                     self._set_overall_progress_text("Running")
                     self.current_cycle_progress.setRange(0, 0)
-                    self.current_cycle_detail.setText(f"Cycle 1 / {total} · Preparing cycle")
+                    self.current_cycle_detail.setText(f"Cycle 1 of {total} · Preparing cycle")
                     self.current_cycle_stage_counter.setText("Preparing")
+                    self._apply_superflip_repeat_state(None)
                 elif kind == "cycle_progress":
                     self._apply_cycle_progress_state(payload)  # type: ignore[arg-type]
                 elif kind == "progress":
@@ -8209,65 +10873,154 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.progress_bar.setValue(value)
                     self._set_overall_progress_text("Running")
                 elif kind == "error":
-                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run pipeline")
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run workflow")
                     self._handle_pipeline_error(report)
                 elif kind == "error_report":
-                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run pipeline")
+                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run workflow")
                     self._handle_pipeline_error(report)
                 elif kind == "cancelled":
                     self._finish_cancelled_run()
+                elif kind == "stopped":
+                    self._finish_stopped_run(int(payload) if payload is not None else len(self.results))
                 elif kind == "done":
                     self.worker = None
                     self.stop_after_cycle.clear()
                     self.stop_now.clear()
                     self._set_run_status("Complete")
-                    self._append_execution_log("=== Pipeline complete ===", level="SUCCESS")
+                    self._append_execution_log("=== Workflow complete ===", level="SUCCESS")
                     if payload is not None:
                         self.progress_bar.setValue(int(payload))
                     self._set_overall_progress_text("Complete")
                     if self._cycle_progress_state is None:
-                        self.current_cycle_detail.setText("Pipeline complete")
+                        self.current_cycle_detail.setText("Workflow complete")
                         self.current_cycle_stage_counter.setText("Completed")
                     self.run_btn.setEnabled(True)
                     self.run_btn.setText("Run phasing")
-                    can_handoff = bool(self.results and self.last_run_config and self.last_run_config.jana_inflip is not None)
-                    self.handoff_btn.setEnabled(can_handoff)
-                    if can_handoff:
-                        self._append_execution_log(
-                            "Jana2020 hand-off is ready. Use 'Send to Jana2020' to select the cycle and map source.",
-                            subsystem="Jana2020",
-                        )
+                    self._sync_jana_action_button()
+                    # Auto-opening the result selector is Jana-Wizard-owned
+                    # functionality: a standalone session that happens to
+                    # load a Jana2020 .inflip manually must never trigger it
+                    # (spec: only a session actually launched from the
+                    # Wizard -- either Full configuration or Phase recycling
+                    # -- is eligible).
+                    if self._jana_wizard_handoff_available():
+                        if self.jana_wizard_context.launch_mode == "phase_recycling":
+                            # Deferred to the next event-loop turn, on the GUI
+                            # thread, rather than opened inline here: at this
+                            # point we are still inside the queue-drain loop of
+                            # this QTimer slot, and the selector is modal
+                            # (dialog.exec()). Opening it inline would run a
+                            # nested event loop from inside the drain -- which
+                            # re-enters _poll_queue and stalls every remaining
+                            # message for as long as the dialog stays open.
+                            # Every completed result is already committed to
+                            # self.results (the "result" messages are queued
+                            # before "done" and drained above), the run status
+                            # is COMPLETE, and the action button has been
+                            # re-synced, so the state the selector reads is
+                            # final by the time this fires.
+                            QTimer.singleShot(0, self._auto_open_jana_result_selector)
+                        else:
+                            self._append_execution_log(
+                                "[Jana2020] Hand-off ready · select Superflip or SharpED result",
+                                subsystem="Jana2020",
+                            )
         except queue.Empty:
             pass
 
-    def _recommended_handoff_index(self) -> int:
-        if not self.results:
-            return -1
-        finite_symm = [
-            (idx, float(r.superflip_symm))
-            for idx, r in enumerate(self.results)
-            if r.superflip_symm is not None and np.isfinite(float(r.superflip_symm))
-        ]
-        if finite_symm:
-            # Superflip's Symm. column is an agreement residual; lower values mean better symmetry agreement.
-            return min(finite_symm, key=lambda item: item[1])[0]
-        finite_ref = [
-            (idx, float(r.superflip_ref_match))
-            for idx, r in enumerate(self.results)
-            if r.superflip_ref_match is not None and np.isfinite(float(r.superflip_ref_match))
-        ]
-        if finite_ref:
-            return min(finite_ref, key=lambda item: item[1])[0]
-        return len(self.results) - 1
+    def _auto_open_jana_result_selector(self) -> None:
+        """Open the locked Jana2020 result selector after a successful Wizard
+        Phase-recycling run (GUI thread, one event-loop turn after completion).
 
-    def open_jana_handoff_dialog(self) -> None:
+        Nothing here is speculative: "Opening..." is logged immediately before
+        the real open request and a confirmation only after the selector has
+        actually been constructed and shown, so the execution log can never
+        claim a selector that never appeared. A failure is reported, never
+        swallowed -- in a windowed build an escaping exception would otherwise
+        vanish with no stderr to print to, which is exactly how this looked
+        like "the log says it opened but nothing happened".
+        """
+        # Re-check rather than trust the state captured at completion time:
+        # this runs one event-loop turn later, so a Clear (or a new run) could
+        # have invalidated the results in between.
+        if not self._jana_wizard_handoff_available():
+            return
+        if self.jana_wizard_context.launch_mode != "phase_recycling":
+            return
+        if self._jana_auto_selector_shown:
+            return
+        self._jana_auto_selector_shown = True
+        self._append_execution_log(
+            "Phase recycling complete. Opening the Jana2020 result selector automatically.",
+            subsystem="Jana2020",
+        )
+        try:
+            self.open_jana_result_selector(
+                source_mode="locked",
+                initial_source=self.jana_wizard_context.wizard_map_source or "deblurred",
+            )
+        except Exception as exc:
+            self._append_execution_log(
+                f"The Jana2020 result selector could not be opened: {exc}",
+                level="ERROR",
+                subsystem="Jana2020",
+            )
+            self._show_error_report(
+                build_error_report(
+                    exc,
+                    subsystem="Jana2020",
+                    operation="Open Jana2020 result selector",
+                    extra_details=traceback.format_exc(),
+                )
+            )
+        finally:
+            # "Send to Jana2020" stays available either way: after a normal
+            # close it is the manual way back in, and after a failure it is
+            # the retry. It is never disabled merely because the automatic
+            # open was already attempted.
+            self._sync_jana_action_button()
+
+    def _source_map_path(self, result: CycleResult, source: str) -> Path:
+        return Path(result.superflip_map) if source == "superflip" else Path(result.deblur_map)
+
+    def _source_structure_path(self, result: CycleResult, source: str) -> Path:
+        return Path(result.superflip_edma_cif) if source == "superflip" else Path(result.deblur_edma_cif)
+
+    def _source_available_for_results(self, source: str) -> bool:
+        return any(self._source_map_path(r, source).is_file() for r in self.results)
+
+    def _default_handoff_source(self) -> str:
+        # No Wizard choice exists for a Full-configuration hand-off -- default
+        # to SharpED (typically the more refined final result) when it was
+        # actually produced, else Superflip (always present in the standard
+        # workflow).
+        if self._source_available_for_results("deblurred"):
+            return "deblurred"
+        return "superflip"
+
+    def open_jana_result_selector(self, source_mode: str, initial_source: str) -> None:
+        """One shared Jana2020 result selector reused by both Jana-Wizard
+        launch contexts that reach this main window:
+
+        - source_mode="locked": Wizard Phase recycling. The map source was
+          already chosen in the Wizard (jana_wizard_context.wizard_map_source)
+          and is shown read-only, with no switch offered.
+        - source_mode="switchable": Wizard "Open full configuration". The
+          user interactively switches between Superflip and SharpED.
+          Switching is presentation only: it never reruns Superflip, SharpED,
+          EDMA, FFT, OMIT, R_free, RMSD or any other metric -- it only
+          changes which existing CycleResult fields are displayed and which
+          map/structure paths are used for the preview and hand-off.
+
+        Both modes hand off through the exact same perform_jana_handoff()
+        used before; this method only changes presentation."""
         cfg = self.last_run_config
         if cfg is None or cfg.jana_inflip is None:
             self._show_error_report(
                 build_error_report(
-                    RuntimeError("Jana2020 hand-off requires a run started from a Jana .inflip file."),
+                    RuntimeError("Jana2020 handoff requires a run started from a Jana2020 .inflip file."),
                     subsystem="Jana2020",
-                    operation="Jana2020 hand-off",
+                    operation="Jana2020 handoff",
                     severity="warning",
                 )
             )
@@ -8275,50 +11028,46 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if not self.results:
             self._show_error_report(
                 build_error_report(
-                    RuntimeError("No completed cycle is available for Jana2020 hand-off."),
+                    RuntimeError("No completed cycle is available for Jana2020 handoff."),
                     subsystem="Jana2020",
-                    operation="Jana2020 hand-off",
+                    operation="Jana2020 handoff",
                     severity="warning",
                 )
             )
             return
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Pass Phase Studio result to Jana2020")
-        dialog.resize(1180, 560)
-        layout = QVBoxLayout(dialog)
-        info = QLabel(
-            "Select the completed Phase Studio cycle and the map that should be used "
-            "as the model for Jana2020's final Superflip hand-off. The table shows "
-            "all Superflip metrics currently parsed from every completed cycle. Rvalue, "
-            "Peaks, Symm. and Der.SG come from the saved-density run actually used by Superflip."
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-
-        headers = [
-            "Cycle",
-            "Saved run",
-            "Rvalue",
-            "Peaks",
-            "Symm.",
-            "Der.SG",
-            "Ref.match",
-            "FoM / Score",
-            "Success rate %",
-            "Mean cycles",
-            "Superflip map",
-            "Deblurred map",
-        ]
-        metrics_table = QTableWidget(len(self.results), len(headers))
-        metrics_table.setHorizontalHeaderLabels(headers)
-        metrics_table.setAlternatingRowColors(True)
-        metrics_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        metrics_table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        metrics_table.setSelectionMode(QAbstractItemView.SingleSelection)
-        metrics_table.verticalHeader().setVisible(False)
-        metrics_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        metrics_table.horizontalHeader().setStretchLastSection(False)
+        switchable = source_mode == "switchable"
+        superflip_ok = self._source_available_for_results("superflip")
+        sharped_ok = self._source_available_for_results("deblurred")
+        wants_superflip = str(initial_source or "").strip().lower() == "superflip"
+        if switchable:
+            # The user can switch source here, so opening on the other tab
+            # when the requested one produced nothing is a helpful default,
+            # not a silent substitution -- both remain visible and labelled.
+            if wants_superflip and not superflip_ok and sharped_ok:
+                initial_source = "deblurred"
+            elif not wants_superflip and not sharped_ok and superflip_ok:
+                initial_source = "superflip"
+        else:
+            # Locked (Wizard Phase recycling): the map source was chosen in
+            # the Wizard and no switch is offered, so quietly handing back
+            # the OTHER source would misrepresent the result. Fail loudly
+            # and precisely instead.
+            locked_available = superflip_ok if wants_superflip else sharped_ok
+            if not locked_available:
+                self._show_error_report(
+                    build_error_report(
+                        RuntimeError(
+                            f"No completed {result_source_title(initial_source)} result is "
+                            f"available for Jana2020 handoff."
+                        ),
+                        subsystem="Jana2020",
+                        operation="Jana2020 handoff",
+                        severity="warning",
+                    )
+                )
+                return
+        state: Dict[str, object] = {"source": initial_source, "cycle": None}
 
         def fmt(value: object) -> str:
             if value is None:
@@ -8331,108 +11080,619 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             except Exception:
                 return str(value) if str(value) else "n/a"
 
-        for row, result in enumerate(self.results):
-            values = [
-                f"{int(result.cycle):03d}",
-                "n/a" if result.superflip_saved_run is None else str(int(result.superflip_saved_run)),
-                fmt(result.superflip_rvalue),
-                fmt(result.superflip_peaks),
-                fmt(result.superflip_symm),
-                result.superflip_derived_sg or "n/a",
-                fmt(result.superflip_ref_match),
-                fmt(result.superflip_fom),
-                fmt(result.superflip_success_rate),
-                fmt(result.superflip_mean_cycles),
-                "available" if Path(result.superflip_map).is_file() else "missing",
-                "available" if Path(result.deblur_map).is_file() else "missing",
-            ]
-            for col, text in enumerate(values):
-                item = QTableWidgetItem(text)
-                if col == 0:
-                    item.setData(Qt.UserRole, int(result.cycle))
-                metrics_table.setItem(row, col, item)
-        layout.addWidget(metrics_table, 1)
+        def fmt_count(value: object) -> str:
+            if value is None:
+                return "n/a"
+            try:
+                return f"{int(round(float(value))):,}"
+            except (TypeError, ValueError):
+                return "n/a"
 
-        form = QFormLayout()
-        cycle_combo = QComboBox()
-        for result in self.results:
-            symm = "n/a" if result.superflip_symm is None else f"{float(result.superflip_symm):.3f}"
-            rvalue = "n/a" if result.superflip_rvalue is None else f"{float(result.superflip_rvalue):.3f}"
-            run_label = "n/a" if result.superflip_saved_run is None else str(int(result.superflip_saved_run))
-            label = f"Cycle {int(result.cycle):03d} — saved run {run_label}, Symm. {symm}, Rvalue {rvalue}"
-            cycle_combo.addItem(label, int(result.cycle))
-        recommended = self._recommended_handoff_index()
-        if recommended >= 0:
-            cycle_combo.setCurrentIndex(recommended)
-            metrics_table.selectRow(recommended)
+        def col_available(getter) -> bool:
+            return any(getter(r) not in (None, "") for r in self.results)
 
-        map_combo = QComboBox()
-        map_combo.addItem("Deblurred map (SharpED output)", "deblurred")
-        map_combo.addItem("Superflip map", "superflip")
-        try:
-            rec = self.results[recommended]
-            if not Path(rec.deblur_map).is_file():
-                map_combo.setCurrentIndex(1)
-        except Exception:
-            pass
+        class _PreviewHost:
+            """Reuses IterativeSuperflipPipelineQtGUI's own atom/cell/depth-cue
+            rendering and rotation-drag methods -- unchanged, on a disposable
+            object -- so this preview looks and behaves exactly like the main
+            Structure Comparison view without touching the main window's own
+            rendering state. Created once for the whole dialog (not per
+            source-switch rebuild) so rotation survives a source switch."""
 
-        def sync_table_from_combo(index: int) -> None:
-            if 0 <= index < metrics_table.rowCount():
-                metrics_table.selectRow(index)
+            _structure_cartesian_geometry = IterativeSuperflipPipelineQtGUI._structure_cartesian_geometry
+            _element_color = IterativeSuperflipPipelineQtGUI._element_color
+            _plot_structure_atoms = IterativeSuperflipPipelineQtGUI._plot_structure_atoms
+            _update_structure_depth_artist = IterativeSuperflipPipelineQtGUI._update_structure_depth_artist
+            _update_structure_depth_cue = IterativeSuperflipPipelineQtGUI._update_structure_depth_cue
+            # These two are @staticmethod on the main window. Reading them
+            # off the class yields the PLAIN underlying function, and binding
+            # a plain function as a class attribute here would turn it back
+            # into an instance method -- so preview_host._apply_structure_
+            # axis_limits(ax, limits) would pass (self, ax, limits) and raise
+            # TypeError. Re-wrap them so they stay static, exactly as on the
+            # main window.
+            _structure_axis_limits = staticmethod(IterativeSuperflipPipelineQtGUI._structure_axis_limits)
+            _apply_structure_axis_limits = staticmethod(IterativeSuperflipPipelineQtGUI._apply_structure_axis_limits)
+            _begin_structure_view_drag = IterativeSuperflipPipelineQtGUI._begin_structure_view_drag
+            _apply_structure_view = IterativeSuperflipPipelineQtGUI._apply_structure_view
+            _sync_structure_view_from_event = IterativeSuperflipPipelineQtGUI._sync_structure_view_from_event
+            _finish_structure_view_drag = IterativeSuperflipPipelineQtGUI._finish_structure_view_drag
 
-        def sync_combo_from_table() -> None:
-            row = metrics_table.currentRow()
-            if 0 <= row < cycle_combo.count() and row != cycle_combo.currentIndex():
-                cycle_combo.setCurrentIndex(row)
+            def __init__(self, cell, elev: float, azim: float) -> None:
+                self.structure_cell = cell
+                self.structure_elev = elev
+                self.structure_azim = azim
+                self._structure_depth_artists: List[StructureDepthArtists] = []
+                self.structure_axes: List[object] = []
+                self._structure_interactive_axes: List[object] = []
+                self.structure_view_base_limits = None
+                self.structure_view_limits = None
+                self._structure_view_drag_source = None
+                self.structure_canvas = None
 
-        cycle_combo.currentIndexChanged.connect(sync_table_from_combo)
-        metrics_table.itemSelectionChanged.connect(sync_combo_from_table)
+        preview_host = _PreviewHost(self.structure_cell, self.structure_elev, self.structure_azim)
 
-        form.addRow("Cycle", cycle_combo)
-        form.addRow("Map source", map_combo)
-        layout.addLayout(form)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Jana2020 result selection")
+        # Content-aware target size, capped to the available screen: a
+        # single-cycle, no-reference run doesn't need the same window as a
+        # multi-cycle, fully-ranked, reference-compared one. Computed once
+        # up front rather than per source-switch -- switching source changes
+        # column count modestly but not enough to justify visibly resizing
+        # an already-open dialog under the user's cursor.
+        reference_available_hint = bool(self.reference_atoms_for_plot)
+        if len(self.results) <= 1 and not reference_available_hint:
+            preferred_width, preferred_height = 1150, 680
+        else:
+            preferred_width, preferred_height = 1400, 800
+        preferred_height = min(preferred_height + max(0, len(self.results) - 5) * 12, preferred_height + 150)
+        apply_safe_dialog_geometry(dialog, preferred_width, preferred_height)
+        outer_layout = QVBoxLayout(dialog)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
 
-        note = QLabel(
-            "The suggested cycle is selected by the best Superflip symmetry agreement "
-            "(lowest Symm. residual). You can override it manually. After a successful "
-            "hand-off Phase Studio closes automatically."
-        )
-        note.setWordWrap(True)
-        layout.addWidget(note)
+        # Same branded header + navy context banner as the main window and the
+        # Jana2020 Wizard, so this reads as the same application rather than a
+        # generic Qt dialog -- identical for both source_mode values.
+        outer_layout.addWidget(create_phase_studio_brand_header())
+        outer_layout.addWidget(create_phase_studio_context_banner(
+            "JANA2020 RESULT SELECTION", "Compare completed cycles and select a map for handoff"
+        ))
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("Pass to Jana2020")
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addWidget(buttons)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(14, 10, 14, 14)
+        content_layout.setSpacing(10)
+        outer_layout.addWidget(content, 1)
+
+        # --- Result source: a switchable Superflip/SharpED segmented control
+        # for Full configuration, or a read-only label for the Wizard's own
+        # Phase-recycling choice (spec sections 14-16, 34-35). ---
+        source_row = QHBoxLayout()
+        source_row.setSpacing(8)
+        source_heading = QLabel("Result source")
+        source_row.addWidget(source_heading)
+        superflip_btn: Optional[QPushButton] = None
+        sharped_btn: Optional[QPushButton] = None
+        locked_source_value_label: Optional[QLabel] = None
+        if switchable:
+            superflip_btn = QPushButton("Superflip")
+            sharped_btn = QPushButton("SharpED")
+            for btn in (superflip_btn, sharped_btn):
+                btn.setObjectName("metricsViewToggle")
+                btn.setCheckable(True)
+                btn.setCursor(Qt.PointingHandCursor)
+            source_group = QButtonGroup(dialog)
+            source_group.setExclusive(True)
+            source_group.addButton(superflip_btn)
+            source_group.addButton(sharped_btn)
+            superflip_btn.setEnabled(superflip_ok)
+            sharped_btn.setEnabled(sharped_ok)
+            if not superflip_ok:
+                superflip_btn.setToolTip("No Superflip map is available for the completed cycles.")
+            if not sharped_ok:
+                sharped_btn.setToolTip("No SharpED map is available for the completed cycles.")
+            source_row.addWidget(superflip_btn)
+            source_row.addWidget(sharped_btn)
+        else:
+            locked_source_value_label = QLabel(result_map_label(str(state["source"])))
+            locked_font = locked_source_value_label.font()
+            locked_font.setBold(True)
+            locked_source_value_label.setFont(locked_font)
+            source_row.addWidget(locked_source_value_label)
+        source_row.addStretch(1)
+        content_layout.addLayout(source_row)
+        if not switchable:
+            wizard_note = QLabel("Result source was selected in the Jana2020 Wizard.")
+            wizard_note.setStyleSheet("color: #7183a6; font-style: italic;")
+            content_layout.addWidget(wizard_note)
+
+        summary_form = QFormLayout()
+        summary_form.setContentsMargins(0, 0, 0, 0)
+        summary_form.setHorizontalSpacing(18)
+        summary_form.setVerticalSpacing(2)
+        summary_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        content_layout.addLayout(summary_form)
+
+        content_layout.addWidget(QLabel("Select a completed cycle for Jana2020 handoff."))
+
+        availability_note = QLabel("")
+        availability_note.setObjectName("janaSourceAvailabilityNote")
+        availability_note.setStyleSheet("color: #b3261e; font-weight: 600;")
+        availability_note.setWordWrap(True)
+        availability_note.setVisible(False)
+        content_layout.addWidget(availability_note)
+
+        table_section_label = QLabel("CANDIDATE CYCLES")
+        table_section_label.setObjectName("sectionLabel")
+        content_layout.addWidget(table_section_label)
+
+        body_holder = QWidget()
+        body_layout = QVBoxLayout(body_holder)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(6)
+        content_layout.addWidget(body_holder, 1)
+
+        button_row = QHBoxLayout()
+        close_btn = QPushButton("Return to Phase Studio")
+        send_btn = QPushButton("Send to Jana2020")
+        send_btn.setObjectName("primaryButton")
+        button_row.addWidget(close_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(send_btn)
+        content_layout.addLayout(button_row)
+        close_btn.clicked.connect(dialog.reject)
+        send_btn.clicked.connect(dialog.accept)
+
+        current_result_ref: Dict[str, Optional[CycleResult]] = {"result": None}
+
+        def rebuild(map_source: str) -> None:
+            state["source"] = map_source
+            if switchable:
+                superflip_btn.setChecked(map_source == "superflip")
+                sharped_btn.setChecked(map_source != "superflip")
+            else:
+                locked_source_value_label.setText(result_map_label(map_source))
+
+            while body_layout.count():
+                child = body_layout.takeAt(0)
+                widget = child.widget()
+                if widget is not None:
+                    # Detach immediately (not just deleteLater) so a stray
+                    # findChild(QTableWidget) mid-switch -- in tests or any
+                    # other introspection -- can never see the outgoing table.
+                    widget.setParent(None)
+                    widget.deleteLater()
+
+            source_title = result_source_title(map_source)
+
+            if map_source == "superflip":
+                candidate_columns = [
+                    ("Saved run", lambda r: r.superflip_saved_run, lambda v: "n/a" if v is None else str(int(v))),
+                    ("R value", lambda r: r.superflip_rvalue, fmt),
+                    ("Peakiness", lambda r: r.superflip_peaks, fmt),
+                    ("Symmetry", lambda r: r.superflip_symm, fmt),
+                    ("Derived SG", lambda r: (r.superflip_derived_sg or None), lambda v: v or "n/a"),
+                    ("Ref. match", lambda r: r.superflip_ref_match, fmt),
+                    ("FoM / Score", lambda r: r.superflip_fom, fmt),
+                    ("Success rate %", lambda r: r.superflip_success_rate, fmt),
+                    ("Mean cycles", lambda r: r.superflip_mean_cycles, fmt),
+                    ("Recall", lambda r: r.superflip_recall, fmt),
+                    ("Precision", lambda r: r.superflip_precision, fmt),
+                    ("Heavy atoms found", lambda r: r.superflip_heavy_atom_count, fmt_count),
+                ]
+                rfree_getter = lambda r: r.omit_superflip_rfree
+                omit_getter = lambda r: r.omit_superflip_correlation
+                rmsd_getter = lambda r: r.superflip_metric
+            else:
+                # Deliberately excludes Superflip-only fields (R value,
+                # Peakiness, Symmetry, Derived SG) -- they describe the
+                # Superflip map, not the SharpED-processed one this table
+                # represents.
+                candidate_columns = [
+                    ("Recall", lambda r: r.deblur_recall, fmt),
+                    ("Precision", lambda r: r.deblur_precision, fmt),
+                    ("Heavy atoms found", lambda r: r.deblur_heavy_atom_count, fmt_count),
+                    ("Map correlation", lambda r: r.recycle_map_correlation, fmt),
+                ]
+                rfree_getter = lambda r: r.omit_deblur_rfree
+                omit_getter = lambda r: r.omit_deblur_correlation
+                rmsd_getter = lambda r: r.deblur_metric
+
+            # --- Selection score: rank-based normalization of whichever of
+            # R_free (lower better), OMIT correlation (higher better) and
+            # RMSD (lower better) are actually populated for THIS source.
+            # UI sorting aid only -- never written back into any CycleResult,
+            # metrics.csv or hand-off, and switching source recomputes this
+            # display-only ranking from the existing values, never a metric.
+            def rank_normalize(values: List[Optional[float]], higher_is_better: bool) -> List[Optional[float]]:
+                pairs = [(i, float(v)) for i, v in enumerate(values) if v is not None and np.isfinite(float(v))]
+                normalized: List[Optional[float]] = [None] * len(values)
+                if not pairs:
+                    return normalized
+                if len(pairs) == 1:
+                    normalized[pairs[0][0]] = 0.0
+                    return normalized
+                ordered = sorted(pairs, key=lambda p: p[1], reverse=higher_is_better)
+                n = len(ordered)
+                i = 0
+                while i < n:
+                    j = i
+                    while j + 1 < n and ordered[j + 1][1] == ordered[i][1]:
+                        j += 1
+                    average_rank = (i + j) / 2.0
+                    for k in range(i, j + 1):
+                        normalized[ordered[k][0]] = average_rank / (n - 1)
+                    i = j + 1
+                return normalized
+
+            rfree_values = [rfree_getter(r) for r in self.results]
+            omit_values = [omit_getter(r) for r in self.results]
+            rmsd_values = [rmsd_getter(r) for r in self.results]
+            rfree_available = any(v is not None for v in rfree_values)
+            omit_available = any(v is not None for v in omit_values)
+            rmsd_available = any(v is not None for v in rmsd_values)
+
+            ranking_columns = []
+            normalized_dims: List[Tuple[str, List[Optional[float]]]] = []
+            if rfree_available:
+                ranking_columns.append(("R_free", rfree_getter, fmt))
+                normalized_dims.append(("R_free", rank_normalize(rfree_values, higher_is_better=False)))
+            if omit_available:
+                ranking_columns.append(("OMIT correlation", omit_getter, fmt))
+                normalized_dims.append(("OMIT correlation", rank_normalize(omit_values, higher_is_better=True)))
+            if rmsd_available:
+                ranking_columns.append(("RMSD (Å)", rmsd_getter, fmt))
+                normalized_dims.append(("RMSD", rank_normalize(rmsd_values, higher_is_better=False)))
+
+            scores: List[Optional[float]] = []
+            for idx in range(len(self.results)):
+                valid = [normalized[idx] for _name, normalized in normalized_dims if normalized[idx] is not None]
+                scores.append(sum(valid) / len(valid) if valid else None)
+            # Ranking is comparative: with a single completed cycle there is
+            # nothing to compare it against, and the rank-normalizer's degenerate
+            # 0.0 would be displayed as a real "Selection score 0.000" beside a
+            # "Rank 1" that means nothing. Show the metrics, drop the comparison.
+            ranking_active = len(self.results) > 1 and any(s is not None for s in scores)
+
+            if ranking_active:
+                order = sorted(
+                    range(len(self.results)),
+                    key=lambda i: (scores[i] is None, scores[i] if scores[i] is not None else 0.0, i),
+                )
+                # Standard competition ranking: equal scores share the same
+                # Rank (1, 1, 3 -- not 1, 1, 2).
+                rank_numbers: dict = {}
+                position = 0
+                previous_score: Optional[float] = None
+                current_rank = 0
+                for i in order:
+                    if scores[i] is None:
+                        continue
+                    position += 1
+                    if previous_score is None or scores[i] != previous_score:
+                        current_rank = position
+                        previous_score = scores[i]
+                    rank_numbers[i] = current_rank
+            else:
+                order = list(range(len(self.results)))
+                rank_numbers = {}
+
+            columns = [(h, g, f) for (h, g, f) in candidate_columns if col_available(g)]
+            headers: List[str] = (["Rank", "Cycle", "Selection score"] if ranking_active else ["Cycle"])
+            headers += [h for h, _g, _f in ranking_columns]
+            headers += [h for h, _g, _f in columns]
+            cycle_col_index = headers.index("Cycle")
+            reference_available = bool(self.reference_atoms_for_plot)
+
+            if len(self.results) <= 1:
+                ranking_summary = "Not applicable — only one completed cycle"
+            elif normalized_dims:
+                ranking_summary = " + ".join(name for name, _values in normalized_dims)
+                if not rmsd_available and (rfree_available or omit_available):
+                    ranking_summary += " (reference RMSD unavailable)"
+            else:
+                ranking_summary = "Not available"
+
+            while summary_form.rowCount():
+                summary_form.removeRow(0)
+            for label_text, value_text in (
+                ("Completed cycles", str(len(self.results))),
+                ("Ranking", ranking_summary),
+                ("Reference", "Available" if reference_available else "Not available"),
+            ):
+                value_label = QLabel(value_text)
+                value_font = value_label.font()
+                value_font.setBold(True)
+                value_label.setFont(value_font)
+                summary_form.addRow(label_text, value_label)
+
+            table = QTableWidget(len(self.results), len(headers))
+            table.setObjectName("diagnosticTable")
+            table.setHorizontalHeaderLabels(headers)
+            table.setAlternatingRowColors(True)
+            table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+            table.setSelectionBehavior(QAbstractItemView.SelectRows)
+            table.setSelectionMode(QAbstractItemView.SingleSelection)
+            table.verticalHeader().setVisible(False)
+            table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+            table.horizontalHeader().setStretchLastSection(len(headers) <= 3)
+
+            def fit_table_columns_to_viewport() -> None:
+                """Use the width the table already has before scrolling it.
+
+                ResizeToContents sizes every column to its content and then lets
+                the table scroll horizontally, which produced a scrollbar even
+                when the columns would comfortably have fitted. When they do
+                fit, the spare width is shared out instead; when they genuinely
+                do not, content sizing and the scrollbar come back.
+                """
+                header = table.horizontalHeader()
+                try:
+                    needed = sum(header.sectionSize(i) for i in range(header.count()))
+                    available = table.viewport().width()
+                except Exception:
+                    return
+                if needed <= 0 or available <= 0:
+                    return
+                if needed <= available:
+                    header.setSectionResizeMode(QHeaderView.Stretch)
+                    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+                else:
+                    header.setSectionResizeMode(QHeaderView.ResizeToContents)
+                    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+            table.fit_columns_to_viewport = fit_table_columns_to_viewport  # type: ignore[attr-defined]
+            # Re-fit whenever the table is resized (dialog resize, splitter drag).
+            table.resizeEvent = (  # type: ignore[assignment]
+                lambda event, _base=table.resizeEvent, _fit=fit_table_columns_to_viewport: (
+                    _base(event), _fit()
+                )[0]
+            )
+
+            class _NumericTableWidgetItem(QTableWidgetItem):
+                """Sorts by an explicit numeric/string key instead of Qt's
+                default lexicographic text compare, so header-click sorting
+                is correct for this table."""
+
+                def __init__(self, text: str, sort_value: object) -> None:
+                    super().__init__(text)
+                    self._sort_value = sort_value
+
+                def __lt__(self, other: object) -> bool:  # noqa: N802 - Qt override
+                    other_value = getattr(other, "_sort_value", None)
+                    if self._sort_value is None:
+                        return False
+                    if other_value is None:
+                        return True
+                    try:
+                        return float(self._sort_value) < float(other_value)
+                    except (TypeError, ValueError):
+                        return str(self._sort_value) < str(other_value)
+
+            def add_cell(display_row: int, col: int, text: str, sort_value: object, left_align: bool = False) -> "_NumericTableWidgetItem":
+                item = _NumericTableWidgetItem(text, sort_value)
+                item.setTextAlignment((Qt.AlignLeft if left_align else Qt.AlignRight) | Qt.AlignVCenter)
+                table.setItem(display_row, col, item)
+                return item
+
+            # Without a validation ranking metric, no cycle is scientifically
+            # "recommended" -- the first (chronologically earliest) cycle is
+            # selected purely so a preview is shown, with no best/preferred
+            # framing.
+            initial_result_idx = order[0] if order else 0
+            preserved_cycle = state.get("cycle")
+            preserved_result_idx = None
+            if preserved_cycle is not None:
+                for idx, r in enumerate(self.results):
+                    if int(r.cycle) == preserved_cycle:
+                        preserved_result_idx = idx
+                        break
+            select_result_idx = preserved_result_idx if preserved_result_idx is not None else initial_result_idx
+
+            for display_row, result_idx in enumerate(order):
+                result = self.results[result_idx]
+                col = 0
+                if ranking_active:
+                    rank = rank_numbers.get(result_idx)
+                    add_cell(display_row, col, "n/a" if rank is None else str(rank), rank)
+                    col += 1
+                cycle_item = add_cell(display_row, col, str(int(result.cycle)), int(result.cycle))
+                cycle_item.setData(Qt.UserRole, int(result.cycle))
+                if ranking_active and result_idx == initial_result_idx:
+                    cycle_item.setToolTip("Best-ranked cycle (lowest Selection score).")
+                col += 1
+                if ranking_active:
+                    score = scores[result_idx]
+                    add_cell(display_row, col, fmt(score), score)
+                    col += 1
+                for _header, getter, formatter in ranking_columns:
+                    value = getter(result)
+                    add_cell(display_row, col, formatter(value), value)
+                    col += 1
+                for header, getter, formatter in columns:
+                    value = getter(result)
+                    add_cell(display_row, col, formatter(value), value, left_align=(header == "Derived SG"))
+                    col += 1
+
+            def result_for_table_row(row: int) -> Optional[CycleResult]:
+                if row < 0:
+                    return None
+                item = table.item(row, cycle_col_index)
+                if item is None:
+                    return None
+                cycle_id = item.data(Qt.UserRole)
+                if cycle_id is None:
+                    return None
+                return next((r for r in self.results if int(r.cycle) == int(cycle_id)), None)
+
+            preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
+            preview_canvas = FigureCanvas(preview_figure)
+            preview_canvas.setObjectName("janaResultPreviewCanvas")
+            preview_canvas.setMinimumHeight(260)
+            preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            preview_canvas.setToolTip("")
+            preview_host.structure_canvas = preview_canvas
+
+            def preview_atoms_for(result: CycleResult) -> List[AtomSite]:
+                return self._safe_parse_structure(self._source_structure_path(result, map_source))
+
+            def render_preview(result: CycleResult) -> None:
+                current_result_ref["result"] = result
+                state["cycle"] = int(result.cycle)
+                has_map = self._source_map_path(result, map_source).is_file()
+                if has_map:
+                    availability_note.setVisible(False)
+                else:
+                    extra = " Choose another cycle, or switch source." if switchable else " Choose another cycle."
+                    availability_note.setText(f"No {source_title} map is available for cycle {int(result.cycle)}.{extra}")
+                    availability_note.setVisible(True)
+                send_btn.setEnabled(has_map)
+
+                preview_figure.clear()
+                preview_figure.patch.set_facecolor("#ffffff")
+                preview_host.structure_axes = []
+                preview_host._structure_interactive_axes = []
+                preview_host._structure_depth_artists = []
+                panels = [(
+                    f"{source_title} · Cycle {int(result.cycle)}",
+                    preview_atoms_for(result),
+                    "Structure preview unavailable for this cycle",
+                )]
+                if reference_available:
+                    panels.append(("Reference", self.reference_atoms_for_plot, "Reference structure unavailable"))
+                # With no atomic reference, a full second pane would just show
+                # "Reference structure unavailable" -- give the selected
+                # result the whole viewer instead of wasting half of it.
+                column_count = len(panels)
+                x_positions = (0.5,) if column_count == 1 else (0.25, 0.75)
+                metadata = []
+                for idx, (_title, atoms, empty_text) in enumerate(panels, start=1):
+                    ax = preview_figure.add_subplot(1, column_count, idx, projection="3d")
+                    preview_host.structure_axes.append(ax)
+                    metadata.append(preview_host._plot_structure_atoms(ax, atoms, empty_text))
+                for x_position, (title, _atoms, _empty_text) in zip(x_positions, panels):
+                    preview_figure.text(
+                        x_position, 0.96, title, ha="center", va="center",
+                        fontsize=10, fontweight="bold", color="#001170",
+                    )
+                for x_position, meta in zip(x_positions, metadata):
+                    preview_figure.text(x_position, 0.03, meta, ha="center", va="center", fontsize=7.5, color="#52658b")
+                if column_count > 1:
+                    preview_figure.add_artist(Line2D(
+                        [0.5, 0.5], [0.08, 0.90], transform=preview_figure.transFigure,
+                        color="#cbd7ea", linewidth=0.45, alpha=0.62,
+                    ))
+                preview_figure.subplots_adjust(left=0.01, right=0.99, bottom=0.09, top=0.90, wspace=0.04)
+                preview_canvas.draw_idle()
+
+            preview_canvas.mpl_connect("button_press_event", preview_host._begin_structure_view_drag)
+            preview_canvas.mpl_connect("motion_notify_event", preview_host._sync_structure_view_from_event)
+            preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_view_drag)
+
+            def on_selection_changed() -> None:
+                result = result_for_table_row(table.currentRow())
+                if result is not None:
+                    render_preview(result)
+
+            table.itemSelectionChanged.connect(on_selection_changed)
+            # Populate rows first, THEN enable sorting -- enabling it before
+            # setItem() calls would let each insertion re-sort mid-population.
+            # Cycle identity is resolved via Qt.UserRole (result_for_table_row),
+            # never the visible row index, so header-click sorting stays correct.
+            table.setSortingEnabled(True)
+            # setSortingEnabled(True) itself immediately re-sorts existing rows
+            # (descending, by column 0, by default) -- force a deterministic
+            # ascending sort by column 0 (Rank when ranked, else Cycle) so the
+            # already-built `order` sequence (best-first / chronological) is
+            # what actually ends up on screen, not an arbitrary Qt default.
+            table.sortItems(0, Qt.AscendingOrder)
+            select_display_row = order.index(select_result_idx) if select_result_idx in order else 0
+            table.selectRow(select_display_row)
+            # selectRow() doesn't reliably fire itemSelectionChanged the very
+            # first time a freshly (re)built table is populated -- render
+            # explicitly so the preview is never blank after a rebuild.
+            initial_result = result_for_table_row(select_display_row)
+            if initial_result is not None:
+                render_preview(initial_result)
+
+            viewer_section = QWidget()
+            viewer_section_layout = QVBoxLayout(viewer_section)
+            viewer_section_layout.setContentsMargins(0, 0, 0, 0)
+            viewer_section_layout.setSpacing(3)
+            # One structure and nothing to hold it against is a preview, not a
+            # comparison (the 3D rendering itself is unchanged either way).
+            viewer_section_label = QLabel(
+                "STRUCTURE COMPARISON" if reference_available else "STRUCTURE PREVIEW"
+            )
+            viewer_section_label.setObjectName("sectionLabel")
+            viewer_section_layout.addWidget(viewer_section_label)
+            viewer_section_layout.addWidget(preview_canvas, 1)
+
+            splitter = QSplitter(Qt.Horizontal)
+            splitter.addWidget(table)
+            splitter.addWidget(viewer_section)
+            # A handful of columns doesn't need half the dialog; give the
+            # table only as much width as its content plausibly needs and let
+            # the structure viewer take the rest.
+            table_share = 0.32 if len(headers) <= 3 else 0.55
+            splitter_total = 1260
+            splitter.setSizes([
+                int(splitter_total * table_share), int(splitter_total * (1.0 - table_share))
+            ])
+            body_layout.addWidget(splitter, 1)
+            # After the splitter has handed the table its width.
+            QTimer.singleShot(0, fit_table_columns_to_viewport)
+
+            if ranking_active:
+                note_text = (
+                    "Selection score combines available validation ranks -- R_free and OMIT correlation "
+                    "(from the 5% reflection holdout) and RMSD (vs. a reference structure, if provided); "
+                    "lower is better."
+                )
+            else:
+                note_text = "No validation metric is available for ranking. Select a cycle manually."
+            note = QLabel(note_text)
+            note.setStyleSheet("color: #52658b;")
+            note.setWordWrap(True)
+            body_layout.addWidget(note)
+
+        if switchable:
+            superflip_btn.clicked.connect(lambda _checked=False: rebuild("superflip"))
+            sharped_btn.clicked.connect(lambda _checked=False: rebuild("deblurred"))
+
+        rebuild(str(state["source"]))
+
+        # Everything is constructed and populated; the modal show below cannot
+        # now fail to produce a visible selector. Logged here rather than after
+        # exec() returns, which would mean "closed", not "opened".
+        self._append_execution_log("[Jana2020] Result selector opened.", subsystem="Jana2020")
 
         if dialog.exec() != QDialog.Accepted:
+            # Closing without sending keeps the main window and its completed
+            # results exactly as they are; "Send to Jana2020" reopens this
+            # same selector.
             return
 
-        selected_cycle = int(cycle_combo.currentData())
-        selected_map = str(map_combo.currentData() or "deblurred")
-        selected_result = next((r for r in self.results if int(r.cycle) == selected_cycle), None)
+        selected_result = current_result_ref["result"]
         if selected_result is None:
-            self._show_error_report(
-                build_error_report(
-                    RuntimeError("Selected Jana2020 hand-off cycle is no longer available."),
-                    subsystem="Jana2020",
-                    operation="Jana2020 hand-off",
-                    severity="warning",
-                )
-            )
+            return
+        final_source = str(state["source"])
+        if not self._source_map_path(selected_result, final_source).is_file():
+            # Defensive: Send is disabled whenever this is true, but never
+            # silently hand off the wrong source if it is somehow reached.
             return
 
         self.handoff_btn.setEnabled(False)
         self._append_execution_log(
-            f"Starting Jana2020 hand-off from cycle {selected_cycle:03d} ({selected_map}).",
+            f"[Jana2020] Hand-off source · Cycle {int(selected_result.cycle):03d} · {result_map_label(final_source)}",
             level="STEP",
             subsystem="Jana2020",
         )
 
         def worker() -> None:
             try:
-                perform_jana_handoff(cfg, selected_result, selected_map, log=self.log)
+                perform_jana_handoff(cfg, selected_result, final_source, log=self.log)
                 self.msg_queue.put(("handoff_done", None))
             except Exception as exc:
                 self.msg_queue.put((
@@ -8440,60 +11700,506 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     build_error_report(
                         exc,
                         subsystem="Jana2020",
-                        operation="Jana2020 hand-off",
+                        operation="Jana2020 handoff",
                         extra_details=traceback.format_exc(),
                     ),
                 ))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _layout_metrics_figure(self) -> None:
-        width = max(1.0, float(self.canvas.width()))
-        height = max(1.0, float(self.canvas.height()))
+    def open_jana_handoff_dialog(self) -> None:
+        """Entry point for the main window's "Send to Jana2020" button.
+        Dispatches to the one shared open_jana_result_selector(): locked to
+        the Wizard's own choice for a Phase-recycling session, switchable
+        between Superflip/SharpED for a Full-configuration session."""
+        if self.jana_wizard_context.launch_mode == "phase_recycling":
+            self.open_jana_result_selector(
+                source_mode="locked",
+                initial_source=self.jana_wizard_context.wizard_map_source or "deblurred",
+            )
+            return
+        self.open_jana_result_selector(source_mode="switchable", initial_source=self._default_handoff_source())
+
+    def open_install_to_jana_dialog(self) -> None:
+        """Entry point for the main window's "Install to Jana2020" button
+        (standalone launch only -- see _on_jana_action_clicked()).
+
+        Manages the Phase Studio -> Jana2020\\SUPERFLIP integration: detect,
+        install, update, repair, remove. Every file operation is delegated
+        to phase_studio.jana_integration (transactional, independently
+        tested); this method is presentation only and never modifies
+        anything just by being opened -- only the explicit "Install
+        integration"/"Update integration"/"Repair"/"Remove integration"
+        buttons do."""
+        from phase_studio import jana_integration as ji
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Jana2020 Integration")
+        outer = QVBoxLayout(dialog)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(create_phase_studio_brand_header())
+        outer.addWidget(create_phase_studio_context_banner(
+            "JANA2020 INTEGRATION",
+            "Install the Phase Studio workflow launcher into Jana2020",
+        ))
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(14, 10, 14, 10)
+        content_layout.setSpacing(10)
+        scroll_area.setWidget(content)
+        outer.addWidget(scroll_area, 1)
+
+        path_group = QGroupBox("Jana2020 Installation")
+        path_group_layout = QVBoxLayout(path_group)
+        path_row = QHBoxLayout()
+        path_edit = QLineEdit()
+        path_edit.setPlaceholderText(r"C:\Jana2020")
+        path_edit.setReadOnly(True)
+        browse_btn = QPushButton("Browse…")
+        path_row.addWidget(path_edit, 1)
+        path_row.addWidget(browse_btn)
+        path_group_layout.addLayout(path_row)
+        path_hint = QLabel("Select the Jana2020 root folder; Phase Studio looks for its SUPERFLIP subfolder.")
+        path_hint.setWordWrap(True)
+        path_hint.setStyleSheet("color: #52658b;")
+        path_group_layout.addWidget(path_hint)
+        content_layout.addWidget(path_group)
+
+        status_group = QGroupBox("Detection Status")
+        status_layout = QVBoxLayout(status_group)
+        content_layout.addWidget(status_group)
+
+        state_label = QLabel("")
+        state_label.setObjectName("settingsCallout")
+        state_label.setTextFormat(Qt.RichText)
+        state_label.setWordWrap(True)
+        content_layout.addWidget(state_label)
+
+        explain_label = QLabel("")
+        explain_label.setWordWrap(True)
+        explain_label.setTextFormat(Qt.RichText)
+        content_layout.addWidget(explain_label)
+
+        signature_label = QLabel("")
+        signature_label.setWordWrap(True)
+        signature_label.setTextFormat(Qt.RichText)
+        signature_label.setStyleSheet("color: #52658b;")
+        content_layout.addWidget(signature_label)
+
+        result_label = QLabel("")
+        result_label.setWordWrap(True)
+        result_label.setVisible(False)
+        content_layout.addWidget(result_label)
+
+        log_view = QTextEdit()
+        log_view.setReadOnly(True)
+        log_view.setVisible(False)
+        log_view.setMaximumHeight(140)
+        content_layout.addWidget(log_view)
+        content_layout.addStretch(1)
+
+        footer = QWidget()
+        footer.setObjectName("wizardFooter")
+        footer_layout = QHBoxLayout(footer)
+        footer_layout.setContentsMargins(14, 8, 14, 12)
+        close_btn = QPushButton("Close")
+        remove_btn = QPushButton("Remove integration")
+        primary_btn = QPushButton("Install integration")
+        primary_btn.setObjectName("primaryButton")
+        # Disabled from construction, before the first refresh() has run --
+        # never rely on Qt's default-enabled state for a button whose real
+        # state depends on detecting a payload/writable directory first.
+        remove_btn.setEnabled(False)
+        primary_btn.setEnabled(False)
+        footer_layout.addWidget(close_btn)
+        footer_layout.addStretch(1)
+        footer_layout.addWidget(remove_btn)
+        footer_layout.addWidget(primary_btn)
+        outer.addWidget(footer)
+
+        state: Dict[str, object] = {"jana_root": None, "superflip_dir": None, "report": None, "install_state": ji.IntegrationState.NOT_INSTALLED}
+
+        def resolve_initial_root() -> Optional[Path]:
+            configured_paths = []
+            for key in ("superflip_exe", "edma_exe"):
+                text = self._path_value(key).strip() if key in self.inputs else ""
+                if text:
+                    configured_paths.append(Path(text))
+            return ji.detect_jana_root(configured_paths)
+
+        def clear_status_layout() -> None:
+            while status_layout.count():
+                child = status_layout.takeAt(0)
+                widget = child.widget()
+                if widget is not None:
+                    widget.setParent(None)
+                    widget.deleteLater()
+
+        def status_row(ok: bool, text: str) -> QLabel:
+            mark = "✓" if ok else "✗"
+            color = "#2264b8" if ok else "#b42318"
+            label = QLabel(f"<span style='color:{color};font-weight:600;'>{mark}</span>&nbsp;&nbsp;{html.escape(text)}")
+            label.setTextFormat(Qt.RichText)
+            return label
+
+        def refresh(jana_root: Optional[Path]) -> None:
+            state["jana_root"] = jana_root
+            path_edit.setText(str(jana_root) if jana_root is not None else "")
+            superflip_dir = ji.superflip_dir_for_root(jana_root) if jana_root is not None else None
+            state["superflip_dir"] = superflip_dir
+            report = ji.inspect_jana_superflip_dir(superflip_dir) if superflip_dir is not None else None
+            state["report"] = report
+            install_state = ji.classify_install_state(report, ji.bundled_integration_version()) if report is not None else ji.IntegrationState.NOT_INSTALLED
+            state["install_state"] = install_state
+
+            clear_status_layout()
+            if report is None:
+                status_layout.addWidget(status_row(False, "No Jana2020 installation selected."))
+            else:
+                status_layout.addWidget(status_row(report.exists, "SUPERFLIP directory detected"))
+                status_layout.addWidget(status_row(report.has_original_exe or (report.has_superflip_exe and not report.has_marker), "Original Superflip detected"))
+                status_layout.addWidget(status_row(report.has_edma_exe, "EDMA detected"))
+                if not report.is_writable and report.exists:
+                    status_layout.addWidget(status_row(False, "Directory is not writable with the current Windows permissions"))
+
+            state_text = {
+                ji.IntegrationState.NOT_INSTALLED: "Not installed",
+                ji.IntegrationState.INSTALLED_CURRENT: f"Installed · version {ji.bundled_integration_version()}",
+                ji.IntegrationState.UPDATE_AVAILABLE: f"Update available · installed {report.marker.version if report and report.marker else '?'}, bundled {ji.bundled_integration_version()}",
+                ji.IntegrationState.REPAIR_REQUIRED: "Repair required",
+                ji.IntegrationState.CONFLICT: "Conflict detected",
+            }.get(install_state, "Not installed")
+            state_label.setText(f"<b>Status:</b> {html.escape(state_text)}")
+
+            if install_state == ji.IntegrationState.CONFLICT:
+                explain_label.setText(
+                    "<b>Existing Superflip backup detected.</b> Phase Studio did not modify this installation "
+                    "because its ownership could not be verified. Nothing was changed."
+                )
+            elif install_state == ji.IntegrationState.NOT_INSTALLED:
+                explain_label.setText(
+                    "Phase Studio will:<br>"
+                    "&bull; preserve the existing Superflip executable as <code>superflip_original.exe</code><br>"
+                    "&bull; install the Phase Studio Jana2020 launcher as <code>superflip.exe</code><br>"
+                    "&bull; install its required runtime files<br>"
+                    "&bull; leave EDMA and all Jana2020 crystallographic data unchanged"
+                )
+            elif install_state == ji.IntegrationState.UPDATE_AVAILABLE:
+                explain_label.setText("A newer Phase Studio Jana2020 launcher is available. Updating preserves the original Superflip executable and replaces only Phase-Studio-owned files.")
+            elif install_state == ji.IntegrationState.REPAIR_REQUIRED:
+                explain_label.setText("The Phase Studio integration is incomplete (a required file is missing). Repair replaces only Phase-Studio-owned files; the original Superflip executable is preserved.")
+            else:
+                explain_label.setText("The installed Phase Studio Jana2020 launcher is up to date.")
+
+            payload_dir = ji.resolve_bundled_jana_payload_dir()
+            if payload_dir is None:
+                signature_label.setText(
+                    "<b>Integration package: Not available</b><br>"
+                    "The Jana2020 integration package is not available in this Phase Studio build."
+                )
+            else:
+                sig = ji.authenticode_signature_status(payload_dir / ji.WRAPPER_EXE_NAME)
+                sig_text = {"signed": "Signed", "unsigned": "Unsigned"}.get(sig, "Unknown")
+                signature_label.setText(f"<b>Integration package: Ready</b><br>Wrapper signature: {sig_text}")
+
+            can_write = report is not None and report.exists and report.is_writable
+            primary_btn.setText({
+                ji.IntegrationState.UPDATE_AVAILABLE: "Update integration",
+                ji.IntegrationState.REPAIR_REQUIRED: "Repair integration",
+                ji.IntegrationState.INSTALLED_CURRENT: "Repair integration",
+            }.get(install_state, "Install integration"))
+            primary_btn.setEnabled(can_write and install_state != ji.IntegrationState.CONFLICT and payload_dir is not None)
+
+            # Remove is only ever safe when a verified Phase Studio marker
+            # proves ownership of the installed integration AND a valid
+            # (non-empty) original Superflip backup still exists to restore
+            # -- not merely "some state other than not-installed/conflict",
+            # since REPAIR_REQUIRED can itself mean the backup went missing.
+            owns_installation = report is not None and report.has_marker and report.marker is not None
+            original_backup_path = report.directory / ji.ORIGINAL_EXE_NAME if report is not None else None
+            has_valid_backup = False
+            if owns_installation and original_backup_path is not None:
+                try:
+                    has_valid_backup = original_backup_path.stat().st_size > 0
+                except OSError:
+                    has_valid_backup = False
+            remove_btn.setEnabled(can_write and owns_installation and has_valid_backup)
+            apply_safe_dialog_geometry(dialog, 640, 640)
+
+        def browse_clicked() -> None:
+            start_dir = str(state["jana_root"]) if state.get("jana_root") else r"C:\Jana2020"
+            picked = QFileDialog.getExistingDirectory(dialog, "Select the Jana2020 installation folder", start_dir)
+            if picked:
+                refresh(Path(picked))
+
+        def show_result(result: object, success_detail: str = "") -> None:
+            result_label.setVisible(True)
+            log_view.setVisible(bool(result.log))
+            log_view.setPlainText("\n".join(result.log))
+            if result.success:
+                result_label.setStyleSheet("color: #2264b8;")
+                text = f"<b>{html.escape(result.message)}</b>"
+                if success_detail:
+                    text += f"<br>{success_detail}"
+                result_label.setText(text)
+            else:
+                result_label.setStyleSheet("color: #b42318;")
+                result_label.setText(f"<b>{html.escape(result.message)}</b>")
+
+        def install_clicked() -> None:
+            superflip_dir = state.get("superflip_dir")
+            if not superflip_dir:
+                return
+            # A failed (or unexpectedly raised) attempt must never leave the
+            # dialog's buttons out of sync with the real on-disk state --
+            # refresh() always runs in `finally`, whatever happened above.
+            try:
+                payload_dir = ji.resolve_bundled_jana_payload_dir()
+                if payload_dir is None:
+                    show_result(ji.OperationResult(False, "error", "Bundled Jana2020 integration payload was not found in this Phase Studio installation."))
+                    return
+                result = ji.install_or_update_integration(superflip_dir, payload_dir, bundled_version=ji.bundled_integration_version())
+                success_detail = ""
+                if result.success:
+                    success_detail = (
+                        f"Jana2020:<br>{html.escape(str(state['jana_root']))}<br><br>"
+                        f"Original Superflip:<br>{html.escape(str(Path(superflip_dir) / ji.ORIGINAL_EXE_NAME))}<br><br>"
+                        f"Phase Studio launcher:<br>{html.escape(str(Path(superflip_dir) / ji.WRAPPER_EXE_NAME))}"
+                    )
+                show_result(result, success_detail)
+            finally:
+                refresh(state["jana_root"])
+
+        def remove_clicked() -> None:
+            superflip_dir = state.get("superflip_dir")
+            if not superflip_dir:
+                return
+            confirmation = QMessageBox.question(
+                dialog,
+                "Remove Jana2020 Integration",
+                "Restore the original Superflip executable and remove the Phase Studio launcher?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if confirmation != QMessageBox.Yes:
+                return
+            try:
+                result = ji.remove_integration(superflip_dir)
+                show_result(result)
+            finally:
+                refresh(state["jana_root"])
+
+        browse_btn.clicked.connect(browse_clicked)
+        primary_btn.clicked.connect(install_clicked)
+        remove_btn.clicked.connect(remove_clicked)
+        close_btn.clicked.connect(dialog.reject)
+
+        refresh(resolve_initial_root())
+        apply_safe_dialog_geometry(dialog, 640, 640)
+        dialog.exec()
+
+    def _replay_metrics_tab(self, key: str) -> None:
+        """Re-run the last _render_metrics_tab() call for this tab with its
+        original series data, so a Reset view / Full range / Detail control
+        (or a double-click reset) can update the displayed limits without
+        waiting for the next data-driven refresh."""
+        args = self._metrics_last_render_args.get(key)
+        if args is None:
+            return
+        self._render_metrics_tab(key, args["series"], raw=args["raw"], raw_ylabel=args["raw_ylabel"])
+
+    def _reset_metrics_view(self, key: Optional[str]) -> None:
+        if key is None:
+            return
+        interaction = self.metrics_interactions.get(key)
+        if interaction is not None:
+            interaction.reset_view()
+
+    def _set_metrics_view_mode(self, key: Optional[str], mode: str) -> None:
+        if key is None:
+            return
+        interaction = self.metrics_interactions.get(key)
+        if interaction is not None:
+            interaction.set_mode(mode)
+
+    def _current_metrics_key(self) -> Optional[str]:
+        if not hasattr(self, "metrics_tabs"):
+            return None
+        index = self.metrics_tabs.currentIndex()
+        if 0 <= index < len(self._metrics_tab_keys):
+            return self._metrics_tab_keys[index]
+        return None
+
+    def _on_metrics_tab_changed(self, index: int) -> None:
+        key = self._metrics_tab_keys[index] if 0 <= index < len(self._metrics_tab_keys) else None
+        supports_detail = key in self._metrics_detail_supported_keys
+        if hasattr(self, "metrics_full_range_btn"):
+            self.metrics_full_range_btn.setVisible(supports_detail)
+        if hasattr(self, "metrics_detail_btn"):
+            self.metrics_detail_btn.setVisible(supports_detail)
+        self._on_metrics_view_changed(key)
+
+    def _on_metrics_view_changed(self, key: Optional[str]) -> None:
+        # The control strip is shared/single, in the tab bar's corner, and
+        # always reflects whichever tab is currently selected -- an
+        # interaction change on a background tab (not realistically
+        # reachable by the mouse, but defensive) must not touch it.
+        if key is None or key != self._current_metrics_key():
+            return
+        interaction = self.metrics_interactions.get(key)
+        if interaction is None:
+            return
+        in_manual = interaction.user_modified
+        if hasattr(self, "metrics_detail_btn"):
+            self.metrics_detail_btn.setEnabled(interaction.detail_available)
+            self.metrics_detail_btn.setChecked(not in_manual and interaction.mode == "detail")
+        if hasattr(self, "metrics_full_range_btn"):
+            self.metrics_full_range_btn.setChecked(not in_manual and interaction.mode != "detail")
+        if hasattr(self, "metrics_reset_btn"):
+            self.metrics_reset_btn.setEnabled(interaction.user_modified or interaction.mode == "detail")
+
+    # --- Metric legend band -----------------------------------------------
+    # The reserved band used to be a flat 112 px, which is narrower than the
+    # legend the validation tabs actually draw ("Omit map correlation" needs
+    # ~133 px), so the longest labels were clipped at the canvas edge. The
+    # band is now measured from the real legend and clamped: the minimum is
+    # the previous fixed value, so tabs whose labels already fitted keep
+    # exactly the layout they had.
+    METRICS_LEGEND_MIN_WIDTH_PX = 112.0
+    METRICS_LEGEND_MAX_WIDTH_PX = 190.0
+    METRICS_LEGEND_TEXT_PADDING_PX = 6.0
+
+    def _metrics_legend_width_pixels(self, figure) -> float:
+        """Width in device pixels the figure's legend needs to render whole.
+
+        Measured from the legend itself (handles, handle/text padding and the
+        label text), which is what Matplotlib will actually draw, rather than
+        guessed from a character count. Falls back to an estimate only if no
+        renderer is available yet; either way the caller clamps the result.
+        """
+        if not figure.legends:
+            return 0.0
+        legend = figure.legends[0]
+        try:
+            renderer = figure.canvas.get_renderer()
+        except Exception:
+            renderer = None
+        if renderer is not None:
+            try:
+                measured = float(legend.get_window_extent(renderer).width)
+                if math.isfinite(measured) and measured > 0.0:
+                    return measured + self.METRICS_LEGEND_TEXT_PADDING_PX
+            except Exception:
+                pass
+        # No renderer yet (first layout before any draw): approximate from the
+        # longest label at the legend's own font size, plus its handle column.
+        try:
+            labels = [text.get_text() for text in legend.get_texts()]
+            font_pixels = float(legend.prop.get_size_in_points()) * figure.dpi / 72.0
+            longest = max((len(label) for label in labels), default=0)
+            handle_pixels = 1.8 * font_pixels
+            return longest * 0.55 * font_pixels + handle_pixels + self.METRICS_LEGEND_TEXT_PADDING_PX
+        except Exception:
+            return self.METRICS_LEGEND_MIN_WIDTH_PX
+
+    def _layout_metrics_figure(self, key: str) -> None:
+        figure = self.metrics_figures[key]
+        canvas = self.metrics_canvases[key]
+        width = max(1.0, float(canvas.width()))
+        height = max(1.0, float(canvas.height()))
         has_data = bool(self.results)
+        # A single-series tab (e.g. Powder repartitioning) omits its legend
+        # entirely -- the y-axis label already names the one plotted metric
+        # -- so it should reclaim the margin a legend would otherwise cost,
+        # rather than leaving a wide empty band on the right.
+        has_legend = has_data and bool(figure.legends)
+        legend_gap_pixels = 8.0
         left_pixels = 86.0 if has_data else 70.0
         left = min(0.18, max(0.07, left_pixels / width))
         bottom = min(0.22, max(0.12, 34.0 / height))
         if has_data:
-            # Reserve a compact, fixed-width band for the vertical legend.  Keeping
-            # this budget pixel based avoids wasting plot width on large canvases
-            # while still fitting the longest label at moderately narrow widths.
-            legend_width_pixels = 112.0
-            legend_gap_pixels = 8.0
-            outer_right_pixels = 8.0
-            right = 1.0 - min(
-                0.32,
-                (legend_width_pixels + legend_gap_pixels + outer_right_pixels) / width,
-            )
             top = 1.0 - min(0.08, max(0.035, 10.0 / height))
+            if has_legend:
+                # Reserve a compact, content-aware band for the vertical
+                # legend. Keeping this budget pixel based avoids wasting plot
+                # width on large canvases; measuring it means the longest
+                # label is no longer clipped, and the clamp keeps a
+                # pathological label from eating the plot. The 0.32 fraction
+                # below is a second, canvas-relative safety net on narrow
+                # canvases.
+                legend_width_pixels = min(
+                    self.METRICS_LEGEND_MAX_WIDTH_PX,
+                    max(
+                        self.METRICS_LEGEND_MIN_WIDTH_PX,
+                        self._metrics_legend_width_pixels(figure),
+                    ),
+                )
+                outer_right_pixels = 8.0
+                right = 1.0 - min(
+                    0.32,
+                    (legend_width_pixels + legend_gap_pixels + outer_right_pixels) / width,
+                )
+            else:
+                right = 1.0 - min(0.04, max(0.02, 18.0 / width))
         else:
             right = 1.0 - min(0.04, max(0.02, 18.0 / width))
             top = 1.0 - min(0.16, max(0.07, 22.0 / height))
-        self.figure.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
-        if has_data and self.figure.legends:
+        figure.subplots_adjust(left=left, right=right, bottom=bottom, top=top)
+        if has_legend:
             legend_left = right + (legend_gap_pixels / width)
             legend_center_y = (bottom + top) / 2.0
-            self.figure.legends[0].set_bbox_to_anchor(
+            figure.legends[0].set_bbox_to_anchor(
                 (legend_left, legend_center_y),
-                transform=self.figure.transFigure,
+                transform=figure.transFigure,
             )
 
-    def _update_plot(self) -> None:
-        self.figure.clear()
-        self.ax = self.figure.add_subplot(111)
-        self.figure.patch.set_facecolor("#ffffff")
-        self.ax.set_facecolor("#ffffff")
+    def _render_metrics_tab(
+        self,
+        key: str,
+        series: List[Tuple[str, List[Optional[float]], bool, str, str, str]],
+        *,
+        raw: bool = False,
+        raw_ylabel: str = "",
+    ) -> None:
+        """Render one convergence tab. By default, each series is rescaled to a
+        shared 0-1 "Best/Worst" score so metrics with unrelated units (RMSD,
+        recall, reference match, ...) can be compared on one axis. Pass raw=True
+        for a tab with a single metric already in one meaningful unit (for
+        example a percentage), where that rescaling would hide whether the
+        actual value is trending down/up and should instead be plotted as-is.
+
+        Visualization only: the values plotted/shown here (and in hover
+        tooltips) are exactly the stored CycleResult metrics or, for
+        non-raw tabs, a display-only 0-1 rescaling of them for a shared axis
+        -- nothing here recomputes or alters a scientific value."""
+        self._metrics_last_render_args[key] = {"series": series, "raw": raw, "raw_ylabel": raw_ylabel}
+        interaction = self.metrics_interactions.get(key)
+        if interaction is not None:
+            interaction.notify_redraw_start()
+        figure = self.metrics_figures[key]
+        canvas = self.metrics_canvases[key]
+        figure.clear()
+        ax = figure.add_subplot(111)
+        self.metrics_axes[key] = ax
+        figure.patch.set_facecolor("#ffffff")
+        ax.set_facecolor("#ffffff")
         cycles = [r.cycle for r in self.results]
         if not cycles:
+            self._metrics_hover_series[key] = []
             status = str(getattr(self, "_run_status", "READY")).upper()
             if status in {"RUNNING", "STOPPING"}:
-                empty_message = "Waiting for the first convergence metrics…"
-            elif status in {"ERROR", "CANCELLED"}:
-                empty_message = "No convergence metrics available."
+                empty_message = "Waiting for reconstruction metrics…"
+            elif status in {"ERROR", "CANCELLED", "STOPPED"}:
+                empty_message = "No reconstruction metrics available."
             else:
-                empty_message = "Run the pipeline to display convergence metrics."
-            self.ax.set_axis_off()
-            self.ax.text(
+                empty_message = "Run phasing to display reconstruction metrics."
+            ax.set_axis_off()
+            ax.text(
                 0.5,
                 0.50,
                 empty_message,
@@ -8501,38 +12207,90 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 va="center",
                 color="#7183a6",
                 fontsize=8.5,
-                transform=self.ax.transAxes,
+                transform=ax.transAxes,
             )
-            self._layout_metrics_figure()
-            self.canvas.draw_idle()
+            self._layout_metrics_figure(key)
+            canvas.draw_idle()
             return
 
-        self.ax.set_title("")
-        self.ax.set_xlabel("")
-        self.figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#14204a", fontsize=8.5)
-        self.ax.set_ylim(-0.04, 1.04)
-        self.ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
-        self.ax.set_yticklabels(["Worst 0.00", "0.25", "0.50", "0.75", "Best 1.00"])
+        ax.set_title("")
+        ax.set_xlabel("")
+        figure.text(0.5, 0.018, "Cycle", ha="center", va="bottom", color="#14204a", fontsize=8.5)
+        detail_ylim: Optional[Tuple[float, float]] = None
+        if raw:
+            all_finite = [
+                float(v)
+                for _label, values, *_rest in series
+                for v in values
+                if v is not None and np.isfinite(float(v))
+            ]
+            if all_finite:
+                lo = min(0.0, min(all_finite))
+                hi = max(all_finite)
+                pad = max(1e-9, (hi - lo) * 0.08)
+                full_ylim = (lo - pad, hi + pad)
+                candidate_detail = robust_detail_range(all_finite)
+                if candidate_detail is not None:
+                    full_span = full_ylim[1] - full_ylim[0]
+                    detail_span = candidate_detail[1] - candidate_detail[0]
+                    # Only offer Detail when it would actually narrow the
+                    # view meaningfully -- otherwise it's the same as Full
+                    # range and just adds a confusing extra control.
+                    if full_span > 0 and detail_span < full_span * 0.92:
+                        detail_ylim = candidate_detail
+            else:
+                full_ylim = (0.0, 1.0)
+            ax.set_ylabel(raw_ylabel, fontsize=7.5, color="#001170")
+        else:
+            full_ylim = (-0.04, 1.04)
+            # Intermediate ticks stay at their numeric positions (0.25/0.5/0.75)
+            # so the horizontal gridlines remain useful, but only the two
+            # semantic endpoints get a label -- "Worst 0.00"/"Best 1.00" read
+            # as redundant once the axis is understood as a quality scale.
+            ax.set_yticks([0.0, 0.25, 0.5, 0.75, 1.0])
+            ax.set_yticklabels(["Worst", "", "", "", "Best"])
+            ax.set_ylabel("Normalized score", fontsize=7.5, color="#001170")
         try:
             cycles_to_run = max(1, self._spin_value("cycles"))
         except Exception:
             cycles_to_run = max(cycles) if cycles else 1
-        x_max = max([cycles_to_run] + cycles) if cycles else cycles_to_run
-        self.ax.set_xlim(0.75, float(x_max) + 0.25)
-        if x_max <= 30:
-            self.ax.set_xticks(list(range(1, x_max + 1)))
+        max_completed = max(cycles) if cycles else 0
+        run_status = str(getattr(self, "_run_status", "READY")).upper()
+        if run_status in {"RUNNING", "STOPPING"}:
+            # Live run: fit the currently populated cycles plus a little
+            # right-side headroom for the next point, rather than jumping
+            # straight to the full planned cycle count -- 12 of 50 planned
+            # cycles otherwise compresses all the active data into the left
+            # ~24% of the plot. Headroom grows with progress so the viewport
+            # doesn't visibly jump every single cycle, and is capped at the
+            # planned total.
+            headroom = max(2, round(max_completed * 0.1))
+            x_max = min(cycles_to_run, max(max_completed + headroom, 1))
         else:
-            self.ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12, min_n_ticks=2))
-        self.ax.grid(True, axis="y", color="#cbd7ea", linewidth=0.6, alpha=0.64)
-        self.ax.grid(True, axis="x", color="#cbd7ea", linewidth=0.5, alpha=0.42)
+            # Not currently running (finished, stopped early, or not yet
+            # started): fit the data that actually exists instead of
+            # stretching out to a planned count that will never be reached
+            # for a run stopped before completion.
+            x_max = max_completed if cycles else cycles_to_run
+        full_xlim = (0.75, float(x_max) + 0.25)
+        if interaction is not None and interaction.user_modified:
+            # A manual zoom/pan may no longer align with one-tick-per-cycle;
+            # let Matplotlib choose sensible ticks for whatever is visible.
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10, min_n_ticks=2))
+        elif x_max <= 30:
+            ax.set_xticks(list(range(1, x_max + 1)))
+        else:
+            ax.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=12, min_n_ticks=2))
+        ax.grid(True, axis="y", color="#cbd7ea", linewidth=0.6, alpha=0.64)
+        ax.grid(True, axis="x", color="#cbd7ea", linewidth=0.5, alpha=0.42)
         for spine in ("top", "right"):
-            self.ax.spines[spine].set_visible(False)
-        self.ax.spines["left"].set_color("#001170")
-        self.ax.spines["bottom"].set_color("#001170")
-        self.ax.tick_params(colors="#001170")
-        self.ax.title.set_color("#001170")
-        self.ax.xaxis.label.set_color("#001170")
-        self.ax.yaxis.label.set_color("#001170")
+            ax.spines[spine].set_visible(False)
+        ax.spines["left"].set_color("#001170")
+        ax.spines["bottom"].set_color("#001170")
+        ax.tick_params(colors="#001170")
+        ax.title.set_color("#001170")
+        ax.xaxis.label.set_color("#001170")
+        ax.yaxis.label.set_color("#001170")
 
         def best_score(values: Sequence[Optional[float]], higher_is_better: bool) -> List[float]:
             arr = np.asarray([np.nan if v is None else float(v) for v in values], dtype=float)
@@ -8549,23 +12307,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 out[finite] = scaled if higher_is_better else 1.0 - scaled
             return out.tolist()
 
-        series = [
-            ("R", [r.superflip_rvalue for r in self.results], False, "#001170", "o", "-"),
-            ("Peaks", [r.superflip_peaks for r in self.results], True, "#2264b8", "s", "-"),
-            ("Symmetry", [r.superflip_symm for r in self.results], False, "#44b7ff", "^", "-"),
-            ("Reference match", [r.superflip_ref_match for r in self.results], False, "#001170", "D", ":"),
-            ("FOM", [r.superflip_fom for r in self.results], True, "#2264b8", "P", "--"),
-            ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
-            ("Deblur RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
-            ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
-        ]
         plotted = 0
+        hover_series: List[Tuple[str, List[int], List[Optional[float]], List[Optional[float]], str]] = []
         for label, values, higher_is_better, color, marker, linestyle in series:
-            y = best_score(values, higher_is_better)
-            if not np.any(np.isfinite(np.asarray(y, dtype=float))):
+            if raw:
+                y = [np.nan if v is None else float(v) for v in values]
+            else:
+                y = best_score(values, higher_is_better)
+            finite_mask = np.isfinite(np.asarray(y, dtype=float))
+            if not np.any(finite_mask):
                 continue
             plotted += 1
-            self.ax.plot(
+            ax.plot(
                 cycles,
                 y,
                 color=color,
@@ -8577,9 +12330,35 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 markeredgewidth=0.8,
                 label=label,
             )
-        if plotted:
-            handles, labels = self.ax.get_legend_handles_labels()
-            self.figure.legend(
+            # No persistent "latest cycle" ring: the line ending already shows
+            # the newest point, and a permanent hollow-circle overlay reads as
+            # a leftover hover state even when the pointer isn't over it. Only
+            # an actual hover (MetricsPlotInteraction) emphasizes a marker now.
+            unit = "%" if ("%" in label or ("%" in raw_ylabel and raw)) else ""
+            hover_series.append((label, list(cycles), list(y), list(values), unit))
+        self._metrics_hover_series[key] = hover_series
+        # Whether this tab shows a legend is decided by the tab's DEFINITION
+        # (how many labelled series it can ever plot), never by how many of
+        # them happen to carry finite values right now. Keying it off the
+        # live count made the legend flicker in and out between cycles: on
+        # cycle 1 several multi-metric tabs have exactly one finite series
+        # (Map correlation needs a previous cycle, reference-dependent
+        # metrics need a reference, ...), so `plotted > 1` was False and the
+        # legend silently vanished until a later cycle happened to populate
+        # a second series.
+        #
+        # A genuinely single-series tab (Powder repartitioning, Intensity
+        # correction) still omits its legend: its y-axis label already names
+        # the one plotted metric, so a one-item legend would just repeat it
+        # while costing horizontal space.
+        #
+        # Built here, AFTER every artist for this pass has been added, and
+        # after figure.clear() above discarded the previous pass's legend --
+        # so the legend always matches the artists actually on screen, with
+        # one entry per plotted series and no stale or placeholder entries.
+        if plotted >= 1 and len(series) > 1:
+            handles, labels = ax.get_legend_handles_labels()
+            figure.legend(
                 handles,
                 labels,
                 loc="center left",
@@ -8592,18 +12371,120 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 handletextpad=0.4,
                 borderaxespad=0.0,
             )
-        else:
-            self.ax.text(
+        elif not plotted:
+            ax.text(
                 0.5,
                 0.5,
                 "No finite metrics yet",
                 ha="center",
                 va="center",
                 color="#7183a6",
-                transform=self.ax.transAxes,
+                transform=ax.transAxes,
             )
-        self._layout_metrics_figure()
-        self.canvas.draw_idle()
+
+        view_mode = "full"
+        if interaction is not None:
+            view_mode = interaction.apply_limits(ax, full_xlim, full_ylim, detail_ylim)
+        else:
+            ax.set_xlim(*full_xlim)
+            ax.set_ylim(*full_ylim)
+
+        if view_mode == "detail":
+            ylo, yhi = ax.get_ylim()
+            clipped = sum(
+                1
+                for _label, values, *_rest in series
+                for v in values
+                if v is not None and np.isfinite(float(v)) and not (ylo <= float(v) <= yhi)
+            )
+            if clipped:
+                noun = "point" if clipped == 1 else "points"
+                ax.text(
+                    0.02,
+                    0.965,
+                    f"{clipped} {noun} outside detail range · Full range to view",
+                    ha="left",
+                    va="top",
+                    color="#52658b",
+                    fontsize=7.0,
+                    style="italic",
+                    transform=ax.transAxes,
+                    bbox=dict(boxstyle="square,pad=0.25", facecolor="#ffffff", edgecolor="none", alpha=0.82),
+                )
+
+        self._layout_metrics_figure(key)
+        canvas.draw_idle()
+
+    def _update_plot(self) -> None:
+        def series_has_data(series) -> bool:
+            return any(v is not None for _label, values, *_rest in series for v in values)
+
+        def set_tab_visible(key: str, series) -> None:
+            try:
+                index = self._metrics_tab_keys.index(key)
+            except ValueError:
+                return
+            # Before any cycle has completed there is nothing to distinguish
+            # "no data yet" from "irrelevant for this run" -- keep every tab
+            # visible (showing the normal "Run phasing..." placeholder) until
+            # results start arriving, only then hide tabs that stayed empty.
+            self.metrics_tabs.setTabVisible(index, (not self.results) or series_has_data(series))
+
+        superflip_series = [
+            ("Reference match", [r.superflip_ref_match for r in self.results], False, "#001170", "D", ":"),
+            ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
+            ("Recall", [r.superflip_recall for r in self.results], True, "#2264b8", "^", "-"),
+            ("Precision", [r.superflip_precision for r in self.results], True, "#082a8a", "P", "--"),
+            ("Heavy atoms found", [r.superflip_heavy_atom_count for r in self.results], True, "#7183a6", "h", ":"),
+        ]
+        self._render_metrics_tab("superflip", superflip_series)
+        set_tab_visible("superflip", superflip_series)
+
+        deblur_series = [
+            ("SharpED RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
+            ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
+            ("Recall", [r.deblur_recall for r in self.results], True, "#44b7ff", "^", "-"),
+            ("Precision", [r.deblur_precision for r in self.results], True, "#082a8a", "P", "--"),
+            ("Heavy atoms found", [r.deblur_heavy_atom_count for r in self.results], True, "#7183a6", "h", ":"),
+        ]
+        self._render_metrics_tab("deblur", deblur_series)
+        set_tab_visible("deblur", deblur_series)
+
+        superflip_omit_series = [
+            ("Omit map correlation", [r.omit_superflip_correlation for r in self.results], True, "#2264b8", "*", "-"),
+            ("R_free", [r.omit_superflip_rfree for r in self.results], False, "#001170", "o", "-"),
+        ]
+        self._render_metrics_tab("superflip_omit", superflip_omit_series)
+        set_tab_visible("superflip_omit", superflip_omit_series)
+
+        deblur_omit_series = [
+            ("Omit map correlation", [r.omit_deblur_correlation for r in self.results], True, "#2264b8", "*", "-"),
+            ("R_free", [r.omit_deblur_rfree for r in self.results], False, "#001170", "o", "-"),
+        ]
+        self._render_metrics_tab("deblur_omit", deblur_omit_series)
+        set_tab_visible("deblur_omit", deblur_omit_series)
+
+        powder_repartition_series = [
+            ("Mean intensity change (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
+        ]
+        self._render_metrics_tab(
+            "powder_repartition",
+            powder_repartition_series,
+            raw=True,
+            raw_ylabel="Mean intensity change (%)",
+        )
+        set_tab_visible("powder_repartition", powder_repartition_series)
+
+        intensity_correction_series = [
+            ("Mean intensity change (%)", [r.intensity_correction_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
+        ]
+        self._render_metrics_tab(
+            "intensity_correction",
+            intensity_correction_series,
+            raw=True,
+            raw_ylabel="Mean intensity change (%)",
+        )
+        set_tab_visible("intensity_correction", intensity_correction_series)
 
     def _element_color(self, element: str) -> str:
         # This extended blue scale is intentionally exclusive to structure atoms.
@@ -8677,11 +12558,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         bounds_max = np.max(cell_corners, axis=0)
         spans = np.maximum(bounds_max - bounds_min, 1.0e-6)
         padding = spans * 0.025
-        ax.set_xlim(bounds_min[0] - padding[0], bounds_max[0] + padding[0])
-        ax.set_ylim(bounds_min[1] - padding[1], bounds_max[1] + padding[1])
-        ax.set_zlim(bounds_min[2] - padding[2], bounds_max[2] + padding[2])
+        base_limits = tuple(
+            (float(bounds_min[i] - padding[i]), float(bounds_max[i] + padding[i]))
+            for i in range(3)
+        )
         display_aspect = spans / max(float(np.max(spans)), 1.0e-6)
         ax.set_box_aspect(display_aspect, zoom=1.18)
+        # Restore the shared zoom/pan, but only while it belongs to this same
+        # cell geometry -- a different structure resets the view rather than
+        # inheriting a zoom framed around the previous crystal.
+        if self.structure_view_base_limits != base_limits:
+            self.structure_view_base_limits = base_limits
+            self.structure_view_limits = None
+        self._apply_structure_axis_limits(ax, self.structure_view_limits or base_limits)
+        self._structure_interactive_axes.append(ax)
 
         cell_edges = (
             (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
@@ -8731,8 +12621,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._structure_depth_artists.append(depth_artists)
         self._update_structure_depth_artist(depth_artists, self.structure_elev, self.structure_azim)
         shown = len(plot_atoms)
-        suffix = "" if shown == len(non_h_atoms) else f"; first {shown} heaviest shown"
-        return f"{len(non_h_atoms)} non-H/He atoms{suffix}"
+        # "atoms shown" (not "non-H/He atoms") since the viewer header
+        # already explains hydrogen/helium are hidden -- no need to repeat
+        # the exclusion rule here. When only the heaviest subset is actually
+        # drawn, say so explicitly instead, rather than call the full count
+        # "shown".
+        if shown == len(non_h_atoms):
+            return f"{len(non_h_atoms):,} atoms shown"
+        return f"{len(non_h_atoms):,} atoms · displaying {shown:,} heaviest"
 
     def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
         atom_fade = structure_depth_fade(
@@ -8797,37 +12693,78 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._append_execution_log(report.diagnostic_block(), level="DETAIL", subsystem="Structure viewer")
             return []
 
-    def _begin_structure_rotation(self, event) -> None:
-        ax = getattr(event, "inaxes", None)
-        self._structure_rotation_source = ax if ax in self.structure_axes else None
+    @staticmethod
+    def _structure_axis_limits(ax) -> Optional[Tuple[Tuple[float, float], ...]]:
+        """The axes' current 3D limits, or None if they cannot be read.
 
-    def _apply_structure_rotation(self, source_ax, *, redraw: bool = True) -> None:
-        if source_ax is None or source_ax not in self.structure_axes:
+        Matplotlib's 3D navigation expresses both zoom (right drag) and pan
+        (middle drag) purely as changes to these limits, so reading and writing
+        them is all that is needed to mirror either gesture onto the other
+        panels."""
+        try:
+            return (
+                (float(ax.get_xlim3d()[0]), float(ax.get_xlim3d()[1])),
+                (float(ax.get_ylim3d()[0]), float(ax.get_ylim3d()[1])),
+                (float(ax.get_zlim3d()[0]), float(ax.get_zlim3d()[1])),
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _apply_structure_axis_limits(ax, limits: Optional[Tuple[Tuple[float, float], ...]]) -> None:
+        if not limits or len(limits) != 3:
+            return
+        try:
+            ax.set_xlim3d(limits[0][0], limits[0][1], auto=False)
+            ax.set_ylim3d(limits[1][0], limits[1][1], auto=False)
+            ax.set_zlim3d(limits[2][0], limits[2][1], auto=False)
+        except Exception:
+            pass
+
+    def _begin_structure_view_drag(self, event) -> None:
+        # Only a panel that actually drew a structure may drive the shared
+        # view: an empty panel never had its limits or view angles set, so
+        # letting it be the source would push matplotlib's defaults onto the
+        # panels that do have content.
+        ax = getattr(event, "inaxes", None)
+        self._structure_view_drag_source = ax if ax in self._structure_interactive_axes else None
+
+    def _apply_structure_view(self, source_ax, *, redraw: bool = True) -> None:
+        """Mirror one panel's camera and zoom/pan onto every other panel."""
+        if source_ax is None or source_ax not in self._structure_interactive_axes:
             return
         elev = float(getattr(source_ax, "elev", self.structure_elev))
         azim = float(getattr(source_ax, "azim", self.structure_azim))
         self.structure_elev = elev
         self.structure_azim = azim
+        limits = self._structure_axis_limits(source_ax)
+        if limits is not None:
+            self.structure_view_limits = limits
         for axis in self.structure_axes:
             axis.view_init(elev=elev, azim=azim)
+        # All panels share one cell, so they start from identical limits and
+        # can simply be given the source's -- no rescaling between panels.
+        for axis in self._structure_interactive_axes:
+            if axis is not source_ax:
+                self._apply_structure_axis_limits(axis, limits)
         self._update_structure_depth_cue(elev, azim)
         if redraw:
             self.structure_canvas.draw_idle()
 
     def _sync_structure_view_from_event(self, event) -> None:
-        source_ax = self._structure_rotation_source
+        source_ax = self._structure_view_drag_source
         if source_ax is None:
             source_ax = getattr(event, "inaxes", None)
-        if source_ax is None or source_ax not in self.structure_axes:
+        if source_ax is None or source_ax not in self._structure_interactive_axes:
             return
-        self._apply_structure_rotation(source_ax)
+        self._apply_structure_view(source_ax)
 
-    def _finish_structure_rotation(self, event) -> None:
-        source_ax = self._structure_rotation_source
+    def _finish_structure_view_drag(self, event) -> None:
+        source_ax = self._structure_view_drag_source
         if source_ax is None:
             source_ax = getattr(event, "inaxes", None)
-        self._apply_structure_rotation(source_ax, redraw=False)
-        self._structure_rotation_source = None
+        self._apply_structure_view(source_ax, redraw=False)
+        self._structure_view_drag_source = None
         self.structure_canvas.draw()
 
     def _layout_structure_figure(self) -> None:
@@ -8850,21 +12787,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_figure.clear()
         self.structure_figure.patch.set_facecolor("#ffffff")
         self.structure_axes = []
+        self._structure_interactive_axes = []
         self._structure_depth_artists = []
         status = str(getattr(self, "_run_status", "READY")).upper()
         waiting = status in {"RUNNING", "STOPPING"}
         failed = status in {"ERROR", "CANCELLED"}
         panels = [
-            ("Reference", self.reference_atoms_for_plot, "No structure available"),
+            ("Reference", self.reference_atoms_for_plot, "No reference structure"),
             (
                 "Superflip",
                 self.superflip_atoms_for_plot,
-                "Waiting for Superflip result…" if waiting else ("Superflip result unavailable" if failed else "No structure available"),
+                "Waiting for Superflip result…" if waiting else ("Superflip result unavailable" if failed else "No Superflip structure available"),
             ),
             (
                 "SharpED",
                 self.deblur_atoms_for_plot,
-                "Waiting for SharpED result…" if waiting else ("SharpED result unavailable" if failed else "No structure available"),
+                "Waiting for SharpED result…" if waiting else ("SharpED result unavailable" if failed else "No SharpED structure available"),
             ),
         ]
         has_interactive_structure = any(
@@ -8916,6 +12854,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.draw_idle()
 
     def get_config(self) -> RunConfig:
+        self._sync_sharped_catalog()
         input_source_mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
         reference_xplor: Optional[Path] = None
         first_model_text = self._path_value("first_cycle_modelfile")
@@ -8941,6 +12880,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if modelfile_source_value == "none":
             cycles_value = 1
         crystal_metadata = self._resolve_crystal_metadata_from_inputs()
+        resolved_wavelength, wavelength_source = resolve_powder_wavelength(
+            self._dspin_value("powder_wavelength"), jana_inflip, external_reference_file,
+        )
+        if self._check_value("redistribute_overlaps") and resolved_wavelength > 0 and wavelength_source != "manual entry":
+            self.log(f"Powder overlap repartitioning: wavelength {resolved_wavelength:g} A auto-detected from {wavelength_source}.", level="DETAIL")
         return RunConfig(
             hkl=hkl_path,
             reference_cif=reference_cif_path,
@@ -8978,7 +12922,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             voxel=self._line_value("voxel"),
             bestdensities_count=self._spin_value("bestdensities_count"),
             bestdensities_metric=normalize_bestdensities_metric(self._combo_value("bestdensities_metric")),
-            bestdensities_symmetry=self._check_value("bestdensities_symmetry"),
+            bestdensities_symmetry=normalize_bestdensities_metric(self._combo_value("bestdensities_metric")) == "symmetry",
             polish=self._check_value("polish"),
             maxcycles=self._spin_value("maxcycles"),
             repeatmode=self._spin_value("repeatmode"),
@@ -8998,25 +12942,66 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             electrons=self._line_value("electrons"),
             dataitemwidths="auto",
             extra_superflip_keywords=self._multiline_value("extra_superflip_keywords"),
+            map_feedback_missing_enabled=self._check_value("map_feedback_missing_enabled"),
             map_feedback_missing_from_cycle=self._spin_value("map_feedback_missing_from_cycle"),
             map_feedback_missing_percent_limit=self._dspin_value("map_feedback_missing_percent_limit"),
+            map_feedback_intensity_enabled=self._check_value("map_feedback_intensity_enabled"),
             map_feedback_intensity_from_cycle=self._spin_value("map_feedback_intensity_from_cycle"),
             map_feedback_intensity_damping=self._dspin_value("map_feedback_intensity_damping"),
             map_feedback_intensity_max_i_over_sigma=self._dspin_value("map_feedback_intensity_max_i_over_sigma"),
+            redistribute_overlaps=self._check_value("redistribute_overlaps"),
+            powder_redistribution_from_cycle=self._spin_value("powder_redistribution_from_cycle"),
+            powder_wavelength=resolved_wavelength,
+            powder_separation_factor=self._dspin_value("powder_separation_factor"),
+            powder_redistribution_mix=self._dspin_value("powder_redistribution_mix"),
             run_sharped=self._check_value("run_sharped") and modelfile_source_value != "superflip_xplor",
             symmetrize_deblurred_map=self._check_value("symmetrize_deblurred_map") and modelfile_source_value != "superflip_xplor",
             run_edma_superflip=self._check_value("run_edma_superflip"),
             run_edma_deblurred=self._check_value("run_edma_deblurred"),
-            sharped_base_url=self._line_value("sharped_base_url") or "https://jana.fzu.cz",
+            compute_omit_maps=self._check_value("compute_omit_maps"),
+            compute_omit_rfree=self._check_value("compute_omit_maps") and self._check_value("compute_omit_rfree"),
+            sharped_base_url=self._line_value("sharped_base_url") or DEFAULT_SERVER_URL,
             sharped_api_token=self._line_value("sharped_api_token") or os.environ.get("SHARPED_API_TOKEN", ""),
             sharped_model=self._combo_value("sharped_model") or "default",
             sharped_elements=self._line_value("sharped_elements"),
             sharped_outres=self._dspin_value("sharped_outres"),
+            sharped_map_value_exponent=normalize_map_value_exponent(self._dspin_value("sharped_map_value_exponent")),
             sharped_max_upload_mb=self._dspin_value("sharped_max_upload_mb"),
             sharped_timeout_seconds=self._spin_value("sharped_timeout_seconds"),
             sharped_poll_seconds=self._spin_value("sharped_poll_seconds"),
             sharped_max_polls=self._spin_value("sharped_max_polls"),
         )
+
+    def _resolve_configured_data_mode(self, cfg: RunConfig) -> str:
+        # In pure Jana2020 .inflip mode the HKL format control is disabled and its
+        # stored value ignored (dataformat always comes straight from the
+        # .inflip file) -- force AUTO here too so a stale/corrupted widget
+        # value can never override that, regardless of what is still sitting
+        # in cfg.reflection_data_mode.
+        mode = normalize_input_source_mode(cfg.input_source_mode)
+        effective_configured_mode = (
+            REFLECTION_DATA_MODE_AUTO if mode == INPUT_MODE_INFLIP else cfg.reflection_data_mode
+        )
+        return resolve_reflection_data_mode_from_sources(cfg.hkl, effective_configured_mode, cfg.jana_inflip)
+
+    def _resolve_configured_data_mode_for_ui(self) -> str:
+        """Best-effort equivalent of _resolve_configured_data_mode() for live
+        widget state (before a RunConfig exists), used to gate controls that
+        only make sense for a particular HKL format -- e.g. powder overlap
+        repartitioning requires FWHM-carrying data. Never raises: falls back
+        to the configured mode itself if paths are missing/unreadable."""
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
+        configured = (
+            REFLECTION_DATA_MODE_AUTO if mode == INPUT_MODE_INFLIP
+            else (self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO)
+        )
+        hkl_text = self._path_value("hkl").strip() if "hkl" in self.inputs else ""
+        inflip_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
+        inflip_path = Path(inflip_text) if inflip_text else None
+        try:
+            return resolve_reflection_data_mode_from_sources(Path(hkl_text), configured, inflip_path)
+        except Exception:
+            return normalize_reflection_data_mode(configured)
 
     def _validate_run_config(self, cfg: RunConfig) -> Tuple[List[str], str]:
         issues: List[str] = []
@@ -9027,8 +13012,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
         if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
             if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
-                issues.append("The Jana .inflip file does not exist or cannot be read.")
-                details.append(f"Jana .inflip: {cfg.jana_inflip or '(not selected)'}")
+                issues.append("The Jana2020 .inflip file does not exist or cannot be read.")
+                details.append(f"Jana2020 .inflip: {cfg.jana_inflip or '(not selected)'}")
             if mode == INPUT_MODE_INFLIP_OVERRIDES:
                 if hkl_text and not cfg.hkl.is_file():
                     issues.append("The external HKL override does not exist.")
@@ -9049,24 +13034,104 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif ref_suffix not in REFERENCE_FILE_SUFFIXES:
                 issues.append("The external reference format is not supported.")
                 details.append(f"Reference suffix: {ref_suffix or '(none)'}")
+        if cfg.redistribute_overlaps and cfg.powder_wavelength <= 0:
+            issues.append(
+                "Powder overlap repartitioning is enabled, but no Wavelength (Å) could be resolved from a manual "
+                "entry, the .inflip file, or the reference file's _diffrn_radiation_wavelength tag."
+            )
+            details.append("Wavelength (Å): Basic → Map feedback → Powder overlap repartitioning")
+        if cfg.redistribute_overlaps and not reflection_mode_has_fwhm(self._resolve_configured_data_mode(cfg)):
+            issues.append(
+                "Powder overlap repartitioning is enabled, but the configured reflection data does not carry a "
+                "FWHM value (hkl I fwhm / hkl F fwhm). This mechanism only applies to FWHM-carrying data."
+            )
+            details.append("Enable powder overlap repartitioning: Basic → Map feedback → Powder overlap repartitioning")
         reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
         is_recycling = reconstruction_mode != "superflip"
         if (cfg.run_sharped or is_recycling) and not cfg.sharped_api_token.strip():
             issues.append("A SharpED API token is required for the selected workflow.")
         needs_superflip = not is_recycling or reconstruction_mode == "sharped_recycle"
         needs_edma = (not is_recycling and (cfg.run_edma_superflip or cfg.run_edma_deblurred)) or (is_recycling and cfg.run_edma_recycle_final)
-        for exe, label, needed in (
-            (cfg.superflip_exe, "Superflip", needs_superflip),
-            (cfg.edma_exe, "EDMA", needs_edma),
-        ):
-            if needed and resolve_executable_for_validation(exe) is None:
-                issues.append(f"The {label} executable was not found.")
-                details.append(f"{label} executable: {exe or '(not selected)'}")
+        needs_sharped = bool(cfg.run_sharped or is_recycling)
+        preflight_issues, preflight_details = self._run_workflow_preflight(
+            cfg, needs_superflip=needs_superflip, needs_edma=needs_edma,
+            needs_sharped=needs_sharped,
+        )
+        issues.extend(preflight_issues)
+        details.extend(preflight_details)
         return list(dict.fromkeys(issues)), sanitize_error_details("\n".join(details))
+
+    def _run_workflow_preflight(self, cfg: RunConfig, *, needs_superflip: bool,
+                                needs_edma: bool, needs_sharped: bool) -> Tuple[List[str], List[str]]:
+        """Check the external programs and services THIS workflow will use.
+
+        Runs through the one shared requirements module, so the full GUI and the
+        Jana2020 Wizard apply identical rules. Only what the configured workflow
+        actually needs is checked -- a workflow that never runs EDMA is never
+        asked for EDMA.
+
+        When a requirement is unsatisfied but a usable installation is found in
+        the standard Jana2020 location, the configured path is repaired in place
+        (config, the Advanced -> Setup widget and the saved settings) and the
+        workflow continues, rather than stopping to ask about something Phase
+        Studio can see for itself.
+        """
+        from phase_studio import requirements as reqs
+
+        issues: List[str] = []
+        details: List[str] = []
+        required = reqs.requirements_for_workflow(
+            needs_superflip=needs_superflip, needs_edma=needs_edma,
+            needs_sharped=needs_sharped,
+        )
+        if not required.kinds():
+            return issues, details
+
+        result = reqs.run_preflight(
+            required,
+            superflip_path=cfg.superflip_exe,
+            edma_path=cfg.edma_exe,
+            sharped_base_url=cfg.sharped_base_url,
+            sharped_token=cfg.sharped_api_token,
+            accept_suggestion=lambda _status: True,
+        )
+
+        for repaired in result.repaired:
+            key = ("superflip_exe" if repaired.kind is reqs.RequirementKind.SUPERFLIP
+                   else "edma_exe")
+            path_text = str(repaired.path)
+            widget = self.inputs.get(key)
+            if widget is not None:
+                self._set_widget_value_from_string(widget, path_text)
+            if key == "superflip_exe":
+                cfg.superflip_exe = path_text
+            else:
+                cfg.edma_exe = path_text
+            label = "Superflip" if key == "superflip_exe" else "EDMA"
+            self._append_execution_log(
+                f"{label} executable detected automatically: {path_text}",
+                level="DETAIL", subsystem="Setup",
+            )
+        if result.repaired:
+            try:
+                self.save_settings()
+            except Exception:
+                pass
+
+        for status in result.failures:
+            issues.append(status.message)
+            if status.kind is reqs.RequirementKind.SHARPED:
+                # Never echo the token, the server URL or the raw error text.
+                details.append(f"SharpED requirement: {status.state.value}")
+            else:
+                label = ("Superflip" if status.kind is reqs.RequirementKind.SUPERFLIP
+                         else "EDMA")
+                details.append(f"{label} executable: {status.detail or '(not selected)'}")
+        return issues, details
 
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
-            self._append_execution_log("Pipeline is already running.", level="WARNING", subsystem="Pipeline")
+            self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Pipeline")
             return
         try:
             cfg = self.get_config()
@@ -9088,33 +13153,37 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
         mode = normalize_input_source_mode(cfg.input_source_mode)
         if mode == INPUT_MODE_INFLIP:
-            self._append_execution_log("Input mode: Jana .inflip. Embedded HKL data will be used.")
+            self._append_execution_log("Input mode: Jana2020 .inflip. Embedded HKL data will be used.")
         elif mode == INPUT_MODE_INFLIP_OVERRIDES:
             if not self._path_value("hkl").strip():
-                self._append_execution_log("HKL override is empty; the Jana .inflip fbegin/endf block will be used.", level="DETAIL")
+                self._append_execution_log("HKL override is empty; the Jana2020 .inflip fbegin/endf block will be used.", level="DETAIL")
             if not self._path_value("reference_cif").strip():
                 self._append_execution_log("External reference file is empty; no external reference density or atom sites will be used.", level="DETAIL")
         self.stop_after_cycle.clear()
         self.stop_now.clear()
+        self._jana_auto_selector_shown = False
+        # Fresh workflow: stable compatibility notices are reported again.
+        self._workflow_log_once = set()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self._set_overall_progress_text("Running")
         self._cycle_progress_state = None
         self.current_cycle_progress.setRange(0, 0)
-        self.current_cycle_detail.setText("Preparing pipeline...")
+        self.current_cycle_detail.setText("Preparing workflow…")
         self.current_cycle_stage_counter.setText("Preparing")
         self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
-        self.run_btn.setText("Running...")
-        self._append_execution_log("Preparing validated pipeline inputs...", level="DETAIL")
+        self.run_btn.setText("Running…")
+        self.log_text.horizontalScrollBar().setValue(0)
+        self._append_execution_log("Preparing validated workflow inputs…", level="DETAIL")
         QApplication.processEvents()
         self.worker = threading.Thread(target=self.pipeline_worker, args=(cfg,), daemon=True)
         self.worker.start()
 
     def continue_run(self) -> None:
         if self.worker and self.worker.is_alive():
-            self._append_execution_log("Pipeline is already running.", level="WARNING", subsystem="Pipeline")
+            self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Pipeline")
             return
         state = self._resume_state
         if state is None:
@@ -9131,19 +13200,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.last_run_config = state.cfg
         self.stop_after_cycle.clear()
         self.stop_now.clear()
+        self._jana_auto_selector_shown = False
+        # Fresh workflow: stable compatibility notices are reported again.
+        self._workflow_log_once = set()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setValue(0)
         self._set_overall_progress_text("Running")
         self._cycle_progress_state = None
         self.current_cycle_progress.setRange(0, 0)
-        self.current_cycle_detail.setText("Resuming pipeline...")
+        self.current_cycle_detail.setText("Resuming workflow…")
         self.current_cycle_stage_counter.setText("Preparing")
         self._set_run_status("Running")
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
-        self.run_btn.setText("Running...")
+        self.run_btn.setText("Running…")
         self._append_execution_log(
-            f"Continuing pipeline from cycle {state.completed_cycles + 1} of {requested_cycles}, "
+            f"Continuing workflow from cycle {state.completed_cycles + 1} of {requested_cycles}, "
             "reusing the previous run's metadata, reflections and cycle feedback.",
             level="DETAIL",
         )
@@ -9157,7 +13229,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if resume_state is not None:
             try:
                 self.log(
-                    f"=== Pipeline resumed at cycle {resume_state.completed_cycles + 1} / {resume_state.cfg.cycles} ===",
+                    f"=== Pipeline resumed at cycle {resume_state.completed_cycles + 1} of {resume_state.cfg.cycles} ===",
                     level="STEP",
                 )
                 self.msg_queue.put(("progress_setup", resume_state.cfg.cycles))
@@ -9169,7 +13241,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             except Exception as exc:
                 self.msg_queue.put((
                     "error_report",
-                    build_error_report(exc, operation="Run pipeline", extra_details=traceback.format_exc()),
+                    build_error_report(exc, operation="Run workflow", extra_details=traceback.format_exc()),
                 ))
             return
         try:
@@ -9180,11 +13252,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"  Work directory: {cfg.work_dir}")
             if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
                 if cfg.jana_inflip is None:
-                    raise RuntimeError("Jana input mode selected, but no Jana .inflip file is configured.")
+                    raise RuntimeError("Jana input mode selected, but no Jana2020 .inflip file is configured.")
                 self.log(f"  Jana2020 .inflip: {cfg.jana_inflip}", level="DETAIL")
                 if mode == INPUT_MODE_INFLIP or not cfg.hkl.is_file():
                     cfg.hkl = extract_embedded_hkl_from_inflip(cfg.jana_inflip, cfg.work_dir)
-                    self.log("  HKL source: embedded fbegin/endf block exported from Jana .inflip", level="DETAIL")
+                    self.log("  HKL source: embedded fbegin/endf block exported from Jana2020 .inflip", level="DETAIL")
                 else:
                     self.log("  HKL source: external override", level="DETAIL")
 
@@ -9204,9 +13276,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.superflip_referencefile is not None:
                     self.log(f"  Reference: {cfg.superflip_referencefile}")
             self.log(f"  HKL: {cfg.hkl}")
-            configured_data_mode = resolve_reflection_data_mode_from_sources(
-                cfg.hkl, cfg.reflection_data_mode, cfg.jana_inflip
-            )
+            configured_data_mode = self._resolve_configured_data_mode(cfg)
             value_col, sigma_col, include_000 = reflection_columns_for_mode(configured_data_mode)
             refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
             refl = merge_duplicate_reflections(refl_raw)
@@ -9235,7 +13305,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if cfg.crystal_metadata.source_path is not None:
                 self.log(f"  Metadata file: {cfg.crystal_metadata.source_path}", level="DETAIL")
             self.log(f"  Cell: {ref_ctx.cell.a:.5f} {ref_ctx.cell.b:.5f} {ref_ctx.cell.c:.5f} {ref_ctx.cell.alpha:.3f} {ref_ctx.cell.beta:.3f} {ref_ctx.cell.gamma:.3f}")
-            self.log(f"  Space group: {ref_ctx.spacegroup_hm} (#{ref_ctx.spacegroup.number})")
+            self.log(f"  Space group: {compact_spacegroup_symbol(ref_ctx.spacegroup)} (#{ref_ctx.spacegroup.number})")
             self.log(f"  Composition: {ref_ctx.composition}")
             self.log(
                 f"  Atom sites: {atom_source.name if atom_source is not None else 'none'} · {len(ref_ctx.atoms)} atoms",
@@ -9263,7 +13333,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log("Workflow", level="STEP")
             self.log("  Stages: " + " → ".join(workflow), level="INFO")
             self.log(f"  Cycles: {cfg.cycles}", level="INFO")
-            self.log(f"  Next-cycle model: {modelfile_mode}", level="INFO")
+            self.log(f"  Next-cycle model: {modelfile_source_display_label(modelfile_mode)}", level="INFO")
             if use_xplor_modelfile:
                 self.log(
                     f"  XPLOR damping 1/x: {max(0.001, min(1.0, float(cfg.damping_factor))):g}",
@@ -9276,9 +13346,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"  Server: {cfg.sharped_base_url}")
             self.log(f"  Model: {cfg.sharped_model or 'default'}")
             self.log(f"  Elements: {sharped_elements}")
+            # Provenance: a finished run's log must always say which map value
+            # exponent produced it. Non-default values are reported at the
+            # normal tier; the default stays a detailed diagnostic so a default
+            # run's log reads exactly as it did before this setting existed.
+            sharped_exponent = normalize_map_value_exponent(cfg.sharped_map_value_exponent)
+            if sharped_exponent == 0.0:
+                self.log("  Map value scaling: disabled (exponent 0)")
+            elif map_value_scaling_is_identity(sharped_exponent):
+                self.log(f"  Map value exponent: {sharped_exponent:.3f} (map values unchanged)", level="DETAIL")
+            else:
+                self.log(f"  Map value exponent: {sharped_exponent:.3f}")
 
             self.log(f"EDMA plimit after Superflip: {cfg.plimit_superflip:g} sigma multiplier", level="DETAIL")
-            self.log(f"EDMA plimit after deblurring: {cfg.plimit_deblur:g} sigma multiplier", level="DETAIL")
+            self.log(f"EDMA plimit after SharpED: {cfg.plimit_deblur:g} sigma multiplier", level="DETAIL")
             self.log(f"EDMA maxima/fullcell/numberofatoms: {cfg.edma_maxima} / {cfg.edma_fullcell} / {cfg.edma_numberofatoms}", level="DETAIL")
             self.log(f"SharpED maximum upload size: {cfg.sharped_max_upload_mb:g} MB" if cfg.sharped_max_upload_mb > 0 else "SharpED maximum upload size: disabled", level="DETAIL")
             if use_xplor_modelfile:
@@ -9287,7 +13368,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     level="DETAIL",
                 )
             if use_superflip_xplor_modelfile:
-                self.log("Next-cycle XPLOR modelfile uses the raw Superflip map; SharpED deblurring is not required for cycling.", level="DETAIL")
+                self.log("Next-cycle XPLOR modelfile uses the Superflip map; SharpED is not required for cycling.", level="DETAIL")
             if use_cif_modelfile:
                 self.log("CIF modelfiles are written without an explicit CIF format keyword; Superflip infers CIF from the .cif extension.", level="DETAIL")
             self.log(f"Superflip perform: {cfg.perform_algorithm.upper()}")
@@ -9296,7 +13377,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"map={normalize_map_export_format(cfg.map_export_format)}, "
                 f"structure={normalize_structure_export_format(cfg.structure_export_format)}"
             )
-            self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, Superflip symmetry/deblurred={'yes' if cfg.symmetrize_deblurred_map else 'no'}, EDMA/deblurred={'yes' if cfg.run_edma_deblurred else 'no'}")
+            self.log(f"Optional functions: EDMA/Superflip={'yes' if cfg.run_edma_superflip else 'no'}, SharpED={'yes' if cfg.run_sharped else 'no'}, Superflip symmetry/SharpED={'yes' if cfg.symmetrize_deblurred_map else 'no'}, EDMA/SharpED={'yes' if cfg.run_edma_deblurred else 'no'}")
             if cfg.first_cycle_modelfile is not None:
                 self.log(f"First-cycle external modelfile: {cfg.first_cycle_modelfile}")
             explicit_superflip_referencefile = cfg.superflip_referencefile
@@ -9332,18 +13413,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log("Superflip referencefile keyword: no", level="DETAIL")
             self.log(f"Superflip bestdensities: {cfg.bestdensities_count} {'symmetry' if cfg.bestdensities_symmetry else cfg.bestdensities_metric}")
             self.log(f"Superflip polish: {'yes' if cfg.polish else 'no'}")
-            self.log(f"Superflip HKL data mode: {configured_data_mode}")
+            self.log(f"Superflip HKL data mode: {format_reflection_data_mode(configured_data_mode)}")
             if cfg.resolution_d_min > 0:
                 self.log(f"Superflip resolution cutoff: d >= {cfg.resolution_d_min:g} A")
-            if cfg.map_feedback_missing_from_cycle > 0 or cfg.map_feedback_intensity_from_cycle > 0:
-                self.log(
-                    "Map feedback: "
-                    f"missing_from_cycle={cfg.map_feedback_missing_from_cycle}, "
-                    f"missing_limit={cfg.map_feedback_missing_percent_limit:g}%, "
-                    f"intensity_from_cycle={cfg.map_feedback_intensity_from_cycle}, "
-                    f"intensity_damping={cfg.map_feedback_intensity_damping:g}, "
-                    f"intensity_max_value_sigma={cfg.map_feedback_intensity_max_i_over_sigma:g}"
-                )
+            # One concise section at workflow start, never repeated per cycle --
+            # canonical user-facing method names only, never internal RunConfig
+            # field names (see Basic -> Map feedback for the same labels).
+            map_feedback_lines: List[str] = []
+            if cfg.map_feedback_missing_enabled:
+                map_feedback_lines.append(f"  Missing-reflection completion · from cycle {cfg.map_feedback_missing_from_cycle}")
+            if cfg.map_feedback_intensity_enabled:
+                map_feedback_lines.append(f"  Intensity correction · from cycle {cfg.map_feedback_intensity_from_cycle}")
+            if cfg.redistribute_overlaps:
+                map_feedback_lines.append(f"  Powder overlap repartitioning · from cycle {cfg.powder_redistribution_from_cycle}")
+                map_feedback_lines.append(f"  Wavelength: {cfg.powder_wavelength:g} Å")
+                map_feedback_lines.append(f"  Separation factor: {cfg.powder_separation_factor:g}")
+                map_feedback_lines.append(f"  Map ratio mix: {cfg.powder_redistribution_mix:g}")
+            if map_feedback_lines:
+                self.log("[Map feedback]\n" + "\n".join(map_feedback_lines))
+            else:
+                self.log("[Map feedback] Disabled")
             self.msg_queue.put(("progress_setup", cfg.cycles))
             data_modes_needed = {configured_data_mode}
             observed_hkls: Dict[str, Path] = {}
@@ -9352,15 +13441,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 n_written = write_observed_reflections(observed_hkl, refl, cfg.i_over_sigma_min, data_mode=data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 observed_hkls[data_mode] = observed_hkl
                 self.log(f"Prepared HKL for {data_mode}: {observed_hkl} ({n_written} reflections)")
-            export_fmt = normalize_map_export_format(cfg.map_export_format)
-            if export_fmt == "hkl_phases":
-                standard_hkl = cfg.work_dir / "observed_unique_standardized_I_sigma_phase.hkl"
-                n_standard = write_standardized_hkl_with_phase(standard_hkl, refl, cfg.i_over_sigma_min, configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
-                self.log(f"Standardized HKL export: {standard_hkl} ({n_standard} reflections)")
-            elif export_fmt == "shelx_fcf":
-                standard_fcf = cfg.work_dir / "observed_unique.fcf"
-                n_standard = write_shelx_fcf(standard_fcf, refl, cfg.i_over_sigma_min, configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
-                self.log(f"ShelX FCF export: {standard_fcf} ({n_standard} reflections)")
+            omit_test_hkls: FrozenSet[Tuple[int, int, int]] = frozenset()
+            if cfg.compute_omit_maps and reconstruction_mode == "superflip":
+                omit_test_hkls = select_omit_test_set(refl, cfg.randomseed)
+                self.log(f"Omit maps: excluding {len(omit_test_hkls)}/{len(refl)} reflections (fixed for this run) for cross-validation.", level="DETAIL")
             state = PipelineState(
                 cfg=cfg,
                 ref_ctx=ref_ctx,
@@ -9376,6 +13460,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 exclude_labels=parse_atom_label_list(cfg.exclude_atoms),
                 progress_stages=cycle_progress_stages(cfg),
                 current_reflections=current_reflections,
+                omit_test_hkls=omit_test_hkls,
             )
             self._resume_state = state
             if reconstruction_mode == "superflip":
@@ -9387,7 +13472,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 "error_report",
                 build_error_report(
                     exc,
-                    operation="Run pipeline",
+                    operation="Run workflow",
                     extra_details=traceback.format_exc(),
                 ),
             ))
@@ -9407,9 +13492,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         exclude_labels = state.exclude_labels
         progress_stages = state.progress_stages
         all_results = state.all_results
+        # Some Superflip diagnostics (e.g. the normalize-keyword-unsupported
+        # notice) repeat byte-for-byte on every cycle since Superflip's input
+        # is regenerated each time; demote every repeat after the first to
+        # DETAIL for the whole run instead of showing it at full prominence
+        # once per cycle. Nothing is ever suppressed -- only the repeats.
+        seen_repeated_superflip_warnings: set = set()
+        superflip_log = make_run_scoped_dedup_log(
+            self.log,
+            seen_repeated_superflip_warnings,
+            ("Superflip normalize value", "  Ignored duplicate/managed Superflip keyword"),
+        )
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
             if self.stop_after_cycle.is_set():
-                self.msg_queue.put(("cancelled", state.completed_cycles))
+                # Graceful stop: the cycle above finished normally and its
+                # results are valid, which is NOT the same terminal state as
+                # an immediate interruption.
+                self.msg_queue.put(("stopped", state.completed_cycles))
                 return
             self._emit_cycle_progress(
                 cyc,
@@ -9419,7 +13518,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 detail="preparing model and reflections",
             )
             cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"=== Cycle {cyc} / {cfg.cycles} ===", level="STEP")
+            self.log(f"=== Cycle {cyc} of {cfg.cycles} ===", level="STEP")
             model_for_sf: Optional[Path] = None
             model_source = "none"
             model_metric = state.current_model_metric
@@ -9430,13 +13529,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif state.current_model is not None and use_xplor_modelfile:
                 model_source = modelfile_mode
                 model_for_sf = state.current_model
-                self.log(f"[Cycle model] Source: {modelfile_mode} from cycle {cyc - 1} · {model_for_sf}")
+                self.log(f"[Cycle {cyc}] Next-cycle model · {modelfile_source_display_label(modelfile_mode)} (from cycle {cyc - 1}) · {model_for_sf}")
                 self.log("  CIF-only exclude settings skipped for XPLOR modelfile.", level="DETAIL")
             elif state.current_model is not None and use_cif_modelfile:
                 model_source = "deblurred_edma_cif"
                 model_for_sf = cycle_dir / f"cycle_{cyc:03d}_modelfile_prepared.cif"
                 model_for_sf, removed, kept = write_filtered_cif(state.current_model, model_for_sf, exclude_labels)
-                self.log(f"[Cycle model] Prepared CIF model · {model_for_sf}")
+                self.log(f"[Cycle {cyc}] Next-cycle model · {modelfile_source_display_label('deblurred_edma_cif')} (from cycle {cyc - 1})")
+                self.log(f"[Cycle model] Prepared CIF model · {model_for_sf}", level="DETAIL")
                 self.log(f"  removed={removed}, kept={kept}", level="DETAIL")
                 self.log("  Superflip infers CIF from the .cif extension; no explicit format keyword is written.", level="DETAIL")
                 model_metric = nearest_metric_to_reference(model_for_sf, ref_ctx)
@@ -9471,6 +13571,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         f"finevoxel {sf_voxel}",
                     )
             effective_repeat = 1 if model_for_sf is not None else max(1, int(cfg.repeatmode))
+
+            def make_superflip_progress_relay(detail: str) -> Optional[Callable[[str], None]]:
+                # Live sub-progress is only meaningful when Superflip will
+                # actually attempt more than one repeat with THIS generated
+                # input (the effective, not just configured, repeatmode) --
+                # see SuperflipRepeatProgressParser for the parsed syntax.
+                if effective_repeat <= 1:
+                    return None
+                tracker = SuperflipRepeatProgressParser(effective_repeat)
+
+                def relay(line: str) -> None:
+                    progress = tracker.feed(line)
+                    if progress is not None:
+                        self._emit_cycle_progress(
+                            cyc,
+                            cfg.cycles,
+                            progress_stages,
+                            "Superflip",
+                            sub_index=progress.repeat,
+                            sub_total=progress.repeat_total,
+                            detail=detail,
+                            busy=True,
+                        )
+
+                relay.tracker = tracker  # type: ignore[attr-defined]
+                return relay
+
             if effective_repeat == 1:
                 self._emit_cycle_progress(
                     cyc,
@@ -9483,12 +13610,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     busy=True,
                 )
             else:
+                # effective_repeat (Superflip's own repeatmode setting) is
+                # internal/developer-oriented and stays out of the compact
+                # primary status line; it is already visible in the pipeline's
+                # own settings-summary log lines at cycle/run start.
                 self._emit_cycle_progress(
                     cyc,
                     cfg.cycles,
                     progress_stages,
                     "Superflip",
-                    detail=f"repeat mode {effective_repeat} · running",
+                    detail="running",
                     busy=True,
                 )
             # XPLOR is always requested (mandatory internal working map for EDMA/SharpED);
@@ -9496,10 +13627,38 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_map_format = normalize_map_export_format(cfg.map_export_format)
             sf_export_ccp4 = sf_map_format == "ccp4"
             sf_export_jana = sf_map_format == "jana"
-            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, self.log, self.stop_now)
+            sf_progress_relay = make_superflip_progress_relay("running")
+            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=sf_progress_relay)
+            if sf_progress_relay is not None and not sf_progress_relay.tracker.saw_progress:  # type: ignore[attr-defined]
+                self.log("[Superflip] Live repeat progress unavailable for this executable.", level="DETAIL")
             self.log(f"Superflip map: {sf_map}")
             if self.stop_now.is_set():
                 raise RuntimeError("Immediate stop requested.")
+            export_phased_reflections_from_map(
+                cfg.map_export_format, cycle_dir / sf_prefix, sf_map, state.current_reflections,
+                cfg.i_over_sigma_min, configured_data_mode, ref_ctx.cell, cfg.resolution_d_min, self.log,
+            )
+            omit_sf_map: Optional[Path] = None
+            omit_sf_correlation: Optional[float] = None
+            omit_sf_rfree: Optional[float] = None
+            if cfg.compute_omit_maps and state.omit_test_hkls:
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Superflip", detail="omit map · running", busy=True)
+                omit_reflections = [r for r in state.current_reflections if (int(r.h), int(r.k), int(r.l)) not in state.omit_test_hkls]
+                omit_hkl = cycle_dir / f"{sf_prefix}_omit_input.hkl"
+                write_observed_reflections(omit_hkl, omit_reflections, cfg.i_over_sigma_min, data_mode=configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
+                omit_prefix = f"{sf_prefix}_omit"
+                omit_progress_relay = make_superflip_progress_relay("omit map · running")
+                omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay)
+                self.log(f"Omit Superflip map ({len(state.omit_test_hkls)} reflections excluded): {omit_sf_map}")
+                omit_sf_correlation = xplor_map_correlation(sf_map, omit_sf_map)
+                if cfg.compute_omit_rfree:
+                    predictions = xplor_fft_predictions(omit_sf_map, list(state.omit_test_hkls))
+                    omit_sf_rfree = compute_rfree(state.current_reflections, state.omit_test_hkls, configured_data_mode, predictions)
+                self.log(
+                    f"[Omit] Superflip map correlation={('n/a' if omit_sf_correlation is None else f'{omit_sf_correlation:.4f}')}"
+                    f" · R_free={('n/a' if omit_sf_rfree is None else f'{omit_sf_rfree:.4f}')}",
+                    subsystem="Superflip",
+                )
             sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
             self._emit_cycle_progress(
                 cyc,
@@ -9531,6 +13690,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
+                    write_m40=cfg.jana_inflip is not None,
                 )
             else:
                 sf_edma_dir.mkdir(parents=True, exist_ok=True)
@@ -9539,6 +13699,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self.log("EDMA after Superflip disabled; empty placeholder CIF/XYZ/PDB written.")
             sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
             sf_metric_text = "n/a" if sf_metric is None else f"{float(sf_metric):.3f}"
+            sf_recall: Optional[float] = None
+            sf_precision: Optional[float] = None
+            sf_heavy_atoms: Optional[float] = None
+            if cfg.run_edma_superflip:
+                sf_recall_precision = atom_recall_precision(sf_edma_cif, ref_ctx, cfg.merge_distance)
+                if sf_recall_precision is not None:
+                    sf_recall, sf_precision = sf_recall_precision
+                else:
+                    sf_heavy_atoms = count_heavy_atoms(sf_edma_cif)
             self.log(
                 f"[EDMA] Completed · Superflip map · RMSD={sf_metric_text} Å\n"
                 f"  output: {sf_edma_cif}",
@@ -9572,14 +13741,41 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         detail=detail,
                         busy=detail != "completed",
                     ),
+                    map_value_exponent=cfg.sharped_map_value_exponent,
                 )
             else:
                 shutil.copy2(sf_map, deblur_map)
                 if use_superflip_xplor_modelfile:
-                    self.log("SharpED deblurring skipped; raw Superflip XPLOR is used for the next-cycle modelfile.")
+                    self.log("SharpED skipped; the Superflip map (XPLOR) is used for the next-cycle modelfile.")
                 else:
-                    self.log("SharpED disabled; deblurred map is a copy of the Superflip map.")
-            self.log(f"Deblurred map: {deblur_map}")
+                    self.log(f"SharpED disabled; the {result_map_label('deblurred')} is a copy of the Superflip map.")
+            self.log(f"{result_map_label('deblurred')}: {deblur_map}")
+            omit_deblur_correlation: Optional[float] = None
+            omit_deblur_rfree: Optional[float] = None
+            if cfg.compute_omit_maps and state.omit_test_hkls and omit_sf_map is not None and cfg.run_sharped and not use_superflip_xplor_modelfile:
+                if self.stop_now.is_set():
+                    raise RuntimeError("Immediate stop requested.")
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="omit map · preparing upload", busy=True)
+                omit_deblur_map = cycle_dir / f"{sf_prefix}_omit_deblurred.xplor"
+                run_sharped_deblur(
+                    omit_sf_map, omit_deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model,
+                    sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds,
+                    cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log, self.stop_now,
+                    progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
+                        cycle, cfg.cycles, progress_stages, "SharpED", detail=f"omit map · {detail}", busy=detail != "completed",
+                    ),
+                    map_value_exponent=cfg.sharped_map_value_exponent,
+                )
+                self.log(f"Omit {result_map_label('deblurred')}: {omit_deblur_map}")
+                omit_deblur_correlation = xplor_map_correlation(deblur_map, omit_deblur_map)
+                if cfg.compute_omit_rfree:
+                    predictions = xplor_fft_predictions(omit_deblur_map, list(state.omit_test_hkls))
+                    omit_deblur_rfree = compute_rfree(state.current_reflections, state.omit_test_hkls, configured_data_mode, predictions)
+                self.log(
+                    f"[Omit] {result_map_label('deblurred')} correlation={('n/a' if omit_deblur_correlation is None else f'{omit_deblur_correlation:.4f}')}"
+                    f" · R_free={('n/a' if omit_deblur_rfree is None else f'{omit_deblur_rfree:.4f}')}",
+                    subsystem="SharpED",
+                )
             if cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
@@ -9592,7 +13788,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     busy=True,
                 )
                 sym_prefix = f"cycle_{cyc:03d}_deblurred_symmetrized"
-                self.log("  Superflip symmetry uses the deblurred XPLOR map as both modelfile and referencefile.")
+                self.log(f"  Superflip symmetry uses the {result_map_label('deblurred').lower()} XPLOR map as both modelfile and referencefile.")
                 deblur_map = run_superflip_symmetrize_map(
                     cycle_dir=cycle_dir,
                     prefix=sym_prefix,
@@ -9609,27 +13805,37 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             deblur_prefix = f"cycle_{cyc:03d}_deblurred"
             deblur_edma_dir = cycle_dir / "edma_deblurred"
             if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
-                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · deblurred map", busy=True)
+                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, f"EDMA · {result_map_label('deblurred')}", busy=True)
                 deblur_edma_cif = run_edma_on_xplor(
                     deblur_map, deblur_edma_dir, deblur_prefix, ref_ctx, cfg.plimit_deblur,
                     cfg.merge_distance, cfg.edma_exe, self.log,
                     self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
+                    write_m40=cfg.jana_inflip is not None,
                 )
             else:
                 deblur_edma_dir.mkdir(parents=True, exist_ok=True)
                 deblur_edma_cif = deblur_edma_dir / f"{deblur_prefix}_edma.cif"
                 write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
                 if use_superflip_xplor_modelfile:
-                    self.log("EDMA after deblurred map skipped for raw Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
+                    self.log(f"EDMA after {result_map_label('deblurred').lower()} skipped for Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
                 else:
-                    self.log("EDMA after deblurred map disabled; empty placeholder CIF/XYZ/PDB written.")
+                    self.log(f"EDMA after {result_map_label('deblurred').lower()} disabled; empty placeholder CIF/XYZ/PDB written.")
             deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
             deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
+            deblur_recall: Optional[float] = None
+            deblur_precision: Optional[float] = None
+            deblur_heavy_atoms: Optional[float] = None
+            if cfg.run_edma_deblurred:
+                deblur_recall_precision = atom_recall_precision(deblur_edma_cif, ref_ctx, cfg.merge_distance)
+                if deblur_recall_precision is not None:
+                    deblur_recall, deblur_precision = deblur_recall_precision
+                else:
+                    deblur_heavy_atoms = count_heavy_atoms(deblur_edma_cif)
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
             self.log(
-                f"[EDMA] Completed · Deblurred map · RMSD={deblur_metric_text} Å\n"
+                f"[EDMA] Completed · {result_map_label('deblurred')} · RMSD={deblur_metric_text} Å\n"
                 f"  output: {deblur_edma_cif}",
                 subsystem="EDMA",
             )
@@ -9654,27 +13860,57 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 superflip_fom=sf_log_metrics.fom,
                 superflip_success_rate=sf_log_metrics.success_rate,
                 superflip_mean_cycles=sf_log_metrics.mean_cycles,
+                omit_superflip_correlation=omit_sf_correlation,
+                omit_superflip_rfree=omit_sf_rfree,
+                omit_deblur_correlation=omit_deblur_correlation,
+                omit_deblur_rfree=omit_deblur_rfree,
+                superflip_recall=sf_recall,
+                superflip_precision=sf_precision,
+                superflip_heavy_atom_count=sf_heavy_atoms,
+                deblur_recall=deblur_recall,
+                deblur_precision=deblur_precision,
+                deblur_heavy_atom_count=deblur_heavy_atoms,
+                powder_repartition_avg_change_percent=state.pending_powder_repartition_change_percent,
+                intensity_correction_avg_change_percent=state.pending_intensity_correction_change_percent,
             )
+            state.pending_powder_repartition_change_percent = None
+            state.pending_intensity_correction_change_percent = None
             all_results.append(result)
             write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
             self.msg_queue.put(("result", result))
             if cyc < cfg.cycles:
-                add_missing = cfg.map_feedback_missing_from_cycle > 0 and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
-                correct_intensities = cfg.map_feedback_intensity_from_cycle > 0 and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
-                if add_missing or correct_intensities:
-                    state.current_reflections = apply_map_feedback_to_reflections(
-                        state.current_reflections,
-                        configured_data_mode,
-                        deblur_map,
-                        ref_ctx.cell,
-                        cfg.resolution_d_min,
-                        add_missing,
-                        cfg.map_feedback_missing_percent_limit,
-                        correct_intensities,
-                        cfg.map_feedback_intensity_damping,
-                        cfg.map_feedback_intensity_max_i_over_sigma,
-                        self.log,
-                    )
+                add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
+                correct_intensities = cfg.map_feedback_intensity_enabled and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
+                redistribute = cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength > 0
+                if cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength <= 0:
+                    self.log("Overlap repartitioning enabled but Wavelength is 0; skipping for this cycle.", level="WARNING")
+                if add_missing or correct_intensities or redistribute:
+                    if add_missing or correct_intensities:
+                        state.current_reflections, state.pending_intensity_correction_change_percent = apply_map_feedback_to_reflections(
+                            state.current_reflections,
+                            configured_data_mode,
+                            deblur_map,
+                            ref_ctx.cell,
+                            cfg.resolution_d_min,
+                            add_missing,
+                            cfg.map_feedback_missing_percent_limit,
+                            correct_intensities,
+                            cfg.map_feedback_intensity_damping,
+                            cfg.map_feedback_intensity_max_i_over_sigma,
+                            self.log,
+                        )
+                    if redistribute:
+                        state.current_reflections, state.pending_powder_repartition_change_percent = redistribute_overlap_reflections(
+                            state.current_reflections,
+                            configured_data_mode,
+                            deblur_map,
+                            ref_ctx.cell,
+                            cfg.powder_wavelength,
+                            cfg.powder_separation_factor,
+                            cfg.powder_redistribution_mix,
+                            self.log,
+                            log_path=cycle_dir / f"cycle_{cyc:03d}_powder_repartitioning.log",
+                        )
                     feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
                     n_feedback = write_observed_reflections(
                         feedback_hkl,
@@ -9727,7 +13963,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 complete=True,
             )
             if self.stop_after_cycle.is_set():
-                self.msg_queue.put(("cancelled", state.completed_cycles))
+                # Graceful stop: the cycle above finished normally and its
+                # results are valid, which is NOT the same terminal state as
+                # an immediate interruption.
+                self.msg_queue.put(("stopped", state.completed_cycles))
                 return
         self.msg_queue.put(("done", state.completed_cycles))
 
@@ -9746,11 +13985,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         progress_stages = ["Preparing cycle", "Superflip", "SharpED", "Phase calculation", "Finalizing cycle"]
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
             if self.stop_after_cycle.is_set():
-                self.msg_queue.put(("cancelled", state.completed_cycles))
+                # Graceful stop: the cycle above finished normally and its
+                # results are valid, which is NOT the same terminal state as
+                # an immediate interruption.
+                self.msg_queue.put(("stopped", state.completed_cycles))
                 return
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Preparing cycle", detail="preparing input map")
             cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"=== Cycle {cyc} / {cfg.cycles} (SharpED phase recycling) ===", level="STEP")
+            self.log(f"=== Cycle {cyc} of {cfg.cycles} (SharpED phase recycling) ===", level="STEP")
 
             sf_log_metrics = SuperflipLogMetrics()
             if state.recycle_map is None:
@@ -9781,6 +14023,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log(f"[Cycle 1] Superflip map: {input_map}")
                     if self.stop_now.is_set():
                         raise RuntimeError("Immediate stop requested.")
+                    export_phased_reflections_from_map(
+                        cfg.map_export_format, cycle_dir / sf_prefix, input_map, reflections,
+                        cfg.i_over_sigma_min, configured_data_mode, ref_ctx.cell, cfg.resolution_d_min, self.log,
+                    )
                     sf_log_metrics = parse_superflip_cycle_metrics(cycle_dir, sf_prefix)
             else:
                 input_map = state.recycle_map
@@ -9796,8 +14042,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
                     cycle, cfg.cycles, progress_stages, "SharpED", detail=detail, busy=detail != "completed",
                 ),
+                map_value_exponent=cfg.sharped_map_value_exponent,
             )
-            self.log(f"Deblurred map: {deblur_map}")
+            self.log(f"{result_map_label('deblurred')}: {deblur_map}")
             if self.stop_now.is_set():
                 raise RuntimeError("Immediate stop requested.")
 
@@ -9822,6 +14069,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
+                    write_m40=cfg.jana_inflip is not None,
                 )
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx)
                 self.log(f"[EDMA] Completed · Final map · output: {deblur_edma_cif}", subsystem="EDMA")
@@ -9859,7 +14107,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.msg_queue.put(("progress", state.completed_cycles))
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="completed", complete=True)
             if self.stop_after_cycle.is_set():
-                self.msg_queue.put(("cancelled", state.completed_cycles))
+                # Graceful stop: the cycle above finished normally and its
+                # results are valid, which is NOT the same terminal state as
+                # an immediate interruption.
+                self.msg_queue.put(("stopped", state.completed_cycles))
                 return
         self.msg_queue.put(("done", state.completed_cycles))
 
@@ -9959,6 +14210,7 @@ def initialize_main_window(
 
 def main() -> None:
     app = QApplication(sys.argv)
+    apply_phase_studio_app_icon(app)
     apply_phase_studio_style(app)
     splash = create_startup_splash()
     splash.show()

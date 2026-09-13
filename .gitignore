@@ -7,6 +7,7 @@ documentation/
 examples/
 
 .venv/
+.venv-build/
 venv/
 env/
 
@@ -33,3 +34,15 @@ metrics.csv
 *_phase_studio_cycle_*.sflog
 *_embedded_reflections.hkl
 *_embedded_reference.cif
+
+# Store/MSIX packaging secrets and real identity -- never commit these.
+packaging/msix/store_identity.json
+*.pfx
+*.p12
+*.msix
+*.msixbundle
+
+# Store visual assets are generated (reproducibly, from the app's own vector
+# logo) by packaging/generate_store_assets.py, not hand-authored -- keep the
+# generator, not its regenerable binary output. See packaging/msix/Assets/README.md.
+packaging/msix/Assets/*.png

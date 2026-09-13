@@ -1,6 +1,6 @@
 # Phase Studio User Manual
 
-**Version 1.0.6**
+**Version 1.0.8**
 
 ## 1. Introduction
 
@@ -81,16 +81,16 @@ The left side contains:
   - Input
   - Workflow
   - Output
+  - Map feedback
   - Help
 - **Advanced**
   - Setup
   - Superflip
   - EDMA
   - SharpED
-  - Map feedback
   - Help
 
-Both **Help** tabs are self-contained in-app reference material: Basic → Help covers the Basic tabs (getting-started guide, Input/Workflow/Output field reference, About); Advanced → Help covers the Advanced tabs (Setup/Superflip/EDMA/SharpED/Map feedback field reference, plus the raw Superflip keyword reference). Each has its own CONTENTS navigation row and does not duplicate the other's sections.
+Both **Help** tabs are self-contained in-app reference material: Basic → Help covers the Basic tabs (getting-started guide, Input/Workflow/Output/Map feedback field reference, About); Advanced → Help covers the Advanced tabs (Setup/Superflip/EDMA/SharpED field reference, plus the raw Superflip keyword reference). Each has its own CONTENTS navigation row and does not duplicate the other's sections.
 
 ### 3.2 Run dashboard
 
@@ -251,13 +251,27 @@ The **Resolution Bins** table provides shell-wise statistics.
 
 The dialog can also provide copy/export actions when available in the current build.
 
+### 5.3 FWHM-format data
+
+**HKL format** (Basic → Input) includes two additional modes, `hkl I fwhm` and `hkl F fwhm`, for reflection data whose second column is a peak-shape full width at half maximum — for example intensities extracted from a Le Bail powder-pattern fit — rather than a genuine measurement uncertainty. Selecting `set from inflip` also recognizes a Jana `.inflip` `dataformat ... fwhm` line automatically.
+
+Because FWHM is not comparable in scale or meaning to σ, an `I/FWHM` ratio is not a signal-to-noise ratio. When FWHM data is detected:
+
+- Validate HKL and Analyze completeness relabel every σ-based column and statistic (`sigma(Iobs)`/`sigma(Fobs)` becomes `FWHM(Iobs)`/`FWHM(Fobs)`, `I/σ(I)` becomes `I/FWHM`), and the "Derived I/σ" conversion column (which applies an F→I error-propagation factor that assumes a genuine σ) is left blank.
+- The `I/σ(I) = 3` significance threshold and the resolution where mean `I/σ(I)` falls below it are not computed or shown, since that convention does not apply to FWHM data; the completeness dialog displays an explanatory note instead.
+- The Superflip input still receives the correct `dataformat ... fwhm` keyword (not `dummy` or a plain `sigma` assumption), so Superflip itself is told the true nature of the column.
+
 ---
 
 ## 6. Reconstruction workflow
 
 ### 6.1 Starting preset
 
-**Starting preset** applies a bundle of starting values in one step; every value stays individually editable afterward, and re-selecting a preset re-applies its values. **Recommended** is the default: a general-purpose baseline (cycles 5, Phasing method Superflip, next-cycle model deblurred_xplor, XPLOR damping 0.3, all optional processing enabled except symmetry averaging, SharpED model koala 2.0) that matches the built-in defaults, so a fresh install and a fresh selection of **Recommended** produce the same configuration. The other presets (MOF atomic resolution, MOF medium resolution, small molecule, inorganic) tune a handful of settings for a specific sample type. **custom** applies nothing and is only a placeholder for "I've configured this by hand" — selecting it does not change or reset any current value.
+**Starting preset** applies a bundle of starting values in one step; every value stays individually editable afterward, and re-selecting a preset re-applies its values. **Recommended** is the default: a general-purpose baseline (cycles 5, Phasing method Superflip, next-cycle model deblurred_xplor, XPLOR damping 0.3, all optional processing enabled except symmetry averaging, SharpED model default) that matches the built-in defaults, so a fresh install and a fresh selection of **Recommended** produce the same configuration. The other presets (MOF atomic resolution, MOF medium resolution, small molecule, inorganic) tune a handful of settings for a specific sample type. **custom** applies nothing and is only a placeholder for "I've configured this by hand" — selecting it does not change or reset any current value.
+
+The SharpED model selector and Jana2020 Wizard use the current server catalog. **default** remains a selection preference and resolves to the live server default immediately before upload. Refresh replaces the catalog and its default together; removed selections return to **default**. If discovery fails, the last successful catalog remains visibly marked as cached. A default-model job requires a successful fresh lookup, while an explicit model identifier is sent unchanged.
+
+The current service is `https://sharped.fzu.cz`; saved URLs for the former bundled `https://jana.fzu.cz` host migrate to it. Use an API token issued by the current service: tokens accepted by the former host may be rejected by the current host. Custom server URLs remain supported. See [model discovery diagnostics](docs/SHARPED_MODEL_DISCOVERY.md).
 
 Treat presets as starting points rather than universal scientific recommendations.
 
@@ -321,7 +335,13 @@ The Workflow page groups these under two headings. Under "Superflip cycle" (used
 - EDMA after the raw Superflip map,
 - SharpED deblurring,
 - Superflip symmetry averaging of the processed map (beta),
-- EDMA after the processed map.
+- EDMA after the processed map,
+- compute omit maps (exclude 5% of reflections),
+- compute R_free from the excluded 5% (requires the omit-maps option above).
+
+Enabling omit maps additionally runs Superflip (and, if enabled, SharpED) each cycle on a fixed random 5% of reflections excluded from the input, purely for cross-validation; roughly doubles Superflip/SharpED time per cycle. See [11.6 Superflip Convergence](#116-superflip-convergence) for where the results are displayed.
+
+The three map-feedback mechanisms (missing-reflection completion, intensity correction, powder overlap repartitioning) each have their own enable checkbox and settings on [10. Map feedback](#10-map-feedback) (Basic → Map feedback), not here.
 
 Under "Phase-recycling methods" (used by the two beta Phasing methods):
 
@@ -371,7 +391,7 @@ These settings affect the Superflip input generated by Phase Studio and should b
 
 ### 7.4 Output
 
-Output format is configured on **Basic → Output**, not on this page: a single **Map format** choice (XPLOR, XPLOR + CCP4, XPLOR + Jana m80/m81, HKL reflections with phases, or ShelX (fcf)) and a single **Structure format** choice for the EDMA-exported structure (CIF, CIF + XYZ, or CIF + PDB). The last two Map format options save the observed reflections instead of an extra density map.
+Output format is configured on **Basic → Output**, not on this page: a single **Map format** choice (XPLOR, XPLOR + CCP4, XPLOR + Jana m80/m81, HKL reflections with phases, or ShelX (fcf)) and a single **Structure format** choice for the EDMA-exported structure (CIF, CIF + XYZ, or CIF + PDB). The last two Map format options save, for each cycle's Superflip map, the observed |Fobs|/intensity alongside phases (and, for ShelX, calculated F²) read by FFT from that map, instead of an extra density map.
 
 XPLOR and CIF are always produced internally regardless of these choices, because SharpED, EDMA and later-cycle modelfiles depend on them; the Map/Structure format choice only adds one extra saved format on top.
 
@@ -421,7 +441,7 @@ These settings affect which EDMA maxima are exported.
 
 ## 9. SharpED configuration
 
-The SharpED model selector is on the **Basic → Workflow** page. Server connection lives on **Advanced → Setup**; elements, output resolution and transfer/network settings live on **Advanced → SharpED**.
+The SharpED model selector is on the **Basic → Workflow** page. Server connection lives on **Advanced → Setup**; elements, output resolution, map value exponent and transfer/network settings live on **Advanced → SharpED**.
 
 ### 9.1 Server connection
 
@@ -461,7 +481,33 @@ This value is sent to the SharpED server as the output-map sampling request.
 
 The manual intentionally does not assign physical units beyond what is established by the current application/server contract.
 
-### 9.5 Transfer and network
+### 9.5 Map value exponent
+
+**Map value exponent** *a* (default `1.000`, range `0.0`–`10.0`) applies a reversible signed power transform to the voxel values of the map uploaded to SharpED, and the exact inverse transform to the map SharpED returns:
+
+```text
+forward:  y = sign(x) * |x|^a
+inverse:  x = sign(y) * |y|^(1/a)
+```
+
+The transform is signed because density maps legitimately contain negative voxel values, for which a plain `x^a` is not real-valued for a non-integer `a`.
+
+- `a < 1` compresses the dynamic range of the absolute map values.
+- `a = 1` (the default) leaves the map unchanged; the workflow is bit-for-bit the pre-existing one, and no power operation is evaluated at all.
+- `a > 1` expands the dynamic range of the absolute map values.
+- `a = 0` disables the transform. `x^0` discards the original magnitude and cannot be inverted, so this value is treated as a bypass rather than as a transform.
+
+Zero voxels stay exactly zero for every exponent, and negative voxels stay negative.
+
+Only voxel values are affected. The voxel grid, origin, cell, symmetry, map dimensions, map format, metadata and the SharpED request parameters are all unchanged. The inverse transform is applied to the map the server actually returned, before EDMA, map symmetrization, structure extraction, metrics, phase recycling, visualization, export and the Jana2020 hand-off see it — everything downstream works in the original map-value domain. No normalization, shifting, clipping or rescaling is added.
+
+The configured value is recorded once per run in the execution log (as a detailed diagnostic when it is left at the default), so a completed calculation always shows which exponent produced it.
+
+This is an experimental preprocessing option. Phase Studio makes no claim that any particular exponent improves crystallographic results.
+
+The simplified Jana2020 Wizard does not expose this setting; a Wizard run uses whatever value is stored in the normal Phase Studio configuration, which is `1.000` unless it has been changed on **Advanced → SharpED**.
+
+### 9.6 Transfer and network
 
 Current controls include:
 
@@ -476,30 +522,48 @@ A maximum-polls value of `-1` represents no fixed polling limit where supported 
 
 ## 10. Map feedback
 
-The **Advanced → Map feedback** page controls optional feedback from a completed map into later cycles.
+The **Basic → Map feedback** page controls optional feedback from a completed map into later cycles.
 
-Both mechanisms rewrite the observed HKL data used by subsequent cycles, not just the model; the page carries a warning to this effect.
+All three mechanisms rewrite the observed HKL data used by subsequent cycles, not just the model; the page carries a warning to this effect. Each mechanism has its own **Enable** checkbox at the top of its group; unchecking it grays out (disables) the rest of that group's controls and skips the mechanism entirely, regardless of what its other fields are set to.
+
+Each group's **Start after cycle** control ranges from `1` to the current **Cycles** value (Basic → Workflow) and its maximum tracks Cycles automatically — lowering Cycles below a group's current start cycle clamps it down.
 
 ### 10.1 Missing-reflection completion
 
 Controls include:
 
-- start-after-cycle threshold,
+- enable checkbox,
+- start-after-cycle threshold (1 to Cycles),
 - maximum percentage of added reflections.
-
-A start cycle of `0` disables the operation where this remains the current GUI semantics.
 
 ### 10.2 Intensity correction
 
 Controls include:
 
-- start-after-cycle threshold,
+- enable checkbox,
+- start-after-cycle threshold (1 to Cycles),
 - damping,
 - value/σ limit.
 
 A damping value of `0` retains observed intensities, while `1` corresponds to full replacement by the scaled map-derived value according to the implemented workflow.
 
 A value/σ threshold of `0` applies the correction to all non-zero reflections where this is the current implementation.
+
+### 10.3 Powder overlap repartitioning
+
+Enabled via its own checkbox on this page; applies only to reflections carrying an FWHM value (the `hkl I fwhm`/`hkl F fwhm` HKL formats).
+
+Each cycle from its start-after-cycle threshold onward, reflections whose Bragg peaks overlap — `delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2`, Superflip's own `fwhmseparation` convention — are grouped, and their combined observed intensity is redistributed between them using intensities calculated by FFT from that cycle's **processed map** (i.e. the SharpED-deblurred map when **Run SharpED deblurring** is enabled, otherwise a plain copy of the raw Superflip map — the same map used by intensity correction and missing-reflection completion). The group total is always conserved.
+
+Controls include:
+
+- enable checkbox,
+- start-after-cycle threshold (1 to Cycles),
+- **Wavelength (Å)** — required to compute 2theta. If left at `0`, it is auto-detected first from the loaded `.inflip` file's `lambda`/`wavelength` line, then from the reference file's `_diffrn_radiation_wavelength` CIF tag; enter it manually if neither source has it. A manually entered nonzero value always takes priority over auto-detection.
+- **Separation factor** — the multiplier in the overlap criterion above (default `0.2`).
+- **Map ratio mix** — `0` keeps each reflection's observed share of its group; `1` (default) replaces it entirely with the map-derived share. A group where the map has no usable signal for any member falls back to the observed split unchanged.
+
+Each time repartitioning runs, it writes `cycle_NNN_powder_repartitioning.log` in that cycle's working directory: how many overlap groups were considered, their average size, the average per-group intensity change, and the observed ("before") vs. redistributed ("after") intensity for every reflection in the 3 groups with the largest d-spacing (lowest 2theta). The average per-group intensity change is also plotted on the **Powder repartitioning** convergence tab — see [11.6 Superflip Convergence](#116-superflip-convergence).
 
 ---
 
@@ -538,15 +602,15 @@ Phase Studio does not need to fabricate time-based percentages when no reliable 
 
 ### 11.6 Superflip Convergence
 
-The convergence panel can display metrics such as:
+The convergence panel has five tabs, each scaled and colored independently:
 
-- R,
-- Peaks,
-- Symmetry,
-- Reference match,
-- FOM,
-- Superflip RMSD,
-- deblurred-map RMSD.
+- **Superflip** — metrics tied to the raw Superflip map. With a reference structure: Reference match, Superflip RMSD, Recall and Precision (heavy, i.e. non-H/He, atoms matched to the reference within EDMA's **Merge distance**; recall = fraction of reference atoms found, precision = fraction of found atoms that are real). Without a reference: only **Heavy atoms found**, a plain count of non-H/He atoms in the EDMA output, as a fallback progress indicator. (Superflip's own internal R/Peaks/FOM/Symmetry indicators were removed from this graph: cycle 1 normally runs ab initio while cycle 2 onward is seeded by the selected next-cycle model, so they are not a like-for-like series across that transition, and `bestdensities`/`repeatmode` selects the best of several stochastic attempts each cycle, adding further cycle-to-cycle fluctuation unrelated to genuine quality change. They remain in `metrics.csv` and the execution log.)
+- **SharpED** (formerly labeled "Deblurred") — the same reference-dependent set (SharpED RMSD, Recall, Precision) or reference-free fallback (Heavy atoms found) for the SharpED-processed map, plus Map correlation (SharpED phase-recycling methods only, correlating each cycle's recomposed map with the previous cycle's — always empty for the standard Superflip phasing method).
+- **Superflip (omit+rfree)** — only populated when **Compute omit maps** is enabled: Omit map correlation (the raw Superflip map compared with the same cycle's omit map) and, if **Compute R_free from excluded 5%** is also enabled, R_free for the raw Superflip map. Needs no reference structure.
+- **SharpED (omit+rfree)** — the same two metrics for the SharpED-processed map and its omit-map counterpart. Needs no reference structure.
+- **Powder repartitioning** — only populated when [10.3 Powder overlap repartitioning](#103-powder-overlap-repartitioning) is enabled: the average, across overlap groups, of each group's mean member-wise intensity change caused by that repartitioning run (lower is better — it should shrink toward 0% as the map increasingly agrees with the observed data). Since repartitioning happens between cycles, each cycle's point reflects the repartitioning that fed its input, so it lags one cycle behind the repartitioning run itself (and the very first repartitioned cycle appears on the *next* cycle's point). Needs no reference structure.
+
+Every series is normalized per tab to a 0 (worst) to 1 (best) scale for comparison; the underlying values are in `metrics.csv`.
 
 Unavailable series can be omitted in partial or cancelled runs.
 
@@ -558,7 +622,9 @@ The current structure panel compares:
 - Superflip,
 - SharpED.
 
-Loaded structures use synchronized rotation.
+All three panels share one camera and one zoom: dragging with the **left** button rotates, with the **right** button zooms, and with the **middle** button pans — every gesture is applied to all loaded panels at once, so the structures stay directly comparable. A panel with no loaded structure is skipped and cannot drive the shared view.
+
+The shared view is kept when the panels are redrawn (for example when a new cycle finishes), and is reset to the full unit cell when the cell geometry itself changes.
 
 Hydrogens are hidden in the preview when this is the active visualization policy.
 

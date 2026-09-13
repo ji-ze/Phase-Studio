@@ -7,6 +7,23 @@ CONTROL_ARROW_HEIGHT = 4.0
 CONTROL_ARROW_STROKE_WIDTH = 1.5
 
 
+# --- Shared visual constants -------------------------------------------------
+# One small, named set of spacing levels for the Jana2020 Wizard, so its page
+# code asks for a level instead of carrying unrelated pixel values. The main
+# Phase Studio GUI keeps its own established rhythm; only the Wizard's section
+# padding is tightened (QGroupBox#wizardSection in the stylesheet), because the
+# Wizard stacks several configuration sections in one screen-safe window where
+# the main GUI has a whole scrollable panel per page.
+PHASE_STUDIO_SPACING = {
+    "page_margin": 14,
+    "section_gap": 8,
+    "heading_gap": 6,
+    "row_gap": 6,
+    "inline_gap": 8,
+    "control_height": 26,
+    "numeric_editor_width": 230,
+}
+
 _SHARPED_QSS = """
 QWidget {
     background-color: #ffffff;
@@ -26,6 +43,15 @@ QGroupBox {
     margin-top: 1.25em;
     padding: 12px 8px 8px 8px;
     background-color: #ffffff;
+}
+QGroupBox#wizardSection {
+    /* The Wizard stacks several configuration sections inside one
+       screen-safe window, so it uses a tighter vertical rhythm than the main
+       GUI's scrollable settings panels. Same border, title and colours --
+       only the padding differs, which is what keeps Map feedback on one
+       screen at 1080p instead of scrolling. */
+    margin-top: 1.05em;
+    padding: 8px 8px 6px 8px;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
@@ -179,12 +205,18 @@ QPushButton:disabled {
 }
 QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
 QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
-    color: #8794ad;
+    /* A disabled control must still be READABLE: the Map feedback page shows
+       real configured values ("1", "0.000") in controls that are disabled
+       until their feature is switched on, and at the previous #8794ad they
+       washed out against the light field (~2.9:1). This muted navy reaches
+       ~4.9:1 on the same background while staying clearly lighter than the
+       enabled #001170, so the control still reads as disabled. */
+    color: #5a6b8c;
     background-color: #f1f4f8;
     border-bottom-color: #cbd7ea;
 }
 QLabel:disabled, QCheckBox:disabled {
-    color: #8794ad;
+    color: #5a6b8c;
 }
 QLineEdit[configurationLocked="true"]:disabled,
 QTextEdit[configurationLocked="true"]:disabled,
@@ -192,13 +224,18 @@ QPlainTextEdit[configurationLocked="true"]:disabled,
 QSpinBox[configurationLocked="true"]:disabled,
 QDoubleSpinBox[configurationLocked="true"]:disabled,
 QComboBox[configurationLocked="true"]:disabled {
-    color: #52658b;
+    /* A locked-during-RUNNING value must stay comfortably readable -- this
+       is the configuration actively being used, not a genuinely irrelevant
+       field -- while remaining clearly lower-contrast than an enabled
+       control. Medium-muted navy rather than the near-invisible gray a
+       plain :disabled state would give it. */
+    color: #3d4d73;
     background-color: #edf2f8;
     border-bottom-color: #aebdd2;
 }
 QLabel[configurationLocked="true"]:disabled,
 QCheckBox[configurationLocked="true"]:disabled {
-    color: #7183a6;
+    color: #4f5f87;
 }
 QSpinBox:disabled::up-button, QSpinBox:disabled::down-button,
 QDoubleSpinBox:disabled::up-button, QDoubleSpinBox:disabled::down-button,
@@ -251,6 +288,9 @@ QGroupBox#guidedSettingsGroup {
     border-top: 1px solid #dce5f2;
     margin-top: 0;
     padding: 6px 8px 6px 8px;
+}
+QGroupBox#settingsGroup[tightTop="true"] {
+    margin-top: 0.6em;
 }
 QHeaderView::section {
     background-color: #f2f4f9;
@@ -384,6 +424,13 @@ QLabel#statusBadge[runState="complete"], QLabel#statusBadge[runState="transferre
     color: #2264b8;
     background-color: #f2f4f9;
     border: 2px solid #2264b8;
+}
+QLabel#statusBadge[runState="stopped"] {
+    /* A graceful stop after a completed cycle: finished early but valid, so it
+       reads like a muted COMPLETE rather than the solid ERROR/CANCELLED mark. */
+    color: #001170;
+    background-color: #e6eef8;
+    border: 2px solid #44b7ff;
 }
 QLabel#statusBadge[runState="error"], QLabel#statusBadge[runState="cancelled"] {
     color: #ffffff;
@@ -521,6 +568,43 @@ QToolButton:hover {
     background-color: #44b7ff;
     border-color: #2264b8;
 }
+QToolButton#disclosureToggle {
+    background-color: #ffffff;
+    border: 1px solid #cbd7ea;
+    padding: 4px 8px;
+    color: #001170;
+    font-weight: 600;
+    text-align: left;
+}
+QToolButton#disclosureToggle:hover {
+    background-color: #f2f4f9;
+    border-color: #2264b8;
+}
+QToolButton#disclosureToggle:checked {
+    background-color: #edf3fa;
+    border-color: #2264b8;
+}
+QFrame#workflowCard {
+    background-color: #ffffff;
+    border: 1px solid #cbd7ea;
+    border-radius: 3px;
+}
+QFrame#workflowCard:hover {
+    background-color: #f5f9ff;
+}
+QFrame#workflowCard[selected="true"] {
+    background-color: #edf3fa;
+    border: 1px solid #2264b8;
+}
+QFrame#workflowCard[selected="true"]:hover {
+    background-color: #edf3fa;
+}
+QFrame#workflowCard QLabel {
+    background-color: transparent;
+}
+QLabel#workflowCardDescription {
+    color: #52658b;
+}
 QScrollBar:vertical {
     background: #f2f4f9;
     width: 5px;
@@ -629,6 +713,14 @@ QLabel#helpCallout, QLabel#settingsCallout, QLabel#configurationLockHint {
     border-left: 3px solid #8fb6da;
     padding: 8px 10px;
 }
+QLabel#helpCallout[calloutKind="warning"], QLabel#settingsCallout[calloutKind="warning"] {
+    background-color: #e7f0fb;
+    border-left: 4px solid #2264b8;
+}
+QLabel#helpCallout[calloutKind="tip"], QLabel#settingsCallout[calloutKind="tip"] {
+    background-color: #f7f9fc;
+    border-left: 2px solid #b7cbe8;
+}
 QWidget#metadataErrorPanel {
     background-color: #f7f9fc;
     border: none;
@@ -649,9 +741,22 @@ QToolButton#metadataErrorDetails {
 QLabel#settingsCallout {
     padding: 6px 8px;
 }
+QLabel#settingsCallout[compactPadding="true"] {
+    padding: 3px 8px;
+}
 QLabel#configurationLockHint {
     font-size: 9pt;
     padding: 5px 8px;
+}
+QLabel#pageHeading {
+    color: #001170;
+    font-size: 12pt;
+    font-weight: 700;
+    background-color: #ffffff;
+}
+QFrame#pageHeadingRule {
+    background-color: #2264b8;
+    border: none;
 }
 QLabel#inlineGroupTitle {
     color: #001170;
@@ -665,7 +770,7 @@ QLabel#helpContentsLabel {
     font-weight: 800;
     padding: 2px 8px 2px 0;
 }
-QToolButton#helpNavLink, QToolButton#guideLink {
+QToolButton#helpNavLink, QToolButton#guideLink, QToolButton#settingsNavLink {
     color: #2264b8;
     background-color: #ffffff;
     border: none;
@@ -686,7 +791,7 @@ QToolButton#externalLink:pressed {
     background-color: #e2f4ff;
     border: none;
 }
-QToolButton#helpNavLink:hover, QToolButton#guideLink:hover {
+QToolButton#helpNavLink:hover, QToolButton#guideLink:hover, QToolButton#settingsNavLink:hover {
     color: #001170;
     background-color: #f2f4f9;
     border-bottom: 1px solid #44b7ff;
@@ -810,6 +915,50 @@ QPushButton#diagnosticSecondaryButton:hover {
     background-color: #f2f4f9;
     color: #001170;
 }
+QPushButton#metricsControlButton {
+    background-color: #ffffff;
+    color: #2264b8;
+    border: 1px solid #cbd7ea;
+    border-radius: 0;
+    padding: 1px 8px;
+    min-height: 17px;
+    font-size: 7.7pt;
+    font-weight: 600;
+}
+QPushButton#metricsControlButton:hover {
+    background-color: #f2f4f9;
+    border-color: #2264b8;
+    color: #001170;
+}
+QPushButton#metricsViewToggle {
+    background-color: #ffffff;
+    color: #52658b;
+    border: 1px solid #cbd7ea;
+    border-radius: 0;
+    padding: 1px 8px;
+    min-height: 17px;
+    font-size: 7.7pt;
+    font-weight: 600;
+}
+QPushButton#metricsViewToggle:hover {
+    border-color: #2264b8;
+    color: #001170;
+}
+QPushButton#metricsViewToggle:checked {
+    background-color: #edf3fa;
+    border-color: #2264b8;
+    color: #001170;
+}
+QPushButton#metricsViewToggle:disabled {
+    color: #b7c2d9;
+    border-color: #e3e9f3;
+    background-color: #f7f9fc;
+}
+QLabel#metricsHintLabel {
+    color: #9aa8c2;
+    font-size: 7.3pt;
+    font-style: italic;
+}
 QSplitter#diagnosticSplitter::handle {
     background-color: #cbd7ea;
 }
@@ -909,8 +1058,211 @@ a { color: #2264b8; }
 """
 
 
+_TOOLTIP_WRAP_PREFIX = '<div style="max-width:'
+
+
+def _wrap_tooltip_html(text: str, max_width: int = 380) -> str:
+    """Cap a tooltip's rendered width. A plain-text QToolTip never wraps, so
+    a single long sentence can otherwise span most of the screen; wrapping
+    it as rich text inside a width-capped div fixes that regardless of how
+    long the underlying sentence is. Blank-line-separated parts (e.g. a
+    PathRow's description plus its live "Path: ..." line) become separate
+    paragraphs; ordinary internal whitespace/newlines within each part
+    collapse to a single space, matching plain-text tooltip conventions.
+    Already-wrapped text (e.g. a tooltip copied from one widget to another
+    via .toolTip()) is returned unchanged rather than wrapped again."""
+    if text.startswith(_TOOLTIP_WRAP_PREFIX):
+        return text
+    import html as _html
+    parts = [part.strip() for part in text.split("\n\n") if part.strip()]
+    if not parts:
+        return ""
+    body = "<br><br>".join(_html.escape(" ".join(part.split())) for part in parts)
+    return f'{_TOOLTIP_WRAP_PREFIX}{max_width}px;">{body}</div>'
+
+
+def _install_tooltip_width_cap(app: object) -> None:
+    """Monkey-patch QWidget.setToolTip once per process so every tooltip set
+    anywhere in the app -- present call sites and any added later -- is
+    automatically capped to a readable width, instead of auditing and
+    wrapping each call site by hand. Idempotent: safe if
+    apply_phase_studio_style() runs more than once in the same process."""
+    from PySide6.QtWidgets import QWidget
+
+    if getattr(QWidget.setToolTip, "_phase_studio_wraps_tooltips", False):
+        return
+    original_set_tooltip = QWidget.setToolTip
+
+    def _phase_studio_set_tooltip(self, text=""):
+        original_set_tooltip(self, _wrap_tooltip_html(str(text or "")))
+
+    _phase_studio_set_tooltip._phase_studio_wraps_tooltips = True
+    QWidget.setToolTip = _phase_studio_set_tooltip
+
+
+def install_wheel_safety(app: object) -> object:
+    """Stop the mouse wheel from silently changing configuration values.
+
+    Scrolling a settings page used to alter whatever spin box or combo box the
+    pointer happened to pass over, quietly changing a scientific setting the
+    user never touched and never saw change.
+
+    A value editor only accepts wheel input after it has been *explicitly
+    clicked*. Keyboard focus alone is deliberately not enough: Tab, programmatic
+    focus and restoring a page all set focus without the user ever pointing at
+    the control. Clicking arms it; losing focus disarms it.
+
+    When an editor is not armed the wheel event is forwarded to the nearest
+    scroll area so the page scrolls as the user intended -- it is redirected,
+    never swallowed.
+
+    Deliberately untouched: scroll bars and scroll areas themselves, an open
+    combo box popup (its list scrolls normally), and every canvas-style widget,
+    so Matplotlib wheel zoom and the structure viewer keep working.
+
+    Returns the installed filter (also stored on the application), so tests and
+    a later re-style can find it.
+    """
+    from PySide6.QtCore import QEvent, QObject, Qt
+    from PySide6.QtWidgets import (
+        QAbstractScrollArea,
+        QAbstractSlider,
+        QAbstractSpinBox,
+        QApplication,
+        QComboBox,
+        QScrollBar,
+    )
+
+    class WheelSafetyFilter(QObject):
+        """Application-wide click-to-arm wheel guard for value editors."""
+
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._armed = None
+
+        @staticmethod
+        def is_value_editor(widget) -> bool:
+            """Form/configuration editors whose value the wheel would change.
+
+            QAbstractSlider covers QSlider, but QScrollBar is a slider too and
+            must keep its normal wheel behaviour, so it is excluded explicitly.
+            """
+            if isinstance(widget, QScrollBar):
+                return False
+            return isinstance(widget, (QAbstractSpinBox, QComboBox, QAbstractSlider))
+
+        def editor_for(self, widget):
+            """The value editor that *widget* belongs to, if any.
+
+            Spin boxes and combo boxes are compound widgets: the press and the
+            wheel both land on an internal QLineEdit or button child, never on
+            the editor itself, so the event has to be resolved back to the
+            editor or clicking one would never arm it.
+            """
+            node = widget
+            while node is not None:
+                if self.is_value_editor(node):
+                    return node
+                try:
+                    node = node.parentWidget()
+                except Exception:
+                    return None
+            return None
+
+        def is_armed(self, widget) -> bool:
+            return self._armed is not None and self._armed is widget
+
+        def arm(self, widget) -> None:
+            self._armed = widget if self.is_value_editor(widget) else None
+
+        def disarm(self, widget=None) -> None:
+            if widget is None or self._armed is widget:
+                self._armed = None
+
+        @staticmethod
+        def _popup_is_open(widget) -> bool:
+            if not isinstance(widget, QComboBox):
+                return False
+            try:
+                view = widget.view()
+                return view is not None and view.isVisible()
+            except Exception:
+                return False
+
+        @staticmethod
+        def _scrollable_ancestor(widget):
+            parent = widget.parentWidget() if widget is not None else None
+            while parent is not None:
+                if isinstance(parent, QAbstractScrollArea):
+                    return parent
+                parent = parent.parentWidget()
+            return None
+
+        def eventFilter(self, watched, event):  # noqa: N802 - Qt override
+            try:
+                event_type = event.type()
+            except Exception:
+                return False
+
+            if event_type == QEvent.Type.MouseButtonPress:
+                # Explicit pointer activation is the ONLY thing that arms an
+                # editor. A press anywhere else disarms whatever was armed.
+                # Qt delivers the same press to the editor AND to its
+                # ancestors, so disarming whenever a press does not resolve to
+                # an editor would immediately undo the arming that the very
+                # same click just performed. Arming happens here; disarming is
+                # left entirely to FocusOut, which fires as soon as the user
+                # clicks or tabs anywhere else.
+                editor = self.editor_for(watched)
+                if editor is not None:
+                    self.arm(editor)
+                return False
+
+            if event_type == QEvent.Type.FocusOut:
+                editor = self.editor_for(watched)
+                # Opening a combo box moves focus into its own popup, which is
+                # not the user leaving the editor -- disarming there would undo
+                # the arming that opening it just performed.
+                if editor is not None and not self._popup_is_open(editor):
+                    self.disarm(editor)
+                return False
+
+            if event_type != QEvent.Type.Wheel:
+                return False
+            editor = self.editor_for(watched)
+            if editor is None:
+                return False
+            if self.is_armed(editor) or self._popup_is_open(editor):
+                return False  # deliberate interaction: normal behaviour
+
+            # Not armed: give the scroll the user actually meant to the page.
+            scroll_area = self._scrollable_ancestor(editor)
+            if scroll_area is not None:
+                QApplication.sendEvent(scroll_area.viewport(), event)
+            return True
+
+    try:
+        previous = getattr(app, "_phase_studio_wheel_filter", None)
+        if previous is not None:
+            app.removeEventFilter(previous)
+        wheel_filter = WheelSafetyFilter(app)
+        app._phase_studio_wheel_filter = wheel_filter
+        app.installEventFilter(wheel_filter)
+        return wheel_filter
+    except Exception:
+        return None
+
+
 def apply_phase_studio_style(app: object) -> None:
     """Apply the SharpED logo palette and Phase Studio visual system."""
+    try:
+        _install_tooltip_width_cap(app)
+    except Exception:
+        pass
+    try:
+        install_wheel_safety(app)
+    except Exception:
+        pass
     try:
         from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, Qt
         from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen

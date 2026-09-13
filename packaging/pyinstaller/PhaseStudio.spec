@@ -1,0 +1,160 @@
+# -*- mode: python ; coding: utf-8 -*-
+# PyInstaller ONEDIR build of the main Phase Studio application, used for the
+# Microsoft Store / MSIX staging build (packaging/build_store_msix.ps1).
+#
+# Output:
+#
+#     PhaseStudio/
+#         PhaseStudio.exe
+#         _internal/...
+#
+# ONEDIR (not ONEFILE) is used here deliberately: MSIX already provides
+# application packaging/versioning, files can be staged into the MSIX layout
+# deterministically, and startup never pays the ONEFILE self-extraction cost
+# (see packaging/README_STORE.md, "Why ONEDIR"). This does not change the
+# Python application itself -- it is the same phase_studio/app.py entry point
+# the repository's own top-level PhaseStudio.spec (ONEFILE, for quick
+# developer/testing distribution) builds; keep both in sync if PyInstaller
+# requirements change.
+
+import sys
+from pathlib import Path
+
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+
+# SPECPATH (supplied by PyInstaller) is the directory CONTAINING this spec
+# file: <RepoRoot>\packaging\pyinstaller. Two .parent steps reach the repo
+# root (pyinstaller -> packaging -> RepoRoot) -- a THIRD .parent was the
+# actual bug behind "script ...\phase_studio\app.py not found" during the
+# first real Windows build (it resolved one directory above the repo root).
+# Verified with an assertion below rather than trusting the arithmetic alone.
+project_dir = Path(SPECPATH).resolve().parent.parent
+
+entry_point = project_dir / "phase_studio" / "app.py"
+if not entry_point.is_file():
+    raise FileNotFoundError(
+        f"Phase Studio entry point not found: {entry_point}\n"
+        f"Resolved project root: {project_dir}\n"
+        f"SPECPATH was: {Path(SPECPATH).resolve()}"
+    )
+
+# Shared portable-runtime staging (see packaging/pyinstaller/portable_runtime.py).
+# It lives beside this spec and is not importable as an installed package.
+spec_dir = Path(SPECPATH).resolve()
+sys.path.insert(0, str(spec_dir))
+import portable_runtime  # noqa: E402
+
+# Fail before doing any work if the build environment cannot produce a
+# consistent Qt runtime (Conda PySide6 with Qt outside the Python package,
+# mismatched PySide6/shiboken6, missing Qt platform plugin).
+qt_report = portable_runtime.validate_pyside6_installation()
+
+hiddenimports = [
+    "phase_studio",
+    "phase_studio.app",
+    "phase_studio.jana_superflip",
+    "phase_studio.jana_integration",
+    "phase_studio.sharped_server_client",
+    "phase_studio.ui_style",
+    "matplotlib.backends.backend_qtagg",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "PySide6.QtWidgets",
+]
+
+try:
+    hiddenimports += collect_submodules("qtvscodestyle")
+except Exception:
+    pass
+
+datas = []
+datas += [(str(project_dir / "phase_studio" / "assets"), "phase_studio/assets")]
+try:
+    datas += collect_data_files("qtvscodestyle")
+except Exception:
+    pass
+
+
+a = Analysis(
+    [str(entry_point)],
+    pathex=[str(project_dir)],
+    binaries=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
+    hookspath=[],
+    hooksconfig={
+        "matplotlib": {
+            "backends": "QtAgg",
+        },
+    },
+    # Resolve native DLLs from this distribution only -- not from PATH and not
+    # from the executable's own directory. Prevents a foreign Qt6*.dll, ICU or
+    # VC runtime belonging to another installed program from being loaded.
+    runtime_hooks=[
+        str(spec_dir / "runtime_hooks" / "pyi_rth_dll_isolation.py"),
+    ],
+    excludes=[
+        "PyQt5",
+        "PyQt6",
+        "PySide2",
+        "tkinter",
+        "matplotlib.backends.backend_tkagg",
+    ],
+    noarchive=False,
+    optimize=0,
+)
+
+# ---------------------------------------------------------------------------
+# Portable native runtime -- makes this distribution start on a clean Windows
+# 10/11 x64 machine with no Visual C++ Redistributable installed.
+# ---------------------------------------------------------------------------
+# 1. Drop any app-local Universal CRT collected from the Python distribution:
+#    the UCRT is a component of Windows 10/11, and a private older copy is a
+#    portability hazard rather than a fix.
+a.binaries, removed_ucrt = portable_runtime.strip_app_local_ucrt(a.binaries)
+
+# 2. Bundle exactly one copy of each required VC++ runtime DLL at the
+#    _internal root, discovered from the collected binaries' import tables and
+#    taken from explicit in-environment sources (never System32, never PATH).
+a.binaries, staged_runtime = portable_runtime.stage_msvc_runtime(a.binaries)
+
+portable_runtime.report("PhaseStudio", staged_runtime, qt_report, removed_ucrt)
+portable_runtime.write_portable_manifest(
+    project_dir / "build" / "portable-runtime-PhaseStudio.json",
+    app="PhaseStudio",
+    staged_runtime=staged_runtime,
+    qt_report=qt_report,
+    removed_ucrt=removed_ucrt,
+)
+
+pyz = PYZ(a.pure)
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    [],
+    exclude_binaries=True,
+    name="PhaseStudio",
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=False,
+    disable_windowed_traceback=False,
+    argv_emulation=False,
+    target_arch=None,
+    codesign_identity=None,
+    entitlements_file=None,
+    icon=[str(project_dir / "phase_studio" / "assets" / "phase_studio.ico")],
+)
+
+coll = COLLECT(
+    exe,
+    a.binaries,
+    a.datas,
+    strip=False,
+    upx=False,
+    upx_exclude=[],
+    name="PhaseStudio",
+)
