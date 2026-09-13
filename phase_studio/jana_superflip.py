@@ -2178,18 +2178,17 @@ class _JanaWorkflowWizard:
         self.cross_validation_layout = QVBoxLayout(self.cross_validation_group)
         self.omit_checkbox = QCheckBox("Compute OMIT validation maps")
         self.omit_checkbox.setToolTip(
-            "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed "
-            "random 5% holdout of reflections excluded from the input, for cross-validation. "
-            "Feeds the phase-recycling result selector's Selection score, helping identify the "
-            "most suitable map among the recycling cycles. Roughly doubles Superflip/SharpED "
+            "Freeze a symmetry/Friedel-orbit-safe 5% reflection holdout before the workflow "
+            "and exclude it from every work-data and feedback step. Enables cross-validation "
+            "metrics and profile-aware result recommendation. Roughly doubles Superflip/SharpED "
             "time per cycle."
         )
         self.rfree_checkbox = QCheckBox("Calculate R_free")
         self.rfree_checkbox.setToolTip(
-            "Compute R_free (the crystallographic R-factor between the excluded holdout "
+            "Calculated automatically with the holdout: the crystallographic R-factor between the excluded "
             "reflections' observed |F| and |F| calculated by FFT from the omit map) for each "
-            "cycle. Feeds the phase-recycling result selector's Selection score alongside OMIT "
-            "correlation, helping rank cycles and choose the most suitable map. Requires "
+            "cycle. The result selector uses the active profile's explicit lexicographic "
+            "criteria, without a combined numeric score. Requires "
             "'Compute OMIT validation maps'."
         )
         self.cross_validation_layout.addWidget(self.omit_checkbox)
@@ -2210,9 +2209,8 @@ class _JanaWorkflowWizard:
 
         def sync_rfree_dependency(_checked: bool = False) -> None:
             omit_enabled = self.omit_checkbox.isChecked()
-            self.rfree_checkbox.setEnabled(omit_enabled)
-            if not omit_enabled and self.rfree_checkbox.isChecked():
-                self.rfree_checkbox.setChecked(False)
+            self.rfree_checkbox.setChecked(omit_enabled)
+            self.rfree_checkbox.setEnabled(False)
 
         self.omit_checkbox.toggled.connect(sync_rfree_dependency)
         sync_rfree_dependency()
@@ -2804,8 +2802,8 @@ def launch_phase_studio_from_jana(
             win._apply_workflow_preset("recommended")
         else:
             # "Open full configuration": the user drives the whole workflow
-            # manually and explicitly clicks Send to Jana2020 once a run
-            # completes -- no auto-selected map source, no auto-start.
+            # manually; no map source is pre-locked and the workflow does not
+            # auto-start. Completed runs use the shared result selector.
             win.jana_wizard_context.launch_mode = "full_configuration"
         # The third primary button and window title default to standalone's
         # "Install to Jana2020" / "Phase Studio <version>" at construction;
@@ -2840,7 +2838,7 @@ def launch_phase_studio_from_jana(
                 )
             else:
                 win._append_execution_log(
-                    "After the full workflow finishes, use 'Send to Jana2020' to choose the cycle and map source for the final handoff.",
+                    "After the full workflow finishes, the result selector opens with the recommended cycle and map source preselected; use 'Pass to Jana2020' to complete the handoff.",
                     level="DETAIL",
                     subsystem="Jana2020",
                 )

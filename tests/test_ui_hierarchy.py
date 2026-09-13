@@ -148,15 +148,15 @@ def main():
 
     # =========================================================================
     # Metrics tab bar: no corner widget competing with the tab bar, scroll
-    # (not silent elision) used for overflow, all 6 scientific tab names present.
+    # (not silent elision) used for overflow, exactly three profile metrics present.
     # =========================================================================
     check("Metrics tab bar has no corner widget (moved to its own toolbar row)", win.metrics_tabs.cornerWidget() is None)
     check("Metrics tab bar uses scroll buttons rather than eliding", win.metrics_tabs.usesScrollButtons())
     from PySide6.QtCore import Qt as _Qt
     check("Metrics tab bar never silently elides", win.metrics_tabs.tabBar().elideMode() == _Qt.TextElideMode.ElideNone)
-    expected_metrics_tabs = {"Superflip", "SharpED", "Superflip validation", "SharpED validation", "Powder report", "Intensity correction"}
+    expected_metrics_tabs = {"Amplitude R_F", "Amplitude CC", "Weighted triplet C3"}
     actual_metrics_tabs = {win.metrics_tabs.tabText(i) for i in range(win.metrics_tabs.count())}
-    check("All 6 scientific metrics tab names preserved, unshortened", actual_metrics_tabs == expected_metrics_tabs)
+    check("Exactly 3 reference-free profile metric tabs are shown initially", actual_metrics_tabs == expected_metrics_tabs)
 
     # =========================================================================
     # Callout system: kind-aware property, Warning stays prominent.

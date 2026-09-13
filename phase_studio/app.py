@@ -50,6 +50,39 @@ from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence
 import numpy as np
 
 try:
+    from phase_studio.map_quality import (
+        FrozenReflection,
+        MapQualityMetrics,
+        ResultCandidate,
+        ResultRecommendation,
+        ValidationContext,
+        ValidationProfile,
+        compute_map_quality,
+        make_validation_context,
+        profile_definition,
+        recommend_best_result,
+        scaled_amplitude_metrics,
+        with_holdout_metrics,
+        with_reference_metrics,
+    )
+except Exception:
+    from map_quality import (  # type: ignore[no-redef]
+        FrozenReflection,
+        MapQualityMetrics,
+        ResultCandidate,
+        ResultRecommendation,
+        ValidationContext,
+        ValidationProfile,
+        compute_map_quality,
+        make_validation_context,
+        profile_definition,
+        recommend_best_result,
+        scaled_amplitude_metrics,
+        with_holdout_metrics,
+        with_reference_metrics,
+    )
+
+try:
     from phase_studio.version import VERSION as __version__
 except Exception:
     from version import VERSION as __version__
@@ -513,6 +546,9 @@ class CycleResult:
     deblur_heavy_atom_count: Optional[float] = None
     powder_repartition_avg_change_percent: Optional[float] = None
     intensity_correction_avg_change_percent: Optional[float] = None
+    validation_profile: str = ValidationProfile.REFERENCE_FREE.value
+    superflip_quality: Optional[MapQualityMetrics] = None
+    deblur_quality: Optional[MapQualityMetrics] = None
 
 
 INPUT_MODE_INFLIP = "jana_inflip"
@@ -675,6 +711,7 @@ class PipelineState:
     auto_reference_xplor: Optional[Path] = None
     recycle_map: Optional[Path] = None
     omit_test_hkls: FrozenSet[Tuple[int, int, int]] = field(default_factory=frozenset)
+    validation_context: Optional[ValidationContext] = None
     pending_powder_repartition_change_percent: Optional[float] = None
     pending_intensity_correction_change_percent: Optional[float] = None
 
@@ -1627,9 +1664,9 @@ def nearest_metric_to_reference(model_cif: Optional[Path], ref_ctx: ReferenceCon
         return None
     return float(math.sqrt(np.mean(np.square(all_d))))
 
-def atom_recall_precision(
+def atom_reference_match_metrics(
     model_cif: Optional[Path], ref_ctx: ReferenceContext, merge_distance: float, same_element: bool = True,
-) -> Optional[Tuple[Optional[float], Optional[float]]]:
+) -> Optional[Tuple[Optional[float], Optional[float], int, int]]:
     """Recall/precision of EDMA-found atoms against the reference: each atom is
     matched to its nearest same-element counterpart within merge_distance
     (independent nearest-neighbor lookup per atom, not a global bipartite
@@ -1643,8 +1680,10 @@ def atom_recall_precision(
     fallback), since miscounting a wrong-element peak as "found" would
     misrepresent recall/precision. Returns None only when there are no heavy
     reference atoms to compare against; with a reference but an empty/missing
-    model, returns (0.0, None) -- recall is 0, precision has no denominator
-    (nothing was found to be right or wrong about)."""
+    model, returns (0.0, None, 0, 0) -- recall is 0, precision has no
+    denominator (nothing was found to be right or wrong about).  The final
+    two values are model-side true positives and false positives for reporting.
+    """
     def heavy(atoms: Sequence[AtomSite]) -> List[AtomSite]:
         return [a for a in atoms if clean_element_symbol(a.element) not in {"H", "He"}]
     if not ref_ctx.atoms:
@@ -1654,11 +1693,11 @@ def atom_recall_precision(
         return None
     model_atoms = heavy(parse_cif_atoms(Path(model_cif))) if model_cif is not None and Path(model_cif).is_file() else []
     if not model_atoms:
-        return (0.0, None)
+        return (0.0, None, 0, 0)
     _, model_sg, _ = parse_cif_cell_and_sg(Path(model_cif))
     model_full = heavy(expanded_unique_atoms(model_atoms, ref_ctx.cell, model_sg))
     if not model_full:
-        return (0.0, None)
+        return (0.0, None, 0, 0)
     def nearest_distance(a: AtomSite, candidates: Sequence[AtomSite]) -> Optional[float]:
         same = [b for b in candidates if not same_element or clean_element_symbol(a.element) == clean_element_symbol(b.element)]
         if not same:
@@ -1668,7 +1707,17 @@ def atom_recall_precision(
     matched_model = sum(1 for a in model_full if (d := nearest_distance(a, ref_full)) is not None and d <= merge_distance)
     recall = matched_ref / len(ref_full)
     precision = matched_model / len(model_full)
-    return (recall, precision)
+    return (recall, precision, matched_model, len(model_full) - matched_model)
+
+
+def atom_recall_precision(
+    model_cif: Optional[Path], ref_ctx: ReferenceContext, merge_distance: float, same_element: bool = True,
+) -> Optional[Tuple[Optional[float], Optional[float]]]:
+    """Backward-compatible recall/precision view of the shared match result."""
+    metrics = atom_reference_match_metrics(model_cif, ref_ctx, merge_distance, same_element)
+    if metrics is None:
+        return None
+    return metrics[0], metrics[1]
 
 def count_heavy_atoms(model_cif: Optional[Path]) -> Optional[float]:
     """Number of non-hydrogen, non-helium atoms in an EDMA structure export --
@@ -2897,16 +2946,119 @@ def compute_rfree(reflections: Sequence[Reflection], test_hkls: FrozenSet[Tuple[
         fcalc.append(math.sqrt(max(0.0, prediction[0])))
     if len(fobs) < 3:
         return None
-    fobs_arr = np.asarray(fobs, dtype=np.float64)
-    fcalc_arr = np.asarray(fcalc, dtype=np.float64)
-    denom = float(np.sum(fcalc_arr * fcalc_arr))
-    if denom <= 1e-12:
-        return None
-    k = float(np.sum(fobs_arr * fcalc_arr)) / denom
-    fobs_sum = float(np.sum(fobs_arr))
-    if fobs_sum <= 1e-12:
-        return None
-    return float(np.sum(np.abs(fobs_arr - k * fcalc_arr)) / fobs_sum)
+    return scaled_amplitude_metrics(fobs, fcalc).r_factor
+
+
+def select_orbit_safe_holdout(
+    reflections: Sequence[Reflection],
+    spacegroup: gemmi.SpaceGroup,
+    seed_text: str,
+    fraction: float = 0.05,
+) -> FrozenSet[Tuple[int, int, int]]:
+    """Select whole symmetry/Friedel orbits for a fixed experimental holdout."""
+    measured = {(int(r.h), int(r.k), int(r.l)) for r in reflections if (int(r.h), int(r.k), int(r.l)) != (0, 0, 0)}
+    if not measured:
+        return frozenset()
+    operations = full_spacegroup_ops(spacegroup) or [gemmi.Op("x,y,z")]
+
+    def orbit_key(hkl: Tuple[int, int, int]) -> Tuple[int, int, int]:
+        equivalents = []
+        for operation in operations:
+            transformed = tuple(int(value) for value in operation.apply_to_hkl(hkl))
+            equivalents.extend((transformed, tuple(-value for value in transformed)))
+        return min(equivalents)
+
+    groups: Dict[Tuple[int, int, int], List[Tuple[int, int, int]]] = {}
+    for hkl in sorted(measured):
+        groups.setdefault(orbit_key(hkl), []).append(hkl)
+    seed_value = str(seed_text or "").strip()
+    rng = np.random.default_rng(int(seed_value) if seed_value.isdigit() else 987654321)
+    keys = sorted(groups)
+    rng.shuffle(keys)
+    target = max(1, round(len(measured) * max(0.0, min(1.0, fraction))))
+    selected: set[Tuple[int, int, int]] = set()
+    for key in keys:
+        group = groups[key]
+        if selected and len(selected) >= target:
+            break
+        selected.update(group)
+    return frozenset(selected)
+
+
+def reference_phases_from_atoms(
+    reflections: Sequence[Reflection], ref_ctx: ReferenceContext,
+) -> Dict[Tuple[int, int, int], float]:
+    """Calculate reference phases on measured hkl from the existing atom model."""
+    if not ref_ctx.atoms:
+        return {}
+    atoms = expanded_unique_atoms(ref_ctx.atoms, ref_ctx.cell, ref_ctx.spacegroup)
+    phases: Dict[Tuple[int, int, int], float] = {}
+    for reflection in reflections:
+        hkl = (int(reflection.h), int(reflection.k), int(reflection.l))
+        if hkl == (0, 0, 0):
+            continue
+        coefficient = 0.0j
+        for atom in atoms:
+            try:
+                weight = float(gemmi.Element(clean_element_symbol(atom.element)).atomic_number)
+            except Exception:
+                weight = float(ATOMIC_NUMBER_HINTS.get(clean_element_symbol(atom.element), 1))
+            # numpy.fft uses the crystallographic exp(-2*pi*i*h.r) convention.
+            angle = -2.0 * math.pi * float(np.dot(np.asarray(hkl, dtype=np.float64), atom.frac))
+            coefficient += weight * complex(math.cos(angle), math.sin(angle))
+        if abs(coefficient) > 1.0e-15:
+            phases[hkl] = float(math.atan2(coefficient.imag, coefficient.real))
+    return phases
+
+
+def build_validation_context(
+    reflections: Sequence[Reflection],
+    data_mode: str,
+    ref_ctx: ReferenceContext,
+    free_hkls: FrozenSet[Tuple[int, int, int]],
+) -> ValidationContext:
+    frozen = tuple(
+        FrozenReflection(
+            int(reflection.h), int(reflection.k), int(reflection.l),
+            math.sqrt(reflection_value_as_intensity(reflection, data_mode)),
+        )
+        for reflection in reflections
+        if (int(reflection.h), int(reflection.k), int(reflection.l)) != (0, 0, 0)
+    )
+    return make_validation_context(
+        frozen,
+        free_hkls=free_hkls,
+        reference_model=str(ref_ctx.cif_path) if ref_ctx.atoms else None,
+        reference_phases=reference_phases_from_atoms(reflections, ref_ctx),
+        unit_cell=(
+            ref_ctx.cell.a, ref_ctx.cell.b, ref_ctx.cell.c,
+            ref_ctx.cell.alpha, ref_ctx.cell.beta, ref_ctx.cell.gamma,
+        ),
+    )
+
+
+def assess_xplor_map(path: Path, context: ValidationContext) -> MapQualityMetrics:
+    try:
+        xmap = read_xplor_map(path)
+        return compute_map_quality(xmap.data, xmap.grid, xmap.cell, xmap.axis_order, context)
+    except Exception as exc:
+        return MapQualityMetrics(
+            n_measured_reflections=len(context.original_measured_reflections),
+            n_work_reflections=len(context.work_reflections),
+            n_free_reflections=len(context.free_reflections),
+            n_triplets=len(context.triplet_set),
+            unavailable_reason=str(exc),
+        )
+
+
+def format_validation_log_line(
+    cycle: int, source: str, profile: ValidationProfile | str, metrics: MapQualityMetrics,
+) -> str:
+    fields = []
+    for metric in profile_definition(profile).primary_metrics:
+        value = metrics.value(metric.key)
+        fields.append(f"{metric.label} {'n/a' if value is None else f'{value:.3f}'}")
+    return f"[Validation] Cycle {int(cycle)} · {result_source_title(source)} · " + " · ".join(fields)
 
 def candidate_missing_hkls_from_bounds(reflections: Sequence[Reflection], cell: gemmi.UnitCell, resolution_d_min: float) -> List[Tuple[int, int, int]]:
     if not reflections:
@@ -2944,6 +3096,7 @@ def apply_map_feedback_to_reflections(
     intensity_damping: float,
     intensity_max_i_over_sigma: float,
     log: Callable[[str], None],
+    excluded_hkls: FrozenSet[Tuple[int, int, int]] = frozenset(),
 ) -> Tuple[List[Reflection], Optional[float]]:
     """Returns (updated_reflections, intensity_correction_avg_change_percent),
     the latter being the mean, across reflections actually corrected this
@@ -2995,7 +3148,10 @@ def apply_map_feedback_to_reflections(
     if add_missing and missing_percent_limit > 0:
         max_add = int(math.floor(len(current) * max(0.0, float(missing_percent_limit)) / 100.0))
         if max_add > 0:
-            candidates = candidate_missing_hkls_from_bounds(current, cell, resolution_d_min)
+            candidates = [
+                hkl for hkl in candidate_missing_hkls_from_bounds(current, cell, resolution_d_min)
+                if hkl not in excluded_hkls
+            ]
             candidate_predictions = xplor_fft_predictions(feedback_map, candidates)
             ranked = sorted(candidate_predictions.items(), key=lambda item: item[1][0], reverse=True)
             existing = {(int(r.h), int(r.k), int(r.l)) for r in current}
@@ -5562,79 +5718,176 @@ def parse_superflip_cycle_metrics(cycle_dir: Path, prefix: str) -> SuperflipLogM
     return fallback
 
 
+QUALITY_CSV_COLUMNS = (
+    "cycle", "source", "validation_profile", "map_path", "structure_path",
+    "reference_f05", "reference_precision", "reference_recall", "reference_tp",
+    "reference_fp", "reference_rmsd", "reference_phase_agreement",
+    "amplitude_rf", "amplitude_cc", "amplitude_scale",
+    "r_work", "r_free", "cc_work", "cc_free", "omit_map_correlation",
+    "triplet_c3", "entropy_normalized", "map_concentration",
+    "standardized_peakiness", "negative_density_mass",
+    "n_measured_reflections", "n_work_reflections", "n_free_reflections",
+    "n_triplets", "unavailable_reason",
+    # Existing per-cycle fields retained for downstream compatibility. They
+    # repeat on the two source rows belonging to the same cycle.
+    "model_source", "model_in", "model_rmsd_A",
+    "superflip_map", "superflip_edma_cif", "superflip_rmsd_A",
+    "deblur_map", "deblur_edma_cif", "deblur_rmsd_A",
+    "superflip_saved_run", "superflip_rvalue", "superflip_peaks",
+    "superflip_symm", "superflip_derived_sg", "superflip_ref_match",
+    "superflip_fom", "superflip_success_rate_percent", "superflip_mean_cycles",
+    "recycle_map_correlation", "omit_superflip_correlation",
+    "omit_superflip_rfree", "omit_deblur_correlation", "omit_deblur_rfree",
+    "superflip_recall", "superflip_precision", "superflip_heavy_atom_count",
+    "deblur_recall", "deblur_precision", "deblur_heavy_atom_count",
+    "powder_repartition_avg_change_percent",
+    "intensity_correction_avg_change_percent",
+)
+
+
+def result_candidates_from_results(results: Sequence[CycleResult]) -> List[ResultCandidate]:
+    candidates: List[ResultCandidate] = []
+    for result in results:
+        for source, quality, map_path, structure_path in (
+            ("superflip", result.superflip_quality, Path(result.superflip_map), Path(result.superflip_edma_cif)),
+            ("deblurred", result.deblur_quality, Path(result.deblur_map), Path(result.deblur_edma_cif)),
+        ):
+            if quality is None:
+                continue
+            usable_map = map_path.is_file() and map_path.stat().st_size > 0
+            if not usable_map:
+                continue
+            usable_structure = False
+            if structure_path.is_file() and structure_path.stat().st_size > 0:
+                try:
+                    usable_structure = bool(parse_cif_atoms(structure_path))
+                except Exception:
+                    usable_structure = False
+            candidates.append(ResultCandidate(
+                cycle=int(result.cycle), source=source,
+                map_path=str(map_path), structure_path=str(structure_path), metrics=quality,
+                usable_map=usable_map, usable_structure=usable_structure,
+            ))
+    return candidates
+
+
 def write_metrics_csv(path: Path, results: Sequence[CycleResult]) -> None:
+    """Write one stable machine-readable row for every cycle/source candidate."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow([
-            "cycle",
-            "model_source",
-            "model_in",
-            "model_rmsd_A",
-            "superflip_map",
-            "superflip_edma_cif",
-            "superflip_rmsd_A",
-            "deblur_map",
-            "deblur_edma_cif",
-            "deblur_rmsd_A",
-            "superflip_saved_run",
-            "superflip_rvalue",
-            "superflip_peaks",
-            "superflip_symm",
-            "superflip_derived_sg",
-            "superflip_ref_match",
-            "superflip_fom",
-            "superflip_success_rate_percent",
-            "superflip_mean_cycles",
-            "recycle_map_correlation",
-            "omit_superflip_correlation",
-            "omit_superflip_rfree",
-            "omit_deblur_correlation",
-            "omit_deblur_rfree",
-            "superflip_recall",
-            "superflip_precision",
-            "superflip_heavy_atom_count",
-            "deblur_recall",
-            "deblur_precision",
-            "deblur_heavy_atom_count",
-            "powder_repartition_avg_change_percent",
-            "intensity_correction_avg_change_percent",
-        ])
-        for r in results:
-            w.writerow([
-                r.cycle,
-                r.model_source,
-                "" if r.model_in is None else r.model_in,
-                "" if r.model_metric is None else r.model_metric,
-                r.superflip_map,
-                r.superflip_edma_cif,
-                "" if r.superflip_metric is None else r.superflip_metric,
-                r.deblur_map,
-                r.deblur_edma_cif,
-                "" if r.deblur_metric is None else r.deblur_metric,
-                "" if r.superflip_saved_run is None else r.superflip_saved_run,
-                "" if r.superflip_rvalue is None else r.superflip_rvalue,
-                "" if r.superflip_peaks is None else r.superflip_peaks,
-                "" if r.superflip_symm is None else r.superflip_symm,
-                r.superflip_derived_sg or "",
-                "" if r.superflip_ref_match is None else r.superflip_ref_match,
-                "" if r.superflip_fom is None else r.superflip_fom,
-                "" if r.superflip_success_rate is None else r.superflip_success_rate,
-                "" if r.superflip_mean_cycles is None else r.superflip_mean_cycles,
-                "" if r.recycle_map_correlation is None else r.recycle_map_correlation,
-                "" if r.omit_superflip_correlation is None else r.omit_superflip_correlation,
-                "" if r.omit_superflip_rfree is None else r.omit_superflip_rfree,
-                "" if r.omit_deblur_correlation is None else r.omit_deblur_correlation,
-                "" if r.omit_deblur_rfree is None else r.omit_deblur_rfree,
-                "" if r.superflip_recall is None else r.superflip_recall,
-                "" if r.superflip_precision is None else r.superflip_precision,
-                "" if r.superflip_heavy_atom_count is None else r.superflip_heavy_atom_count,
-                "" if r.deblur_recall is None else r.deblur_recall,
-                "" if r.deblur_precision is None else r.deblur_precision,
-                "" if r.deblur_heavy_atom_count is None else r.deblur_heavy_atom_count,
-                "" if r.powder_repartition_avg_change_percent is None else r.powder_repartition_avg_change_percent,
-                "" if r.intensity_correction_avg_change_percent is None else r.intensity_correction_avg_change_percent,
-            ])
+    with path.open("w", newline="", encoding="utf-8") as stream:
+        writer = csv.DictWriter(stream, fieldnames=QUALITY_CSV_COLUMNS)
+        writer.writeheader()
+        for candidate in result_candidates_from_results(results):
+            cycle_result = next(result for result in results if int(result.cycle) == int(candidate.cycle))
+            row = {
+                "cycle": candidate.cycle,
+                "source": "superflip" if candidate.source == "superflip" else "sharped",
+                "validation_profile": profile_definition(results[0].validation_profile).profile.value if results else "",
+                "map_path": candidate.map_path,
+                "structure_path": candidate.structure_path if candidate.usable_structure else "",
+            }
+            quality_end = QUALITY_CSV_COLUMNS.index("unavailable_reason") + 1
+            for column in QUALITY_CSV_COLUMNS[5:quality_end]:
+                value = getattr(candidate.metrics, column, "")
+                row[column] = "" if value is None else value
+            legacy_values = {
+                "model_source": cycle_result.model_source,
+                "model_in": cycle_result.model_in,
+                "model_rmsd_A": cycle_result.model_metric,
+                "superflip_map": cycle_result.superflip_map,
+                "superflip_edma_cif": cycle_result.superflip_edma_cif,
+                "superflip_rmsd_A": cycle_result.superflip_metric,
+                "deblur_map": cycle_result.deblur_map,
+                "deblur_edma_cif": cycle_result.deblur_edma_cif,
+                "deblur_rmsd_A": cycle_result.deblur_metric,
+                "superflip_saved_run": cycle_result.superflip_saved_run,
+                "superflip_rvalue": cycle_result.superflip_rvalue,
+                "superflip_peaks": cycle_result.superflip_peaks,
+                "superflip_symm": cycle_result.superflip_symm,
+                "superflip_derived_sg": cycle_result.superflip_derived_sg,
+                "superflip_ref_match": cycle_result.superflip_ref_match,
+                "superflip_fom": cycle_result.superflip_fom,
+                "superflip_success_rate_percent": cycle_result.superflip_success_rate,
+                "superflip_mean_cycles": cycle_result.superflip_mean_cycles,
+                "recycle_map_correlation": cycle_result.recycle_map_correlation,
+                "omit_superflip_correlation": cycle_result.omit_superflip_correlation,
+                "omit_superflip_rfree": cycle_result.omit_superflip_rfree,
+                "omit_deblur_correlation": cycle_result.omit_deblur_correlation,
+                "omit_deblur_rfree": cycle_result.omit_deblur_rfree,
+                "superflip_recall": cycle_result.superflip_recall,
+                "superflip_precision": cycle_result.superflip_precision,
+                "superflip_heavy_atom_count": cycle_result.superflip_heavy_atom_count,
+                "deblur_recall": cycle_result.deblur_recall,
+                "deblur_precision": cycle_result.deblur_precision,
+                "deblur_heavy_atom_count": cycle_result.deblur_heavy_atom_count,
+                "powder_repartition_avg_change_percent": cycle_result.powder_repartition_avg_change_percent,
+                "intensity_correction_avg_change_percent": cycle_result.intensity_correction_avg_change_percent,
+            }
+            row.update({key: "" if value is None else value for key, value in legacy_values.items()})
+            writer.writerow(row)
+
+
+def write_map_quality_report(
+    path: Path,
+    results: Sequence[CycleResult],
+    selected_candidate: Optional[ResultCandidate] = None,
+) -> None:
+    candidates = result_candidates_from_results(results)
+    if not results:
+        return
+    profile = ValidationProfile(results[0].validation_profile)
+    definition = profile_definition(profile)
+    recommendation = recommend_best_result(profile, candidates)
+    recommended = recommendation.recommended_candidate
+    lines = [
+        "MAP QUALITY ASSESSMENT",
+        "",
+        f"Assessment: {definition.assessment_label}",
+        f"Automatic recommendation: {recommended.label if recommended is not None else 'Unavailable'}",
+        f"Recommendation reason: {recommendation.reason}",
+        "",
+        "Selection criteria:",
+    ]
+    for index, metric in enumerate(definition.primary_metrics, start=1):
+        direction = "higher is better" if metric.higher_is_better else "lower is better"
+        lines.append(f"{index}. {metric.label} — {direction}")
+    lines.extend(["", "Candidates:"])
+    header = ["Cycle", "Source"] + [metric.label for metric in definition.primary_metrics]
+    lines.append(" | ".join(header))
+    lines.append(" | ".join("---" for _ in header))
+    for candidate in candidates:
+        values = []
+        for metric in definition.primary_metrics:
+            value = candidate.metrics.value(metric.key)
+            values.append("n/a" if value is None else f"{value:.6g}")
+        lines.append(" | ".join([str(candidate.cycle), result_source_title(candidate.source)] + values))
+    lines.extend(["", "All computed metrics:"])
+    for candidate in candidates:
+        lines.append(f"{candidate.label}:")
+        available = []
+        for metric in definition.all_report_metrics:
+            value = getattr(candidate.metrics, metric.key, None)
+            if value is not None:
+                available.append(f"  {metric.key}: {value}")
+        for key in (
+            "n_measured_reflections", "n_work_reflections",
+            "n_free_reflections", "n_triplets",
+        ):
+            available.append(f"  {key}: {getattr(candidate.metrics, key)}")
+        lines.extend(available or ["  No valid metrics available."])
+        if candidate.metrics.unavailable_reason:
+            lines.append(f"  unavailable_reason: {candidate.metrics.unavailable_reason}")
+    lines.extend(["", "Final user selection:"])
+    if selected_candidate is None:
+        lines.append("Pending")
+    else:
+        lines.append(selected_candidate.label)
+        lines.append(
+            "Automatic recommendation accepted"
+            if recommended is not None and selected_candidate == recommended else "Manual override"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 # -----------------------------------------------------------------------------
@@ -5856,8 +6109,8 @@ INPUT_TOOLTIPS = {
     "run_sharped": "Run SharpED server deblurring on the Superflip XPLOR map. If disabled, the SharpED map is a copy of the Superflip map.",
     "symmetrize_deblurred_map": "After SharpED deblurring, run Superflip in perform symmetry mode with the deblurred XPLOR as modelfile. No charge flipping is performed; the output map is averaged according to the supplied space-group symmetry and is then used for EDMA, Jana export, feedback and later-cycle XPLOR modelfiles.",
     "run_edma_deblurred": "Run EDMA peak search on the SharpED XPLOR map. Disable this when you only want map export or Superflip EDMA results.",
-    "compute_omit_maps": "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, producing 'omit' maps used only for cross-validation. Enables the Superflip validation and SharpED validation tabs' omit-map correlation series (full map vs. omit map); together with R_free, this also feeds the phase-recycling result selector's Selection score, helping identify the most suitable map among the recycling cycles. Roughly doubles Superflip/SharpED time per cycle.",
-    "compute_omit_rfree": "Also compute R_free from the excluded 5% holdout: the crystallographic R-factor between their observed |F| and |F| calculated by FFT from the omit map, which never saw them. Feeds the phase-recycling result selector's Selection score alongside OMIT correlation, helping rank cycles and choose the most suitable map. Requires 'Compute OMIT validation maps'.",
+    "compute_omit_maps": "Freeze a symmetry/Friedel-orbit-safe 5% holdout before the workflow and exclude it from every work-data and feedback step. Enables cross-validation metrics and profile-aware result recommendation for both Superflip and SharpED. Roughly doubles Superflip/SharpED time per cycle.",
+    "compute_omit_rfree": "R_free is calculated automatically whenever the frozen 5% holdout is enabled because it is a primary cross-validation metric. Result recommendation uses explicit lexicographic criteria; no combined numeric score is created.",
     "perform_algorithm": "Superflip perform keyword. Common values: CF, lde, general, fourier, symmetry; AAR is kept for executables that support it.",
     "map_export_format": "XPLOR is always produced internally (EDMA and SharpED require it). xplor keeps only that working map; ccp4 or jana additionally saves a CCP4 map or Jana m80/m81 density+reflection files. 'HKL reflections with phases' and 'ShelX (fcf)' instead save, for each cycle's Superflip map, the observed |Fobs|/intensity together with phases (and, for ShelX, calculated F squared) read by FFT from that map, in a standardized text file or a ShelX/Jana-compatible .fcf file.",
     "structure_export_format": "CIF is always produced internally (used for metrics and next-cycle modelfiles). xyz or pdb additionally saves that structure format alongside the CIF.",
@@ -6480,6 +6733,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_after_cycle = threading.Event()
         self.stop_now = threading.Event()
         self.results: List[CycleResult] = []
+        self.result_recommendation: Optional[ResultRecommendation] = None
+        self.current_validation_profile = ValidationProfile.REFERENCE_FREE
         self.last_run_config: Optional[RunConfig] = None
         self._resume_state: Optional[PipelineState] = None
         self.reference_atoms_for_plot: List[AtomSite] = []
@@ -6916,7 +7171,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>4. Inspect each cycle</h3>
             <p>Review convergence metrics, structure previews, detected atom/peak counts, reference agreement when available, Superflip versus SharpED results, and the execution log. Phase Studio does not replace final crystallographic refinement.</p>
             <h3>5. Return the selected result to Jana2020</h3>
-            <p>After a successful run, <b>Send to Jana2020</b> lets you select a completed cycle and map source. Final interpretation and refinement remain in Jana2020.</p>
+            <p>After a successful Jana2020 run, <b>Pass to Jana2020</b> opens the result selector with the profile-aware recommendation preselected. In standalone use, <b>Save map and model</b> opens the same selector. Final interpretation and refinement remain in Jana2020.</p>
         """)
         setup_help_layout.insertWidget(1, WorkflowDiagram())
         self._add_help_callout(setup_help_layout, "Tip", "Validate the reflection interpretation and review the selected preset values before starting a run.", kind="tip")
@@ -6946,7 +7201,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 <li><b>1st Superflip, then SharpED (beta)</b> &mdash; Superflip runs only once, on cycle 1. Every following cycle deblurs the previous map with SharpED, calculates phases by FFT from that deblurred map for every measured reflection (expanded over the full space-group symmetry), and recomposes a map from |Fobs| with those phases for the next cycle. Does not work well with some models.</li>
                 <li><b>SharpED (experimental)</b> &mdash; the same recycling loop, but skips Superflip entirely: cycle 1 starts from a map synthesized directly from |Fobs| with independent random phases. Not production-ready; can take hundreds of cycles to converge, if it converges at all.</li>
             </ul>
-            <p>Both recycling methods are hidden unless <b>Show beta and experimental features</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize SharpED map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. The convergence graph adds a <b>Map correlation</b> series for these methods (each cycle's recomposed map compared with the previous cycle's).</p>
+            <p>Both recycling methods are hidden unless <b>Show beta and experimental features</b> is checked on Advanced &rarr; Setup. Selecting one disables Next-cycle model, XPLOR damping, Symmetrize SharpED map and the per-cycle EDMA checkboxes below it, since the method defines its own next-cycle map; use <b>Run EDMA on final map</b> (Optional processing) instead. Each completed map is assessed with the active three-metric validation profile; the cycle-to-cycle map correlation remains available in the detailed output.</p>
             <p><b>Next-cycle model</b> (Superflip phasing method only) is the authoritative source for cycle 2 onward: <b>None</b> forces a one-cycle run; <b>Superflip map (XPLOR)</b> cycles without SharpED processing; <b>SharpED map (XPLOR)</b> uses the SharpED-processed XPLOR map; <b>SharpED structure (EDMA CIF)</b> uses the EDMA structure extracted from the SharpED map and ignores XPLOR damping.</p>
             <p><b>XPLOR damping (1/x)</b> (Superflip phasing method, XPLOR next-cycle models only) is the inverse damping factor: 1.0 means no damping, 0.5 is equivalent to the previous factor 2.0, 0.25 to factor 4.0.</p>
             <p><b>Excluded atoms</b> removes selected atom labels from CIF modelfiles before the next Superflip cycle (comma/semicolon/whitespace-separated); it does not apply to XPLOR-only model paths.</p>
@@ -6959,8 +7214,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 <li><b>Run SharpED</b> &mdash; process the Superflip map with the SharpED server. If disabled, the SharpED map used downstream is just a copy of the Superflip map.</li>
                 <li><b>Symmetrize SharpED map with Superflip (beta)</b> &mdash; after SharpED processing, run Superflip in symmetry mode (no charge flipping) with the SharpED map as modelfile, averaging it according to the supplied space-group symmetry. Hidden unless beta/experimental features are enabled.</li>
                 <li><b>Run EDMA on SharpED map</b> &mdash; peak-search the SharpED (or symmetrized) XPLOR map and export CIF/XYZ/PDB.</li>
-                <li><b>Compute OMIT validation maps (5% holdout)</b> &mdash; each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed random 5% of reflections excluded from the input, purely for cross-validation. Populates the omit-map correlation series on the <b>Superflip validation</b> and <b>SharpED validation</b> tabs. Roughly doubles Superflip/SharpED time per cycle.</li>
-                <li><b>Calculate R_free on the 5% holdout</b> &mdash; requires the option above; also computes R_free (the crystallographic R-factor between the excluded reflections' observed |F| and |F| calculated by FFT from the omit map) for both the omit-map series.</li>
+                <li><b>Compute OMIT validation maps (5% holdout)</b> &mdash; freezes a symmetry/Friedel-orbit-safe holdout before cycle 1 and excludes it from every work-data and feedback step. Enables the cross-validation assessment profiles and OMIT map correlation. Roughly doubles Superflip/SharpED time per cycle.</li>
+                <li><b>Calculate R_free on the 5% holdout</b> &mdash; is selected automatically with the option above and reports R_free from reflections never admitted to work data. Recommendation follows the active profile's explicit three-metric priority without a combined score.</li>
             </ul>
             <p>Under <b>Phase-recycling methods</b> (used by the two beta/experimental Phasing methods):</p>
             <ul><li><b>Run EDMA on final map</b> &mdash; run EDMA once, on the last cycle's recomposed |Fobs|+phi_calc map.</li></ul>
@@ -6987,7 +7242,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         jana_integration_layout = self._add_help_section(basic_help_tab, "jana_integration", "Jana2020 data and workflows", """
             <p>Phase Studio supports Jana2020 .inflip data and scientific workflows.
             When launched from the Jana2020 Workflow Wizard, completed results can
-            be selected and sent back with <b>Send to Jana2020</b>.</p>
+            be selected and sent back with <b>Pass to Jana2020</b>.</p>
             <p>Jana installation management is provided by the separate Phase Studio
             Jana2020 Installer application.</p>
         """)
@@ -7282,7 +7537,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_now_btn = QPushButton("Stop immediately")
         self.clear_btn = QPushButton("Clear results")
         # Result handoff is visible only in a Jana Wizard session.
-        self.jana_action_btn = QPushButton("Send to Jana2020")
+        self.jana_action_btn = QPushButton("Save map and model")
         self.handoff_btn = self.jana_action_btn
         self.run_btn.setObjectName("primaryButton")
         self.continue_btn.setObjectName("continueButton")
@@ -7422,45 +7677,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._metrics_hover_series: Dict[str, list] = {}
         self._metrics_last_render_args: Dict[str, dict] = {}
         self._metrics_tab_keys: List[str] = []
-        metrics_tab_tooltips = {
-            "superflip": (
-                "Reference match, SF RMSD, Recall and Precision compare directly against a supplied reference "
-                "structure (Recall/Precision: heavy, i.e. non-H/He, atoms matched within EDMA's Merge distance), so "
-                "they only appear when one is provided. Without a reference, Heavy atoms found (a simple count) "
-                "appears instead as a fallback progress indicator."
-            ),
-            "deblur": (
-                "SharpED RMSD, Recall and Precision compare directly against a supplied reference structure (Recall/"
-                "Precision: heavy, i.e. non-H/He, atoms matched within EDMA's Merge distance), so they only appear "
-                "when one is provided. Without a reference, Heavy atoms found appears instead as a fallback progress "
-                "indicator. Map correlation only appears for the SharpED phase-recycling phasing methods."
-            ),
-            "powder_repartition": (
-                "Average, across overlap groups, of each group's mean member-wise intensity change caused by that "
-                "cycle's powder overlap repartitioning (Basic -> Map feedback). Only appears when repartitioning is "
-                "enabled; lower is better, since it should shrink toward 0% as the map increasingly agrees with the "
-                "observed data. Each cycle's point reflects the repartitioning that fed its input, so it lags one "
-                "cycle behind the repartitioning run itself."
-            ),
-            "intensity_correction": (
-                "Average, across corrected reflections, of the intensity change caused by that cycle's map-based "
-                "intensity correction (Basic -> Map feedback -> Intensity correction). Only appears when intensity "
-                "correction is enabled; lower is better, since it should shrink toward 0% as the map increasingly "
-                "agrees with the observed data. Each cycle's point reflects the correction that fed its input, so it "
-                "lags one cycle behind the correction run itself."
-            ),
-            "superflip_omit": "OMIT maps + R_free cross-validation for the Superflip map.",
-            "deblur_omit": "OMIT maps + R_free cross-validation for the SharpED map.",
-        }
-        self._metrics_detail_supported_keys = {"powder_repartition", "intensity_correction"}
-        for key, title in (
-            ("superflip", "Superflip"),
-            ("deblur", "SharpED"),
-            ("superflip_omit", "Superflip validation"),
-            ("deblur_omit", "SharpED validation"),
-            ("powder_repartition", "Powder report"),
-            ("intensity_correction", "Intensity correction"),
-        ):
+        initial_definition = profile_definition(ValidationProfile.REFERENCE_FREE)
+        self._metrics_detail_supported_keys = {"quality_0", "quality_1", "quality_2"}
+        for index, metric in enumerate(initial_definition.primary_metrics):
+            key, title = f"quality_{index}", metric.label
             # Each page is now JUST the canvas -- the interaction controls
             # (hint / Full range / Detail / Reset view) live once in the
             # QTabWidget's own corner, not a second per-tab toolbar row, so
@@ -7480,8 +7700,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             canvas.setFocusPolicy(Qt.ClickFocus)
             page_layout.addWidget(canvas, 1)
             tab_index = self.metrics_tabs.addTab(page, title)
-            if key in metrics_tab_tooltips:
-                self.metrics_tabs.setTabToolTip(tab_index, metrics_tab_tooltips[key])
+            direction = "Higher is better." if metric.higher_is_better else "Lower is better."
+            self.metrics_tabs.setTabToolTip(tab_index, f"{metric.label}. {direction}")
             self._metrics_tab_keys.append(key)
             self.metrics_figures[key] = figure
             self.metrics_axes[key] = figure.add_subplot(111)
@@ -7495,6 +7715,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 on_state_changed=self._on_metrics_view_changed,
                 request_rerender=(lambda k=key: self._replay_metrics_tab(k)),
             )
+        self.assessment_label = QLabel(f"Assessment: {initial_definition.assessment_label}")
+        self.assessment_label.setObjectName("metricsAssessmentLabel")
+        metrics_layout.addWidget(self.assessment_label)
         # ----- Shared interaction control strip: its own row, ABOVE the tab
         # bar, rather than a QTabWidget corner widget sharing the tab bar's
         # own horizontal strip -- 6 scientific tab names (some, like "Powder
@@ -8471,13 +8694,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         omit_rfree_widget = self.inputs.get("compute_omit_rfree")
         omit_maps_enabled = not is_recycling and self._check_value("compute_omit_maps")
         if isinstance(omit_rfree_widget, QCheckBox):
-            omit_rfree_widget.setEnabled(omit_maps_enabled)
+            omit_rfree_widget.setChecked(omit_maps_enabled)
+            omit_rfree_widget.setEnabled(False)
             omit_rfree_widget.setToolTip(
                 INPUT_TOOLTIPS.get("compute_omit_rfree", "") if omit_maps_enabled
-                else "Ignored: requires 'Compute omit maps' to be enabled."
+                else "Requires 'Compute omit maps' to be enabled."
             )
-            if not omit_maps_enabled and omit_rfree_widget.isChecked():
-                omit_rfree_widget.setChecked(False)
         recycle_final_widget = self.inputs.get("run_edma_recycle_final")
         if hasattr(recycle_final_widget, "setEnabled"):
             recycle_final_widget.setEnabled(is_recycling)  # type: ignore[attr-defined]
@@ -9976,6 +10198,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.log_text.horizontalScrollBar().setValue(0)
         self._last_log_record = None
         self.results.clear()
+        self.result_recommendation = None
+        self.current_validation_profile = ValidationProfile.REFERENCE_FREE
         self.reference_atoms_for_plot.clear()
         self.superflip_atoms_for_plot.clear()
         self.deblur_atoms_for_plot.clear()
@@ -10234,6 +10458,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # A partially completed workflow is still a usable result set: the
         # Jana2020 hand-off stays available for whatever finished.
         self._sync_jana_action_button()
+        if self._jana_wizard_handoff_available():
+            QTimer.singleShot(0, self._auto_open_jana_result_selector)
 
     def _set_run_status(self, status: str) -> None:
         normalized = str(status).strip().upper() or "READY"
@@ -10313,19 +10539,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.setWindowTitle(f"Phase Studio {__version__}")
 
     def _sync_jana_action_button(self) -> None:
-        """Keep installation management out of the shared scientific GUI."""
+        """Expose the shared result selector with context-specific wording."""
         if not hasattr(self, "jana_action_btn"):
             return
         launched = self.jana_wizard_context.launched_from_jana_wizard
-        self.jana_action_btn.setVisible(launched)
-        self.jana_action_btn.setText("Send to Jana2020")
-        self.jana_action_btn.setToolTip("Select a completed workflow result to send to Jana2020.")
+        self.jana_action_btn.setVisible(True)
+        self.jana_action_btn.setText("Pass to Jana2020" if launched else "Save map and model")
+        self.jana_action_btn.setToolTip(
+            "Select a completed workflow result to pass to Jana2020."
+            if launched else
+            "Select and save an existing completed map and structure model."
+        )
         active = str(getattr(self, "_run_status", "READY")).upper() == "RUNNING"
-        self.jana_action_btn.setEnabled(launched and not active and self._jana_wizard_handoff_available())
+        available = self._jana_wizard_handoff_available() if launched else bool(self._result_candidates())
+        self.jana_action_btn.setEnabled(not active and available)
 
     def _on_jana_action_clicked(self) -> None:
         if self.jana_wizard_context.launched_from_jana_wizard:
             self.open_jana_handoff_dialog()
+        else:
+            self.open_result_selector(context="standalone")
 
     def _show_stopping_badge(self) -> None:
         # Cosmetic only: the pipeline is still RUNNING for _update_action_states()
@@ -10577,6 +10810,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.deblur_atoms_for_plot = self._safe_parse_structure(result.deblur_edma_cif)  # type: ignore[attr-defined]
                     self._update_plot()
                     self._update_structure_views()
+                    self._update_action_states()
+                elif kind == "validation_profile":
+                    try:
+                        self.current_validation_profile = ValidationProfile(str(payload))
+                    except (TypeError, ValueError):
+                        self.current_validation_profile = ValidationProfile.REFERENCE_FREE
+                    self._update_plot()
                 elif kind == "structure_update":
                     panel, cif_path = payload  # type: ignore[misc]
                     atoms = self._safe_parse_structure(Path(cif_path))
@@ -10699,33 +10939,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     # Wizard -- either Full configuration or Phase recycling
                     # -- is eligible).
                     if self._jana_wizard_handoff_available():
-                        if self.jana_wizard_context.launch_mode == "phase_recycling":
-                            # Deferred to the next event-loop turn, on the GUI
-                            # thread, rather than opened inline here: at this
-                            # point we are still inside the queue-drain loop of
-                            # this QTimer slot, and the selector is modal
-                            # (dialog.exec()). Opening it inline would run a
-                            # nested event loop from inside the drain -- which
-                            # re-enters _poll_queue and stalls every remaining
-                            # message for as long as the dialog stays open.
-                            # Every completed result is already committed to
-                            # self.results (the "result" messages are queued
-                            # before "done" and drained above), the run status
-                            # is COMPLETE, and the action button has been
-                            # re-synced, so the state the selector reads is
-                            # final by the time this fires.
-                            QTimer.singleShot(0, self._auto_open_jana_result_selector)
-                        else:
-                            self._append_execution_log(
-                                "[Jana2020] Hand-off ready · select Superflip or SharpED result",
-                                subsystem="Jana2020",
-                            )
+                        # Defer the modal selector until this queue-drain turn
+                        # finishes. Wizard auto-runs and manually started Full
+                        # configuration runs share the same behavior.
+                        QTimer.singleShot(0, self._auto_open_jana_result_selector)
         except queue.Empty:
             pass
 
     def _auto_open_jana_result_selector(self) -> None:
-        """Open the locked Jana2020 result selector after a successful Wizard
-        Phase-recycling run (GUI thread, one event-loop turn after completion).
+        """Open the shared Jana2020 selector after a usable Wizard run.
 
         Nothing here is speculative: "Opening..." is logged immediately before
         the real open request and a confirmation only after the selector has
@@ -10740,20 +10962,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # have invalidated the results in between.
         if not self._jana_wizard_handoff_available():
             return
-        if self.jana_wizard_context.launch_mode != "phase_recycling":
-            return
         if self._jana_auto_selector_shown:
             return
         self._jana_auto_selector_shown = True
         self._append_execution_log(
-            "Phase recycling complete. Opening the Jana2020 result selector automatically.",
+            "Workflow results are ready. Opening the Jana2020 result selector automatically.",
             subsystem="Jana2020",
         )
         try:
-            self.open_jana_result_selector(
-                source_mode="locked",
-                initial_source=self.jana_wizard_context.wizard_map_source or "deblurred",
-            )
+            self.open_jana_result_selector()
         except Exception as exc:
             self._append_execution_log(
                 f"The Jana2020 result selector could not be opened: {exc}",
@@ -10781,6 +10998,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _source_structure_path(self, result: CycleResult, source: str) -> Path:
         return Path(result.superflip_edma_cif) if source == "superflip" else Path(result.deblur_edma_cif)
 
+    def _source_quality(self, result: CycleResult, source: str) -> Optional[MapQualityMetrics]:
+        return result.superflip_quality if source == "superflip" else result.deblur_quality
+
+    def _result_candidates(self) -> List[ResultCandidate]:
+        return result_candidates_from_results(self.results)
+
+    def _active_validation_profile(self) -> ValidationProfile:
+        for result in self.results:
+            try:
+                return ValidationProfile(result.validation_profile)
+            except (TypeError, ValueError):
+                continue
+        return self.current_validation_profile
+
     def _source_available_for_results(self, source: str) -> bool:
         return any(self._source_map_path(r, source).is_file() for r in self.results)
 
@@ -10793,7 +11024,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return "deblurred"
         return "superflip"
 
-    def open_jana_result_selector(self, source_mode: str, initial_source: str) -> None:
+    def _open_legacy_jana_result_selector(self, source_mode: str, initial_source: str) -> None:
         """One shared Jana2020 result selector reused by both Jana-Wizard
         launch contexts that reach this main window:
 
@@ -11502,18 +11733,309 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def open_jana_result_selector(self, source_mode: str = "switchable", initial_source: str = "") -> None:
+        """Compatibility entry point for the unified profile-aware selector."""
+        self.open_result_selector(context="jana")
+
+    def _cycle_result_for_candidate(self, candidate: ResultCandidate) -> Optional[CycleResult]:
+        return next((result for result in self.results if int(result.cycle) == int(candidate.cycle)), None)
+
+    def _export_selected_candidate(self, candidate: ResultCandidate) -> bool:
+        destination_text = QFileDialog.getExistingDirectory(
+            self,
+            "Save selected result",
+            str(self.last_run_config.work_dir if self.last_run_config is not None else Path.home()),
+        )
+        if not destination_text:
+            return False
+        destination = Path(destination_text)
+        sources = [Path(candidate.map_path)]
+        if candidate.usable_structure:
+            sources.append(Path(candidate.structure_path))
+        targets = [destination / source.name for source in sources]
+        existing = [target for target in targets if target.exists()]
+        if existing:
+            names = "\n".join(target.name for target in existing)
+            answer = QMessageBox.question(
+                self,
+                "Replace existing result files?",
+                "The following files already exist:\n\n" + names + "\n\nReplace them?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return False
+        destination.mkdir(parents=True, exist_ok=True)
+        for source, target in zip(sources, targets):
+            shutil.copy2(source, target)
+        self._append_execution_log(
+            f"[Results] Saved {candidate.label} · {len(targets)} file(s) · {destination}",
+            level="SUCCESS",
+            subsystem="Results",
+        )
+        return True
+
+    def open_result_selector(self, context: str = "standalone") -> None:
+        """Open the shared profile-aware selector for Jana2020 or standalone."""
+        candidates = self._result_candidates()
+        if not candidates:
+            self._show_error_report(build_error_report(
+                RuntimeError("No completed map is available for result selection."),
+                subsystem="Results",
+                operation="Open result selector",
+                severity="warning",
+            ))
+            return
+        is_jana = str(context).strip().lower() == "jana"
+        cfg = self.last_run_config
+        if is_jana and (cfg is None or cfg.jana_inflip is None):
+            self._show_error_report(build_error_report(
+                RuntimeError("Jana2020 handoff requires a run started from a Jana2020 .inflip file."),
+                subsystem="Jana2020",
+                operation="Jana2020 handoff",
+                severity="warning",
+            ))
+            return
+
+        profile = self._active_validation_profile()
+        definition = profile_definition(profile)
+        recommendation = recommend_best_result(profile, candidates)
+        self.result_recommendation = recommendation
+        ordered = sorted(candidates, key=lambda candidate: (
+            int(candidate.cycle), 0 if candidate.source == "superflip" else 1, candidate.source,
+        ))
+        initially_selected = recommendation.selected_candidate or ordered[0]
+        state: Dict[str, Optional[ResultCandidate]] = {"selected": initially_selected}
+
+        class _PreviewHost:
+            _structure_cartesian_geometry = IterativeSuperflipPipelineQtGUI._structure_cartesian_geometry
+            _element_color = IterativeSuperflipPipelineQtGUI._element_color
+            _plot_structure_atoms = IterativeSuperflipPipelineQtGUI._plot_structure_atoms
+            _update_structure_depth_artist = IterativeSuperflipPipelineQtGUI._update_structure_depth_artist
+            _update_structure_depth_cue = IterativeSuperflipPipelineQtGUI._update_structure_depth_cue
+            _structure_axis_limits = staticmethod(IterativeSuperflipPipelineQtGUI._structure_axis_limits)
+            _apply_structure_axis_limits = staticmethod(IterativeSuperflipPipelineQtGUI._apply_structure_axis_limits)
+            _begin_structure_view_drag = IterativeSuperflipPipelineQtGUI._begin_structure_view_drag
+            _apply_structure_view = IterativeSuperflipPipelineQtGUI._apply_structure_view
+            _sync_structure_view_from_event = IterativeSuperflipPipelineQtGUI._sync_structure_view_from_event
+            _finish_structure_view_drag = IterativeSuperflipPipelineQtGUI._finish_structure_view_drag
+
+            def __init__(self, cell, elev: float, azim: float) -> None:
+                self.structure_cell = cell
+                self.structure_elev = elev
+                self.structure_azim = azim
+                self._structure_depth_artists = []
+                self.structure_axes = []
+                self._structure_interactive_axes = []
+                self.structure_view_base_limits = None
+                self.structure_view_limits = None
+                self._structure_view_drag_source = None
+                self.structure_canvas = None
+
+        preview_host = _PreviewHost(self.structure_cell, self.structure_elev, self.structure_azim)
+        dialog = QDialog(self)
+        dialog.setObjectName("resultSelectionDialog")
+        dialog.setProperty("resultContext", "JANA2020" if is_jana else "STANDALONE")
+        dialog.setWindowTitle("Jana2020 result selection" if is_jana else "Save map and model")
+        apply_safe_dialog_geometry(dialog, 1400, 800)
+        outer_layout = QVBoxLayout(dialog)
+        outer_layout.setContentsMargins(0, 0, 0, 0)
+        outer_layout.setSpacing(0)
+        outer_layout.addWidget(create_phase_studio_brand_header())
+        outer_layout.addWidget(create_phase_studio_context_banner(
+            "JANA2020 RESULT SELECTION" if is_jana else "RESULT SELECTION",
+            "Compare completed maps and select the result to pass to Jana2020"
+            if is_jana else "Compare completed maps and select the result to save",
+        ))
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(14, 10, 14, 14)
+        content_layout.setSpacing(9)
+        outer_layout.addWidget(content, 1)
+        summary_form = QFormLayout()
+        summary_form.setHorizontalSpacing(18)
+        summary_form.setVerticalSpacing(2)
+        reference_available = profile in {
+            ValidationProfile.REFERENCE_AND_HOLDOUT, ValidationProfile.REFERENCE_ONLY,
+        }
+        free_count = max((candidate.metrics.n_free_reflections for candidate in candidates), default=0)
+        summary_values = (
+            ("Assessment", definition.assessment_label),
+            ("Completed cycles", str(len({candidate.cycle for candidate in candidates}))),
+            ("Recommended result", recommendation.recommended_candidate.label if recommendation.recommended_candidate else "Unavailable"),
+            ("Reference", "Available" if reference_available else "Not available"),
+            ("Holdout", f"5% · {free_count} reflections" if free_count else "Not enabled"),
+        )
+        for label_text, value_text in summary_values:
+            value_label = QLabel(value_text)
+            font = value_label.font(); font.setBold(True); value_label.setFont(font)
+            summary_form.addRow(label_text, value_label)
+        content_layout.addLayout(summary_form)
+        reason_label = QLabel(recommendation.reason)
+        reason_label.setObjectName("recommendationReason")
+        reason_label.setWordWrap(True)
+        reason_label.setStyleSheet("color: #52658b;")
+        content_layout.addWidget(reason_label)
+        table_section_label = QLabel("RESULT CANDIDATES")
+        table_section_label.setObjectName("sectionLabel")
+        content_layout.addWidget(table_section_label)
+
+        headers = ["Recommended", "Cycle", "Source"] + [metric.arrow_label for metric in definition.primary_metrics]
+        table = QTableWidget(len(ordered), len(headers))
+        table.setObjectName("diagnosticTable")
+        table.setHorizontalHeaderLabels(headers)
+        table.setAlternatingRowColors(True)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SingleSelection)
+        table.verticalHeader().setVisible(False)
+        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+
+        def format_metric(value: Optional[float]) -> str:
+            return "n/a" if value is None else f"{float(value):.3f}"
+
+        selected_row = 0
+        for row, candidate in enumerate(ordered):
+            is_recommended = candidate == recommendation.recommended_candidate
+            values = [
+                "Recommended" if is_recommended else "",
+                str(candidate.cycle),
+                result_source_title(candidate.source) + (" (map only)" if not candidate.usable_structure else ""),
+            ] + [format_metric(candidate.metrics.value(metric.key)) for metric in definition.primary_metrics]
+            for column, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setTextAlignment((Qt.AlignLeft if column in (0, 2) else Qt.AlignRight) | Qt.AlignVCenter)
+                item.setData(Qt.UserRole, row)
+                table.setItem(row, column, item)
+            if candidate == initially_selected:
+                selected_row = row
+
+        preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
+        preview_canvas = FigureCanvas(preview_figure)
+        preview_canvas.setObjectName("resultPreviewCanvas")
+        preview_canvas.setMinimumHeight(260)
+        preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        preview_host.structure_canvas = preview_canvas
+        preview_canvas.mpl_connect("button_press_event", preview_host._begin_structure_view_drag)
+        preview_canvas.mpl_connect("motion_notify_event", preview_host._sync_structure_view_from_event)
+        preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_view_drag)
+
+        action_btn = QPushButton("Pass to Jana2020" if is_jana else "Save map and model")
+        action_btn.setObjectName("primaryButton")
+
+        def render_preview(candidate: ResultCandidate) -> None:
+            state["selected"] = candidate
+            preview_figure.clear()
+            preview_figure.patch.set_facecolor("#ffffff")
+            preview_host.structure_axes = []
+            preview_host._structure_interactive_axes = []
+            preview_host._structure_depth_artists = []
+            atoms = self._safe_parse_structure(Path(candidate.structure_path)) if candidate.usable_structure else []
+            panels = [(candidate.label, atoms, "Structure model unavailable · map remains usable")]
+            if reference_available:
+                panels.append(("Reference", self.reference_atoms_for_plot, "Reference structure unavailable"))
+            count = len(panels)
+            positions = (0.5,) if count == 1 else (0.25, 0.75)
+            metadata = []
+            for index, (_title, panel_atoms, empty_text) in enumerate(panels, start=1):
+                axis = preview_figure.add_subplot(1, count, index, projection="3d")
+                preview_host.structure_axes.append(axis)
+                metadata.append(preview_host._plot_structure_atoms(axis, panel_atoms, empty_text))
+            for position, (title, _atoms, _empty) in zip(positions, panels):
+                preview_figure.text(position, 0.96, title, ha="center", va="center", fontsize=10, fontweight="bold", color="#001170")
+            for position, details in zip(positions, metadata):
+                preview_figure.text(position, 0.03, details, ha="center", va="center", fontsize=7.5, color="#52658b")
+            if count > 1:
+                preview_figure.add_artist(Line2D([0.5, 0.5], [0.08, 0.90], transform=preview_figure.transFigure, color="#cbd7ea", linewidth=0.45, alpha=0.62))
+            preview_figure.subplots_adjust(left=0.01, right=0.99, bottom=0.09, top=0.90, wspace=0.04)
+            preview_canvas.draw_idle()
+            action_btn.setText(
+                "Pass to Jana2020" if is_jana else
+                ("Save map and model" if candidate.usable_structure else "Save available result")
+            )
+
+        def selected_candidate() -> Optional[ResultCandidate]:
+            row = table.currentRow()
+            return ordered[row] if 0 <= row < len(ordered) else None
+
+        def on_selection_changed() -> None:
+            candidate = selected_candidate()
+            if candidate is not None:
+                render_preview(candidate)
+
+        table.itemSelectionChanged.connect(on_selection_changed)
+        table.selectRow(selected_row)
+        render_preview(initially_selected)
+
+        preview_section = QWidget()
+        preview_layout = QVBoxLayout(preview_section)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_label = QLabel("STRUCTURE COMPARISON" if reference_available else "STRUCTURE PREVIEW")
+        preview_label.setObjectName("sectionLabel")
+        preview_layout.addWidget(preview_label)
+        preview_layout.addWidget(preview_canvas, 1)
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.addWidget(table)
+        splitter.addWidget(preview_section)
+        splitter.setSizes([760, 640])
+        content_layout.addWidget(splitter, 1)
+
+        button_row = QHBoxLayout()
+        close_btn = QPushButton("Return to Phase Studio")
+        button_row.addWidget(close_btn)
+        button_row.addStretch(1)
+        button_row.addWidget(action_btn)
+        content_layout.addLayout(button_row)
+        close_btn.clicked.connect(dialog.reject)
+        action_btn.clicked.connect(dialog.accept)
+
+        self._append_execution_log(
+            f"[Results] Result selector opened · {definition.assessment_label}",
+            subsystem="Results",
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+        chosen = state["selected"]
+        if chosen is None:
+            return
+        self.result_recommendation = recommendation.with_selected(chosen)
+        if cfg is not None:
+            write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", self.results, chosen)
+        if not is_jana:
+            self._export_selected_candidate(chosen)
+            return
+
+        result = self._cycle_result_for_candidate(chosen)
+        if result is None:
+            return
+        self.handoff_btn.setEnabled(False)
+        self._append_execution_log(
+            f"[Jana2020] Hand-off source · {chosen.label}",
+            level="STEP",
+            subsystem="Jana2020",
+        )
+
+        def handoff_worker() -> None:
+            try:
+                perform_jana_handoff(cfg, result, chosen.source, log=self.log)
+                self.msg_queue.put(("handoff_done", None))
+            except Exception as exc:
+                self.msg_queue.put(("handoff_error", build_error_report(
+                    exc,
+                    subsystem="Jana2020",
+                    operation="Jana2020 handoff",
+                    extra_details=traceback.format_exc(),
+                )))
+
+        threading.Thread(target=handoff_worker, daemon=True).start()
+
     def open_jana_handoff_dialog(self) -> None:
         """Entry point for the main window's "Send to Jana2020" button.
         Dispatches to the one shared open_jana_result_selector(): locked to
         the Wizard's own choice for a Phase-recycling session, switchable
         between Superflip/SharpED for a Full-configuration session."""
-        if self.jana_wizard_context.launch_mode == "phase_recycling":
-            self.open_jana_result_selector(
-                source_mode="locked",
-                initial_source=self.jana_wizard_context.wizard_map_source or "deblurred",
-            )
-            return
-        self.open_jana_result_selector(source_mode="switchable", initial_source=self._default_handoff_source())
+        self.open_jana_result_selector()
 
     def _replay_metrics_tab(self, key: str) -> None:
         """Re-run the last _render_metrics_tab() call for this tab with its
@@ -11928,75 +12450,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         canvas.draw_idle()
 
     def _update_plot(self) -> None:
-        def series_has_data(series) -> bool:
-            return any(v is not None for _label, values, *_rest in series for v in values)
-
-        def set_tab_visible(key: str, series) -> None:
-            try:
-                index = self._metrics_tab_keys.index(key)
-            except ValueError:
-                return
-            # Before any cycle has completed there is nothing to distinguish
-            # "no data yet" from "irrelevant for this run" -- keep every tab
-            # visible (showing the normal "Run phasing..." placeholder) until
-            # results start arriving, only then hide tabs that stayed empty.
-            self.metrics_tabs.setTabVisible(index, (not self.results) or series_has_data(series))
-
-        superflip_series = [
-            ("Reference match", [r.superflip_ref_match for r in self.results], False, "#001170", "D", ":"),
-            ("SF RMSD", [r.superflip_metric for r in self.results], False, "#44b7ff", "v", "-."),
-            ("Recall", [r.superflip_recall for r in self.results], True, "#2264b8", "^", "-"),
-            ("Precision", [r.superflip_precision for r in self.results], True, "#082a8a", "P", "--"),
-            ("Heavy atoms found", [r.superflip_heavy_atom_count for r in self.results], True, "#7183a6", "h", ":"),
-        ]
-        self._render_metrics_tab("superflip", superflip_series)
-        set_tab_visible("superflip", superflip_series)
-
-        deblur_series = [
-            ("SharpED RMSD", [r.deblur_metric for r in self.results], False, "#001170", "X", "--"),
-            ("Map correlation", [r.recycle_map_correlation for r in self.results], True, "#2264b8", "*", "-"),
-            ("Recall", [r.deblur_recall for r in self.results], True, "#44b7ff", "^", "-"),
-            ("Precision", [r.deblur_precision for r in self.results], True, "#082a8a", "P", "--"),
-            ("Heavy atoms found", [r.deblur_heavy_atom_count for r in self.results], True, "#7183a6", "h", ":"),
-        ]
-        self._render_metrics_tab("deblur", deblur_series)
-        set_tab_visible("deblur", deblur_series)
-
-        superflip_omit_series = [
-            ("Omit map correlation", [r.omit_superflip_correlation for r in self.results], True, "#2264b8", "*", "-"),
-            ("R_free", [r.omit_superflip_rfree for r in self.results], False, "#001170", "o", "-"),
-        ]
-        self._render_metrics_tab("superflip_omit", superflip_omit_series)
-        set_tab_visible("superflip_omit", superflip_omit_series)
-
-        deblur_omit_series = [
-            ("Omit map correlation", [r.omit_deblur_correlation for r in self.results], True, "#2264b8", "*", "-"),
-            ("R_free", [r.omit_deblur_rfree for r in self.results], False, "#001170", "o", "-"),
-        ]
-        self._render_metrics_tab("deblur_omit", deblur_omit_series)
-        set_tab_visible("deblur_omit", deblur_omit_series)
-
-        powder_repartition_series = [
-            ("Mean intensity change (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
-        ]
-        self._render_metrics_tab(
-            "powder_repartition",
-            powder_repartition_series,
-            raw=True,
-            raw_ylabel="Mean intensity change (%)",
-        )
-        set_tab_visible("powder_repartition", powder_repartition_series)
-
-        intensity_correction_series = [
-            ("Mean intensity change (%)", [r.intensity_correction_avg_change_percent for r in self.results], False, "#001170", "o", "-"),
-        ]
-        self._render_metrics_tab(
-            "intensity_correction",
-            intensity_correction_series,
-            raw=True,
-            raw_ylabel="Mean intensity change (%)",
-        )
-        set_tab_visible("intensity_correction", intensity_correction_series)
+        definition = profile_definition(self._active_validation_profile())
+        if hasattr(self, "assessment_label"):
+            self.assessment_label.setText(f"Assessment: {definition.assessment_label}")
+            self.assessment_label.setToolTip(definition.description)
+        for index, metric in enumerate(definition.primary_metrics):
+            key = f"quality_{index}"
+            self.metrics_tabs.setTabText(index, metric.label)
+            direction = "Higher is better." if metric.higher_is_better else "Lower is better."
+            self.metrics_tabs.setTabToolTip(index, f"{metric.label}. {direction}")
+            superflip_values = [
+                None if result.superflip_quality is None else result.superflip_quality.value(metric.key)
+                for result in self.results
+            ]
+            sharped_values = [
+                None if result.deblur_quality is None else result.deblur_quality.value(metric.key)
+                for result in self.results
+            ]
+            series = [
+                ("Superflip", superflip_values, metric.higher_is_better, "#001170", "o", "-"),
+                ("SharpED", sharped_values, metric.higher_is_better, "#44b7ff", "^", "--"),
+            ]
+            self._render_metrics_tab(key, series, raw=True, raw_ylabel=metric.label)
 
     def _element_color(self, element: str) -> str:
         # This extended blue scale is intentionally exclusive to structure atoms.
@@ -12946,17 +13421,41 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             else:
                 self.log("[Map feedback] Disabled")
             self.msg_queue.put(("progress_setup", cfg.cycles))
+            omit_test_hkls: FrozenSet[Tuple[int, int, int]] = frozenset()
+            if cfg.compute_omit_maps:
+                omit_test_hkls = select_orbit_safe_holdout(refl, ref_ctx.spacegroup, cfg.randomseed)
+            validation_context = build_validation_context(
+                refl, configured_data_mode, ref_ctx, omit_test_hkls,
+            )
+            self.msg_queue.put(("validation_profile", validation_context.profile.value))
+            if omit_test_hkls:
+                current_reflections = [
+                    reflection for reflection in refl
+                    if (int(reflection.h), int(reflection.k), int(reflection.l)) not in omit_test_hkls
+                ]
+            definition = profile_definition(validation_context.profile)
+            holdout_text = (
+                f"5% holdout · {len(validation_context.free_reflections)} free reflections"
+                if validation_context.free_reflections else "no holdout"
+            )
+            self.log(
+                f"[Validation] Assessment: {definition.assessment_label} · {holdout_text}",
+                subsystem="Validation",
+            )
             data_modes_needed = {configured_data_mode}
             observed_hkls: Dict[str, Path] = {}
             for data_mode in sorted(data_modes_needed):
                 observed_hkl = cfg.work_dir / observed_hkl_name_for_mode(data_mode)
-                n_written = write_observed_reflections(observed_hkl, refl, cfg.i_over_sigma_min, data_mode=data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
+                n_written = write_observed_reflections(observed_hkl, current_reflections, cfg.i_over_sigma_min, data_mode=data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 observed_hkls[data_mode] = observed_hkl
                 self.log(f"Prepared HKL for {data_mode}: {observed_hkl} ({n_written} reflections)")
-            omit_test_hkls: FrozenSet[Tuple[int, int, int]] = frozenset()
-            if cfg.compute_omit_maps and reconstruction_mode == "superflip":
-                omit_test_hkls = select_omit_test_set(refl, cfg.randomseed)
-                self.log(f"Omit maps: excluding {len(omit_test_hkls)}/{len(refl)} reflections (fixed for this run) for cross-validation.", level="DETAIL")
+            if omit_test_hkls:
+                self.log(
+                    f"Holdout: excluded {len(omit_test_hkls)}/{len(refl)} reflections in complete symmetry/Friedel orbits; "
+                    "the fixed set is excluded from every work-data cycle and feedback step.",
+                    level="DETAIL",
+                    subsystem="Validation",
+                )
             state = PipelineState(
                 cfg=cfg,
                 ref_ctx=ref_ctx,
@@ -12973,6 +13472,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 progress_stages=cycle_progress_stages(cfg),
                 current_reflections=current_reflections,
                 omit_test_hkls=omit_test_hkls,
+                validation_context=validation_context,
             )
             self._resume_state = state
             if reconstruction_mode == "superflip":
@@ -13153,6 +13653,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             omit_sf_map: Optional[Path] = None
             omit_sf_correlation: Optional[float] = None
             omit_sf_rfree: Optional[float] = None
+            omit_sf_quality: Optional[MapQualityMetrics] = None
             if cfg.compute_omit_maps and state.omit_test_hkls:
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Superflip", detail="omit map · running", busy=True)
                 omit_reflections = [r for r in state.current_reflections if (int(r.h), int(r.k), int(r.l)) not in state.omit_test_hkls]
@@ -13163,9 +13664,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay)
                 self.log(f"Omit Superflip map ({len(state.omit_test_hkls)} reflections excluded): {omit_sf_map}")
                 omit_sf_correlation = xplor_map_correlation(sf_map, omit_sf_map)
-                if cfg.compute_omit_rfree:
-                    predictions = xplor_fft_predictions(omit_sf_map, list(state.omit_test_hkls))
-                    omit_sf_rfree = compute_rfree(state.current_reflections, state.omit_test_hkls, configured_data_mode, predictions)
+                if state.validation_context is not None:
+                    omit_sf_quality = assess_xplor_map(omit_sf_map, state.validation_context)
+                    omit_sf_rfree = omit_sf_quality.r_free
                 self.log(
                     f"[Omit] Superflip map correlation={('n/a' if omit_sf_correlation is None else f'{omit_sf_correlation:.4f}')}"
                     f" · R_free={('n/a' if omit_sf_rfree is None else f'{omit_sf_rfree:.4f}')}",
@@ -13213,13 +13714,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_metric_text = "n/a" if sf_metric is None else f"{float(sf_metric):.3f}"
             sf_recall: Optional[float] = None
             sf_precision: Optional[float] = None
+            sf_tp: Optional[int] = None
+            sf_fp: Optional[int] = None
             sf_heavy_atoms: Optional[float] = None
             if cfg.run_edma_superflip:
-                sf_recall_precision = atom_recall_precision(sf_edma_cif, ref_ctx, cfg.merge_distance)
-                if sf_recall_precision is not None:
-                    sf_recall, sf_precision = sf_recall_precision
+                sf_match = atom_reference_match_metrics(sf_edma_cif, ref_ctx, cfg.merge_distance)
+                if sf_match is not None:
+                    sf_recall, sf_precision, sf_tp, sf_fp = sf_match
                 else:
                     sf_heavy_atoms = count_heavy_atoms(sf_edma_cif)
+            sf_quality: Optional[MapQualityMetrics] = None
+            if state.validation_context is not None:
+                sf_quality = assess_xplor_map(sf_map, state.validation_context)
+                sf_quality = with_reference_metrics(
+                    sf_quality,
+                    precision=sf_precision,
+                    recall=sf_recall,
+                    rmsd=sf_metric,
+                    true_positives=sf_tp,
+                    false_positives=sf_fp,
+                )
+                if state.omit_test_hkls:
+                    sf_quality = with_holdout_metrics(
+                        sf_quality, sf_quality, omit_sf_correlation,
+                    )
             self.log(
                 f"[EDMA] Completed · Superflip map · RMSD={sf_metric_text} Å\n"
                 f"  output: {sf_edma_cif}",
@@ -13264,6 +13782,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"{result_map_label('deblurred')}: {deblur_map}")
             omit_deblur_correlation: Optional[float] = None
             omit_deblur_rfree: Optional[float] = None
+            omit_deblur_quality: Optional[MapQualityMetrics] = None
             if cfg.compute_omit_maps and state.omit_test_hkls and omit_sf_map is not None and cfg.run_sharped and not use_superflip_xplor_modelfile:
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
@@ -13280,9 +13799,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 )
                 self.log(f"Omit {result_map_label('deblurred')}: {omit_deblur_map}")
                 omit_deblur_correlation = xplor_map_correlation(deblur_map, omit_deblur_map)
-                if cfg.compute_omit_rfree:
-                    predictions = xplor_fft_predictions(omit_deblur_map, list(state.omit_test_hkls))
-                    omit_deblur_rfree = compute_rfree(state.current_reflections, state.omit_test_hkls, configured_data_mode, predictions)
+                if state.validation_context is not None:
+                    omit_deblur_quality = assess_xplor_map(omit_deblur_map, state.validation_context)
+                    omit_deblur_rfree = omit_deblur_quality.r_free
                 self.log(
                     f"[Omit] {result_map_label('deblurred')} correlation={('n/a' if omit_deblur_correlation is None else f'{omit_deblur_correlation:.4f}')}"
                     f" · R_free={('n/a' if omit_deblur_rfree is None else f'{omit_deblur_rfree:.4f}')}",
@@ -13338,13 +13857,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
             deblur_recall: Optional[float] = None
             deblur_precision: Optional[float] = None
+            deblur_tp: Optional[int] = None
+            deblur_fp: Optional[int] = None
             deblur_heavy_atoms: Optional[float] = None
             if cfg.run_edma_deblurred:
-                deblur_recall_precision = atom_recall_precision(deblur_edma_cif, ref_ctx, cfg.merge_distance)
-                if deblur_recall_precision is not None:
-                    deblur_recall, deblur_precision = deblur_recall_precision
+                deblur_match = atom_reference_match_metrics(deblur_edma_cif, ref_ctx, cfg.merge_distance)
+                if deblur_match is not None:
+                    deblur_recall, deblur_precision, deblur_tp, deblur_fp = deblur_match
                 else:
                     deblur_heavy_atoms = count_heavy_atoms(deblur_edma_cif)
+            deblur_quality: Optional[MapQualityMetrics] = None
+            if cfg.run_sharped and not use_superflip_xplor_modelfile and state.validation_context is not None:
+                deblur_quality = assess_xplor_map(deblur_map, state.validation_context)
+                deblur_quality = with_reference_metrics(
+                    deblur_quality,
+                    precision=deblur_precision,
+                    recall=deblur_recall,
+                    rmsd=deblur_metric,
+                    true_positives=deblur_tp,
+                    false_positives=deblur_fp,
+                )
+                if state.omit_test_hkls:
+                    deblur_quality = with_holdout_metrics(
+                        deblur_quality, deblur_quality, omit_deblur_correlation,
+                    )
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
             self.log(
                 f"[EDMA] Completed · {result_map_label('deblurred')} · RMSD={deblur_metric_text} Å\n"
@@ -13384,11 +13920,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_heavy_atom_count=deblur_heavy_atoms,
                 powder_repartition_avg_change_percent=state.pending_powder_repartition_change_percent,
                 intensity_correction_avg_change_percent=state.pending_intensity_correction_change_percent,
+                validation_profile=(
+                    state.validation_context.profile.value
+                    if state.validation_context is not None else ValidationProfile.REFERENCE_FREE.value
+                ),
+                superflip_quality=sf_quality,
+                deblur_quality=deblur_quality,
             )
             state.pending_powder_repartition_change_percent = None
             state.pending_intensity_correction_change_percent = None
             all_results.append(result)
             write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
+            write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", all_results)
+            if sf_quality is not None:
+                self.log(format_validation_log_line(cyc, "superflip", result.validation_profile, sf_quality), subsystem="Validation")
+            if deblur_quality is not None:
+                self.log(format_validation_log_line(cyc, "deblurred", result.validation_profile, deblur_quality), subsystem="Validation")
             self.msg_queue.put(("result", result))
             if cyc < cfg.cycles:
                 add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
@@ -13410,6 +13957,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                             cfg.map_feedback_intensity_damping,
                             cfg.map_feedback_intensity_max_i_over_sigma,
                             self.log,
+                            excluded_hkls=state.omit_test_hkls,
                         )
                     if redistribute:
                         state.current_reflections, state.pending_powder_repartition_change_percent = redistribute_overlap_reflections(
@@ -13572,6 +14120,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             is_final_cycle = cyc == cfg.cycles
             deblur_edma_cif = cycle_dir / f"cycle_{cyc:03d}_edma.cif"
             deblur_metric: Optional[float] = None
+            deblur_recall: Optional[float] = None
+            deblur_precision: Optional[float] = None
+            deblur_tp: Optional[int] = None
+            deblur_fp: Optional[int] = None
             if is_final_cycle and cfg.run_edma_recycle_final:
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="EDMA on final map", busy=True)
                 edma_dir = cycle_dir / "edma_final"
@@ -13584,10 +14136,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     write_m40=cfg.jana_inflip is not None,
                 )
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx)
+                match = atom_reference_match_metrics(deblur_edma_cif, ref_ctx, cfg.merge_distance)
+                if match is not None:
+                    deblur_recall, deblur_precision, deblur_tp, deblur_fp = match
                 self.log(f"[EDMA] Completed · Final map · output: {deblur_edma_cif}", subsystem="EDMA")
                 self.msg_queue.put(("structure_update", ("deblur", deblur_edma_cif)))
             else:
                 write_structure_bundle(deblur_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
+
+            superflip_quality: Optional[MapQualityMetrics] = None
+            deblur_quality: Optional[MapQualityMetrics] = None
+            if state.validation_context is not None:
+                if cyc == 1 and not random_start:
+                    superflip_quality = assess_xplor_map(input_map, state.validation_context)
+                deblur_quality = assess_xplor_map(composed_map, state.validation_context)
+                deblur_quality = with_reference_metrics(
+                    deblur_quality,
+                    precision=deblur_precision,
+                    recall=deblur_recall,
+                    rmsd=deblur_metric,
+                    true_positives=deblur_tp,
+                    false_positives=deblur_fp,
+                )
 
             result = CycleResult(
                 cycle=cyc,
@@ -13610,9 +14180,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 superflip_success_rate=sf_log_metrics.success_rate,
                 superflip_mean_cycles=sf_log_metrics.mean_cycles,
                 recycle_map_correlation=map_correlation,
+                validation_profile=(
+                    state.validation_context.profile.value
+                    if state.validation_context is not None else ValidationProfile.REFERENCE_FREE.value
+                ),
+                superflip_quality=superflip_quality,
+                deblur_quality=deblur_quality,
             )
             all_results.append(result)
             write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
+            write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", all_results)
+            if superflip_quality is not None:
+                self.log(format_validation_log_line(cyc, "superflip", result.validation_profile, superflip_quality), subsystem="Validation")
+            if deblur_quality is not None:
+                self.log(format_validation_log_line(cyc, "deblurred", result.validation_profile, deblur_quality), subsystem="Validation")
             self.msg_queue.put(("result", result))
             state.completed_cycles = cyc
             self.log(f"Cycle {cyc} complete.", level="SUCCESS")

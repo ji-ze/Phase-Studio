@@ -83,9 +83,22 @@ blocks catalog models that endpoint cannot serve and never substitutes a model.
 6. Use **Analyze completeness** to inspect resolution-dependent data quality.
 7. Configure the reconstruction workflow and optional processing steps.
 8. If SharpED is enabled, enter an API token and select a model.
-9. Click **Run pipeline**.
-10. Inspect convergence, structure comparisons, and generated outputs.
-11. For Jana2020 workflows, use **Send to Jana2020** when the desired result is available.
+9. Click **Run phasing**.
+10. Inspect the three metrics selected automatically for the active assessment profile, structure comparisons, and generated outputs.
+11. For Jana2020 workflows, choose the preselected recommendation in **Result Selection** and click **Pass to Jana2020**. In standalone use, click **Save map and model** to open the same selector.
+
+## Map-quality assessment
+
+Phase Studio chooses one of four profiles from reference and 5% holdout availability:
+
+| Profile | Primary metrics, in recommendation order |
+|---|---|
+| Reference + cross-validation | Reference F0.5 higher; R_free lower; OMIT map correlation higher |
+| Reference-backed | Reference F0.5 higher; matched-peak RMSD lower; reference phase agreement higher |
+| Cross-validation | R_free lower; CC_free higher; OMIT map correlation higher |
+| Reference-free map assessment | Amplitude R_F lower; Amplitude CC higher; Weighted triplet C3 higher |
+
+The recommendation is lexicographic and source-neutral: Superflip and SharpED use the same frozen measured reflections, holdout, triplets, and weights. There is no combined selection score and no automatic preference for SharpED or the latest cycle. The GUI plots only the active profile's three metrics; `metrics.csv` and `map_quality_assessment.txt` retain all computed diagnostics.
 
 ## Input workflows
 

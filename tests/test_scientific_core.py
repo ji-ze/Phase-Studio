@@ -147,12 +147,66 @@ def main():
     check("reflection_primary_snr_label: amplitude+FWHM -> 'F/FWHM'", appmod.reflection_primary_snr_label(appmod.REFLECTION_DATA_MODE_AMPLITUDE_FWHM) == "F/FWHM")
     check("reflection_primary_snr_label: intensity+FWHM -> 'I/FWHM'", appmod.reflection_primary_snr_label(appmod.REFLECTION_DATA_MODE_INTENSITY_FWHM) == "I/FWHM")
 
+    orbit_reflections = [
+        appmod.Reflection(sign * h, sign * k, sign * l, 10.0)
+        for h, k, l in ((1, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0), (1, 2, 0))
+        for sign in (-1, 1)
+    ]
+    holdout_a = appmod.select_orbit_safe_holdout(orbit_reflections, gemmi.SpaceGroup("P 1"), "123")
+    holdout_b = appmod.select_orbit_safe_holdout(orbit_reflections, gemmi.SpaceGroup("P 1"), "123")
+    check("holdout split is deterministic for a fixed seed", holdout_a == holdout_b)
+    check("holdout split selects complete measured Friedel pairs", all(tuple(-v for v in hkl) in holdout_a for hkl in holdout_a))
+
     # =========================================================================
     # process_utils: pure, dependency-free helpers used by both app.py and
     # jana_superflip.py.
     # =========================================================================
     check("process_utils.text_encoding() returns a non-empty string", bool(process_utils.text_encoding()))
     check("process_utils.allow_external_process_foreground(-1) is False for an invalid PID", process_utils.allow_external_process_foreground(-1) is False)
+
+    reference_path = tmpdir / "reference.cif"
+    model_path = tmpdir / "model.cif"
+    atoms = [
+        appmod.AtomSite("C1", "C", appmod.np.asarray((0.10, 0.20, 0.30))),
+        appmod.AtomSite("O1", "O", appmod.np.asarray((0.45, 0.55, 0.65))),
+    ]
+    appmod.write_structure_cif(reference_path, cell, sg, "P 1", atoms)
+    appmod.write_structure_cif(model_path, cell, sg, "P 1", atoms)
+    reference_context = appmod.load_reference_context(reference_path, tmpdir / "reference_work")
+    match_metrics = appmod.atom_reference_match_metrics(model_path, reference_context, 0.2)
+    check("reference matching reports true positives", match_metrics is not None and match_metrics[2] == 2)
+    check("reference matching reports false positives", match_metrics is not None and match_metrics[3] == 0)
+
+    # Frozen holdout indices are forbidden from missing-reflection completion.
+    # Stub only map prediction/candidate discovery; exercise the real feedback
+    # update and its unchanged intensity conversion path.
+    original_candidates = appmod.candidate_missing_hkls_from_bounds
+    original_predictions = appmod.xplor_fft_predictions
+    held_out = (3, 0, 0)
+    allowed = (4, 0, 0)
+    try:
+        appmod.candidate_missing_hkls_from_bounds = lambda *_args: [held_out, allowed]
+        appmod.xplor_fft_predictions = lambda _path, hkls: {tuple(hkl): (4.0, 0.0) for hkl in hkls}
+        updated, _change = appmod.apply_map_feedback_to_reflections(
+            unique,
+            appmod.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+            tmpdir / "stub.xplor",
+            cell,
+            0.0,
+            True,
+            100.0,
+            False,
+            0.0,
+            0.0,
+            lambda _message: None,
+            excluded_hkls=frozenset({held_out}),
+        )
+        updated_hkls = {(r.h, r.k, r.l) for r in updated}
+        check("map feedback: frozen holdout never enters missing-reflection completion", held_out not in updated_hkls)
+        check("map feedback: an allowed missing reflection can still be added", allowed in updated_hkls)
+    finally:
+        appmod.candidate_missing_hkls_from_bounds = original_candidates
+        appmod.xplor_fft_predictions = original_predictions
 
     import shutil
     shutil.rmtree(tmpdir, ignore_errors=True)

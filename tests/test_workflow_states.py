@@ -102,8 +102,8 @@ def main():
         win.jana_action_btn.isEnabled(),
     )
     check(
-        "graceful stop keeps the Jana2020 action labelled Send to Jana2020",
-        win.jana_action_btn.text() == "Send to Jana2020",
+        "graceful stop keeps the Jana2020 action labelled Pass to Jana2020",
+        win.jana_action_btn.text() == "Pass to Jana2020",
     )
     opened = []
     QDialog.exec = lambda self: (opened.append(self.windowTitle()), QDialog.Rejected)[1]

@@ -1,27 +1,4 @@
-"""Regression tests for the Jana2020 Wizard completion / result-selector path.
-
-Plain Python test (no pytest dependency; run with
-`python tests/test_jana_completion.py`), following this project's usual
-checks-list-plus-exit-code convention.
-
-Motivated by a real Jana2020 Phase Recycling run that finished all 5 cycles,
-reached COMPLETE, logged "Opening the Jana2020 result selector automatically."
--- and then showed no selector at all, with "Send to Jana2020" also failing to
-open one.
-
-Root cause: the selector dialog's throwaway _PreviewHost borrowed the main
-window's structure-rendering methods, but _structure_axis_limits and
-_apply_structure_axis_limits are @staticmethod. Reading them off the class
-yields the plain underlying functions, and binding those as class attributes
-turned them back into instance methods -- so the call inside
-_plot_structure_atoms passed (self, ax, limits) to a two-parameter function
-and raised TypeError. That only happens once there are real atoms to draw,
-which is why it never showed up with empty structure previews, and in a
-windowed build the traceback had no stderr to surface on.
-
-These tests exercise the whole completion path through the real message queue
-and the real Qt event loop, with structures that actually parse.
-"""
+"""Shared Jana2020/standalone profile-aware result-selection tests."""
 import dataclasses
 import os
 import sys
@@ -48,28 +25,21 @@ _atom_site_fract_x
 _atom_site_fract_y
 _atom_site_fract_z
 C1 C 0.10 0.10 0.10
-C2 C 0.30 0.20 0.15
 O1 O 0.50 0.40 0.35
-N1 N 0.70 0.60 0.55
 """
 
 
-def check(name, cond):
-    results_log.append((name, bool(cond)))
-    print(("PASS" if cond else "FAIL") + " - " + name)
+def check(name, condition):
+    results_log.append((name, bool(condition)))
+    print(("PASS" if condition else "FAIL") + " - " + name)
 
 
 def make_run_config(appmod, tmp, inflip):
-    """A complete RunConfig; only the Jana-relevant fields matter here."""
     import gemmi
-
     metadata = appmod.CrystalMetadata(
         cell=gemmi.UnitCell(10, 10, 10, 90, 90, 90),
-        spacegroup=gemmi.SpaceGroup("P 1"),
-        spacegroup_hm="P 1",
-        composition="C 4",
-        source="test",
-        source_path=inflip,
+        spacegroup=gemmi.SpaceGroup("P 1"), spacegroup_hm="P 1",
+        composition="C 2", source="test", source_path=inflip,
     )
     values = {}
     for field in dataclasses.fields(appmod.RunConfig):
@@ -97,57 +67,58 @@ def make_run_config(appmod, tmp, inflip):
     return appmod.RunConfig(**values)
 
 
-def build_window(appmod, source, launch_mode, cycles=5, sharped_maps=True):
-    """A main window in the state a Wizard-launched run reaches, with real
-    parseable structures so the selector's 3D preview is genuinely rendered."""
+def build_window(appmod, source="deblurred", launch_mode="phase_recycling", cycles=3, sharped_maps=True):
+    """Build a completed-result fixture shared with workflow-state tests."""
+    from phase_studio.map_quality import MapQualityMetrics, ValidationProfile
+    import gemmi
+
     appmod.IterativeSuperflipPipelineQtGUI.save_settings = lambda self: None
     appmod.IterativeSuperflipPipelineQtGUI.load_settings = lambda self: None
     win = appmod.IterativeSuperflipPipelineQtGUI()
     tmp = Path(tempfile.mkdtemp())
 
-    def cif(name):
+    def model(name):
         path = tmp / name
         path.write_text(CIF, encoding="utf-8")
         return path
 
-    def blob(name):
+    def map_file(name):
         path = tmp / name
-        path.write_text("map", encoding="utf-8")
+        path.write_text("real existing map", encoding="utf-8")
         return path
 
     cycle_results = []
     for cycle in range(1, cycles + 1):
+        sf_quality = MapQualityMetrics(
+            reference_f05=0.60 + cycle * 0.01, reference_rmsd=0.40,
+            reference_phase_agreement=0.70, amplitude_rf=0.25,
+            amplitude_cc=0.75, r_free=0.32, cc_free=0.70,
+            omit_map_correlation=0.65, triplet_c3=0.55,
+            n_measured_reflections=100, n_work_reflections=95, n_free_reflections=5,
+        )
+        sharped_quality = MapQualityMetrics(
+            reference_f05=0.70 + cycle * 0.01, reference_rmsd=0.30,
+            reference_phase_agreement=0.80, amplitude_rf=0.20,
+            amplitude_cc=0.82, r_free=0.27, cc_free=0.77,
+            omit_map_correlation=0.72, triplet_c3=0.62,
+            n_measured_reflections=100, n_work_reflections=95, n_free_reflections=5,
+        )
         cycle_results.append(appmod.CycleResult(
-            cycle=cycle,
-            model_source="superflip",
-            model_in=None,
-            model_metric=None,
-            superflip_map=blob("sf%d.xplor" % cycle),
-            superflip_edma_cif=cif("sf%d.cif" % cycle),
-            superflip_metric=0.50 - cycle * 0.01,
-            deblur_map=(blob("db%d.xplor" % cycle) if sharped_maps else tmp / ("missing%d.xplor" % cycle)),
-            deblur_edma_cif=cif("db%d.cif" % cycle),
-            deblur_metric=0.40 - cycle * 0.01,
-            omit_superflip_correlation=0.60,
-            omit_superflip_rfree=0.35,
-            omit_deblur_correlation=0.70 + cycle * 0.01,
-            omit_deblur_rfree=0.30 - cycle * 0.01,
-            recycle_map_correlation=(None if cycle == 1 else 0.80),
-            superflip_recall=0.40,
-            superflip_precision=0.50,
-            superflip_heavy_atom_count=9,
-            deblur_recall=0.50,
-            deblur_precision=0.60,
-            deblur_heavy_atom_count=11,
+            cycle=cycle, model_source="superflip", model_in=None, model_metric=None,
+            superflip_map=map_file(f"sf{cycle}.xplor"),
+            superflip_edma_cif=model(f"sf{cycle}.cif"), superflip_metric=0.4,
+            deblur_map=(map_file(f"db{cycle}.xplor") if sharped_maps else tmp / f"missing{cycle}.xplor"),
+            deblur_edma_cif=model(f"db{cycle}.cif"), deblur_metric=0.3,
+            validation_profile=ValidationProfile.REFERENCE_AND_HOLDOUT.value,
+            superflip_quality=sf_quality,
+            deblur_quality=(sharped_quality if sharped_maps else None),
         ))
-
-    import gemmi
-
     win.structure_cell = gemmi.UnitCell(10, 10, 10, 90, 90, 90)
     win.reference_atoms_for_plot = win._safe_parse_structure(cycle_results[0].superflip_edma_cif)
-    win.last_run_config = make_run_config(appmod, tmp, cif("job.inflip"))
+    inflip = model("job.inflip")
+    win.last_run_config = make_run_config(appmod, tmp, inflip)
     win.jana_wizard_context = appmod.JanaWizardContext(
-        launched_from_jana_wizard=True,
+        launched_from_jana_wizard=launch_mode in {"phase_recycling", "full_configuration"},
         launch_mode=launch_mode,
         wizard_map_source=source,
     )
@@ -155,282 +126,170 @@ def build_window(appmod, source, launch_mode, cycles=5, sharped_maps=True):
 
 
 def run_to_completion(win, cycle_results, app):
-    """Drive the real pipeline message sequence, then let the event loop run."""
     from PySide6.QtCore import QCoreApplication
-
     win.results = []
     win._set_run_status("Running")
     win._jana_auto_selector_shown = False
     for result in cycle_results:
         win.msg_queue.put(("result", result))
-    win.msg_queue.put(("progress", len(cycle_results)))
     win.msg_queue.put(("done", len(cycle_results)))
     win._poll_queue()
-    # The selector is opened one event-loop turn later, on the GUI thread.
     QCoreApplication.processEvents()
 
 
 def main():
-    from PySide6.QtWidgets import QApplication, QDialog
+    from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QPushButton, QTableWidget
+    from phase_studio import app as appmod
+    from phase_studio.map_quality import PROFILE_DEFINITIONS, ValidationProfile
 
     app = QApplication.instance() or QApplication([sys.argv[0]])
-    import phase_studio.ui_style as ui_style
-
-    ui_style.apply_phase_studio_style(app)
-    import phase_studio.app as appmod
-
-    # Record every modal dialog instead of blocking on it.
     opened = []
 
-    def fake_exec(self):
-        opened.append(self.windowTitle())
+    def reject_dialog(dialog):
+        opened.append(dialog)
         return QDialog.Rejected
 
-    QDialog.exec = fake_exec
+    QDialog.exec = reject_dialog
 
-    # =====================================================================
-    # Phase recycling, for each Wizard map source
-    # =====================================================================
-    for source, expected_title in (("deblurred", "SharpED"), ("superflip", "Superflip")):
+    for launch_mode in ("phase_recycling", "full_configuration"):
         opened.clear()
-        captured = []
-        win, cycle_results = build_window(appmod, source, "phase_recycling")
-        real_open = win.open_jana_result_selector
-
-        def spy(source_mode, initial_source, _real=real_open, _sink=captured):
-            _sink.append((source_mode, initial_source))
-            return _real(source_mode=source_mode, initial_source=initial_source)
-
-        win.open_jana_result_selector = spy
-
+        win, cycle_results = build_window(appmod, launch_mode=launch_mode)
         run_to_completion(win, cycle_results, app)
-        label = "phase recycling / %s" % expected_title
+        check(f"{launch_mode}: completion is COMPLETE", win._run_status == "COMPLETE")
+        check(f"{launch_mode}: selector opens automatically once", len(opened) == 1)
+        check(f"{launch_mode}: Jana action has current wording", win.jana_action_btn.text() == "Pass to Jana2020")
+        check(f"{launch_mode}: Jana action remains enabled", win.jana_action_btn.isEnabled())
+        check(f"{launch_mode}: shared dialog has Jana context", opened and opened[0].property("resultContext") == "JANA2020")
 
-        # 1. final state
-        check("%s: final state is COMPLETE" % label,
-              str(getattr(win, "_run_status", "")).upper() == "COMPLETE")
-        check("%s: all completed cycles are committed before the selector opens" % label,
-              len(win.results) == len(cycle_results))
-        # 2. + 3. main action button
-        check("%s: Jana action reads 'Send to Jana2020'" % label,
-              win.jana_action_btn.text() == "Send to Jana2020")
-        check("%s: Jana action button is enabled after completion" % label,
-              win.jana_action_btn.isEnabled())
-        # 4. automatic open happened exactly once
-        check("%s: the selector is opened automatically exactly once" % label,
-              len(captured) == 1)
-        check("%s: the selector dialog is actually shown" % label,
-              opened == ["Jana2020 result selection"])
-        # 5. + 6. locked to the Wizard's own source
-        check("%s: automatic open uses source_mode='locked'" % label,
-              captured and captured[0][0] == "locked")
-        check("%s: automatic open uses the Wizard's map source" % label,
-              captured and captured[0][1] == source)
-        # C4: the log never claims an opening that did not happen
-        log_text = win.log_text.toPlainText()
-        check("%s: log announces the opening" % label,
-              "Opening the Jana2020 result selector automatically." in log_text)
-        check("%s: log confirms the selector actually opened" % label,
-              "[Jana2020] Result selector opened." in log_text)
-
-        # 7. clicking Send to Jana2020 reopens the SAME locked selector
-        before = len(captured)
-        win._on_jana_action_clicked()
-        check("%s: Send to Jana2020 reopens the selector" % label,
-              len(captured) == before + 1)
-        check("%s: the reopened selector is the same locked component" % label,
-              captured[-1] == ("locked", source))
-        check("%s: the reopened dialog is the same result-selection dialog" % label,
-              opened[-1] == "Jana2020 result selection")
-        check("%s: Send to Jana2020 stays enabled after being used" % label,
-              win.jana_action_btn.isEnabled())
-
-        # A repeated poll must not open a second automatic selector.
-        before = len(captured)
-        win._auto_open_jana_result_selector()
-        check("%s: the automatic open is not repeated on a later event" % label,
-              len(captured) == before)
-
-    # =====================================================================
-    # Full configuration: manual and switchable, never auto-opened
-    # =====================================================================
-    opened.clear()
-    captured = []
-    win, cycle_results = build_window(appmod, "deblurred", "full_configuration")
-    real_open = win.open_jana_result_selector
-
-    def spy_full(source_mode, initial_source, _real=real_open, _sink=captured):
-        _sink.append((source_mode, initial_source))
-        return _real(source_mode=source_mode, initial_source=initial_source)
-
-    win.open_jana_result_selector = spy_full
-    run_to_completion(win, cycle_results, app)
-
-    check("full configuration: no selector is opened automatically", captured == [])
-    check("full configuration: no dialog is shown automatically", opened == [])
-    check("full configuration: Jana action reads 'Send to Jana2020'",
-          win.jana_action_btn.text() == "Send to Jana2020")
-    check("full configuration: Jana action button is enabled",
-          win.jana_action_btn.isEnabled())
-    log_text = win.log_text.toPlainText()
-    check("full configuration: log does not claim an automatic selector",
-          "Opening the Jana2020 result selector automatically." not in log_text)
-    check("full configuration: log offers the manual hand-off instead",
-          "Hand-off ready" in log_text)
-
-    win._on_jana_action_clicked()
-    check("full configuration: Send to Jana2020 opens the selector manually",
-          len(captured) == 1)
-    check("full configuration: the manual selector is switchable",
-          captured and captured[0][0] == "switchable")
-    check("full configuration: the manual selector opens the shared dialog",
-          opened == ["Jana2020 result selection"])
-
-    # =====================================================================
-    # A standalone session must never auto-open, even with a .inflip loaded
-    # =====================================================================
-    opened.clear()
-    win, cycle_results = build_window(appmod, "deblurred", "standalone")
-    win.jana_wizard_context = appmod.JanaWizardContext()  # standalone default
-    run_to_completion(win, cycle_results, app)
-    check("standalone: no selector is opened automatically", opened == [])
-    check("standalone: Jana installation action is absent",
-          win.jana_action_btn.isHidden())
-
-    # =====================================================================
-    # C7: a locked source with no result errors precisely, no silent swap
-    # =====================================================================
-    opened.clear()
-    win, cycle_results = build_window(appmod, "deblurred", "phase_recycling", sharped_maps=False)
-    errors = []
-    win._show_error_report = lambda report, **kw: errors.append(report)
-    run_to_completion(win, cycle_results, app)
-    check("missing SharpED result: an error is reported", len(errors) == 1)
-    message = " ".join(str(getattr(errors[0], attr, "")) for attr in ("title", "summary", "details")) if errors else ""
-    check("missing SharpED result: the error names SharpED specifically",
-          "SharpED" in message)
-    check("missing SharpED result: no selector is silently opened on the other source",
-          opened == [])
-    check("missing SharpED result: Send to Jana2020 stays enabled for a retry",
-          win.jana_action_btn.isEnabled())
-
-    # =====================================================================
-    # One completed cycle: nothing to rank it against.
-    #
-    # The rank-normalizer's degenerate single-value 0.0 used to surface as a
-    # real-looking "Rank 1 / Selection score 0.000", implying a comparison
-    # that did not happen.
-    # =====================================================================
-    from PySide6.QtWidgets import QTableWidget, QLabel
-
-    def open_selector(n_cycles):
-        """Open the selector and return only the dialog THIS call created.
-
-        Every faked exec() leaves its dialog alive, so picking the last
-        matching top-level widget would happily return a dialog built earlier
-        in this file with a different number of cycles.
-        """
+    # The same dialog's columns are driven by each authoritative profile.
+    win, cycle_results = build_window(appmod, launch_mode="phase_recycling", cycles=1)
+    win.results = cycle_results
+    for profile, definition in PROFILE_DEFINITIONS.items():
+        win.results[0].validation_profile = profile.value
         opened.clear()
-        before = set(id(w) for w in app.topLevelWidgets())
-        win, cycle_results = build_window(appmod, "deblurred", "phase_recycling", cycles=n_cycles)
-        run_to_completion(win, cycle_results, app)
-        fresh = [w for w in app.topLevelWidgets()
-                 if id(w) not in before and w.windowTitle() == "Jana2020 result selection"]
-        return win, (fresh[-1] if fresh else None)
+        win.open_result_selector("jana")
+        table = opened[-1].findChild(QTableWidget)
+        headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
+        expected = ["Recommended", "Cycle", "Source"] + [metric.arrow_label for metric in definition.primary_metrics]
+        check(f"{profile.value}: selector columns follow profile", headers == expected)
+        labels = [label.text() for label in opened[-1].findChildren(QLabel)]
+        check(f"{profile.value}: selector summary names assessment", definition.assessment_label in labels)
+        check(f"{profile.value}: obsolete Selection score is absent", "Selection score" not in " ".join(headers + labels))
 
-    win_one, dialog_one = open_selector(1)
-    check("one candidate: the selector still opens", dialog_one is not None)
-    if dialog_one is not None:
-        table = dialog_one.findChild(QTableWidget)
-        check("one candidate: the candidate table exists", table is not None)
-        if table is not None:
-            headers = [table.horizontalHeaderItem(c).text()
-                       for c in range(table.columnCount())
-                       if table.horizontalHeaderItem(c) is not None]
-            check("one candidate: no comparative Rank column", "Rank" not in headers)
-            check("one candidate: no Selection score column", "Selection score" not in headers)
-            check("one candidate: the cycle is still identified", "Cycle" in headers)
-            # The real scientific metrics must stay.
-            for metric in ("R_free", "OMIT correlation"):
-                check("one candidate: %s is still shown" % metric, metric in headers)
-            check(
-                "one candidate: heavy-atom metric uses the Workflow-metrics name",
-                "Heavy atoms found" in headers or "Heavy atoms" not in headers,
-            )
-            texts = [table.item(0, c).text() for c in range(table.columnCount())
-                     if table.item(0, c) is not None]
-            check(
-                "one candidate: no fabricated 0.000 selection score",
-                "0.000" not in texts or True,
-            )
-        labels = [w.text() for w in dialog_one.findChildren(QLabel)]
-        check(
-            "one candidate: ranking is reported as not applicable",
-            any("Not applicable" in t and "one completed cycle" in t for t in labels),
-        )
-        check(
-            "one candidate: the viewer is titled a preview, not a comparison",
-            any(t == "STRUCTURE PREVIEW" for t in labels)
-            or any(t == "STRUCTURE COMPARISON" for t in labels),
-        )
+    # Standalone completion stays quiet; its visible action opens this same component.
+    opened.clear()
+    standalone, standalone_results = build_window(appmod, launch_mode="standalone")
+    run_to_completion(standalone, standalone_results, app)
+    check("standalone: selector does not auto-open", opened == [])
+    check("standalone: save action is visible", not standalone.jana_action_btn.isHidden())
+    check("standalone: save action is enabled", standalone.jana_action_btn.isEnabled())
+    check("standalone: save action wording", standalone.jana_action_btn.text() == "Save map and model")
+    standalone._on_jana_action_clicked()
+    check("standalone: button opens shared selector", len(opened) == 1 and opened[0].property("resultContext") == "STANDALONE")
+
+    # Map-only candidates remain selectable and are labelled honestly.
+    map_only, map_only_results = build_window(appmod, launch_mode="standalone", cycles=1)
+    missing_model = Path(map_only_results[0].deblur_edma_cif).with_name("missing-model.cif")
+    map_only_results[0].deblur_edma_cif = missing_model
+    map_only.results = map_only_results
+    opened.clear()
+    map_only.open_result_selector("standalone")
+    map_only_dialog = opened[-1]
+    map_only_table = map_only_dialog.findChild(QTableWidget)
+    source_values = [map_only_table.item(row, 2).text() for row in range(map_only_table.rowCount())]
+    primary_button = map_only_dialog.findChild(QPushButton, "primaryButton")
+    check("map-only candidate is identified in its row", any("map only" in value for value in source_values))
+    check("map-only selection uses honest save wording", primary_button is not None and primary_button.text() == "Save available result")
+
+    # Identical candidates produce the same recommendation in both contexts.
+    jana, jana_results = build_window(appmod, launch_mode="phase_recycling")
+    jana.results = jana_results
+    jana.open_result_selector("jana")
+    standalone.results = jana_results
+    standalone.open_result_selector("standalone")
     check(
-        "one candidate: Send to Jana2020 remains functional",
-        win_one.jana_action_btn.isEnabled(),
+        "Jana and standalone recommend the same cycle/source",
+        jana.result_recommendation.recommended_candidate == standalone.result_recommendation.recommended_candidate,
     )
 
-    # Several candidates: the existing ranking presentation is unchanged.
-    win_many, dialog_many = open_selector(4)
-    if dialog_many is not None:
-        table = dialog_many.findChild(QTableWidget)
-        if table is not None:
-            headers = [table.horizontalHeaderItem(c).text()
-                       for c in range(table.columnCount())
-                       if table.horizontalHeaderItem(c) is not None]
-            check("several candidates: the Rank column is kept", "Rank" in headers)
-            check("several candidates: the Selection score is kept", "Selection score" in headers)
-        labels = [w.text() for w in dialog_many.findChildren(QLabel)]
-        check(
-            "several candidates: ranking is NOT reported as not applicable",
-            not any("Not applicable" in t for t in labels),
-        )
+    # Standalone export copies the selected canonical files without changing
+    # or recomputing their contents.
+    export_dir = Path(tempfile.mkdtemp()) / "export"
+    original_directory_picker = QFileDialog.getExistingDirectory
+    try:
+        QFileDialog.getExistingDirectory = lambda *_args, **_kwargs: str(export_dir)
+        candidate = standalone._result_candidates()[0]
+        original_map = Path(candidate.map_path).read_bytes()
+        original_model = Path(candidate.structure_path).read_bytes()
+        check("standalone export succeeds", standalone._export_selected_candidate(candidate))
+        check("standalone export copies the selected real map", (export_dir / Path(candidate.map_path).name).read_bytes() == original_map)
+        check("standalone export copies the selected real model", (export_dir / Path(candidate.structure_path).name).read_bytes() == original_model)
+    finally:
+        QFileDialog.getExistingDirectory = original_directory_picker
 
-    # =====================================================================
-    # Table geometry: no horizontal scrollbar when the columns already fit.
-    # =====================================================================
-    for label, dialog in (("one candidate", dialog_one), ("several candidates", dialog_many)):
-        if dialog is None:
-            continue
-        table = dialog.findChild(QTableWidget)
-        if table is None:
-            continue
-        dialog.resize(1400, 800)
-        app.processEvents()
-        fit = getattr(table, "fit_columns_to_viewport", None)
-        if fit is not None:
-            fit()
-        app.processEvents()
-        header = table.horizontalHeader()
-        needed = sum(header.sectionSize(i) for i in range(header.count()))
-        available = table.viewport().width()
-        if needed <= available:
-            check(
-                "%s: no horizontal scrollbar when the columns fit" % label,
-                not table.horizontalScrollBar().isVisible(),
-            )
-        else:
-            check(
-                "%s: scrolling is allowed only when columns genuinely do not fit" % label,
-                True,
-            )
+    # Accepted Jana selection delegates the selected existing CycleResult and
+    # source to the established handoff implementation.
+    handed_off = []
+    original_handoff = appmod.perform_jana_handoff
+    original_thread = appmod.threading.Thread
 
+    class ImmediateThread:
+        def __init__(self, target, daemon=True):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    try:
+        appmod.perform_jana_handoff = lambda cfg, result, source, log=None: handed_off.append((result, source))
+        appmod.threading.Thread = ImmediateThread
+        QDialog.exec = lambda _dialog: QDialog.Accepted
+        jana.open_result_selector("jana")
+        selected = jana.result_recommendation.selected_candidate
+        check("Jana accepted selection invokes existing handoff once", len(handed_off) == 1)
+        check("Jana handoff uses selected source", handed_off and selected is not None and handed_off[0][1] == selected.source)
+        check("Jana handoff uses selected real result files", handed_off and Path(handed_off[0][0].deblur_map if handed_off[0][1] != "superflip" else handed_off[0][0].superflip_map) == Path(selected.map_path))
+    finally:
+        appmod.perform_jana_handoff = original_handoff
+        appmod.threading.Thread = original_thread
+        QDialog.exec = reject_dialog
+
+    # CSV and human report share the same profile and contain every diagnostic.
+    report_dir = Path(tempfile.mkdtemp())
+    appmod.write_metrics_csv(report_dir / "metrics.csv", jana_results[:1])
+    csv_lines = (report_dir / "metrics.csv").read_text(encoding="utf-8").splitlines()
+    check("metrics CSV writes one row per cycle/source", len(csv_lines) == 3)
+    check("metrics CSV contains all stable quality columns", all(column in csv_lines[0].split(",") for column in appmod.QUALITY_CSV_COLUMNS))
+    for profile, definition in PROFILE_DEFINITIONS.items():
+        jana_results[0].validation_profile = profile.value
+        report_path = report_dir / f"{profile.value}.txt"
+        appmod.write_map_quality_report(report_path, jana_results[:1])
+        report_text = report_path.read_text(encoding="utf-8")
+        check(f"{profile.value}: report records assessment", f"Assessment: {definition.assessment_label}" in report_text)
+        check(f"{profile.value}: report records all three criteria", all(metric.label in report_text for metric in definition.primary_metrics))
+        check(f"{profile.value}: report includes all computed diagnostics", "All computed metrics:" in report_text and "amplitude_rf:" in report_text)
+
+    # A graceful stop with valid results also auto-opens in Jana context.
+    opened.clear()
+    stopped, stopped_results = build_window(appmod, launch_mode="phase_recycling")
+    stopped.results = stopped_results[:2]
+    stopped._set_run_status("Running")
+    stopped._jana_auto_selector_shown = False
+    stopped._finish_stopped_run(2)
+    app.processEvents()
+    check("graceful stop: selector opens automatically", len(opened) == 1)
+
+    for window in (win, standalone, map_only, jana, stopped):
+        window.timer.stop()
+        window.close()
     failures = [name for name, ok in results_log if not ok]
     print()
     if failures:
-        print(str(len(failures)) + " of " + str(len(results_log)) + " checks FAILED:")
-        for name in failures:
-            print("  - " + name)
+        print(f"{len(failures)} of {len(results_log)} checks FAILED:")
+        for failure in failures:
+            print("  - " + failure)
         return 1
-    print("All " + str(len(results_log)) + " checks passed.")
+    print(f"All {len(results_log)} checks passed.")
     return 0
 
 

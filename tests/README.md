@@ -58,24 +58,16 @@ for every file, checking the exit code) without any additional tooling.
   the wrapper-only workflows one visible console owned by the wrapper, with
   the child's output teed out progressively rather than buffered until exit.
 
-- `test_metric_legends.py` -- Workflow-metrics legend determinism. Walks the
-  real lifecycle (no data -> first cycle -> second cycle -> re-render -> tab
-  switch -> view reset -> completion) and checks after every step that each
-  multi-metric tab shows a legend matching exactly the series it plotted,
-  with no duplicate or empty entries, and that the two genuinely
-  single-metric tabs still omit theirs. The first-cycle case is the
-  regression itself: the legend used to disappear whenever only one series
-  happened to carry finite values.
+- `test_metric_legends.py` -- all four profile-driven three-tab layouts,
+  direction labels, Superflip/SharpED series, and deterministic legends.
 
-- `test_jana_completion.py` -- the Jana2020 Wizard completion path. Drives
-  the real pipeline message queue and Qt event loop to COMPLETE and checks
-  that the locked result selector opens automatically exactly once, on the
-  Wizard's own map source, with "Send to Jana2020" left enabled and
-  reopening the same locked selector. Also covers Full configuration
-  (manual, switchable, never auto-opened), standalone (never auto-opened),
-  and the locked-source-unavailable error path. Uses structures that
-  actually parse, because the original failure only appeared once the
-  selector had real atoms to render.
+- `test_jana_completion.py` -- the shared profile-aware result selector in
+  Jana2020 and standalone contexts: automatic completion/graceful-stop open,
+  all four column sets, absence of Selection score, matching recommendations,
+  and the standalone Save map and model action.
+
+- `test_map_quality.py` -- pure periodic-map metrics, immutable validation
+  data, all four profiles, and exact source-neutral lexicographic ranking.
 
 - `test_wizard_geometry.py` -- the Jana2020 Wizard's window geometry: the
   preferred width is substantially wider than the old narrow layout, always

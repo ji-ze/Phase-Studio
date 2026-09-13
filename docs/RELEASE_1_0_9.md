@@ -30,7 +30,10 @@ version to 1.0.9. No 1.0.9 release tag was created.
 - `phase_studio.jana_integration`: existing filesystem integration operations,
   with explicit ownership/hash conflict checks and regression-tested rollback.
 - `phase_studio.app`: shared scientific GUI without installation management;
-  wrapper-launched result selection and Send to Jana2020 remain available.
+  wrapper-launched profile-aware Result Selection and Pass to Jana2020 remain available.
+- `phase_studio.map_quality`: immutable validation contexts, full-cell map
+  diagnostics, four validation profiles, and source-neutral lexicographic
+  recommendation for Superflip and SharpED candidates.
 - Root `superflip.spec`: same authoritative ONEDIR wrapper, now also stamping
   its Windows EXE version from the canonical version source.
 - Shared packaging spec: selects the standalone or installer entry point and
@@ -51,6 +54,16 @@ transactional integration engine stages it into Jana2020.
 
 ## Verification
 
+- All 17 Python regression scripts pass (670 checks). This includes synthetic
+  periodic Fourier maps, scale/origin invariance, triplet phase statistics,
+  frozen holdout isolation, all four profile orders, both selector contexts,
+  manual override state, real-file export, report/CSV contents, and existing
+  scientific baselines.
+- Local offscreen acceptance rendered the three-metric main panel and shared
+  result selector at their target sizes. Candidate columns, recommendation
+  marking, splitter balance, structure preview, and context-specific actions
+  remained within the intended geometry; widget-level tests verified their
+  exact labels and behavior.
 - The automated Python suite covers catalog compatibility, frozen-product
   boundaries, private payload resolution, transactional install/update/repair/
   remove and rollback, UI text/state behavior, and the preserved scientific
@@ -62,16 +75,26 @@ transactional integration engine stages it into Jana2020.
   derives as 1.0.9.0; conflicting explicit version overrides are rejected.
 - Installer transaction tests use temporary mock Jana directories, never the
   real installation. They exercise the actual UI actions and filesystem code.
-- Scientific functions match the integrated baseline, and all scientific/map
-  scaling golden checks pass. No scientific request, calculation, output,
-  ranking, feedback, or handoff algorithm was changed.
+- Existing scientific functions match the integrated baseline except the
+  explicitly added map-quality metrics and holdout exclusion guard. The map
+  scaling and scientific golden checks pass.
+- Real-executable local acceptance used the installed Superflip and EDMA on a
+  temporary 728-reflection P1 crystal. All four profiles produced their three
+  required finite metrics; the two holdout profiles shared one frozen,
+  orbit-safe 36-reflection free set. The run produced and assessed actual
+  XPLOR maps and an EDMA CIF rather than test doubles.
+- The standalone, Jana wrapper, and Jana installer were rebuilt locally. All
+  dependency, frozen-import, distribution-boundary, payload, and 1.0.9 version
+  smoke checks pass.
 
 ## Remaining manual acceptance
 
 Run both public EXEs on a clean supported Windows PC without Python/Qt/VC++
 installed separately. Exercise install/update/repair/remove on a real Jana2020
-installation, including all Wizard workflows and Full configuration/Send to
-Jana2020. Inspect the GUI at Windows 100%, 125%, and 150% display scaling.
+installation, including all Wizard workflows and Full configuration/Pass to
+Jana2020. Exercise every available assessment profile, manual override, and
+standalone Save map and model. Inspect the GUI at Windows 100%, 125%, and 150%
+display scaling.
 
 An actual MSIX was not produced: the local Store identity and Windows SDK
 MakeAppx tooling were unavailable. Build, install, and certify it with the real

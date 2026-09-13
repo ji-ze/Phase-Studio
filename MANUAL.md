@@ -578,11 +578,11 @@ Each time repartitioning runs, it writes `cycle_NNN_powder_repartitioning.log` i
 
 ## 11. Running and monitoring a reconstruction
 
-### 11.1 Run pipeline
+### 11.1 Run phasing
 
-**Run pipeline** validates the active configuration and starts the reconstruction.
+**Run phasing** validates the active configuration and starts the reconstruction.
 
-Configuration controls are locked while the pipeline is running.
+Configuration controls are locked while the workflow is running.
 
 ### 11.2 Stop after current cycle
 
@@ -590,7 +590,7 @@ Requests a graceful stop after the current cycle has completed.
 
 ### 11.3 Stop immediately
 
-Requests immediate termination of the active external calculation and stops the pipeline as soon as possible.
+Requests immediate termination of the active external calculation and stops the workflow as soon as possible.
 
 After cancellation, Phase Studio retains information about where the run stopped.
 
@@ -609,19 +609,20 @@ The Run Status area contains two levels:
 
 Phase Studio does not need to fabricate time-based percentages when no reliable denominator exists.
 
-### 11.6 Superflip Convergence
+### 11.6 Map-quality metrics
 
-The convergence panel has five tabs, each scaled and colored independently:
+The metrics panel always has exactly three tabs. Phase Studio chooses their contents automatically from two independent facts: whether a reference structure is available and whether the 5% holdout is enabled.
 
-- **Superflip** — metrics tied to the raw Superflip map. With a reference structure: Reference match, Superflip RMSD, Recall and Precision (heavy, i.e. non-H/He, atoms matched to the reference within EDMA's **Merge distance**; recall = fraction of reference atoms found, precision = fraction of found atoms that are real). Without a reference: only **Heavy atoms found**, a plain count of non-H/He atoms in the EDMA output, as a fallback progress indicator. (Superflip's own internal R/Peaks/FOM/Symmetry indicators were removed from this graph: cycle 1 normally runs ab initio while cycle 2 onward is seeded by the selected next-cycle model, so they are not a like-for-like series across that transition, and `bestdensities`/`repeatmode` selects the best of several stochastic attempts each cycle, adding further cycle-to-cycle fluctuation unrelated to genuine quality change. They remain in `metrics.csv` and the execution log.)
-- **SharpED** (formerly labeled "Deblurred") — the same reference-dependent set (SharpED RMSD, Recall, Precision) or reference-free fallback (Heavy atoms found) for the SharpED-processed map, plus Map correlation (SharpED phase-recycling methods only, correlating each cycle's recomposed map with the previous cycle's — always empty for the standard Superflip phasing method).
-- **Superflip (omit+rfree)** — only populated when **Compute omit maps** is enabled: Omit map correlation (the raw Superflip map compared with the same cycle's omit map) and, if **Compute R_free from excluded 5%** is also enabled, R_free for the raw Superflip map. Needs no reference structure.
-- **SharpED (omit+rfree)** — the same two metrics for the SharpED-processed map and its omit-map counterpart. Needs no reference structure.
-- **Powder repartitioning** — only populated when [10.3 Powder overlap repartitioning](#103-powder-overlap-repartitioning) is enabled: the average, across overlap groups, of each group's mean member-wise intensity change caused by that repartitioning run (lower is better — it should shrink toward 0% as the map increasingly agrees with the observed data). Since repartitioning happens between cycles, each cycle's point reflects the repartitioning that fed its input, so it lags one cycle behind the repartitioning run itself (and the very first repartitioned cycle appears on the *next* cycle's point). Needs no reference structure.
+| Assessment | Three plotted metrics and direction |
+|---|---|
+| Reference + cross-validation | Reference F0.5 ↑; R_free ↓; OMIT map correlation ↑ |
+| Reference-backed | Reference F0.5 ↑; matched-peak RMSD ↓; reference phase agreement ↑ |
+| Cross-validation | R_free ↓; CC_free ↑; OMIT map correlation ↑ |
+| Reference-free · no holdout | Amplitude R_F ↓; Amplitude CC ↑; Weighted triplet C3 ↑ |
 
-Every series is normalized per tab to a 0 (worst) to 1 (best) scale for comparison; the underlying values are in `metrics.csv`.
+Each tab plots available Superflip and SharpED candidates versus cycle. Reference-free map assessment is a map-character assessment and is not independent validation. The full diagnostic set, reflection/triplet counts, unavailable reasons, and candidate recommendation are written to `metrics.csv` and `map_quality_assessment.txt`.
 
-Unavailable series can be omitted in partial or cancelled runs.
+When enabled, the free set is selected once in complete symmetry/Friedel orbits before cycle 1. It remains excluded from Superflip input, SharpED feedback, missing-reflection completion, intensity correction, powder repartitioning, and later-cycle work data. Map feedback never changes the original measured validation basis.
 
 ### 11.7 Structure Comparison
 
@@ -662,11 +663,13 @@ When Phase Studio is launched in a Jana2020 context, it can import compatible pr
 
 Explicit Jana2020 values and `.inflip` values take precedence over stale unrelated saved settings.
 
-### 12.2 Send to Jana2020
+### 12.2 Result Selection and Pass to Jana2020
 
-When a compatible result is available, **Send to Jana2020** opens the hand-off workflow.
+After successful completion, or a graceful stop with usable completed results, a Jana2020-launched session opens the shared **Result Selection** dialog automatically. **Pass to Jana2020** reopens it later.
 
-The available result choices depend on the completed run and the active Jana2020 context.
+Every valid `(cycle, source)` pair is a candidate. The table shows only the active profile's three metrics and preselects the lexicographic recommendation. The user may choose another candidate; the report records whether the recommendation was accepted or manually overridden. Handoff uses the selected existing map and structure files without recomputing them.
+
+Standalone Phase Studio does not open the selector automatically. After a valid result exists, **Save map and model** opens the same dialog and copies the selected canonical output files. A map remains exportable when no structure model is available, and existing destination files require confirmation before replacement.
 
 After hand-off, detailed model completion and final refinement should be performed in Jana2020.
 
@@ -683,7 +686,8 @@ Depending on the selected workflow, Phase Studio can generate:
 - SharpED-processed XPLOR maps,
 - symmetry-averaged processed maps,
 - per-cycle models,
-- metrics files.
+- `metrics.csv`, with one row per cycle and source,
+- `map_quality_assessment.txt`, with the profile, criteria, recommendation, all computed diagnostics, and final user selection.
 
 Original and processed files are kept separately where practical so reconstruction decisions can be inspected and reproduced.
 
@@ -700,7 +704,7 @@ Check:
 - whether values are intensities or amplitudes,
 - sigma/phase column mapping.
 
-Use **Validate HKL** before starting the pipeline.
+Use **Validate HKL** before starting the workflow.
 
 ### 14.2 Completeness appears unexpectedly low
 

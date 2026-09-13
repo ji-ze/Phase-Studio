@@ -217,7 +217,7 @@ class SplitDistributionTests(unittest.TestCase):
             dialog.deleteLater()
             app.processEvents()
 
-    def test_standalone_has_no_management_action(self):
+    def test_standalone_has_result_export_action_but_no_management_action(self):
         from PySide6.QtWidgets import QApplication, QPushButton
         from phase_studio.app import IterativeSuperflipPipelineQtGUI
         app = QApplication.instance() or QApplication([])
@@ -225,7 +225,9 @@ class SplitDistributionTests(unittest.TestCase):
              patch.object(IterativeSuperflipPipelineQtGUI, "save_settings"), \
              patch.object(IterativeSuperflipPipelineQtGUI, "refresh_sharped_models"):
             win = IterativeSuperflipPipelineQtGUI()
-            self.assertTrue(win.jana_action_btn.isHidden())
+            self.assertFalse(win.jana_action_btn.isHidden())
+            self.assertEqual(win.jana_action_btn.text(), "Save map and model")
+            self.assertFalse(win.jana_action_btn.isEnabled())
             self.assertFalse(hasattr(win, "open_install_to_jana_dialog"))
             self.assertFalse(any("Install" in button.text() or "Repair" in button.text()
                                  for button in win.findChildren(QPushButton)))
@@ -263,7 +265,12 @@ class SplitDistributionTests(unittest.TestCase):
             old, new = functions(baseline), functions(current)
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
-                        "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record"}
+                        "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record",
+                        # Explicitly extended for immutable validation holdouts;
+                        # the existing correction formula remains unchanged.
+                        "apply_map_feedback_to_reflections", "compute_rfree", "atom_recall_precision",
+                        # Explicit profile-aware per-cycle/source reporting.
+                        "write_metrics_csv"}
             if filename == "sharped_server_client.py":
                 # Display-only compatibility status/disabled entries; scientific
                 # transforms and application workflows remain baseline-identical.

@@ -123,7 +123,7 @@ genuinely different purposes, not a bug.
 ### Map value scaling around a SharpED request
 
 `run_sharped_deblur()` is the single choke point for every SharpED request
-the pipeline makes (full map, omit map, and both phase-recycling methods),
+the workflow makes (full map, omit map, and both phase-recycling methods),
 so the optional `sharped_map_value_exponent` transform lives there and
 nowhere else: exactly one forward `sign(x)*|x|**a` on the last file handed
 to `SharpEDServerClient.execute()`, and exactly one inverse
@@ -160,6 +160,21 @@ stored view is dropped rather than applied to a different crystal.
 The Jana2020 result-selection dialog reuses these same methods through its
 `_PreviewHost` shim, so its preview panels behave identically without a second
 implementation.
+
+## Profile-aware map quality
+
+`phase_studio/map_quality.py` is the Qt-free authority for the four validation
+profiles, their three visible metrics, display direction, recommendation
+priority, and report-only metrics. It also owns immutable `ValidationContext`,
+map metrics, and source-neutral lexicographic recommendation. GUI plots, the
+shared Jana2020/standalone selector, and the report read those definitions.
+
+The context is frozen from original measured reflections before cycle 1. Its
+work/free masks and measured-data triplets never change when map feedback
+changes later-cycle input. Each periodic full-cell map is transformed once;
+the sampled complex coefficients are reused for amplitude, phase, holdout,
+triplet, and map-character metrics. Cropped maps or maps without usable cell,
+grid, or axis metadata produce an explicit unavailable reason.
 
 ## Where UI formatting belongs
 
@@ -206,13 +221,12 @@ called from the same method for now.
 
 ## How to add a workflow metric
 
-1. Compute it where the relevant cycle data is available (usually inside
-   `_run_pipeline_cycles()`), as a plain value on `CycleResult`.
-2. Add a presentation label via a small formatting function (see "Where UI
-   formatting belongs"), not an inline string.
-3. Surface it in `_render_metrics_tab()` and/or `write_metrics_csv()` and,
-   if it should feed the phase-recycling Selection score, in
-   `open_jana_result_selector()`'s ranking-columns list.
+1. Add its `MetricDefinition` and profile membership in `map_quality.py`.
+2. Compute it as pure logic against `ValidationContext`, reusing a map's
+   existing Fourier transform where applicable.
+3. Store it on `MapQualityMetrics`. The profile-driven plots, selector,
+   ranking criteria, CSV, and report then consume the shared definition and
+   result without a separate combined score.
 
 ## How to add a result-source label
 
