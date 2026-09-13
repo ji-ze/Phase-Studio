@@ -294,8 +294,8 @@ def main():
     win.jana_wizard_context = appmod.JanaWizardContext()  # standalone default
     run_to_completion(win, cycle_results, app)
     check("standalone: no selector is opened automatically", opened == [])
-    check("standalone: Jana action stays the integration action",
-          win.jana_action_btn.text() == "Install to Jana2020")
+    check("standalone: Jana installation action is absent",
+          win.jana_action_btn.isHidden())
 
     # =====================================================================
     # C7: a locked source with no result errors precisely, no silent swap

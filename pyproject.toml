@@ -33,7 +33,8 @@ dev = [
 ]
 
 [project.scripts]
-phase-studio = "phase_studio.app:main"
+phase-studio = "phase_studio.standalone:main"
+phase-studio-jana-installer = "phase_studio.jana_installer:main"
 
 [tool.setuptools]
 packages = ["phase_studio"]

@@ -8,7 +8,7 @@ Superflip executable as superflip_original.exe.
 This module is pure file-system management. It never runs Superflip, EDMA,
 or any crystallographic calculation, and it never touches EDMA.exe. It is
 deliberately Qt-free so the transactional logic can be unit tested without a
-GUI; phase_studio/app.py provides the dialog that drives it.
+GUI; phase_studio/jana_installer.py provides the dialog that drives it.
 """
 
 from __future__ import annotations
@@ -201,7 +201,19 @@ def classify_install_state(report: JanaDirectoryReport, bundled_version: str = P
     _internal next to Jana2020's Superflip)."""
     if not report.exists:
         return IntegrationState.NOT_INSTALLED
+    if report.marker_error:
+        return IntegrationState.CONFLICT
     if report.has_marker and report.marker is not None:
+        marker = report.marker
+        if (marker.product != "Phase Studio" or marker.wrapper != WRAPPER_EXE_NAME
+                or marker.original_superflip != ORIGINAL_EXE_NAME or not marker.payload_hash):
+            return IntegrationState.CONFLICT
+        if report.has_superflip_exe:
+            try:
+                if _sha256_file(report.directory / WRAPPER_EXE_NAME) != marker.payload_hash:
+                    return IntegrationState.CONFLICT
+            except OSError:
+                return IntegrationState.CONFLICT
         if not report.has_superflip_exe or not report.has_original_exe or not report.has_runtime_dir:
             return IntegrationState.REPAIR_REQUIRED
         if report.marker.version != bundled_version:
@@ -230,39 +242,22 @@ def bundled_integration_version() -> str:
 
 
 def resolve_bundled_jana_payload_dir() -> Optional[Path]:
-    """Locate the pre-built JanaIntegration payload (superflip.exe + its
-    runtime directory) bundled alongside the running Phase Studio
-    application.
-
-    Release layout (both a plain developer ONEDIR build and an
-    MSIX-installed layout) always places the payload directly beside the
-    running executable -- packaging/build_windows.ps1 stages the known-working
-    root superflip.spec's output into dist/PhaseStudio/JanaIntegration/ as a
-    plain post-build file copy, and build_store_msix.ps1 carries that same
-    already-staged dist/PhaseStudio/ (JanaIntegration included) into the MSIX
-    package unchanged -- so a single frozen candidate covers both (sections
-    14, 59). Returns None if no payload is available (e.g. running from
-    source with no local build)."""
+    """Locate the dedicated installer's complete ONEDIR wrapper payload."""
     candidates: List[Path] = []
     if getattr(sys, "frozen", False):
-        # PyInstaller ONEDIR: sys.executable is .../PhaseStudio/PhaseStudio.exe.
+        # Only the dedicated installer carries this adjacent payload.
         exe_dir = Path(sys.executable).resolve().parent
         candidates.append(exe_dir / "JanaIntegration")
-        # Development convenience only -- e.g. a fresh build_windows.ps1 run
-        # whose JanaIntegration staging step has not (re)run yet. Release
-        # operation never depends on this sibling dist/superflip existing.
-        candidates.append(exe_dir.parent / "superflip")
     else:
         # Running from source: the local build_windows.ps1 output, which
         # builds the Jana wrapper via the known-working
         # "python -m PyInstaller --clean --noconfirm superflip.spec" against
         # the repository's root-level superflip.spec -- its real output
         # directory is dist/superflip (COLLECT(..., name="superflip") in
-        # that spec). Also check an already-staged MSIX layout checked out
-        # directly, for the same reason.
+        # that spec). Also accept the dedicated installer's staged copy.
         module_dir = Path(__file__).resolve().parent.parent
         candidates.append(module_dir / "dist" / "superflip")
-        candidates.append(module_dir / "build" / "store" / "layout" / "PhaseStudio" / "JanaIntegration")
+        candidates.append(module_dir / "dist" / "PhaseStudioJanaInstaller" / "JanaIntegration")
     for candidate in candidates:
         if (candidate / WRAPPER_EXE_NAME).is_file():
             return candidate
@@ -313,6 +308,8 @@ def install_or_update_integration(
 
     if not payload_exe.is_file():
         return OperationResult(False, "error", f"Integration payload is missing {WRAPPER_EXE_NAME}: {payload_exe}", lines)
+    if not payload_runtime.is_dir():
+        return OperationResult(False, "error", "Integration payload is missing its complete _internal runtime.", lines)
     if not directory.is_dir():
         return OperationResult(False, "error", f"Jana2020 SUPERFLIP directory does not exist: {directory}", lines)
     if not check_writable(directory):
@@ -341,6 +338,8 @@ def install_or_update_integration(
     live_exe = directory / WRAPPER_EXE_NAME
     live_runtime = directory / RUNTIME_DIR_NAME
     marker_path = directory / MARKER_FILENAME
+    previous_marker = marker_path.read_bytes() if marker_path.is_file() else None
+    had_live_exe, had_runtime = live_exe.exists(), live_runtime.exists()
 
     if not is_first_install and not original_exe.is_file():
         return OperationResult(
@@ -351,7 +350,10 @@ def install_or_update_integration(
 
     # ----- Stage (section 24) -----
     staging_dir = directory / STAGING_DIR_NAME
-    shutil.rmtree(staging_dir, ignore_errors=True)
+    if any(path.exists() for path in (staging_dir,
+            directory / (WRAPPER_EXE_NAME + BACKUP_EXE_SUFFIX),
+            directory / (RUNTIME_DIR_NAME + BACKUP_RUNTIME_SUFFIX))):
+        return OperationResult(False, "conflict", "Existing transaction files require inspection; nothing was overwritten.", lines)
     try:
         staging_dir.mkdir(parents=True)
         shutil.copy2(payload_exe, staging_dir / WRAPPER_EXE_NAME)
@@ -378,19 +380,29 @@ def install_or_update_integration(
         try:
             if is_first_install:
                 # Nothing was moved aside except the original itself.
-                if original_exe.is_file() and not live_exe.exists():
+                if original_exe.is_file():
+                    if live_exe.exists():
+                        live_exe.unlink()
+                    if live_runtime.exists():
+                        shutil.rmtree(live_runtime)
                     shutil.move(str(original_exe), str(live_exe))
                     emit(f"Rolled back: restored the original Superflip to {live_exe}")
             else:
-                if live_exe.exists():
-                    live_exe.unlink()
                 if backup_exe.is_file():
+                    live_exe.unlink(missing_ok=True)
                     shutil.move(str(backup_exe), str(live_exe))
-                if live_runtime.exists():
-                    shutil.rmtree(live_runtime, ignore_errors=True)
+                elif not had_live_exe:
+                    live_exe.unlink(missing_ok=True)
                 if backup_runtime.is_dir():
+                    shutil.rmtree(live_runtime, ignore_errors=True)
                     shutil.move(str(backup_runtime), str(live_runtime))
+                elif not had_runtime:
+                    shutil.rmtree(live_runtime, ignore_errors=True)
                 emit("Rolled back to the previous Phase Studio integration.")
+            if previous_marker is None:
+                marker_path.unlink(missing_ok=True)
+            else:
+                marker_path.write_bytes(previous_marker)
         except Exception as rollback_exc:
             shutil.rmtree(staging_dir, ignore_errors=True)
             return OperationResult(
@@ -481,6 +493,8 @@ def remove_integration(jana_superflip_dir: Path, *, log: Optional[Callable[[str]
     report = inspect_jana_superflip_dir(directory)
     if not report.has_marker or report.marker is None:
         return OperationResult(False, "error", "No verified Phase Studio integration was found here; nothing to remove.", lines)
+    if classify_install_state(report) == IntegrationState.CONFLICT:
+        return OperationResult(False, "conflict", "Integration ownership or wrapper hash does not match; nothing was removed.", lines)
 
     original_exe = directory / ORIGINAL_EXE_NAME
     live_exe = directory / WRAPPER_EXE_NAME
@@ -503,19 +517,36 @@ def remove_integration(jana_superflip_dir: Path, *, log: Optional[Callable[[str]
             lines,
         )
 
+    backup_exe = directory / f"{WRAPPER_EXE_NAME}{BACKUP_EXE_SUFFIX}"
+    backup_runtime = directory / f"{RUNTIME_DIR_NAME}{BACKUP_RUNTIME_SUFFIX}"
+    if backup_exe.exists() or backup_runtime.exists():
+        return OperationResult(False, "conflict", "Existing transaction files require inspection; nothing was removed.", lines)
+    previous_marker = marker_path.read_bytes()
+    restored = False
     try:
-        if live_runtime.exists():
-            shutil.rmtree(live_runtime)
         if live_exe.exists():
-            live_exe.unlink()
+            shutil.move(str(live_exe), str(backup_exe))
+        if live_runtime.exists():
+            shutil.move(str(live_runtime), str(backup_runtime))
         shutil.move(str(original_exe), str(live_exe))
-        if not live_exe.is_file():
-            raise RuntimeError("Superflip executable is missing after restore.")
-        if marker_path.exists():
-            marker_path.unlink()
-        emit(f"Restored the original Superflip executable to {live_exe}")
+        restored = True
+        marker_path.unlink()
     except Exception as exc:
-        return OperationResult(False, "error", f"Failed to remove the Phase Studio integration: {exc}", lines)
+        try:
+            if restored:
+                shutil.move(str(live_exe), str(original_exe))
+            if backup_exe.exists():
+                shutil.move(str(backup_exe), str(live_exe))
+            if backup_runtime.exists():
+                shutil.move(str(backup_runtime), str(live_runtime))
+            marker_path.write_bytes(previous_marker)
+        except Exception as rollback_exc:
+            return OperationResult(False, "rollback_failed", f"Removal failed: {exc}; rollback failed: {rollback_exc}", lines)
+        return OperationResult(False, "error", f"Removal failed and was rolled back: {exc}", lines)
+    # Original Superflip is now restored; only transaction-owned copies remain.
+    shutil.rmtree(backup_runtime, ignore_errors=True)
+    backup_exe.unlink(missing_ok=True)
+    emit(f"Restored the original Superflip executable to {live_exe}")
 
     return OperationResult(True, IntegrationState.NOT_INSTALLED, "Jana2020 integration removed; the original Superflip executable was restored.", lines)
 

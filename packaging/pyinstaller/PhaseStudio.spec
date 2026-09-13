@@ -1,22 +1,4 @@
-# -*- mode: python ; coding: utf-8 -*-
-# PyInstaller ONEDIR build of the main Phase Studio application, used for the
-# Microsoft Store / MSIX staging build (packaging/build_store_msix.ps1).
-#
-# Output:
-#
-#     PhaseStudio/
-#         PhaseStudio.exe
-#         _internal/...
-#
-# ONEDIR (not ONEFILE) is used here deliberately: MSIX already provides
-# application packaging/versioning, files can be staged into the MSIX layout
-# deterministically, and startup never pays the ONEFILE self-extraction cost
-# (see packaging/README_STORE.md, "Why ONEDIR"). This does not change the
-# Python application itself -- it is the same phase_studio/app.py entry point
-# the repository's own top-level PhaseStudio.spec (ONEFILE, for quick
-# developer/testing distribution) builds; keep both in sync if PyInstaller
-# requirements change.
-
+# Shared portable ONEDIR spec; the installer entry spec selects only its UI.
 import sys
 from pathlib import Path
 
@@ -31,7 +13,9 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 # Verified with an assertion below rather than trusting the arithmetic alone.
 project_dir = Path(SPECPATH).resolve().parent.parent
 
-entry_point = project_dir / "phase_studio" / "app.py"
+installer_build = globals().get("installer_build", False)
+target_name = "PhaseStudioJanaInstaller" if installer_build else "PhaseStudio"
+entry_point = project_dir / "phase_studio" / ("jana_installer.py" if installer_build else "standalone.py")
 if not entry_point.is_file():
     raise FileNotFoundError(
         f"Phase Studio entry point not found: {entry_point}\n"
@@ -44,6 +28,7 @@ if not entry_point.is_file():
 spec_dir = Path(SPECPATH).resolve()
 sys.path.insert(0, str(spec_dir))
 import portable_runtime  # noqa: E402
+from windows_version import version_resource
 
 # Fail before doing any work if the build environment cannot produce a
 # consistent Qt runtime (Conda PySide6 with Qt outside the Python package,
@@ -54,7 +39,6 @@ hiddenimports = [
     "phase_studio",
     "phase_studio.app",
     "phase_studio.jana_superflip",
-    "phase_studio.jana_integration",
     "phase_studio.sharped_server_client",
     "phase_studio.ui_style",
     "matplotlib.backends.backend_qtagg",
@@ -62,6 +46,10 @@ hiddenimports = [
     "PySide6.QtGui",
     "PySide6.QtWidgets",
 ]
+
+if installer_build:
+    hiddenimports = ["phase_studio.jana_installer", "phase_studio.jana_integration",
+                     "phase_studio.ui_branding", "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets"]
 
 try:
     hiddenimports += collect_submodules("qtvscodestyle")
@@ -94,7 +82,8 @@ a = Analysis(
     runtime_hooks=[
         str(spec_dir / "runtime_hooks" / "pyi_rth_dll_isolation.py"),
     ],
-    excludes=[
+    excludes=(["phase_studio.app", "phase_studio.jana_superflip", "numpy", "matplotlib", "gemmi"]
+              if installer_build else ["phase_studio.jana_installer"]) + [
         "PyQt5",
         "PyQt6",
         "PySide2",
@@ -119,10 +108,10 @@ a.binaries, removed_ucrt = portable_runtime.strip_app_local_ucrt(a.binaries)
 #    taken from explicit in-environment sources (never System32, never PATH).
 a.binaries, staged_runtime = portable_runtime.stage_msvc_runtime(a.binaries)
 
-portable_runtime.report("PhaseStudio", staged_runtime, qt_report, removed_ucrt)
+portable_runtime.report(target_name, staged_runtime, qt_report, removed_ucrt)
 portable_runtime.write_portable_manifest(
-    project_dir / "build" / "portable-runtime-PhaseStudio.json",
-    app="PhaseStudio",
+    project_dir / "build" / f"portable-runtime-{target_name}.json",
+    app=target_name,
     staged_runtime=staged_runtime,
     qt_report=qt_report,
     removed_ucrt=removed_ucrt,
@@ -135,7 +124,8 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="PhaseStudio",
+    name=target_name,
+    version=version_resource(target_name, project_dir),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -156,5 +146,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="PhaseStudio",
+    name=target_name,
 )

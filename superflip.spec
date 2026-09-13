@@ -16,6 +16,7 @@ project_dir = Path(SPECPATH).resolve()
 packaging_dir = project_dir / "packaging" / "pyinstaller"
 sys.path.insert(0, str(packaging_dir))
 import portable_runtime  # noqa: E402
+from windows_version import version_resource
 
 qt_report = portable_runtime.validate_pyside6_installation()
 
@@ -93,6 +94,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name="superflip",
+    version=version_resource("Phase Studio Jana2020 Wrapper", project_dir),
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

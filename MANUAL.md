@@ -1,6 +1,6 @@
 # Phase Studio User Manual
 
-**Version 1.0.8**
+**Development version: see `phase_studio/version.py`**
 
 ## 1. Introduction
 
@@ -777,3 +777,22 @@ General project/support contact:
 - Phase Studio: https://github.com/ji-ze/Phase-Studio
 - SharpED: https://sharped.fzu.cz/
 - Superflip and EDMA: https://superflip.fzu.cz/
+
+
+## Windows distribution targets
+
+Phase Studio standalone and the Phase Studio Jana2020 Installer are separate
+applications. The standalone application supports Jana .inflip scientific data,
+but does not install, update, repair, or remove Jana integration.
+
+Run `PhaseStudioJanaInstaller.exe` from its complete distribution directory to
+manage integration. Its primary button becomes Install, Update, or Repair
+according to the detected installation; Remove restores the preserved original
+Superflip. The complete JanaIntegration payload must remain next to the
+installer. EDMA and scientific project files are not modified.
+
+An installed 1.0.8 integration is offered an update to the installer's current
+version. Unknown markers, mismatching wrapper hashes, missing original backups,
+and leftover transaction files prevent destructive changes. Resolve conflicts
+before retrying. The installed Wizard and Full configuration options continue
+to use the shared Phase Studio scientific code.

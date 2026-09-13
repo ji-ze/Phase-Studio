@@ -13,6 +13,12 @@ for every file, checking the exit code) without any additional tooling.
 
 ## What's here
 
+- `test_split_distribution.py` -- canonical version and separate entry points,
+  no standalone management UI, installer detection/install/update/repair/remove,
+  1.0.8 upgrade, ownership/hash conflicts and transaction rollback. Also compares
+  scientific functions with the integrated baseline; standard-library unittest.
+
+
 - `test_sharped_catalog.py` -- standard-library unittest coverage of the real
   model response schema, atomic catalog/default replacement, selection intent,
   multipart DEFAULT/explicit uploads through both application entry points,

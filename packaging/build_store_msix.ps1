@@ -1,81 +1,7 @@
 <#
 .SYNOPSIS
-    Build a Microsoft Store-ready Phase Studio MSIX package.
-
-.DESCRIPTION
-    Reproducible pipeline:
-      1. clean prior Store staging (build\store\, dist\store\),
-      2. build PhaseStudio and the Jana2020 wrapper by running
-         packaging\build_windows.ps1 -- the exact same known-working
-         "python -m PyInstaller --clean --noconfirm superflip.spec" build
-         used for plain developer builds. That script also stages the Jana
-         wrapper into dist\PhaseStudio\JanaIntegration\ (a plain post-build
-         file copy of dist\superflip\, never a second PyInstaller build), so
-         this script does not reimplement a second, separately frozen Jana
-         wrapper: the payload staged into the MSIX below is bit-for-bit what
-         build_windows.ps1 already produced,
-      3. copy the already-staged dist\PhaseStudio\ (JanaIntegration\
-         included) -> MSIX layout PhaseStudio\ as a single directory copy,
-      4. generate the MSIX staging layout,
-      5. generate AppxManifest.xml from the template + store identity + the
-         single Phase Studio version source (phase_studio\version.py),
-      6. validate required visual assets exist,
-      7. optionally Authenticode-sign PhaseStudio\JanaIntegration\superflip.exe
-         (it is copied OUT of the MSIX package later by Phase Studio itself,
-         so the MSIX package signature alone does not cover it -- see
-         phase_studio\jana_integration.py and Part I of the integration
-         design notes),
-      8. call MakeAppx.exe,
-      9. produce the final .msix under dist\store\.
-
-    This script produces an UNSIGNED .msix by default, suitable for direct
-    Microsoft Store submission (the Store re-signs the package after
-    certification). For local sideload testing, sign the produced .msix
-    afterward with packaging\sign_test_msix.ps1 (or pass
-    -TestCertificatePath/-TestCertificatePassword here). Never commit a
-    .pfx, private key, or password anywhere in this repository.
-
-.PARAMETER StoreIdentityPath
-    Path to a local store_identity.json (see
-    packaging\msix\store_identity.example.json). Defaults to
-    packaging\msix\store_identity.json, which is expected to be created
-    locally and is NOT committed (placeholder Partner Center values only
-    live in the .example.json).
-
-.PARAMETER Version
-    Override the package version (format A.B.C.D). Defaults to
-    phase_studio\version.py's VERSION with a trailing ".0" component
-    (e.g. "1.0.8" -> "1.0.8.0") -- the single source of truth for the
-    application version.
-
-.PARAMETER JanaSigningCertificate
-    Optional path to a .pfx used to Authenticode-sign
-    PhaseStudio\JanaIntegration\superflip.exe before it is added to the MSIX
-    payload. If omitted, the wrapper is left unsigned and this is reported
-    clearly (never silently).
-
-.PARAMETER JanaSigningPassword
-    Password for -JanaSigningCertificate, as a SecureString. Never pass a
-    plain-text password on the command line in a shared/scripted context;
-    prefer Read-Host -AsSecureString interactively.
-
-.PARAMETER TimestampUrl
-    RFC 3161 timestamp server used for both the optional Jana wrapper
-    signing and (if requested) test-signing the MSIX itself.
-
-.PARAMETER TestCertificatePath / TestCertificatePassword
-    Optional: also sign the produced MSIX package itself with a local test
-    certificate (for sideload testing on a dev machine). Equivalent to
-    running packaging\sign_test_msix.ps1 afterward.
-
-.EXAMPLE
-    powershell -File packaging\build_store_msix.ps1
-
-.EXAMPLE
-    powershell -File packaging\build_store_msix.ps1 `
-        -JanaSigningCertificate C:\secure\phase_studio_codesign.pfx `
-        -JanaSigningPassword (Read-Host -AsSecureString "Cert password") `
-        -TimestampUrl "http://timestamp.digicert.com"
+Build and package ONLY standalone Phase Studio for Microsoft Store.
+The dedicated Jana installer and its wrapper payload are never included.
 #>
 [CmdletBinding()]
 param(
@@ -86,8 +12,6 @@ param(
     # before printing anything, exactly when run per its own .EXAMPLE).
     [string]$StoreIdentityPath = "",
     [string]$Version,
-    [string]$JanaSigningCertificate,
-    [System.Security.SecureString]$JanaSigningPassword,
     [string]$TimestampUrl = "http://timestamp.digicert.com",
     [string]$TestCertificatePath,
     [System.Security.SecureString]$TestCertificatePassword
@@ -106,14 +30,11 @@ if (-not $StoreIdentityPath) {
 # ---------------------------------------------------------------------------
 # 1. Version (single source of truth: phase_studio\version.py)
 # ---------------------------------------------------------------------------
-if (-not $Version) {
-    $versionPy = Get-Content (Join-Path $RepoRoot "phase_studio\version.py") -Raw
-    if ($versionPy -notmatch 'VERSION\s*=\s*"([^"]+)"') {
-        throw "Could not read VERSION from phase_studio\version.py"
-    }
-    $appVersion = $Matches[1]
-    $Version = "$appVersion.0"
-}
+$versionPy = Get-Content (Join-Path $RepoRoot "phase_studio\version.py") -Raw
+if ($versionPy -notmatch 'VERSION\s*=\s*"([^"]+)"') { throw "Cannot read canonical VERSION." }
+$canonicalVersion = "$($Matches[1]).0"
+if ($Version -and $Version -ne $canonicalVersion) { throw "MSIX version must match $canonicalVersion." }
+$Version = $canonicalVersion
 Write-Host "Phase Studio version: $Version (MSIX package version)"
 
 # ---------------------------------------------------------------------------
@@ -148,75 +69,17 @@ $layoutDir = Join-Path $storeBuildDir "layout"
 New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
 New-Item -ItemType Directory -Force -Path $storeDistDir | Out-Null
 
-# ---------------------------------------------------------------------------
-# 4. Build PhaseStudio + the Jana2020 wrapper by delegating to the canonical
-#    developer build (packaging\build_windows.ps1). That script builds the
-#    Jana wrapper with the exact known-working
-#    "python -m PyInstaller --clean --noconfirm superflip.spec" command
-#    against the repository's root-level superflip.spec -- the same command
-#    already verified against a real Jana2020 installation -- and then
-#    stages a complete copy of its dist\superflip\ output into
-#    dist\PhaseStudio\JanaIntegration\ itself (a plain file copy, not a
-#    second PyInstaller build). This script never gives PyInstaller a
-#    different spec or a different output name for that build; it only
-#    copies the already-staged dist\PhaseStudio\ directory below.
-# ---------------------------------------------------------------------------
-Write-Step "Building PhaseStudio and the Jana2020 wrapper (packaging\build_windows.ps1)"
-& (Join-Path $PSScriptRoot "build_windows.ps1")
-
+Write-Step "Building standalone PhaseStudio"
+& (Join-Path $PSScriptRoot "build_windows.ps1") -Target Standalone
 $builtPhaseStudioDir = Join-Path $RepoRoot "dist\PhaseStudio"
-Assert-PathExists (Join-Path $builtPhaseStudioDir "PhaseStudio.exe") "Built PhaseStudio.exe"
-Assert-PathExists (Join-Path $builtPhaseStudioDir "JanaIntegration\superflip.exe") "Built (staged) PhaseStudio\JanaIntegration\superflip.exe"
-
-Write-Step "Staging build output into the MSIX layout"
-Copy-Item $builtPhaseStudioDir (Join-Path $layoutDir "PhaseStudio") -Recurse -Force
-
-Assert-PathExists (Join-Path $layoutDir "PhaseStudio\PhaseStudio.exe") "Staged PhaseStudio.exe"
-Assert-PathExists (Join-Path $layoutDir "PhaseStudio\JanaIntegration\superflip.exe") "Staged PhaseStudio\JanaIntegration\superflip.exe"
-Assert-PathExists (Join-Path $layoutDir "PhaseStudio\JanaIntegration\_internal") "Staged PhaseStudio\JanaIntegration\_internal"
-
-# ---------------------------------------------------------------------------
-# 5. Optional: Authenticode-sign the Jana wrapper BEFORE it goes into the
-#    MSIX payload. The MSIX package signature does not cover this file once
-#    Phase Studio later copies it out to a Jana2020 installation.
-# ---------------------------------------------------------------------------
-$janaExePath = Join-Path $layoutDir "PhaseStudio\JanaIntegration\superflip.exe"
-if ($JanaSigningCertificate) {
-    Write-Step "Signing PhaseStudio\JanaIntegration\superflip.exe"
-    Assert-PathExists $JanaSigningCertificate "Jana wrapper signing certificate"
-    $signTool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter "signtool.exe" -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -match "\\x64\\" } | Sort-Object FullName -Descending | Select-Object -First 1
-    if (-not $signTool) {
-        throw "SignTool.exe was not found under Windows Kits. Install the Windows SDK, or omit -JanaSigningCertificate to build unsigned."
-    }
-    $signArgs = @("sign", "/fd", "SHA256", "/f", $JanaSigningCertificate)
-    if ($JanaSigningPassword) {
-        $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($JanaSigningPassword))
-        $signArgs += @("/p", $plainPassword)
-    }
-    if ($TimestampUrl) {
-        $signArgs += @("/tr", $TimestampUrl, "/td", "SHA256")
-    }
-    $signArgs += $janaExePath
-    & $signTool.FullName @signArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Signing PhaseStudio\JanaIntegration\superflip.exe failed (SignTool exit code $LASTEXITCODE)."
-    }
-    Write-Host "PhaseStudio\JanaIntegration\superflip.exe signed." -ForegroundColor Green
-} else {
-    Write-Host "Jana integration wrapper is unsigned." -ForegroundColor Yellow
+Assert-PathExists (Join-Path $builtPhaseStudioDir "PhaseStudio.exe") "Built standalone"
+if (Test-Path (Join-Path $builtPhaseStudioDir "JanaIntegration")) {
+    throw "Store packaging refuses a Jana installation payload."
 }
-
-# ---------------------------------------------------------------------------
-# 6. Integration payload marker (informational; the real per-install marker
-#    is written at install time by phase_studio.jana_integration).
-# ---------------------------------------------------------------------------
-$payloadMarker = @{
-    product  = "Phase Studio"
-    version  = $Version.Substring(0, $Version.LastIndexOf("."))
-    wrapper  = "superflip.exe"
-} | ConvertTo-Json
-Set-Content -Path (Join-Path $layoutDir "PhaseStudio\JanaIntegration\phase_studio_integration_payload.json") -Value $payloadMarker -Encoding utf8
+Copy-Item -LiteralPath $builtPhaseStudioDir -Destination (Join-Path $layoutDir "PhaseStudio") -Recurse -Force
+Assert-PathExists (Join-Path $layoutDir "PhaseStudio\PhaseStudio.exe") "Staged standalone"
+& python (Join-Path $PSScriptRoot "tools\check_distribution.py") (Join-Path $layoutDir "PhaseStudio") --profile standalone
+if ($LASTEXITCODE -ne 0) { throw "Store layout failed standalone boundary checks." }
 
 # ---------------------------------------------------------------------------
 # 7. Assets

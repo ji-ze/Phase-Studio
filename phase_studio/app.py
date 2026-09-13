@@ -288,66 +288,6 @@ def blend_structure_colors(base_colors: np.ndarray, fade: np.ndarray) -> np.ndar
     return np.clip(colors * (1.0 - amounts) + amounts, 0.0, 1.0)
 
 
-def fitted_dialog_client_size(
-    available_size: QSize,
-    frame_extra: QSize = QSize(0, 0),
-    preferred_size: QSize = QSize(1180, 835),
-) -> QSize:
-    """Return an initial client size whose complete frame fits the usable desktop."""
-    max_outer_width = max(1, int(math.floor(available_size.width() * 0.95)))
-    # On short high-DPI desktops, use the available work area rather than
-    # sacrificing scientific plot height to a large decorative outer margin.
-    # The native frame is still measured and kept wholly above the taskbar.
-    max_outer_height = max(1, int(math.floor(available_size.height() * 0.97)))
-    client_width = min(preferred_size.width(), max(1, max_outer_width - max(0, frame_extra.width())))
-    client_height = min(preferred_size.height(), max(1, max_outer_height - max(0, frame_extra.height())))
-    return QSize(client_width, client_height)
-
-
-def fit_dialog_to_available_screen(
-    dialog: QDialog,
-    preferred_size: QSize = QSize(1180, 835),
-) -> QRect:
-    """Size and center a dialog inside its screen's availableGeometry()."""
-    dialog.ensurePolished()
-    dialog.winId()  # Ensure native frame margins are available before sizing.
-    screen = dialog.screen() or QGuiApplication.primaryScreen()
-    if screen is None:
-        fallback = QRect(0, 0, preferred_size.width(), preferred_size.height())
-        dialog.resize(preferred_size)
-        return fallback
-
-    available = screen.availableGeometry()
-    frame = dialog.frameGeometry()
-    client = dialog.geometry()
-    frame_extra = QSize(
-        max(0, frame.width() - client.width()),
-        max(0, frame.height() - client.height()),
-    )
-    target = fitted_dialog_client_size(available.size(), frame_extra, preferred_size)
-    dialog.setMinimumSize(min(760, target.width()), min(520, target.height()))
-    dialog.resize(target)
-
-    frame = dialog.frameGeometry()
-    target_frame_top_left = QPoint(
-        available.x() + max(0, (available.width() - frame.width()) // 2),
-        available.y() + max(0, (available.height() - frame.height()) // 2),
-    )
-    dialog.move(dialog.pos() + target_frame_top_left - frame.topLeft())
-
-    # A window manager may adjust frame margins after the first move. Clamp a
-    # second time so the full native frame, including its title bar, stays in
-    # the usable rectangle above the taskbar.
-    frame = dialog.frameGeometry()
-    dx = max(available.left() - frame.left(), 0) - max(frame.right() - available.right(), 0)
-    dy = max(available.top() - frame.top(), 0) - max(frame.bottom() - available.bottom(), 0)
-    if dx or dy:
-        dialog.move(dialog.pos() + QPoint(dx, dy))
-
-    dialog.available_geometry_at_open = QRect(available)  # type: ignore[attr-defined]
-    dialog.initial_client_size = QSize(dialog.size())  # type: ignore[attr-defined]
-    return available
-
 @dataclass
 class ReferenceContext:
     cif_path: Path
@@ -6010,159 +5950,12 @@ for example:
 """
 
 
-def create_phase_studio_logo_pixmap(width: int = 96) -> QPixmap:
-    """Render the supplied Phase Studio monitor mark without an external asset dependency."""
-    width = max(40, int(width))
-    height = max(30, int(round(width * 255.0 / 339.0)))
-    pixmap = QPixmap(width, height)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    try:
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        sx = width / 339.0
-        sy = height / 255.0
-
-        def rect(x: float, y: float, w: float, h: float, color: str, radius: float = 0.0) -> None:
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(color))
-            painter.drawRoundedRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy), radius * sx, radius * sy)
-
-        frame_pen = QPen(QColor("#001170"), max(2.0, 7.0 * sx))
-        frame_pen.setJoinStyle(Qt.RoundJoin)
-        painter.setPen(frame_pen)
-        painter.setBrush(QColor("#F2F4F9"))
-        painter.drawRoundedRect(int(19 * sx), int(11 * sy), int(286 * sx), int(177 * sy), 2.5 * sx, 2.5 * sy)
-        painter.drawLine(int(159 * sx), int(188 * sy), int(159 * sx), int(238 * sy))
-        painter.drawLine(int(82 * sx), int(239 * sy), int(237 * sx), int(239 * sy))
-
-        rect(104, 49, 30, 17, "#001170", 5)
-        rect(132, 69, 19, 16, "#001170", 5)
-        rect(72, 87, 61, 13, "#001170", 6)
-        rect(80, 106, 25, 21, "#001170", 5)
-        rect(118, 109, 17, 42, "#001170", 5)
-        rect(149, 107, 21, 22, "#001170", 5)
-        rect(151, 47, 44, 20, "#1FA5FF", 5)
-        rect(194, 69, 33, 16, "#1FA5FF", 7)
-        rect(172, 87, 90, 13, "#44B7FF", 6)
-        rect(190, 106, 42, 21, "#1FA5FF", 6)
-        rect(146, 134, 64, 15, "#1FA5FF", 7)
-    finally:
-        painter.end()
-    return pixmap
-
-
-def create_phase_studio_app_icon(size: int = 64) -> QIcon:
-    """Create a square, optically centered application/taskbar icon."""
-    size = max(32, int(size))
-    source = create_phase_studio_logo_pixmap(size)
-    cropped = source.copy(
-        int(source.width() * 0.04),
-        int(source.height() * 0.025),
-        int(source.width() * 0.88),
-        int(source.height() * 0.95),
-    )
-    target = QPixmap(size, size)
-    target.fill(Qt.transparent)
-    scaled = cropped.scaled(
-        int(size * 0.90), int(size * 0.90), Qt.KeepAspectRatio, Qt.SmoothTransformation
-    )
-    painter = QPainter(target)
-    try:
-        painter.drawPixmap((size - scaled.width()) // 2, (size - scaled.height()) // 2, scaled)
-    finally:
-        painter.end()
-    return QIcon(target)
-
-
-def apply_phase_studio_app_icon(app: "QApplication") -> None:
-    """Stamp the Phase Studio icon onto the whole application.
-
-    Set on the QApplication rather than per window: QWidget.windowIcon() falls
-    back to the application icon, so this is what gives the Jana2020 Wizard,
-    the result selector and every other top-level dialog a real title-bar,
-    taskbar and Alt+Tab icon instead of the generic Qt fallback. Uses the one
-    existing icon helper -- no second asset, no per-window duplication.
-    """
-    try:
-        if app is not None and app.windowIcon().isNull():
-            app.setWindowIcon(create_phase_studio_app_icon(256))
-    except Exception:
-        # A missing icon must never prevent the application from starting.
-        pass
-
-
-def create_phase_studio_brand_header() -> QWidget:
-    """The "PHASE STUDIO" branded header (logo, title, version badge,
-    subtitle) -- shared by the main window and any other Phase Studio
-    surface (the Jana2020 Wizard, its result selector, ...) that should
-    visually read as the same application rather than a generic dialog."""
-    brand_header = QWidget()
-    brand_header.setObjectName("brandHeader")
-    brand_layout = QHBoxLayout(brand_header)
-    brand_layout.setContentsMargins(12, 6, 12, 7)
-    brand_layout.setSpacing(10)
-    brand_logo = QLabel()
-    brand_logo.setObjectName("brandLogo")
-    brand_logo_pixmap = create_phase_studio_logo_pixmap(58)
-    brand_logo.setPixmap(brand_logo_pixmap)
-    brand_logo.setFixedSize(brand_logo_pixmap.size())
-    brand_logo.setToolTip("Phase Studio")
-    brand_text_layout = QVBoxLayout()
-    brand_text_layout.setContentsMargins(0, 0, 0, 0)
-    brand_text_layout.setSpacing(1)
-    brand_title_row = QHBoxLayout()
-    brand_title_row.setSpacing(8)
-    brand_title = QLabel("PHASE STUDIO")
-    brand_title.setObjectName("brandTitle")
-    version_badge = QLabel(__version__)
-    version_badge.setObjectName("versionBadge")
-    version_badge.setAlignment(Qt.AlignCenter)
-    brand_title_row.addWidget(brand_title, 1)
-    brand_title_row.addWidget(version_badge)
-    brand_subtitle = QLabel("Superflip · SharpED · EDMA workflow")
-    brand_subtitle.setObjectName("brandSubtitle")
-    brand_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-    brand_text_layout.addLayout(brand_title_row)
-    brand_text_layout.addWidget(brand_subtitle)
-    brand_layout.addWidget(brand_logo, 0, Qt.AlignVCenter)
-    brand_layout.addLayout(brand_text_layout, 1)
-    return brand_header
-
-
-def create_phase_studio_context_banner(title: str, subtitle: str, badge: Optional[QWidget] = None) -> QWidget:
-    """A compact navy context banner using the same visual language as the
-    main window's "RUN OVERVIEW" banner (#dashboardHeader/#dashboardTitle/
-    #dashboardSubtitle in ui_style.py), reused for Jana2020 Wizard page
-    context and the Jana2020 result selector so both read as the same
-    application as the main window rather than an unrelated dialog."""
-    banner = QWidget()
-    banner.setObjectName("dashboardHeader")
-    banner_layout = QHBoxLayout(banner)
-    banner_layout.setContentsMargins(12, 5, 12, 5)
-    banner_text = QVBoxLayout()
-    banner_text.setSpacing(0)
-    banner_title = QLabel(title)
-    banner_title.setObjectName("dashboardTitle")
-    banner_subtitle = QLabel(subtitle)
-    banner_subtitle.setObjectName("dashboardSubtitle")
-    banner_subtitle.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-    banner_text.addWidget(banner_title)
-    banner_text.addWidget(banner_subtitle)
-    banner_layout.addLayout(banner_text, 1)
-    if badge is not None:
-        banner_layout.addWidget(badge)
-    return banner
-
-
-def apply_safe_dialog_geometry(dialog: QWidget, width: int, height: int) -> None:
-    """Int-based convenience wrapper around the existing
-    fit_dialog_to_available_screen() (frame-aware: measures the dialog's
-    actual native frame, not an approximate margin, and double-clamps after
-    the window manager settles) -- the one shared safe top-level-window
-    geometry helper for the Jana2020 Wizard, the Jana2020 result selector,
-    HKL Validation/Completeness, and any other Phase Studio dialog, rather
-    than each maintaining its own hard-coded/partial sizing logic."""
-    fit_dialog_to_available_screen(dialog, QSize(width, height))
+from phase_studio.ui_branding import (
+    create_phase_studio_logo_pixmap, create_phase_studio_app_icon,
+    apply_phase_studio_app_icon, create_phase_studio_brand_header,
+    create_phase_studio_context_banner, apply_safe_dialog_geometry,
+    fitted_dialog_client_size, fit_dialog_to_available_screen,
+)
 
 
 class WorkflowDiagram(QWidget):
@@ -7191,34 +6984,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """)
         self._add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.", kind="warning")
         self._add_back_to_contents(map_feedback_layout)
-        jana_integration_layout = self._add_help_section(basic_help_tab, "jana_integration", "Jana2020 integration", """
-            <p>Phase Studio can install itself as Jana2020's active Superflip launcher, so that Jana2020's own
-            "Superflip" action opens the Phase Studio Jana2020 Wizard instead of running Superflip directly.
-            This is entirely optional and separate from using Phase Studio as a standalone application.</p>
-            <h3>Install to Jana2020</h3>
-            <p>When Phase Studio is launched normally (not from the Jana2020 Wizard), the third main-window button
-            reads <b>Install to Jana2020</b> and opens the Jana2020 integration dialog. It detects an existing
-            Jana2020 installation (starting with <code>C:\\Jana2020</code>), or a folder can be selected manually.
-            Installing:</p>
-            <ul>
-                <li>preserves Jana2020's existing Superflip executable as <code>superflip_original.exe</code>,</li>
-                <li>installs the Phase Studio Jana2020 launcher as <code>superflip.exe</code> in its place, together with its required runtime files,</li>
-                <li>leaves <code>EDMA.exe</code> and all Jana2020 crystallographic project data unchanged.</li>
-            </ul>
-            <p>Nothing is modified merely by opening the dialog; only pressing <b>Install integration</b> (or
-            <b>Update integration</b>/<b>Repair</b> once already installed) changes anything on disk, and only inside
-            the selected Jana2020 <code>SUPERFLIP</code> folder.</p>
-            <h3>Reversibility</h3>
-            <p><b>Remove integration</b>, inside the same dialog, restores the preserved <code>superflip_original.exe</code>
-            back to <code>superflip.exe</code> and removes the Phase Studio-owned launcher and its runtime files.
-            Jana2020 then runs its own original Superflip exactly as before Phase Studio was ever installed.</p>
-            <h3>Send to Jana2020</h3>
-            <p>When Phase Studio is instead launched <i>from</i> the Jana2020 Wizard (via the installed launcher, or
-            "Open full configuration"), the same button reads <b>Send to Jana2020</b> and opens the existing
-            Superflip/SharpED cycle-result selection and handoff dialog described above -- unrelated to installing
-            or removing the integration itself.</p>
+        jana_integration_layout = self._add_help_section(basic_help_tab, "jana_integration", "Jana2020 data and workflows", """
+            <p>Phase Studio supports Jana2020 .inflip data and scientific workflows.
+            When launched from the Jana2020 Workflow Wizard, completed results can
+            be selected and sent back with <b>Send to Jana2020</b>.</p>
+            <p>Jana installation management is provided by the separate Phase Studio
+            Jana2020 Installer application.</p>
         """)
-        self._add_help_callout(jana_integration_layout, "Note", "Installing or removing the Jana2020 integration only manages the superflip.exe launcher inside the selected Jana2020 SUPERFLIP folder. It never modifies crystallographic project data, and a completed Phase Studio run is never required to install, update, repair or remove it.")
         self._add_back_to_contents(jana_integration_layout)
         about_layout = self._add_help_section(basic_help_tab, "about", "About Phase Studio", """
             <h2>Phase Studio</h2>
@@ -7509,15 +7281,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_btn = QPushButton("Stop after current cycle")
         self.stop_now_btn = QPushButton("Stop immediately")
         self.clear_btn = QPushButton("Clear results")
-        # Third primary action is context-sensitive: "Send to Jana2020" (a
-        # result-hand-off action) when launched from the Jana2020 Wizard,
-        # "Install to Jana2020" (an application-integration action, no run
-        # required) for a normal standalone launch. handoff_btn is kept as a
-        # compatibility alias -- existing call sites that disable it during
-        # an active run (start_run/continue_run/error/cancel) stay correct
-        # unchanged in both contexts, since "disable while running" applies
-        # to either meaning of the button.
-        self.jana_action_btn = QPushButton("Install to Jana2020")
+        # Result handoff is visible only in a Jana Wizard session.
+        self.jana_action_btn = QPushButton("Send to Jana2020")
         self.handoff_btn = self.jana_action_btn
         self.run_btn.setObjectName("primaryButton")
         self.continue_btn.setObjectName("continueButton")
@@ -10506,49 +10271,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _sync_window_title(self) -> None:
         """Single source of truth for the window title, driven entirely by
         launch context (jana_wizard_context.launched_from_jana_wizard) --
-        never inferred from whether a .inflip happens to be loaded. Mirrors
-        _sync_jana_action_button()'s "Install to Jana2020" / "Send to
-        Jana2020" pattern."""
+        never inferred from whether a .inflip happens to be loaded. Keeps the wrapper launch context visible."""
         if self.jana_wizard_context.launched_from_jana_wizard:
             self.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
         else:
             self.setWindowTitle(f"Phase Studio {__version__}")
 
     def _sync_jana_action_button(self) -> None:
-        """Single source of truth for the third primary action button's
-        label/tooltip/enabled state, driven entirely by launch context
-        (jana_wizard_context.launched_from_jana_wizard) -- never inferred
-        from whether a .inflip happens to be loaded."""
+        """Keep installation management out of the shared scientific GUI."""
         if not hasattr(self, "jana_action_btn"):
             return
+        launched = self.jana_wizard_context.launched_from_jana_wizard
+        self.jana_action_btn.setVisible(launched)
+        self.jana_action_btn.setText("Send to Jana2020")
+        self.jana_action_btn.setToolTip("Select a completed workflow result to send to Jana2020.")
         active = str(getattr(self, "_run_status", "READY")).upper() == "RUNNING"
-        if self.jana_wizard_context.launched_from_jana_wizard:
-            self.jana_action_btn.setText("Send to Jana2020")
-            self.jana_action_btn.setToolTip(
-                "After a run launched from the Jana2020 Wizard completes, select a cycle and either its "
-                "Superflip or SharpED result for handoff back to Jana2020."
-            )
-            self.jana_action_btn.setEnabled((not active) and self._jana_wizard_handoff_available())
-        else:
-            self.jana_action_btn.setText("Install to Jana2020")
-            self.jana_action_btn.setToolTip(
-                "Install, update, repair or remove the Phase Studio Jana2020 launcher inside a Jana2020 "
-                "installation (Jana2020\\SUPERFLIP). Available at any time; no completed run is required."
-            )
-            # An application-integration action, not a result action (spec
-            # section 3): enabled in normal READY state, disabled only while
-            # a calculation is actively running, so files used by Jana/
-            # Superflip are not modified during an active Phase Studio run.
-            self.jana_action_btn.setEnabled(not active)
+        self.jana_action_btn.setEnabled(launched and not active and self._jana_wizard_handoff_available())
 
     def _on_jana_action_clicked(self) -> None:
-        """Dispatches the third primary action according to launch context:
-        the existing Jana2020 result hand-off for a Wizard-launched session,
-        or the Jana2020 integration management dialog for a standalone one."""
         if self.jana_wizard_context.launched_from_jana_wizard:
             self.open_jana_handoff_dialog()
-        else:
-            self.open_install_to_jana_dialog()
 
     def _show_stopping_badge(self) -> None:
         # Cosmetic only: the pipeline is still RUNNING for _update_action_states()
@@ -11719,289 +11461,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             return
         self.open_jana_result_selector(source_mode="switchable", initial_source=self._default_handoff_source())
-
-    def open_install_to_jana_dialog(self) -> None:
-        """Entry point for the main window's "Install to Jana2020" button
-        (standalone launch only -- see _on_jana_action_clicked()).
-
-        Manages the Phase Studio -> Jana2020\\SUPERFLIP integration: detect,
-        install, update, repair, remove. Every file operation is delegated
-        to phase_studio.jana_integration (transactional, independently
-        tested); this method is presentation only and never modifies
-        anything just by being opened -- only the explicit "Install
-        integration"/"Update integration"/"Repair"/"Remove integration"
-        buttons do."""
-        from phase_studio import jana_integration as ji
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Jana2020 Integration")
-        outer = QVBoxLayout(dialog)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.setSpacing(0)
-        outer.addWidget(create_phase_studio_brand_header())
-        outer.addWidget(create_phase_studio_context_banner(
-            "JANA2020 INTEGRATION",
-            "Install the Phase Studio workflow launcher into Jana2020",
-        ))
-
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(14, 10, 14, 10)
-        content_layout.setSpacing(10)
-        scroll_area.setWidget(content)
-        outer.addWidget(scroll_area, 1)
-
-        path_group = QGroupBox("Jana2020 Installation")
-        path_group_layout = QVBoxLayout(path_group)
-        path_row = QHBoxLayout()
-        path_edit = QLineEdit()
-        path_edit.setPlaceholderText(r"C:\Jana2020")
-        path_edit.setReadOnly(True)
-        browse_btn = QPushButton("Browse…")
-        path_row.addWidget(path_edit, 1)
-        path_row.addWidget(browse_btn)
-        path_group_layout.addLayout(path_row)
-        path_hint = QLabel("Select the Jana2020 root folder; Phase Studio looks for its SUPERFLIP subfolder.")
-        path_hint.setWordWrap(True)
-        path_hint.setStyleSheet("color: #52658b;")
-        path_group_layout.addWidget(path_hint)
-        content_layout.addWidget(path_group)
-
-        status_group = QGroupBox("Detection Status")
-        status_layout = QVBoxLayout(status_group)
-        content_layout.addWidget(status_group)
-
-        state_label = QLabel("")
-        state_label.setObjectName("settingsCallout")
-        state_label.setTextFormat(Qt.RichText)
-        state_label.setWordWrap(True)
-        content_layout.addWidget(state_label)
-
-        explain_label = QLabel("")
-        explain_label.setWordWrap(True)
-        explain_label.setTextFormat(Qt.RichText)
-        content_layout.addWidget(explain_label)
-
-        signature_label = QLabel("")
-        signature_label.setWordWrap(True)
-        signature_label.setTextFormat(Qt.RichText)
-        signature_label.setStyleSheet("color: #52658b;")
-        content_layout.addWidget(signature_label)
-
-        result_label = QLabel("")
-        result_label.setWordWrap(True)
-        result_label.setVisible(False)
-        content_layout.addWidget(result_label)
-
-        log_view = QTextEdit()
-        log_view.setReadOnly(True)
-        log_view.setVisible(False)
-        log_view.setMaximumHeight(140)
-        content_layout.addWidget(log_view)
-        content_layout.addStretch(1)
-
-        footer = QWidget()
-        footer.setObjectName("wizardFooter")
-        footer_layout = QHBoxLayout(footer)
-        footer_layout.setContentsMargins(14, 8, 14, 12)
-        close_btn = QPushButton("Close")
-        remove_btn = QPushButton("Remove integration")
-        primary_btn = QPushButton("Install integration")
-        primary_btn.setObjectName("primaryButton")
-        # Disabled from construction, before the first refresh() has run --
-        # never rely on Qt's default-enabled state for a button whose real
-        # state depends on detecting a payload/writable directory first.
-        remove_btn.setEnabled(False)
-        primary_btn.setEnabled(False)
-        footer_layout.addWidget(close_btn)
-        footer_layout.addStretch(1)
-        footer_layout.addWidget(remove_btn)
-        footer_layout.addWidget(primary_btn)
-        outer.addWidget(footer)
-
-        state: Dict[str, object] = {"jana_root": None, "superflip_dir": None, "report": None, "install_state": ji.IntegrationState.NOT_INSTALLED}
-
-        def resolve_initial_root() -> Optional[Path]:
-            configured_paths = []
-            for key in ("superflip_exe", "edma_exe"):
-                text = self._path_value(key).strip() if key in self.inputs else ""
-                if text:
-                    configured_paths.append(Path(text))
-            return ji.detect_jana_root(configured_paths)
-
-        def clear_status_layout() -> None:
-            while status_layout.count():
-                child = status_layout.takeAt(0)
-                widget = child.widget()
-                if widget is not None:
-                    widget.setParent(None)
-                    widget.deleteLater()
-
-        def status_row(ok: bool, text: str) -> QLabel:
-            mark = "✓" if ok else "✗"
-            color = "#2264b8" if ok else "#b42318"
-            label = QLabel(f"<span style='color:{color};font-weight:600;'>{mark}</span>&nbsp;&nbsp;{html.escape(text)}")
-            label.setTextFormat(Qt.RichText)
-            return label
-
-        def refresh(jana_root: Optional[Path]) -> None:
-            state["jana_root"] = jana_root
-            path_edit.setText(str(jana_root) if jana_root is not None else "")
-            superflip_dir = ji.superflip_dir_for_root(jana_root) if jana_root is not None else None
-            state["superflip_dir"] = superflip_dir
-            report = ji.inspect_jana_superflip_dir(superflip_dir) if superflip_dir is not None else None
-            state["report"] = report
-            install_state = ji.classify_install_state(report, ji.bundled_integration_version()) if report is not None else ji.IntegrationState.NOT_INSTALLED
-            state["install_state"] = install_state
-
-            clear_status_layout()
-            if report is None:
-                status_layout.addWidget(status_row(False, "No Jana2020 installation selected."))
-            else:
-                status_layout.addWidget(status_row(report.exists, "SUPERFLIP directory detected"))
-                status_layout.addWidget(status_row(report.has_original_exe or (report.has_superflip_exe and not report.has_marker), "Original Superflip detected"))
-                status_layout.addWidget(status_row(report.has_edma_exe, "EDMA detected"))
-                if not report.is_writable and report.exists:
-                    status_layout.addWidget(status_row(False, "Directory is not writable with the current Windows permissions"))
-
-            state_text = {
-                ji.IntegrationState.NOT_INSTALLED: "Not installed",
-                ji.IntegrationState.INSTALLED_CURRENT: f"Installed · version {ji.bundled_integration_version()}",
-                ji.IntegrationState.UPDATE_AVAILABLE: f"Update available · installed {report.marker.version if report and report.marker else '?'}, bundled {ji.bundled_integration_version()}",
-                ji.IntegrationState.REPAIR_REQUIRED: "Repair required",
-                ji.IntegrationState.CONFLICT: "Conflict detected",
-            }.get(install_state, "Not installed")
-            state_label.setText(f"<b>Status:</b> {html.escape(state_text)}")
-
-            if install_state == ji.IntegrationState.CONFLICT:
-                explain_label.setText(
-                    "<b>Existing Superflip backup detected.</b> Phase Studio did not modify this installation "
-                    "because its ownership could not be verified. Nothing was changed."
-                )
-            elif install_state == ji.IntegrationState.NOT_INSTALLED:
-                explain_label.setText(
-                    "Phase Studio will:<br>"
-                    "&bull; preserve the existing Superflip executable as <code>superflip_original.exe</code><br>"
-                    "&bull; install the Phase Studio Jana2020 launcher as <code>superflip.exe</code><br>"
-                    "&bull; install its required runtime files<br>"
-                    "&bull; leave EDMA and all Jana2020 crystallographic data unchanged"
-                )
-            elif install_state == ji.IntegrationState.UPDATE_AVAILABLE:
-                explain_label.setText("A newer Phase Studio Jana2020 launcher is available. Updating preserves the original Superflip executable and replaces only Phase-Studio-owned files.")
-            elif install_state == ji.IntegrationState.REPAIR_REQUIRED:
-                explain_label.setText("The Phase Studio integration is incomplete (a required file is missing). Repair replaces only Phase-Studio-owned files; the original Superflip executable is preserved.")
-            else:
-                explain_label.setText("The installed Phase Studio Jana2020 launcher is up to date.")
-
-            payload_dir = ji.resolve_bundled_jana_payload_dir()
-            if payload_dir is None:
-                signature_label.setText(
-                    "<b>Integration package: Not available</b><br>"
-                    "The Jana2020 integration package is not available in this Phase Studio build."
-                )
-            else:
-                sig = ji.authenticode_signature_status(payload_dir / ji.WRAPPER_EXE_NAME)
-                sig_text = {"signed": "Signed", "unsigned": "Unsigned"}.get(sig, "Unknown")
-                signature_label.setText(f"<b>Integration package: Ready</b><br>Wrapper signature: {sig_text}")
-
-            can_write = report is not None and report.exists and report.is_writable
-            primary_btn.setText({
-                ji.IntegrationState.UPDATE_AVAILABLE: "Update integration",
-                ji.IntegrationState.REPAIR_REQUIRED: "Repair integration",
-                ji.IntegrationState.INSTALLED_CURRENT: "Repair integration",
-            }.get(install_state, "Install integration"))
-            primary_btn.setEnabled(can_write and install_state != ji.IntegrationState.CONFLICT and payload_dir is not None)
-
-            # Remove is only ever safe when a verified Phase Studio marker
-            # proves ownership of the installed integration AND a valid
-            # (non-empty) original Superflip backup still exists to restore
-            # -- not merely "some state other than not-installed/conflict",
-            # since REPAIR_REQUIRED can itself mean the backup went missing.
-            owns_installation = report is not None and report.has_marker and report.marker is not None
-            original_backup_path = report.directory / ji.ORIGINAL_EXE_NAME if report is not None else None
-            has_valid_backup = False
-            if owns_installation and original_backup_path is not None:
-                try:
-                    has_valid_backup = original_backup_path.stat().st_size > 0
-                except OSError:
-                    has_valid_backup = False
-            remove_btn.setEnabled(can_write and owns_installation and has_valid_backup)
-            apply_safe_dialog_geometry(dialog, 640, 640)
-
-        def browse_clicked() -> None:
-            start_dir = str(state["jana_root"]) if state.get("jana_root") else r"C:\Jana2020"
-            picked = QFileDialog.getExistingDirectory(dialog, "Select the Jana2020 installation folder", start_dir)
-            if picked:
-                refresh(Path(picked))
-
-        def show_result(result: object, success_detail: str = "") -> None:
-            result_label.setVisible(True)
-            log_view.setVisible(bool(result.log))
-            log_view.setPlainText("\n".join(result.log))
-            if result.success:
-                result_label.setStyleSheet("color: #2264b8;")
-                text = f"<b>{html.escape(result.message)}</b>"
-                if success_detail:
-                    text += f"<br>{success_detail}"
-                result_label.setText(text)
-            else:
-                result_label.setStyleSheet("color: #b42318;")
-                result_label.setText(f"<b>{html.escape(result.message)}</b>")
-
-        def install_clicked() -> None:
-            superflip_dir = state.get("superflip_dir")
-            if not superflip_dir:
-                return
-            # A failed (or unexpectedly raised) attempt must never leave the
-            # dialog's buttons out of sync with the real on-disk state --
-            # refresh() always runs in `finally`, whatever happened above.
-            try:
-                payload_dir = ji.resolve_bundled_jana_payload_dir()
-                if payload_dir is None:
-                    show_result(ji.OperationResult(False, "error", "Bundled Jana2020 integration payload was not found in this Phase Studio installation."))
-                    return
-                result = ji.install_or_update_integration(superflip_dir, payload_dir, bundled_version=ji.bundled_integration_version())
-                success_detail = ""
-                if result.success:
-                    success_detail = (
-                        f"Jana2020:<br>{html.escape(str(state['jana_root']))}<br><br>"
-                        f"Original Superflip:<br>{html.escape(str(Path(superflip_dir) / ji.ORIGINAL_EXE_NAME))}<br><br>"
-                        f"Phase Studio launcher:<br>{html.escape(str(Path(superflip_dir) / ji.WRAPPER_EXE_NAME))}"
-                    )
-                show_result(result, success_detail)
-            finally:
-                refresh(state["jana_root"])
-
-        def remove_clicked() -> None:
-            superflip_dir = state.get("superflip_dir")
-            if not superflip_dir:
-                return
-            confirmation = QMessageBox.question(
-                dialog,
-                "Remove Jana2020 Integration",
-                "Restore the original Superflip executable and remove the Phase Studio launcher?",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            if confirmation != QMessageBox.Yes:
-                return
-            try:
-                result = ji.remove_integration(superflip_dir)
-                show_result(result)
-            finally:
-                refresh(state["jana_root"])
-
-        browse_btn.clicked.connect(browse_clicked)
-        primary_btn.clicked.connect(install_clicked)
-        remove_btn.clicked.connect(remove_clicked)
-        close_btn.clicked.connect(dialog.reject)
-
-        refresh(resolve_initial_root())
-        apply_safe_dialog_geometry(dialog, 640, 640)
-        dialog.exec()
 
     def _replay_metrics_tab(self, key: str) -> None:
         """Re-run the last _render_metrics_tab() call for this tab with its
