@@ -100,6 +100,11 @@ for every file, checking the exit code) without any additional tooling.
 
 ## Adding a new golden regression test
 
+`test_sharped_bridge.py` tests the temporary metadata/inference split, separate
+compatibility state, disabled unsupported selections, exact DEFAULT resolution,
+job-host confinement, authentication/redaction, and future unified deployment.
+It uses mocked HTTP transport and real client/Qt code; no live token is needed.
+
 1. Build a small, fully hand-verifiable fixture (few reflections/cycles,
    not a large randomized one) so a human can sanity-check the pinned
    expected values, not just trust whatever the code currently produces.

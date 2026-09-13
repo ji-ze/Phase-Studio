@@ -1,5 +1,10 @@
 # Split Windows distribution
 
+SharpED subsequently gained a [temporary compatibility bridge](SHARPED_TEMPORARY_BRIDGE.md):
+current model discovery remains on the final domain, while authenticated jobs
+use the legacy backend. Current DEFAULT is unavailable there until `koala 4.0`
+can be served; users must choose a compatible concrete model.
+
 ## Git audit
 
 The initial working tree was clean. Remote branches and tags were fetched.

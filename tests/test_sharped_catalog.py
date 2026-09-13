@@ -51,6 +51,9 @@ class CatalogTests(unittest.TestCase):
             return json.dumps({"success": True, "job_id": 1, "token": "job-token"})
 
         self.addCleanup(patch.stopall)
+        # Catalog-only contracts also exercise the future unified deployment.
+        # Temporary split routing/compatibility has dedicated regression tests.
+        patch.object(api, "PRODUCTION_ENDPOINTS", api.SharpEDEndpoints(api.DEFAULT_SERVER_URL, api.DEFAULT_SERVER_URL)).start()
         patch.object(api.SharpEDServerClient, "_request_text", transport).start()
         self.client = api.SharpEDServerClient()
 
