@@ -1,12 +1,6 @@
 <#
 .SYNOPSIS
-Build independent portable Windows targets from one shared source tree.
-.EXAMPLE
-powershell -File packaging\build_windows.ps1 -Target All
-.EXAMPLE
-powershell -File packaging\build_windows.ps1 -Target Standalone
-.EXAMPLE
-powershell -File packaging\build_windows.ps1 -Target JanaInstaller
+Build Phase Studio's two public ONEFILE downloads and internal Jana wrapper.
 #>
 [CmdletBinding()]
 param(
@@ -24,167 +18,113 @@ if ($distDir -ne $defaultDist -and -not $distDir.StartsWith($defaultDist + '\', 
     throw "DistRoot must be inside the repository dist directory."
 }
 $buildDir = Join-Path $RepoRoot "build"
+$releaseDir = Join-Path $distDir "release"
 $PythonExe = (Get-Command python -ErrorAction Stop).Source
 & $PythonExe -m PyInstaller --version
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller is required in the active Python environment." }
 
-function Remove-TargetOutput([string]$Path) {
+function Remove-SafePath([string]$Path) {
     $full = [IO.Path]::GetFullPath($Path)
     $allowed = @($distDir, $buildDir) | ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') + '\' }
     if (-not ($full.StartsWith($allowed[0], [StringComparison]::OrdinalIgnoreCase) -or
               $full.StartsWith($allowed[1], [StringComparison]::OrdinalIgnoreCase))) {
         throw "Refusing to remove output outside repository build/dist: $full"
     }
-    if (Test-Path -LiteralPath $full) {
-        Remove-Item -LiteralPath $full -Recurse -Force -ErrorAction Stop
-    }
+    if (Test-Path -LiteralPath $full) { Remove-Item -LiteralPath $full -Recurse -Force }
 }
 
-function Test-PortableRuntime($DistName, $DistPath, $ManifestName) {
-    $internal = Join-Path $DistPath "_internal"
+function Invoke-PyInstaller([string]$Spec, [string]$WorkName, [string]$OutputDir) {
+    if ($Clean) { Remove-SafePath (Join-Path $buildDir $WorkName) }
+    & $PythonExe -m PyInstaller --clean --noconfirm --distpath $OutputDir $Spec
+    if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed for $WorkName." }
+}
+
+function Test-OnedirRuntime([string]$Directory, [string]$ManifestName) {
     $manifestPath = Join-Path $buildDir "portable-runtime-$ManifestName.json"
-
-    Write-Host ""
-    Write-Host "$DistName"
-
-    if (-not (Test-Path $manifestPath)) {
-        Write-Host "  portable-runtime manifest not found: $manifestPath" -ForegroundColor Red
-        return $false
-    }
+    Assert-PathExists $manifestPath "Portable runtime manifest"
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-
-    $ok = $true
-    # NB: PowerShell variable names are case-insensitive -- a loop variable
-    # named $DistName/$Name here would clobber this function's parameters.
+    $internal = Join-Path $Directory "_internal"
+    Assert-PathExists $internal "ONEDIR runtime"
     $expected = @()
     foreach ($item in $manifest.msvc_runtime) { $expected += $item.name }
-    foreach ($qtLib in $manifest.required_binaries) { $expected += $qtLib }
-
-    Write-Host "  Portable runtime:"
-    foreach ($dllName in $expected) {
-        $found = Get-ChildItem -LiteralPath $internal -Recurse -File -Filter $dllName -ErrorAction SilentlyContinue |
-            Select-Object -First 1
-        if ($found) {
-            Write-Host ("    {0,-24} OK" -f $dllName)
-        } else {
-            Write-Host ("    {0,-24} MISSING" -f $dllName) -ForegroundColor Red
-            $ok = $false
+    foreach ($item in $manifest.required_binaries) { $expected += $item }
+    foreach ($dll in $expected) {
+        if (-not (Get-ChildItem -LiteralPath $internal -Recurse -File -Filter $dll | Select-Object -First 1)) {
+            throw "Portable runtime is missing $dll in $Directory"
         }
     }
-
-    # An app-local Universal CRT must NOT be shipped: the UCRT belongs to
-    # Windows 10/11, and a private older copy is a portability hazard.
-    # (-Include needs a wildcard path in PowerShell 5.1; filter on Name.)
-    $allFiles = @(Get-ChildItem -LiteralPath $internal -Recurse -File -ErrorAction SilentlyContinue)
-    $ucrt = @($allFiles | Where-Object {
-        $_.Name -like 'ucrtbase.dll' -or $_.Name -like 'api-ms-win-*.dll'
+    $forbidden = @(Get-ChildItem -LiteralPath $internal -Recurse -File | Where-Object {
+        $_.Name -eq 'ucrtbase.dll' -or $_.Name -like 'api-ms-win-*.dll'
     })
-    if ($ucrt.Count -eq 0) {
-        Write-Host ("    {0,-24} OK (Windows provides the UCRT)" -f "no app-local UCRT")
-    } else {
-        Write-Host ("    {0,-24} {1} file(s) present" -f "app-local UCRT", $ucrt.Count) -ForegroundColor Red
-        $ok = $false
-    }
-
-    # Windows keeps one module per base name per process, so two different
-    # builds of e.g. MSVCP140.dll in different subdirectories cannot coexist.
-    $runtimeFiles = @($allFiles | Where-Object {
-        $_.Name -like 'vcruntime*.dll' -or $_.Name -like 'msvcp140*.dll' -or $_.Name -like 'Qt6*.dll'
-    })
-    $dupes = @($runtimeFiles |
-        Group-Object { $_.Name.ToLowerInvariant() } |
-        Where-Object { $_.Count -gt 1 -and (@($_.Group.Length | Sort-Object -Unique).Count -gt 1) })
-    if ($dupes.Count -eq 0) {
-        Write-Host ("    {0,-24} OK" -f "no duplicate runtime")
-    } else {
-        foreach ($dupe in $dupes) {
-            Write-Host ("    {0,-24} {1} differing copies" -f $dupe.Name, $dupe.Count) -ForegroundColor Red
-        }
-        $ok = $false
-    }
-
-    # Full native-dependency and symbol-level audits.
-    $auditor = Join-Path $PSScriptRoot "tools\audit_dependencies.py"
-    $verifier = Join-Path $PSScriptRoot "tools\verify_imports.py"
-
-    if (Test-Path $auditor) {
-        $auditOutput = & $PythonExe $auditor --dist $DistPath 2>&1
-        $auditFailed = ($LASTEXITCODE -ne 0)
-        $auditOutput | Where-Object { $_ -match 'Result:|PORTABLE|UNRESOLVED|OUTSIDE THE DIST|Windows 10 1903' } |
-            ForEach-Object { Write-Host "    $_" }
-        if ($auditFailed) { $ok = $false }
-    }
-
-    if (Test-Path $verifier) {
-        $verifyOutput = & $PythonExe $verifier $DistPath --quiet 2>&1
-        $verifyFailed = ($LASTEXITCODE -ne 0)
-        $verifyOutput | Where-Object { $_ -match 'Result:|UNSATISFIED|MISSING DLL|DUPLICATE DLL' } |
-            ForEach-Object { Write-Host "    $_" }
-        if ($verifyFailed) { $ok = $false }
-    }
-
-    if ($ok) {
-        Write-Host "  -> PORTABLE" -ForegroundColor Green
-    } else {
-        Write-Host "  -> NOT PORTABLE" -ForegroundColor Red
-    }
-    return $ok
+    if ($forbidden.Count) { throw "App-local UCRT files were found in $Directory" }
+    & $PythonExe (Join-Path $PSScriptRoot "tools\audit_dependencies.py") --dist $Directory
+    if ($LASTEXITCODE -ne 0) { throw "Native dependency audit failed for $Directory" }
+    & $PythonExe (Join-Path $PSScriptRoot "tools\verify_imports.py") --quiet $Directory
+    if ($LASTEXITCODE -ne 0) { throw "Frozen import verification failed for $Directory" }
 }
 
-$targets = switch ($Target) {
-    "All" { @("PhaseStudio", "superflip", "PhaseStudioJanaInstaller") }
-    "Standalone" { @("PhaseStudio") }
-    "JanaInstaller" { @("superflip", "PhaseStudioJanaInstaller") }
-    "JanaWrapper" { @("superflip") }
-}
+$buildWrapper = $Target -in @("All", "JanaInstaller", "JanaWrapper")
+$buildStandalone = $Target -in @("All", "Standalone")
+$buildInstaller = $Target -in @("All", "JanaInstaller")
+
 Push-Location $RepoRoot
 try {
-    foreach ($product in $targets) {
-        Write-Step "Building $product"
-        $exePath = Join-Path $distDir "$product\$product.exe"
-        $running = @(Get-Process -Name $product -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exePath })
-        if ($running.Count) { throw "Close the running build at $exePath before rebuilding." }
-        if ($Clean) {
-            Remove-TargetOutput (Join-Path $distDir $product)
-            Remove-TargetOutput (Join-Path $buildDir $product)
-        }
-        $spec = if ($product -eq "superflip") { "superflip.spec" } else { "packaging\pyinstaller\$product.spec" }
-        if ($distDir -eq $defaultDist) {
-            & $PythonExe -m PyInstaller --clean --noconfirm $spec
-        } else {
-            & $PythonExe -m PyInstaller --clean --noconfirm --distpath $distDir $spec
-        }
-        if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed for $product." }
-        Assert-PathExists $exePath "Built $product"
-        if (-not (Test-PortableRuntime $product (Join-Path $distDir $product) $product)) {
-            throw "$product failed portable dependency audits."
-        }
+    if ($Target -eq "All" -and $Clean) { Remove-SafePath $releaseDir }
+    New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+
+    if ($buildWrapper) {
+        Write-Step "Building authoritative Jana2020 wrapper (ONEDIR)"
+        if ($Clean) { Remove-SafePath (Join-Path $distDir "superflip") }
+        Invoke-PyInstaller "superflip.spec" "superflip" $distDir
+        $wrapperDir = Join-Path $distDir "superflip"
+        Assert-PathExists (Join-Path $wrapperDir "superflip.exe") "Jana wrapper"
+        Test-OnedirRuntime $wrapperDir "superflip"
+        & $PythonExe (Join-Path $PSScriptRoot "tools\check_distribution.py") $wrapperDir --profile wrapper
+        if ($LASTEXITCODE -ne 0) { throw "Wrapper boundary check failed." }
     }
-    if ($targets -contains "PhaseStudio") {
-        # Even -Clean:$false must never retain an old installation payload.
-        $oldPayload = Join-Path $distDir "PhaseStudio\JanaIntegration"
-        Remove-TargetOutput $oldPayload
-        if (Test-Path $oldPayload) { throw "Standalone must not contain an installation payload." }
+
+    if ($buildStandalone) {
+        Write-Step "Building standalone release (ONEFILE)"
+        $standaloneExe = Join-Path $releaseDir "PhaseStudio-1.0.9-x64.exe"
+        if ($Clean) { Remove-SafePath $standaloneExe }
+        Invoke-PyInstaller "packaging\pyinstaller\PhaseStudio.spec" "PhaseStudio" $releaseDir
+        Assert-PathExists $standaloneExe "Standalone release"
+        & $PythonExe (Join-Path $PSScriptRoot "tools\check_distribution.py") $standaloneExe --profile standalone
+        if ($LASTEXITCODE -ne 0) { throw "Standalone boundary check failed." }
+        & $standaloneExe --version
+        if ($LASTEXITCODE -ne 0) { throw "Standalone smoke test failed." }
     }
-    if ($targets -contains "PhaseStudioJanaInstaller") {
-        $staged = Join-Path $distDir "PhaseStudioJanaInstaller\JanaIntegration"
-        Remove-TargetOutput $staged
-        Copy-Item -LiteralPath (Join-Path $distDir "superflip") -Destination $staged -Recurse -Force
-        Assert-PathExists (Join-Path $staged "superflip.exe") "Installer wrapper payload"
-        Assert-PathExists (Join-Path $staged "_internal") "Installer complete wrapper runtime"
-        if (-not (Test-PortableRuntime "Installer payload" $staged "superflip")) { throw "Staged payload audit failed." }
-    }
-    foreach ($product in $targets) {
-        $profile = switch ($product) {
-            "PhaseStudio" { "standalone" }
-            "superflip" { "wrapper" }
-            "PhaseStudioJanaInstaller" { "installer" }
+
+    if ($buildInstaller) {
+        Write-Step "Building Jana2020 installer (ONEFILE with embedded wrapper)"
+        $wrapperDir = Join-Path $distDir "superflip"
+        Assert-PathExists (Join-Path $wrapperDir "superflip.exe") "Authoritative Jana wrapper"
+        $payloadBundle = Join-Path $buildDir "jana-payload"
+        if ($Clean) { Remove-SafePath $payloadBundle }
+        & $PythonExe (Join-Path $PSScriptRoot "tools\package_jana_payload.py") $wrapperDir $payloadBundle
+        if ($LASTEXITCODE -ne 0) { throw "Could not package the authoritative Jana wrapper." }
+        $env:PHASE_STUDIO_WRAPPER_PAYLOAD = $wrapperDir
+        try {
+            $installerExe = Join-Path $releaseDir "PhaseStudio-Jana2020-Installer-1.0.9-x64.exe"
+            if ($Clean) { Remove-SafePath $installerExe }
+            Invoke-PyInstaller "packaging\pyinstaller\PhaseStudioJanaInstaller.spec" "PhaseStudioJanaInstaller" $releaseDir
+        } finally {
+            Remove-Item Env:PHASE_STUDIO_WRAPPER_PAYLOAD -ErrorAction SilentlyContinue
         }
-        $boundaryArgs = @((Join-Path $PSScriptRoot "tools\check_distribution.py"),
-                         (Join-Path $distDir $product), "--profile", $profile)
-        if ($profile -eq "installer") { $boundaryArgs += @("--wrapper-source", (Join-Path $distDir "superflip")) }
-        & $PythonExe @boundaryArgs
-        if ($LASTEXITCODE -ne 0) { throw "$product failed distribution boundary checks." }
+        Assert-PathExists $installerExe "Jana2020 installer release"
+        & $PythonExe (Join-Path $PSScriptRoot "tools\check_distribution.py") $installerExe --profile installer --wrapper-source $wrapperDir
+        if ($LASTEXITCODE -ne 0) { throw "Installer payload or boundary check failed." }
+        & $installerExe --version
+        if ($LASTEXITCODE -ne 0) { throw "Installer smoke test failed." }
     }
-} finally { Pop-Location }
-Write-Host "Build complete: $($targets -join ', ')" -ForegroundColor Green
+
+    $publicFiles = @(Get-ChildItem -LiteralPath $releaseDir -File)
+    $unexpected = @($publicFiles | Where-Object { $_.Name -notin @(
+        "PhaseStudio-1.0.9-x64.exe", "PhaseStudio-Jana2020-Installer-1.0.9-x64.exe"
+    ) })
+    if ($unexpected.Count) { throw "Unexpected public release files: $($unexpected.Name -join ', ')" }
+    if ($Target -eq "All" -and $publicFiles.Count -ne 2) { throw "All must produce exactly two public EXEs." }
+} finally {
+    Pop-Location
+}
+Write-Host "Build complete. Public downloads: $releaseDir" -ForegroundColor Green

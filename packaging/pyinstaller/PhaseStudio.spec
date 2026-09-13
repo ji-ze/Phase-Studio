@@ -1,5 +1,7 @@
-# Shared portable ONEDIR spec; the installer entry spec selects only its UI.
+# Shared Windows spec. Direct downloads are ONEFILE; the Store profile remains
+# ONEDIR because MSIX owns the outer installation layout.
 import sys
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -14,7 +16,15 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 project_dir = Path(SPECPATH).resolve().parent.parent
 
 installer_build = globals().get("installer_build", False)
-target_name = "PhaseStudioJanaInstaller" if installer_build else "PhaseStudio"
+store_build = globals().get("store_build", False)
+if installer_build and store_build:
+    raise ValueError("Installer and Store build profiles are mutually exclusive.")
+if installer_build:
+    target_name = "PhaseStudio-Jana2020-Installer-1.0.9-x64"
+elif store_build:
+    target_name = "PhaseStudio"
+else:
+    target_name = "PhaseStudio-1.0.9-x64"
 entry_point = project_dir / "phase_studio" / ("jana_installer.py" if installer_build else "standalone.py")
 if not entry_point.is_file():
     raise FileNotFoundError(
@@ -58,6 +68,22 @@ except Exception:
 
 datas = []
 datas += [(str(project_dir / "phase_studio" / "assets"), "phase_studio/assets")]
+if installer_build:
+    wrapper_payload = Path(os.environ.get("PHASE_STUDIO_WRAPPER_PAYLOAD", project_dir / "dist" / "superflip"))
+    if not (wrapper_payload / "superflip.exe").is_file() or not (wrapper_payload / "_internal").is_dir():
+        raise FileNotFoundError(
+            "The Jana installer requires the complete authoritative dist/superflip payload. "
+            "Build superflip.spec first."
+        )
+    payload_bundle = project_dir / "build" / "jana-payload"
+    payload_archive = payload_bundle / "jana-wrapper.zip"
+    payload_manifest = payload_bundle / "jana-wrapper-manifest.json"
+    if not payload_archive.is_file() or not payload_manifest.is_file():
+        raise FileNotFoundError("Run package_jana_payload.py before building the installer.")
+    datas += [
+        (str(payload_archive), "JanaIntegrationPayload"),
+        (str(payload_manifest), "JanaIntegrationPayload"),
+    ]
 try:
     datas += collect_data_files("qtvscodestyle")
 except Exception:
@@ -119,32 +145,23 @@ portable_runtime.write_portable_manifest(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name=target_name,
-    version=version_resource(target_name, project_dir),
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=[str(project_dir / "phase_studio" / "assets" / "phase_studio.ico")],
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name=target_name,
-)
+if store_build:
+    exe = EXE(
+        pyz, a.scripts, [], exclude_binaries=True, name=target_name,
+        version=version_resource(target_name, project_dir), debug=False,
+        bootloader_ignore_signals=False, strip=False, upx=False, console=False,
+        disable_windowed_traceback=False, argv_emulation=False, target_arch=None,
+        codesign_identity=None, entitlements_file=None,
+        icon=[str(project_dir / "phase_studio" / "assets" / "phase_studio.ico")],
+    )
+    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False,
+                   upx_exclude=[], name=target_name)
+else:
+    exe = EXE(
+        pyz, a.scripts, a.binaries, a.datas, [], exclude_binaries=False,
+        name=target_name, version=version_resource(target_name, project_dir),
+        debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
+        console=False, disable_windowed_traceback=False, argv_emulation=False,
+        target_arch=None, codesign_identity=None, entitlements_file=None,
+        icon=[str(project_dir / "phase_studio" / "assets" / "phase_studio.ico")],
+    )

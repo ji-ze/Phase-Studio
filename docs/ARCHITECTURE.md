@@ -99,14 +99,14 @@ Two independent things share the name "Jana2020 integration":
    installs, and rollback on failure. Driven by the "Jana2020 Integration"
    dialog in `app.py` (`open_install_to_jana_dialog`).
 
-`packaging/build_windows.ps1` builds both the standalone app and the Jana
-wrapper, then stages a copy of the wrapper into
-`dist\PhaseStudio\JanaIntegration\` (a plain file copy -- never a second
-PyInstaller build) so the running standalone app can find and install it.
-`packaging/build_store_msix.ps1` delegates the actual build to
-`build_windows.ps1` and stages its already-built output into the MSIX
-layout; it does not rebuild anything itself. Both scripts share small
-helpers from `packaging/common.ps1`.
+`packaging/build_windows.ps1` first builds the authoritative wrapper, then
+embeds that complete ONEDIR tree in the dedicated Jana installer ONEFILE.
+PyInstaller extracts it to private `_MEIPASS` storage; `jana_integration.py`
+accepts only that private payload and keeps the existing stage/verify/swap and
+rollback behavior. The standalone ONEFILE never contains it. Public output is
+exactly two EXEs under `dist/release`; `dist/superflip` is an internal build
+input. `packaging/build_store_msix.ps1` uses the standalone-only
+`PhaseStudioStore.spec` ONEDIR profile for the MSIX layout.
 
 ## SharpED flow
 

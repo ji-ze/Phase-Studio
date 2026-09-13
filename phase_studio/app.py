@@ -74,9 +74,17 @@ except Exception:
     )
 
 try:
-    from phase_studio.sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
+    from phase_studio.sharped_server_client import (
+        SharpEDServerClient, DEFAULT_SERVER_URL,
+        normalize_server_url, current_model_catalog,
+        model_selection, sync_model_catalog,
+    )
 except Exception:
-    from sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
+    from sharped_server_client import (
+        SharpEDServerClient, DEFAULT_SERVER_URL,
+        normalize_server_url, current_model_catalog,
+        model_selection, sync_model_catalog,
+    )
 
 try:
     from phase_studio.sharped_map_scaling import (
@@ -400,7 +408,7 @@ LOG_DETAIL_PREFIXES = (
 class ExecutionLogRecord:
     text: str
     level: str = "INFO"
-    subsystem: str = "Pipeline"
+    subsystem: str = "Workflow"
 
 
 def redact_log_secrets(message: object) -> str:
@@ -448,7 +456,7 @@ def classify_log_record(
         elif "jana2020" in lowered or "jana .inflip" in lowered:
             resolved_subsystem = "Jana2020"
         else:
-            resolved_subsystem = "Pipeline"
+            resolved_subsystem = "Workflow"
 
     resolved_level = str(level or "").strip().upper()
     if resolved_level not in LOG_LEVELS:
@@ -5101,7 +5109,7 @@ def run_sharped_deblur(
     log_both(f"SharpED server HTTP timeout: {timeout} seconds")
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("Immediate stop requested.")
-    if max_upload_mb <= 0 and "jana.fzu.cz" in str(base_url).lower():
+    if max_upload_mb <= 0 and normalize_server_url(base_url) == DEFAULT_SERVER_URL:
         input_bytes = int(Path(input_map).stat().st_size)
         public_limit_bytes = 100_000_000
         if input_bytes > public_limit_bytes:
@@ -5150,19 +5158,12 @@ def run_sharped_deblur(
         log_both(f"SharpED map value detail: exponent {exponent:.3f} applied to {scaled_upload_map.name}")
 
     client = SharpEDServerClient(base_url=base_url, timeout=float(timeout))
-    selected_model = model.strip()
-    if not selected_model or selected_model.lower() in {"default", "server default", "sharped default"}:
-        models = client.get_models(log=log_both)
-        selected_model = models.default_model or "SharpED latest"
-        if models.models:
-            log_both("SharpED server models: " + ", ".join(models.models))
-        log_both(f"SharpED server default model: {selected_model}")
     client.execute(
         file_path=upload_map,
         bearer_token=api_token.strip(),
         out_path=output_map,
         elements=elements.strip() or "C N O",
-        model=selected_model,
+        model=model,
         outres=outres,
         poll_seconds=poll_seconds,
         max_polls=max_polls,
@@ -5871,7 +5872,7 @@ INPUT_TOOLTIPS = {
     "delta": "Superflip delta keyword. AUTO lets Superflip estimate the flip threshold.",
     "weakratio": "Superflip weakratio keyword.",
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
-    "reflection_data_mode": "Exact HKL column order. 'set from inflip' imports dataformat from Jana. hkl I sigma/hkl F sigma/hkl I phase sigma/hkl F phase sigma accept I or F followed by a genuine sigma, optionally with phase in degrees before sigma; Phase Studio converts phase to Superflip turns and retains sigma for diagnostics. hkl I fwhm/hkl F fwhm are for data whose second column is a peak-shape FWHM (e.g. Le Bail powder extraction), not a measurement uncertainty -- I/sigma(I)-style statistics are hidden or relabeled I/FWHM for these, since an I/FWHM ratio is not a signal-to-noise ratio.",
+    "reflection_data_mode": "Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so sigma-based statistics are hidden or relabeled I/FWHM.",
     "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle model instead.",
     "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
@@ -5895,7 +5896,7 @@ INPUT_TOOLTIPS = {
     "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected first from the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
     "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2θ-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
     "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
-    "sharped_base_url": "SharpED inference server base URL. The reference client uses https://jana.fzu.cz.",
+    "sharped_base_url": "SharpED service URL. The current service is https://sharped.fzu.cz.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
     "show_beta_features": "When off (default), beta and experimental Phasing methods and the settings that only apply to them are hidden entirely from the Basic tabs, not just disabled. Enable to make them selectable.",
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
@@ -6925,7 +6926,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Input mode</b> chooses the reflection source: <b>Jana2020 .inflip</b>, <b>Jana2020 .inflip with overrides</b>, or <b>External HKL</b>. In Jana modes, the .inflip file's fbegin/endf block is the default HKL source and its cell/space-group/composition keywords can provide crystallographic metadata; External mode uses reflection data loaded independently of Jana2020 and requires metadata from another source.</p>
             <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
             <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
-            <p><b>HKL format</b> is the exact column order of the reflection data. <code>set from inflip</code> imports the format from Jana, including a <code>dataformat ... fwhm</code> line; the other modes accept intensity or amplitude followed by sigma, optionally with a phase column in degrees before sigma. <b>hkl I fwhm</b> and <b>hkl F fwhm</b> are for data whose second column is a peak-shape FWHM (e.g. from a Le Bail powder extraction) rather than a genuine uncertainty -- Validate HKL and Analyze completeness relabel sigma-based columns and statistics accordingly (I/FWHM instead of I/&sigma;(I)) and hide the I/&sigma;(I)=3 significance threshold, which does not apply to FWHM data.</p>
+            <p><b>HKL format</b> is the exact displayed column order. <b>Set from .inflip</b> imports Jana's dataformat. For example, <b>h k l · F · phase · σ(F)</b> means Miller indices, amplitude, phase in degrees, and amplitude uncertainty. FWHM formats contain peak width rather than measurement uncertainty, so validation and completeness use I/FWHM and omit the I/&sigma;(I)=3 threshold.</p>
             <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
             <h3>Crystal metadata</h3>
             <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana2020 .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
@@ -6972,14 +6973,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Structure format</b> adds one extra saved structure format on top of the CIF that is always kept internally for metrics and next-cycle modelfiles: <code>xyz</code> or <code>pdb</code>.</p>
         """)
         self._add_back_to_contents(output_help_layout)
-        map_feedback_layout = self._add_help_section(basic_help_tab, "map_feedback", "Map feedback reference", """
+        map_feedback_layout = self._add_help_section(basic_help_tab, "map_feedback", "Map feedback reference", f"""
             <p>Each of the three mechanisms below has its own <b>Enable</b> checkbox at the top of its group; unchecking it grays out the rest of that group and skips the mechanism entirely. <b>Start after cycle</b> keeps its own 1-999 range regardless of the current <b>Cycles</b> value (Basic &rarr; Workflow), so it can be set up ahead of raising Cycles; the fields below it stay grayed out with a hint whenever the current Cycles value cannot reach the configured starting cycle.</p>
             <h3>Missing-reflection completion</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
             <h3>Intensity correction</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
             <h3>Powder overlap repartitioning</h3>
-            <p>Only applies to reflections carrying an FWHM value (the <code>hkl I fwhm</code>/<code>hkl F fwhm</code> HKL formats). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
+            <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
         self._add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.", kind="warning")
         self._add_back_to_contents(map_feedback_layout)
@@ -7188,7 +7189,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>Superflip and EDMA are external third-party programs, distributed by their own authors and not bundled with Phase Studio. Both are normally installed with Jana2020; if a path is not configured, Phase Studio looks for them in <code>C:\\Jana2020\\SUPERFLIP</code> when a workflow starts and fills the path in automatically. Official downloads: <a href="https://superflip.fzu.cz/download/superflip_win.zip">superflip_win.zip</a> and <a href="https://superflip.fzu.cz/download/EDMA_win.zip">EDMA_win.zip</a>; license information at <a href="https://superflip.fzu.cz/">superflip.fzu.cz</a>.</p>
             <p>Requirements are checked immediately before a workflow starts, and only for the stages that workflow actually uses -- a workflow that never runs EDMA is never asked for EDMA.</p>
             <h3>SharpED connection</h3>
-            <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
+            <p><b>Server URL</b> selects the SharpED service; the current service is <code>https://sharped.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
             <p>SharpED processing needs an active Jana2020 or SharpED account. Sign in at <a href="https://sharped.fzu.cz/sharp-ed">sharped.fzu.cz/sharp-ed</a> and create a token with <b>Create token</b>, then paste it into <b>API token</b> above.</p>
             <h3>Interface</h3>
             <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize SharpED map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
@@ -7310,9 +7311,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         primary_buttons.addWidget(self.run_btn, 1)
         primary_buttons.addWidget(self.continue_btn, 1)
         primary_buttons.addWidget(self.jana_action_btn, 1)
-        secondary_buttons.addWidget(self.stop_btn, 2)
-        secondary_buttons.addWidget(self.stop_now_btn, 1)
-        secondary_buttons.addWidget(self.clear_btn, 1)
+        # Allocate by measured label length. QSizePolicy.Ignored keeps this row
+        # responsive, so the stretch factors must still reserve enough width
+        # for "Stop immediately" at Windows high-DPI scales.
+        secondary_buttons.addWidget(self.stop_btn, 10)
+        secondary_buttons.addWidget(self.stop_now_btn, 7)
+        secondary_buttons.addWidget(self.clear_btn, 5)
         left_layout.addLayout(primary_buttons)
         left_layout.addLayout(secondary_buttons)
         # jana_wizard_context is still its standalone default at this point
@@ -7406,7 +7410,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metrics_section, metrics_layout = self._make_result_section("WORKFLOW METRICS")
         self.metrics_tabs = QTabWidget()
         self.metrics_tabs.setObjectName("metricsTabs")
-        # Some tab names are genuinely long ("Powder repartitioning"); scroll
+        # Some tab names are genuinely long; scroll
         # rather than silently elide several of them at once when the panel
         # is narrow.
         self.metrics_tabs.setUsesScrollButtons(True)
@@ -7454,7 +7458,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("deblur", "SharpED"),
             ("superflip_omit", "Superflip validation"),
             ("deblur_omit", "SharpED validation"),
-            ("powder_repartition", "Powder repartitioning"),
+            ("powder_repartition", "Powder report"),
             ("intensity_correction", "Intensity correction"),
         ):
             # Each page is now JUST the canvas -- the interaction controls
@@ -7849,7 +7853,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         workflow_form.addRow("", self.recycle_note)
 
         model_form = self._add_form_group(workflow_tab, "SharpED model")
-        self._add_combo(model_form, "sharped_model", "Model", ["koala 2.0"], "koala 2.0")
+        self._add_combo(model_form, "sharped_model", "Model", ["default"], "default")
         try:
             self.inputs["sharped_model"].lineEdit().setReadOnly(False)  # type: ignore[attr-defined]
             self.inputs["sharped_model"].lineEdit().setCursor(Qt.CursorShape.IBeamCursor)  # type: ignore[attr-defined]
@@ -7859,6 +7863,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
         self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
         model_form.addRow("", self.refresh_models_btn)
+        self.sharped_model_status = QLabel("Model information not loaded.")
+        self.sharped_model_status.setWordWrap(True)
+        model_form.addRow("", self.sharped_model_status)
+        self._sync_sharped_catalog()
         settings_links_row = QHBoxLayout()
         settings_links_row.setSpacing(10)
         connection_settings_link = QToolButton()
@@ -8149,6 +8157,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_metadata_source(self._default_metadata_source_for_input())
         self._sync_input_source_mode_widgets()
 
+    def _idle_ready_message(self) -> str:
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode"))
+        inflip = self._path_value("jana_inflip").strip()
+        hkl = self._path_value("hkl").strip()
+        input_path = Path(hkl).expanduser() if mode == INPUT_MODE_EXTERNAL and hkl else None
+        if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} and inflip:
+            input_path = Path(inflip).expanduser()
+        if input_path is not None and input_path.is_file():
+            return "Ready. Review the settings and run phasing."
+        return "Ready. Select an input to begin."
+
+    def _sync_idle_ready_log(self) -> None:
+        if (self.worker is not None or self.results or self.last_run_config is not None
+                or str(self._run_status).upper() != "READY"):
+            return
+        current = self.log_text.toPlainText().strip()
+        if current and not current.startswith("Ready"):
+            return
+        self.log_text.clear()
+        self._last_log_record = None
+        self._append_execution_log(self._idle_ready_message())
+
     def _metadata_source_activated(self, _index: int = -1) -> None:
         self._metadata_source_user_selected = True
         self._sync_metadata_source_widgets()
@@ -8164,6 +8194,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # (e.g. FWHM vs. plain intensity), which gates powder overlap
         # repartitioning -- refresh that alongside the metadata sync above.
         self._sync_map_feedback_widgets()
+        self._sync_idle_ready_log()
         self.save_settings()
 
     def _hkl_path_changed(self) -> None:
@@ -8171,6 +8202,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # external HKL file's detected format also gates powder overlap
         # repartitioning (FWHM-carrying data only).
         self._sync_map_feedback_widgets()
+        self._sync_idle_ready_log()
         self.save_settings()
 
     def _reference_path_changed(self) -> None:
@@ -8291,7 +8323,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._metadata_valid = False
         self._metadata_error_report = report
         if hasattr(self, "metadata_error_text"):
-            self.metadata_error_text.setText(f"{report.title}\n{report.guidance}")
+            inline_guidance = (
+                "Select a valid Jana2020 .inflip file to continue."
+                if report.category == "inflip" else report.guidance
+            )
+            self.metadata_error_text.setText(f"{report.title}.\n{inline_guidance}")
             self.metadata_error_panel.setVisible(True)
 
     def _clear_metadata_error(self) -> None:
@@ -8592,7 +8628,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 redistribute_label.setEnabled(has_fwhm_data)
             redistribute_checkbox.setToolTip(
                 INPUT_TOOLTIPS.get("redistribute_overlaps", "") if has_fwhm_data
-                else "Requires FWHM-carrying reflection data (hkl I fwhm / hkl F fwhm); no FWHM format is currently detected for the configured HKL source."
+                else f"Requires FWHM-carrying reflection data ({format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM)} or {format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM)}); no FWHM format is currently detected for the configured HKL source."
             )
         else:
             has_fwhm_data = True
@@ -8674,6 +8710,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
         self._sync_metadata_source_widgets()
         self._sync_map_feedback_widgets()
+        self._sync_idle_ready_log()
 
     def _set_configuration_locked(self, locked: bool) -> None:
         locked = bool(locked)
@@ -8725,6 +8762,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _set_widget_value_from_string(self, widget: object, value: str) -> None:
         value = "" if value is None else str(value)
+        if widget is self.inputs.get("sharped_base_url"):
+            value = normalize_server_url(value)
+        if widget is self.inputs.get("sharped_model"):
+            value = model_selection(value)
+            catalog = current_model_catalog(self._line_value("sharped_base_url"))
+            if catalog is not None:
+                self._sync_sharped_catalog()
+                if value not in catalog.models:
+                    value = "default"
         try:
             if isinstance(widget, PathRow):
                 widget.set_value(value)
@@ -9159,7 +9205,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sigma_label = reflection_sigma_label(data_mode)
         snr_label = reflection_primary_snr_label(data_mode)
         is_fwhm_mode = reflection_mode_has_fwhm(data_mode)
-        derived_ios_label = "Derived I/FWHM" if is_fwhm_mode else "Derived I/σ"
+        derived_ios_label = "Derived I/FWHM" if is_fwhm_mode else "Derived I/σ(I)"
 
         dialog = QDialog(self)
         dialog.setObjectName("hklValidationDialog")
@@ -9172,7 +9218,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         column_summary = (
             f"{value_label}: column {value_col} · {sigma_label}: column "
             f"{sigma_col if sigma_col is not None else 'none'} · "
-            f"(0 0 0): {'included' if include_000 else 'excluded'}"
+            f"000 reflection: {'included' if include_000 else 'excluded'}"
         )
         layout.addWidget(self._diagnostic_input_summary(
             hkl_path,
@@ -9394,8 +9440,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             layout.addWidget(fwhm_note)
         metric_cards = [
             (f"{len(analysis.reflections_unique):,}", "Unique reflections"),
-            (d_min_text, "d_min"),
-            (d_full, "d at 98% cumulative completeness"),
+            (d_min_text, "dₘᵢₙ"),
+            (d_full, "d₉₈ (98% cumulative completeness)"),
             (median_signal, f"Median {signal_label}"),
         ]
         if not is_fwhm_mode:
@@ -9408,7 +9454,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             (f"{raw_sigma_count:,} / {len(analysis.reflections_raw):,}", f"{sigma_label} coverage"),
         ])
         metrics_panel = self._diagnostic_metric_grid(
-            metric_cards, compact=True, row_columns=(len(metric_cards),)
+            metric_cards,
+            compact=True,
+            row_columns=(4, len(metric_cards) - 4),
         )
         layout.addWidget(metrics_panel)
 
@@ -9946,6 +9994,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.last_run_config = None
         self._update_plot()
         self._update_structure_views()
+        self._sync_idle_ready_log()
 
     def _append_execution_log(
         self,
@@ -10130,8 +10179,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_progress.setRange(0, stage_total)
         self.current_cycle_progress.setValue(max(self.current_cycle_progress.value(), stage_index))
         self.current_cycle_stage_counter.setText(f"{terminal} at stage {stage_index} of {stage_total}")
-        parts = [f"Cycle {state.cycle_index} of {state.cycle_total}", state.stage_name]
-        parts.append("stopped by user" if terminal == "Stopped" else terminal.lower())
+        outcome = "stopped by user" if terminal == "Stopped" else terminal.lower()
+        parts = [f"Cycle {state.cycle_index} of {state.cycle_total}", f"{state.stage_name} {outcome}"]
         self.current_cycle_detail.setText(" · ".join(parts))
 
     def _finish_cancelled_run(self) -> None:
@@ -10304,6 +10353,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._show_stopping_badge()
         self.log("Immediate stop requested.", level="DETAIL")
 
+    def _sync_sharped_catalog(self) -> None:
+        widget = self.inputs.get("sharped_model")
+        if not isinstance(widget, QComboBox):
+            return
+        status = sync_model_catalog(widget, self._line_value("sharped_base_url"))
+        if status is not None:
+            self.sharped_model_status.setText(status)
+
     def refresh_sharped_models(self) -> None:
         base_widget = self.inputs.get("sharped_base_url")
         timeout_widget = self.inputs.get("sharped_timeout_seconds")
@@ -10312,13 +10369,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if isinstance(timeout_widget, QSpinBox):
             timeout = max(5, min(60, int(timeout_widget.value())))
 
+        self.sharped_model_status.setText("Loading models…")
+
         def worker() -> None:
             try:
                 client = SharpEDServerClient(base_url=base_url or DEFAULT_SERVER_URL, timeout=float(timeout))
                 models = client.get_models()
-                self.msg_queue.put(("sharped_models", (models.default_model, models.models)))
-            except Exception as exc:
-                self.msg_queue.put(("log", f"SharpED model refresh failed: {exc}"))
+                self.msg_queue.put(("sharped_models", (normalize_server_url(base_url), models)))
+            except Exception:
+                self.msg_queue.put(("sharped_models_failed", normalize_server_url(base_url)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -10354,7 +10413,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("powder_wavelength", "0.0")
             set_value("powder_separation_factor", "0.2")
             set_value("powder_redistribution_mix", "1.0")
-            set_value("sharped_model", "koala 2.0")
+            set_value("sharped_model", "default")
             set_value("perform_algorithm", "CF")
             set_value("maxcycles", "2000")
             set_value("repeatmode", "10")
@@ -10428,24 +10487,42 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return [ErrorAction("Select HKL…", row.browse, True)] if isinstance(row, PathRow) else []
         if category == "superflip_missing":
             row = self.inputs.get("superflip_exe")
-            return [ErrorAction("Locate Superflip…", row.browse, True)] if isinstance(row, PathRow) else []
+            return [ErrorAction("Set up Superflip", row.browse, True)] if isinstance(row, PathRow) else []
         if category == "edma_missing":
             row = self.inputs.get("edma_exe")
-            return [ErrorAction("Locate EDMA…", row.browse, True)] if isinstance(row, PathRow) else []
+            return [ErrorAction("Set up EDMA", row.browse, True)] if isinstance(row, PathRow) else []
         if category in {"file_permission", "file_write"}:
             row = self.inputs.get("work_dir")
             return [ErrorAction("Choose folder…", row.browse, True)] if isinstance(row, PathRow) else []
         if category == "sharped_authentication":
-            return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("Setup", advanced=True), True)]
+            return [ErrorAction("Update API token", lambda: self._open_configuration_page("Setup", advanced=True), True)]
         if category.startswith("sharped_"):
             return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED", advanced=True), True)]
         if category == "input_validation":
-            actions = [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
-            if "SharpED" in report.summary:
-                actions.append(ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("Setup", advanced=True)))
+            summary = report.summary.casefold()
+            actions: List[ErrorAction] = []
+            for token, key, label in (
+                (".inflip", "jana_inflip", "Select .inflip…"),
+                ("external hkl", "hkl", "Select HKL…"),
+                ("initial model", "first_cycle_modelfile", "Select model…"),
+                ("reference file", "reference_cif", "Select reference…"),
+                ("superflip", "superflip_exe", "Locate Superflip…"),
+                ("edma", "edma_exe", "Locate EDMA…"),
+            ):
+                row = self.inputs.get(key)
+                if token in summary and isinstance(row, PathRow):
+                    actions.append(ErrorAction(label, row.browse, not actions))
+            if "sharped api token" in summary or "sharped model" in summary:
+                actions.append(ErrorAction(
+                    "Open SharpED settings",
+                    lambda: self._open_configuration_page("Setup", advanced=True),
+                    not actions,
+                ))
+            if not actions:
+                actions.append(ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True))
             return actions
         if category in {"hkl_invalid", "metadata", "unit_cell", "space_group", "composition", "inflip"}:
-            return [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
+            return [ErrorAction("Open Input settings", lambda: self._open_configuration_page("Input"), True)]
         return []
 
     def _show_error_report(self, report: ErrorReport, *, write_log: bool = True) -> str:
@@ -10475,6 +10552,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._show_error_report(report)
 
     def _poll_queue(self) -> None:
+        self._sync_sharped_catalog()
         try:
             processed = 0
             while processed < 250:
@@ -10516,23 +10594,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self.structure_cell = gemmi.UnitCell(*values)
                         self._update_structure_views()
                 elif kind == "sharped_models":
-                    default_model, models = payload  # type: ignore[misc]
-                    widget = self.inputs.get("sharped_model")
-                    if isinstance(widget, QComboBox):
-                        current = widget.currentText().strip() or "default"
-                        widget.blockSignals(True)
-                        widget.clear()
-                        values = ["default"]
-                        if default_model:
-                            values.append(str(default_model))
-                        for available_model in list(models):
-                            if available_model not in values:
-                                values.append(available_model)
-                        widget.addItems(values)
-                        idx = widget.findText(current)
-                        widget.setCurrentIndex(idx if idx >= 0 else 0)
-                        widget.blockSignals(False)
-                    self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
+                    source, catalog = payload
+                    if source != normalize_server_url(self._line_value("sharped_base_url")):
+                        continue
+                    self._sync_sharped_catalog()
+                    self._append_execution_log(
+                        f"[SharpED] Models refreshed from server · {len(catalog.models)} available · default: {catalog.default_model}",
+                        level="SUCCESS", subsystem="SharpED")
+                elif kind == "sharped_models_failed":
+                    if payload != normalize_server_url(self._line_value("sharped_base_url")):
+                        continue
+                    self._sync_sharped_catalog()
+                    self.sharped_model_status.setText(
+                        "Model refresh failed · " + self.sharped_model_status.text()
+                        if current_model_catalog(payload) else "Model refresh failed · no model information available.")
+                    self._append_execution_log("[SharpED] Model refresh failed · keeping previous catalog if available", subsystem="SharpED")
                 elif kind == "hkl_load_result":
                     parsed_count = len(payload.reflections) if isinstance(payload, HklLoadResult) else 0
                     unique_count = len(payload.unique_reflections) if isinstance(payload, HklLoadResult) else 0
@@ -11629,11 +11705,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._metrics_hover_series[key] = []
             status = str(getattr(self, "_run_status", "READY")).upper()
             if status in {"RUNNING", "STOPPING"}:
-                empty_message = "Waiting for reconstruction metrics…"
+                empty_message = "Workflow is running · waiting for workflow metrics…"
             elif status in {"ERROR", "CANCELLED", "STOPPED"}:
-                empty_message = "No reconstruction metrics available."
+                empty_message = "No workflow metrics available."
             else:
-                empty_message = "Run phasing to display reconstruction metrics."
+                empty_message = "Run phasing to display workflow metrics."
             ax.set_axis_off()
             ax.text(
                 0.5,
@@ -12229,16 +12305,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         waiting = status in {"RUNNING", "STOPPING"}
         failed = status in {"ERROR", "CANCELLED"}
         panels = [
-            ("Reference", self.reference_atoms_for_plot, "No reference structure"),
+            ("Reference", self.reference_atoms_for_plot, "No reference structure selected"),
             (
                 "Superflip",
                 self.superflip_atoms_for_plot,
-                "Waiting for Superflip result…" if waiting else ("Superflip result unavailable" if failed else "No Superflip structure available"),
+                "Waiting for Superflip result…" if waiting else "Superflip structure unavailable",
             ),
             (
                 "SharpED",
                 self.deblur_atoms_for_plot,
-                "Waiting for SharpED result…" if waiting else ("SharpED result unavailable" if failed else "No SharpED structure available"),
+                "Waiting for SharpED result…" if waiting else "SharpED structure unavailable",
             ),
         ]
         has_interactive_structure = any(
@@ -12290,6 +12366,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.draw_idle()
 
     def get_config(self) -> RunConfig:
+        self._sync_sharped_catalog()
         input_source_mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
         reference_xplor: Optional[Path] = None
         first_model_text = self._path_value("first_cycle_modelfile")
@@ -12478,7 +12555,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if cfg.redistribute_overlaps and not reflection_mode_has_fwhm(self._resolve_configured_data_mode(cfg)):
             issues.append(
                 "Powder overlap repartitioning is enabled, but the configured reflection data does not carry a "
-                "FWHM value (hkl I fwhm / hkl F fwhm). This mechanism only applies to FWHM-carrying data."
+                f"FWHM value ({format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM)} or {format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM)}). This mechanism only applies to FWHM-carrying data."
             )
             details.append("Enable powder overlap repartitioning: Basic → Map feedback → Powder overlap repartitioning")
         reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
@@ -12566,7 +12643,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
-            self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Pipeline")
+            self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Workflow")
             return
         try:
             cfg = self.get_config()
@@ -12618,11 +12695,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def continue_run(self) -> None:
         if self.worker and self.worker.is_alive():
-            self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Pipeline")
+            self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Workflow")
             return
         state = self._resume_state
         if state is None:
-            self._append_execution_log("Nothing to continue: no previous run to resume.", level="WARNING", subsystem="Pipeline")
+            self._append_execution_log("Nothing to continue: no previous run to resume.", level="WARNING", subsystem="Workflow")
             return
         requested_cycles = max(1, self._spin_value("cycles"))
         if requested_cycles <= state.completed_cycles:
@@ -12664,7 +12741,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if resume_state is not None:
             try:
                 self.log(
-                    f"=== Pipeline resumed at cycle {resume_state.completed_cycles + 1} of {resume_state.cfg.cycles} ===",
+                    f"=== Workflow resumed at cycle {resume_state.completed_cycles + 1} of {resume_state.cfg.cycles} ===",
                     level="STEP",
                 )
                 self.msg_queue.put(("progress_setup", resume_state.cfg.cycles))
@@ -12680,7 +12757,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ))
             return
         try:
-            self.log("=== Pipeline started ===", level="STEP")
+            self.log("=== Workflow started ===", level="STEP")
             mode = normalize_input_source_mode(cfg.input_source_mode)
             self.log("Input", level="STEP")
             self.log(f"  Mode: {INPUT_MODE_LABELS.get(mode, mode)}")
@@ -13588,7 +13665,8 @@ class PhaseStudioSplash(QSplashScreen):
         root.addWidget(self.status_label)
         self.progress = QProgressBar()
         self.progress.setObjectName("splashProgress")
-        self.progress.setRange(0, 0)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(12)
         self.progress.setTextVisible(False)
         root.addWidget(self.progress)
         footer = QLabel("Crystallographic reconstruction workspace")
@@ -13596,8 +13674,20 @@ class PhaseStudioSplash(QSplashScreen):
         root.addWidget(footer)
         root.addStretch(1)
 
-    def set_status(self, text: str) -> None:
+    def set_status(self, text: str, progress: Optional[int] = None) -> None:
         self.status_label.setText(str(text))
+        if progress is None:
+            lowered = str(text).casefold()
+            if "initializ" in lowered:
+                progress = 38
+            elif "jana2020" in lowered:
+                progress = 62
+            elif "finaliz" in lowered:
+                progress = 86
+            elif lowered.strip() == "ready":
+                progress = 100
+        if progress is not None:
+            self.progress.setValue(max(self.progress.value(), min(100, int(progress))))
 
 
 def create_startup_splash() -> PhaseStudioSplash:

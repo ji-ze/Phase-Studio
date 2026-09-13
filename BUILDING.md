@@ -80,40 +80,33 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 
 Outputs:
 
 ```text
-dist/PhaseStudio/PhaseStudio.exe
-    _internal/                         standalone scientific application
-dist/PhaseStudioJanaInstaller/PhaseStudioJanaInstaller.exe
-    _internal/                         integration-manager UI only
-    JanaIntegration/superflip.exe      staged authoritative wrapper
-    JanaIntegration/_internal/         complete wrapper scientific runtime
-dist/superflip/superflip.exe
-    _internal/                         authoritative wrapper build
+dist/release/PhaseStudio-1.0.9-x64.exe
+dist/release/PhaseStudio-Jana2020-Installer-1.0.9-x64.exe
+dist/superflip/superflip.exe            internal authoritative wrapper build
+dist/superflip/_internal/               internal wrapper runtime
 ```
 
-Distribute complete directories, never an executable by itself. The installer
-can be copied to USB; it does not need an adjacent standalone application.
-Its payload includes the shared scientific GUI required by the installed
-Wizard's Full configuration option, but its own UI/runtime does not import or
-launch that GUI. Standalone has no installation-management dialog or payload.
-Jana data import remains supported.
+`dist/release` is the complete public release and must contain exactly the two
+EXEs above. Both are PyInstaller ONEFILE applications and can be copied or
+downloaded independently. The installer embeds the complete `dist/superflip`
+tree and uses PyInstaller's private extraction directory at runtime; it needs no
+adjacent payload. Standalone contains no installation-management UI or wrapper.
+`dist/superflip` remains an internal build input and is not a third download.
 
-`packaging/pyinstaller/PhaseStudio.spec` implements the two outer build profiles.
+`packaging/pyinstaller/PhaseStudio.spec` implements the two direct ONEFILE profiles.
 `PhaseStudioJanaInstaller.spec` selects the installer entry point; the root
-`PhaseStudio.spec` forwards to the portable standalone spec. The root
+`PhaseStudio.spec` forwards to the standalone spec. `PhaseStudioStore.spec`
+selects a standalone-only ONEDIR profile for MSIX staging. The root
 `superflip.spec` remains the authoritative ONEDIR wrapper specification and is
 built with `python -m PyInstaller --clean --noconfirm superflip.spec`.
 
-The shared portable-runtime helper and DLL-isolation hook are used by all
-three executables. Each build stages the matching VC++ runtime, excludes
-app-local UCRT, and runs both native dependency and imported-symbol audits.
-The build also inspects the frozen module archives to enforce distribution
-boundaries and compares every staged wrapper file with the authoritative build.
+The shared portable-runtime helper and DLL-isolation hook are used by every
+profile. The build inspects each frozen archive, enforces product boundaries,
+and compares every embedded Jana wrapper file byte-for-byte with the
+authoritative ONEDIR build.
 
-Close an executable before rebuilding its directory. To preserve a running
-older build, use `-DistRoot "$PWD/dist/1.0.9"`; this changes only the output
-location and is restricted to a subdirectory of the repository's `dist`.
-Builds never terminate existing processes. `-Clean:$false` still excludes old
-installation payloads from standalone.
+Close a release executable before rebuilding it. `-DistRoot` remains restricted
+to a subdirectory of the repository's `dist`; builds never terminate processes.
 
 Version strings in windows, Wizard, installer, integration marker, Python
 metadata and Windows EXE resources derive from `phase_studio/version.py`.

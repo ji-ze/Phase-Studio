@@ -107,7 +107,7 @@ def build_error_report(
             category = "sharped_authentication"
             title = "SharpED authentication failed"
             summary = "The SharpED API token is missing or was rejected."
-            guidance = "Open SharpED settings and enter a valid API token before trying again."
+            guidance = "Enter a valid API token in SharpED setup before trying again."
         elif any(token in lower for token in ("timed out", "timeout", "polling limit", "did not finish within")):
             category = "sharped_timeout"
             title = "SharpED request timed out"
@@ -243,7 +243,7 @@ def build_error_report(
         category = "structure_viewer"
         title = "Structure preview unavailable"
         summary = "Phase Studio could not load one structure preview."
-        guidance = "The pipeline can continue; review the structure file and technical details in the Execution Log."
+        guidance = "The workflow can continue; review the structure file and technical details in the Execution Log."
     elif "metadata" in lower:
         resolved_subsystem = "Crystal metadata"
         category = "metadata"
@@ -271,12 +271,39 @@ def build_error_report(
 def build_validation_report(issues: Sequence[str], *, technical_details: str = "") -> ErrorReport:
     unique = list(dict.fromkeys(str(issue).strip() for issue in issues if str(issue).strip()))
     bullets = "\n".join(f"• {issue}" for issue in unique)
+    if len(unique) == 1:
+        issue = unique[0]
+        lowered = issue.casefold()
+        if "working edma executable" in lowered:
+            return ErrorReport(
+                category="edma_missing", subsystem="EDMA", title="EDMA setup required",
+                summary="Phase Studio could not find a working EDMA executable.",
+                guidance="Select an existing EDMA installation or install EDMA before starting this workflow.",
+                technical_details=sanitize_error_details(technical_details or issue),
+                operation="Pre-run validation", severity="error",
+            )
+        if "working superflip executable" in lowered:
+            return ErrorReport(
+                category="superflip_missing", subsystem="Superflip", title="Superflip setup required",
+                summary="Phase Studio could not find a working Superflip executable.",
+                guidance="Select an existing Superflip installation or install Superflip before starting this workflow.",
+                technical_details=sanitize_error_details(technical_details or issue),
+                operation="Pre-run validation", severity="error",
+            )
+        if "sharped api token" in lowered:
+            return ErrorReport(
+                category="sharped_authentication", subsystem="SharpED", title="SharpED access required",
+                summary="A SharpED API token is required for the selected workflow.",
+                guidance="Enter a valid API token in SharpED setup before starting this workflow.",
+                technical_details=sanitize_error_details(technical_details or issue),
+                operation="Pre-run validation", severity="error",
+            )
     return ErrorReport(
         category="input_validation",
         subsystem="Input",
-        title="Cannot start pipeline",
+        title="Cannot start workflow",
         summary="Please fix the following before starting:\n" + bullets,
-        guidance="Open the relevant configuration page, correct the listed items, and start the pipeline again.",
+        guidance="Open the relevant configuration page, correct the listed items, and start the workflow again.",
         technical_details=sanitize_error_details(technical_details or bullets),
         operation="Pre-run validation",
         severity="error",
@@ -352,6 +379,7 @@ def show_phase_studio_error(
     details.setObjectName("errorDialogDetails")
     details.setReadOnly(True)
     details.setLineWrapMode(QPlainTextEdit.NoWrap)
+    details.setMinimumHeight(160)
     details.setMaximumHeight(220)
     details_font = QFont("Cascadia Mono")
     details_font.setStyleHint(QFont.Monospace)
@@ -378,7 +406,8 @@ def show_phase_studio_error(
         copy_button.setVisible(expanded)
         details_button.setText("Hide details" if expanded else "Show details")
         dialog.adjustSize()
-        dialog.resize(max(520, min(700, dialog.width())), min(610, dialog.height()))
+        target_height = min(610, dialog.sizeHint().height()) if expanded else max(250, dialog.minimumSizeHint().height())
+        dialog.resize(max(520, min(700, dialog.width())), target_height)
 
     details_button.clicked.connect(toggle_details)
     copy_button.clicked.connect(lambda: QApplication.clipboard().setText(report.diagnostic_block()))
@@ -386,6 +415,7 @@ def show_phase_studio_error(
     for action in actions:
         button = QPushButton(action.label)
         button.setObjectName("errorPrimaryAction" if action.primary else "errorAction")
+        button.setMinimumHeight(30)
 
         def choose(_checked: bool = False, selected_action: ErrorAction = action) -> None:
             selected["label"] = selected_action.label
@@ -396,6 +426,8 @@ def show_phase_studio_error(
 
     close_button = QPushButton("Close")
     close_button.setObjectName("errorCloseButton")
+    for button in (details_button, copy_button, close_button):
+        button.setMinimumHeight(30)
     close_button.clicked.connect(dialog.reject)
     close_button.setDefault(not any(action.primary for action in actions))
     button_row.addWidget(close_button)

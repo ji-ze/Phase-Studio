@@ -14,10 +14,13 @@ GUI; phase_studio/jana_installer.py provides the dialog that drives it.
 from __future__ import annotations
 
 import hashlib
+import atexit
 import json
 import os
 import shutil
 import sys
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
@@ -35,6 +38,7 @@ RUNTIME_DIR_NAME = "_internal"
 STAGING_DIR_NAME = ".phase_studio_install_tmp"
 BACKUP_EXE_SUFFIX = ".phase_studio_prev"
 BACKUP_RUNTIME_SUFFIX = ".phase_studio_prev"
+_embedded_payload_temp: Optional[tempfile.TemporaryDirectory] = None
 
 
 class IntegrationState:
@@ -241,13 +245,96 @@ def bundled_integration_version() -> str:
     return PHASE_STUDIO_VERSION
 
 
+def _cleanup_embedded_payload() -> None:
+    global _embedded_payload_temp
+    if _embedded_payload_temp is not None:
+        _embedded_payload_temp.cleanup()
+        _embedded_payload_temp = None
+
+
+atexit.register(_cleanup_embedded_payload)
+
+
+def _extract_verified_payload(archive_path: Path, manifest_path: Path) -> Path:
+    """Extract an exact wrapper archive without accepting traversal or links."""
+    global _embedded_payload_temp
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if manifest.get("format") != 1 or not isinstance(manifest.get("files"), list):
+        raise ValueError("Embedded Jana payload manifest is invalid.")
+    expected = {}
+    for item in manifest["files"]:
+        relative = str(item.get("path", ""))
+        parts = Path(relative.replace("/", os.sep)).parts
+        if (not relative or "\\" in relative or relative.startswith("/")
+                or any(part in {"", ".", ".."} for part in parts)):
+            raise ValueError("Embedded Jana payload contains an unsafe path.")
+        if relative in expected:
+            raise ValueError("Embedded Jana payload manifest contains duplicate paths.")
+        expected[relative] = (int(item["size"]), str(item["sha256"]).lower())
+
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        infos = archive.infolist()
+        names = [info.filename for info in infos if not info.is_dir()]
+        if len(names) != len(set(names)) or set(names) != set(expected):
+            raise ValueError("Embedded Jana payload file set does not match its manifest.")
+        for info in infos:
+            if info.is_dir():
+                continue
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise ValueError("Embedded Jana payload may not contain symbolic links.")
+
+        _cleanup_embedded_payload()
+        _embedded_payload_temp = tempfile.TemporaryDirectory(prefix="PhaseStudio-Jana-")
+        root = Path(_embedded_payload_temp.name).resolve()
+        try:
+            for info in infos:
+                if info.is_dir():
+                    continue
+                target = (root / Path(info.filename.replace("/", os.sep))).resolve()
+                try:
+                    target.relative_to(root)
+                except ValueError as exc:
+                    raise ValueError("Embedded Jana payload escaped its staging directory.") from exc
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(info, "r") as source, target.open("wb") as destination:
+                    shutil.copyfileobj(source, destination)
+                expected_size, expected_hash = expected[info.filename]
+                if target.stat().st_size != expected_size or _sha256_file(target) != expected_hash:
+                    raise ValueError(f"Embedded Jana payload verification failed: {info.filename}")
+        except Exception:
+            _cleanup_embedded_payload()
+            raise
+    return root
+
+
 def resolve_bundled_jana_payload_dir() -> Optional[Path]:
     """Locate the dedicated installer's complete ONEDIR wrapper payload."""
     candidates: List[Path] = []
     if getattr(sys, "frozen", False):
-        # Only the dedicated installer carries this adjacent payload.
-        exe_dir = Path(sys.executable).resolve().parent
-        candidates.append(exe_dir / "JanaIntegration")
+        if _embedded_payload_temp is not None:
+            cached = Path(_embedded_payload_temp.name)
+            if ((cached / WRAPPER_EXE_NAME).is_file()
+                    and (cached / RUNTIME_DIR_NAME).is_dir()):
+                return cached
+        # PyInstaller ONEFILE extracts bundled data into its private _MEIPASS
+        # directory. Never accept an adjacent, user-replaceable payload.
+        bundle_root_value = getattr(sys, "_MEIPASS", "")
+        if bundle_root_value:
+            bundle_root = Path(bundle_root_value).resolve()
+            candidate = (bundle_root / "JanaIntegrationPayload").resolve()
+            try:
+                candidate.relative_to(bundle_root)
+            except ValueError:
+                candidate = None
+            if candidate is not None:
+                archive_path = candidate / "jana-wrapper.zip"
+                manifest_path = candidate / "jana-wrapper-manifest.json"
+                if archive_path.is_file() and manifest_path.is_file():
+                    try:
+                        return _extract_verified_payload(archive_path, manifest_path)
+                    except Exception:
+                        return None
     else:
         # Running from source: the local build_windows.ps1 output, which
         # builds the Jana wrapper via the known-working
@@ -259,7 +346,8 @@ def resolve_bundled_jana_payload_dir() -> Optional[Path]:
         candidates.append(module_dir / "dist" / "superflip")
         candidates.append(module_dir / "dist" / "PhaseStudioJanaInstaller" / "JanaIntegration")
     for candidate in candidates:
-        if (candidate / WRAPPER_EXE_NAME).is_file():
+        if ((candidate / WRAPPER_EXE_NAME).is_file()
+                and (candidate / RUNTIME_DIR_NAME).is_dir()):
             return candidate
     return None
 

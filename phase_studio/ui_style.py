@@ -462,7 +462,7 @@ QTextEdit#executionLog {
     border: none;
     border-top: 1px solid #cbd7ea;
     border-radius: 0;
-    padding: 5px 9px;
+    padding: 8px 11px;
     background-color: #ffffff;
     color: #14204a;
     font-family: "Cascadia Mono", "Consolas", monospace;
@@ -490,7 +490,7 @@ QPushButton#handoffButton:hover {
     color: #001170;
 }
 QPushButton#handoffButton:disabled {
-    color: #8794ad;
+    color: #5a6b8c;
     background-color: #f7f9fc;
     border-color: #cbd7ea;
 }
@@ -505,7 +505,7 @@ QPushButton#continueButton:hover {
     color: #001170;
 }
 QPushButton#continueButton:disabled {
-    color: #8794ad;
+    color: #5a6b8c;
     background-color: #f7f9fc;
     border-color: #cbd7ea;
 }
@@ -950,8 +950,8 @@ QPushButton#metricsViewToggle:checked {
     color: #001170;
 }
 QPushButton#metricsViewToggle:disabled {
-    color: #b7c2d9;
-    border-color: #e3e9f3;
+    color: #5a6b8c;
+    border-color: #cbd7ea;
     background-color: #f7f9fc;
 }
 QLabel#metricsHintLabel {

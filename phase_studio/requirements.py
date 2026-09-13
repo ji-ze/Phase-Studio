@@ -268,14 +268,14 @@ def check_sharped_api(base_url: str, token: str, *, timeout: float = 15.0,
                       client_factory: Optional[Callable[..., object]] = None) -> RequirementStatus:
     """Verify SharpED access as far as the existing API client allows.
 
-    This performs a real request through the SAME client the application
-    already uses -- the model list -- so there is no second API
-    implementation and nothing that creates or consumes a job.
+    This uses the SAME client and shared model catalog as the application.
+    A successful response from the last 15 seconds may be reused; otherwise
+    it performs a real model request. Nothing creates or consumes a job.
 
     What this proves, honestly:
 
       * a token is configured at all (answered without any request);
-      * the configured server is reachable and speaks the expected protocol;
+      * the configured server was recently reachable and spoke the expected protocol;
       * the response is well formed.
 
     What it CANNOT prove with the current client: that the token will be
@@ -295,14 +295,14 @@ def check_sharped_api(base_url: str, token: str, *, timeout: float = 15.0,
         return RequirementStatus(kind=RequirementKind.SHARPED,
                                  state=RequirementState.TOKEN_MISSING)
 
-    if client_factory is None:
-        from phase_studio.sharped_server_client import SharpEDServerClient
+    from phase_studio.sharped_server_client import SharpEDServerClient, MODEL_METADATA_REUSE_SECONDS
 
+    if client_factory is None:
         client_factory = SharpEDServerClient
 
     try:
         client = client_factory(base_url=base_url, timeout=timeout)
-        models = client.get_models()
+        models = client.get_models(max_age=MODEL_METADATA_REUSE_SECONDS)
     except Exception as exc:  # noqa: BLE001 - classified below
         return _classify_sharped_error(exc)
 

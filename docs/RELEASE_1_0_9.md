@@ -1,10 +1,9 @@
 # Split Windows distribution
 
-Phase Studio 1.0.9 temporarily uses the original coherent SharpED API at
-`https://jana.fzu.cz`: model discovery, upload, polling, and download all derive
-from that single base URL. This restores the last known-working client behavior
-while server migration is completed. TODO: after SharpED server unification,
-migrate Phase Studio to the final `sharped.fzu.cz` API in a separate task.
+SharpED subsequently gained a [temporary compatibility bridge](SHARPED_TEMPORARY_BRIDGE.md):
+current model discovery remains on the final domain, while authenticated jobs
+use the legacy backend. Current DEFAULT is unavailable there until `koala 4.0`
+can be served; users must choose a compatible concrete model.
 
 ## Git audit
 
@@ -39,26 +38,26 @@ version to 1.0.9. No 1.0.9 release tag was created.
 - Store script: builds/stages only standalone, rejecting installation payloads.
 
 See [BUILDING.md](../BUILDING.md) for exact commands and output layouts.
-The normal outputs are `dist/PhaseStudio`, `dist/PhaseStudioJanaInstaller`, and
-`dist/superflip`. The installer carries a complete, byte-identical copy of the
-authoritative wrapper in `JanaIntegration`; this is the scientific code needed
-after installation, separate from the installer's own UI runtime.
+The public release output is exactly:
 
-During this task an older `dist/PhaseStudio/PhaseStudio.exe` process remained
-running with no visible window. It was not force-terminated or overwritten.
-The tested standalone artifact was therefore built in
-`dist/1.0.9/PhaseStudio` using `-DistRoot`. Installer and wrapper artifacts use
-their normal output locations. All are complete ONEDIR folders.
+- `dist/release/PhaseStudio-1.0.9-x64.exe`
+- `dist/release/PhaseStudio-Jana2020-Installer-1.0.9-x64.exe`
+
+Both downloads are PyInstaller ONEFILE executables. The authoritative Jana
+wrapper remains ONEDIR at `dist/superflip` as an internal build input. Its
+complete file tree is embedded byte-for-byte in the installer and extracted by
+the PyInstaller bootloader to private temporary storage before the existing
+transactional integration engine stages it into Jana2020.
 
 ## Verification
 
-- Complete current suite: 768 plain checks plus 23 unittest cases (7 restored
-  SharpED API contract, 16 split-distribution), across 14 scripts, all passing.
-- Frozen module/archive checks: standalone, installer, wrapper all pass;
-  every staged wrapper file matches the authoritative build.
-- Native dependency and imported-symbol audits pass for standalone, installer,
-  wrapper, and the staged wrapper copy: zero unresolved/external non-Windows
-  dependencies, zero blocking symbol problems, no conflicting duplicate DLLs.
+- The automated Python suite covers catalog compatibility, frozen-product
+  boundaries, private payload resolution, transactional install/update/repair/
+  remove and rollback, UI text/state behavior, and the preserved scientific
+  baselines.
+- Frozen archive checks verify the standalone, installer, and wrapper module
+  boundaries and compare every embedded wrapper file with the authoritative
+  build.
 - EXE resources and embedded runtime versions derive from 1.0.9. MSIX version
   derives as 1.0.9.0; conflicting explicit version overrides are rejected.
 - Installer transaction tests use temporary mock Jana directories, never the
@@ -69,11 +68,10 @@ their normal output locations. All are complete ONEDIR folders.
 
 ## Remaining manual acceptance
 
-Run both products on a clean supported Windows PC without Python/Qt/VC++
-redistributables installed separately. Exercise install/update/repair/remove
-on a real Jana2020 installation, including all Wizard workflows and Full
-configuration/Send to Jana2020. Confirm the old running build is closed before
-rebuilding the default standalone output directory.
+Run both public EXEs on a clean supported Windows PC without Python/Qt/VC++
+installed separately. Exercise install/update/repair/remove on a real Jana2020
+installation, including all Wizard workflows and Full configuration/Send to
+Jana2020. Inspect the GUI at Windows 100%, 125%, and 150% display scaling.
 
 An actual MSIX was not produced: the local Store identity and Windows SDK
 MakeAppx tooling were unavailable. Build, install, and certify it with the real

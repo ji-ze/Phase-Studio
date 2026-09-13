@@ -50,6 +50,53 @@ class SplitDistributionTests(unittest.TestCase):
         code = "import sys; import phase_studio.jana_installer; assert 'phase_studio.app' not in sys.modules; assert 'phase_studio.jana_superflip' not in sys.modules"
         subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
 
+    def test_onefile_installer_uses_private_embedded_payload(self):
+        bundle = Path(self.temp.name) / "onefile-temp"
+        payload_package = bundle / "JanaIntegrationPayload"
+        package_payload = __import__("runpy").run_path(
+            str(ROOT / "packaging/tools/package_jana_payload.py")
+        )["package_payload"]
+        package_payload(self.payload, payload_package)
+        adjacent = Path(self.temp.name) / "public"
+        adjacent.mkdir()
+        import shutil
+        shutil.copytree(self.payload, adjacent / "JanaIntegration")
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "_MEIPASS", str(bundle), create=True), \
+             patch.object(sys, "executable", str(adjacent / "installer.exe")):
+            extracted = ji.resolve_bundled_jana_payload_dir()
+            self.assertIsNotNone(extracted)
+            self.assertNotEqual(extracted, adjacent / "JanaIntegration")
+            self.assertEqual(self.snapshot_payload(extracted), self.snapshot_payload(self.payload))
+            installed = ji.install_or_update_integration(self.target, extracted)
+            self.assertTrue(installed.success, installed.message)
+        ji._cleanup_embedded_payload()
+        self.assertTrue((self.target / "superflip.exe").is_file())
+        self.assertTrue((self.target / "_internal/runtime.dll").is_file())
+
+    @staticmethod
+    def snapshot_payload(root):
+        return {str(path.relative_to(root)): path.read_bytes()
+                for path in Path(root).rglob("*") if path.is_file()}
+
+    def test_embedded_payload_rejects_path_escape(self):
+        import zipfile
+        package = Path(self.temp.name) / "unsafe"
+        package.mkdir()
+        archive = package / "jana-wrapper.zip"
+        manifest = package / "jana-wrapper-manifest.json"
+        data = b"escape"
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("../escape.exe", data)
+        import hashlib
+        manifest.write_text(json.dumps({"format": 1, "files": [{
+            "path": "../escape.exe", "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }]}))
+        with self.assertRaisesRegex(ValueError, "unsafe path"):
+            ji._extract_verified_payload(archive, manifest)
+        self.assertFalse((package.parent / "escape.exe").exists())
+
     def test_entrypoint_versions(self):
         for module in ("phase_studio", "phase_studio.jana_installer"):
             output = subprocess.check_output([sys.executable, "-m", module, "--version"], cwd=ROOT, text=True)
@@ -189,10 +236,21 @@ class SplitDistributionTests(unittest.TestCase):
 
     def test_store_selects_only_standalone(self):
         script = (ROOT / "packaging/build_store_msix.ps1").read_text()
-        self.assertIn('-Target Standalone', script)
+        self.assertIn('PhaseStudioStore.spec', script)
+        self.assertIn('--profile store', script)
         self.assertNotIn('JanaSigningCertificate', script)
         self.assertIn('Store packaging refuses a Jana installation payload', script)
         self.assertIn('$Version = $canonicalVersion', script)
+
+    def test_public_release_contract_is_two_onefile_executables(self):
+        build = (ROOT / "packaging/build_windows.ps1").read_text()
+        spec = (ROOT / "packaging/pyinstaller/PhaseStudio.spec").read_text()
+        self.assertIn('PhaseStudio-1.0.9-x64.exe', build)
+        self.assertIn('PhaseStudio-Jana2020-Installer-1.0.9-x64.exe', build)
+        self.assertIn('$publicFiles.Count -ne 2', build)
+        self.assertIn('a.binaries, a.datas', spec)
+        self.assertIn('"JanaIntegrationPayload"', spec)
+        self.assertTrue((ROOT / "packaging/pyinstaller/PhaseStudioStore.spec").is_file())
 
     def test_scientific_functions_match_integrated_baseline(self):
         git = r"C:\Program Files\Git\cmd\git.exe" if os.name == "nt" else "git"
@@ -205,15 +263,13 @@ class SplitDistributionTests(unittest.TestCase):
             old, new = functions(baseline), functions(current)
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
-                        "fitted_dialog_client_size", "fit_dialog_to_available_screen"}
-            if filename == "app.py":
-                excluded.add("run_sharped_deblur")
-            elif filename == "jana_superflip.py":
-                excluded.add("deblur_with_sharped")
-            elif filename == "sharped_server_client.py":
-                excluded |= {"normalize_server_url", "model_selection", "current_model_catalog",
-                             "model_catalog_status", "apply_model_catalog", "sync_model_catalog",
-                             "resolve_effective_model"}
+                        "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record"}
+            if filename == "sharped_server_client.py":
+                # Display-only compatibility status/disabled entries; scientific
+                # transforms and application workflows remain baseline-identical.
+                excluded |= {"model_catalog_status", "apply_model_catalog"}
+            if filename == "jana_superflip.py":
+                excluded |= {"launch_phase_studio_from_jana", "main"}
             for name in old.keys() - excluded:
                 self.assertEqual(old[name], new.get(name), f"{filename}:{name}")
 
