@@ -19,12 +19,10 @@ for every file, checking the exit code) without any additional tooling.
   scientific functions with the integrated baseline; standard-library unittest.
 
 
-- `test_sharped_catalog.py` -- standard-library unittest coverage of the real
-  model response schema, atomic catalog/default replacement, selection intent,
-  multipart DEFAULT/explicit uploads through both application entry points,
-  late QSettings restoration, widget reconstruction, restart, shared preflight
-  and Wizard state, failed refreshes, custom servers, and bounded reuse.
-  Run directly with `python tests/test_sharped_catalog.py`; no pytest required.
+- `test_sharped_api_contract.py` -- focused coverage of the restored single-base
+  SharpED API, including model discovery, upload, polling, download, Bearer/job
+  token order, caller-side DEFAULT resolution, and custom server URLs.
+  Run directly with `python tests/test_sharped_api_contract.py`; no pytest required.
 
 - `test_scientific_core.py` -- golden regression baseline for the pure
   parsing/analysis functions in `phase_studio/app.py`: HKL parsing
@@ -99,11 +97,6 @@ for every file, checking the exit code) without any additional tooling.
   itself is asserted.
 
 ## Adding a new golden regression test
-
-`test_sharped_bridge.py` tests the temporary metadata/inference split, separate
-compatibility state, disabled unsupported selections, exact DEFAULT resolution,
-job-host confinement, authentication/redaction, and future unified deployment.
-It uses mocked HTTP transport and real client/Qt code; no live token is needed.
 
 1. Build a small, fully hand-verifiable fixture (few reflections/cycles,
    not a large randomized one) so a human can sanity-check the pinned

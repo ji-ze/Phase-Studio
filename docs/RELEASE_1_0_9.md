@@ -1,9 +1,10 @@
 # Split Windows distribution
 
-SharpED subsequently gained a [temporary compatibility bridge](SHARPED_TEMPORARY_BRIDGE.md):
-current model discovery remains on the final domain, while authenticated jobs
-use the legacy backend. Current DEFAULT is unavailable there until `koala 4.0`
-can be served; users must choose a compatible concrete model.
+Phase Studio 1.0.9 temporarily uses the original coherent SharpED API at
+`https://jana.fzu.cz`: model discovery, upload, polling, and download all derive
+from that single base URL. This restores the last known-working client behavior
+while server migration is completed. TODO: after SharpED server unification,
+migrate Phase Studio to the final `sharped.fzu.cz` API in a separate task.
 
 ## Git audit
 
@@ -51,8 +52,8 @@ their normal output locations. All are complete ONEDIR folders.
 
 ## Verification
 
-- Complete suite: 868 existing checks plus 31 unittest cases (15 catalog,
-  16 split-distribution), across 14 scripts, all passing.
+- Complete current suite: 768 plain checks plus 23 unittest cases (7 restored
+  SharpED API contract, 16 split-distribution), across 14 scripts, all passing.
 - Frozen module/archive checks: standalone, installer, wrapper all pass;
   every staged wrapper file matches the authoritative build.
 - Native dependency and imported-symbol audits pass for standalone, installer,

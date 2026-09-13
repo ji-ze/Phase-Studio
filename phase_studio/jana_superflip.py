@@ -35,17 +35,9 @@ except Exception:
     from error_reporting import build_error_report, sanitize_error_details, show_phase_studio_error
 
 try:
-    from phase_studio.sharped_server_client import (
-        SharpEDServerClient, DEFAULT_SERVER_URL, MODEL_METADATA_REUSE_SECONDS,
-        normalize_server_url, current_model_catalog, apply_model_catalog,
-        model_selection, sync_model_catalog,
-    )
+    from phase_studio.sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
 except Exception:
-    from sharped_server_client import (
-        SharpEDServerClient, DEFAULT_SERVER_URL, MODEL_METADATA_REUSE_SECONDS,
-        normalize_server_url, current_model_catalog, apply_model_catalog,
-        model_selection, sync_model_catalog,
-    )
+    from sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
 
 try:
     from phase_studio.ui_style import apply_phase_studio_style
@@ -697,12 +689,17 @@ def deblur_with_sharped(
     server_url = options.server_url.strip() or DEFAULT_SERVER_URL
     model = options.model.strip() or "default"
     client = SharpEDServerClient(base_url=server_url, timeout=600.0)
+    selected_model = model
+    if model.lower() in {"default", "server default", "sharped default"}:
+        models = client.get_models(log=log)
+        selected_model = models.default_model or "SharpED latest"
+        log(f"SharpED default model: {selected_model}")
     client.execute(
         file_path=input_map,
         bearer_token=token,
         out_path=output_map,
         elements=options.elements.strip() or "C N O",
-        model=model,
+        model=selected_model,
         outres=float(options.outres),
         poll_seconds=2,
         max_polls=-1,
@@ -1984,7 +1981,7 @@ class _JanaWorkflowWizard:
 
         self.model = QComboBox()
         self.model.setEditable(True)
-        saved_model = model_selection(self.settings.value("model", "default"))
+        saved_model = str(self.settings.value("model", "default")).strip() or "default"
         self.model.addItem(saved_model)
         if saved_model != "default":
             self.model.insertItem(0, "default")
@@ -1992,6 +1989,14 @@ class _JanaWorkflowWizard:
         self.model.setToolTip(
             "SharpED inference model. Select a model returned by the server or enter an "
             "explicit model identifier. The value 'default' requests the server default."
+        )
+        # An explicit pick must survive Back/Next and any later refresh; a value
+        # that is merely the saved/initial one must not block resolving the
+        # server default once the list actually arrives.
+        self.model_user_picked = {"value": False}
+        self.model.activated.connect(lambda _index=0: self.model_user_picked.__setitem__("value", True))
+        self.model.lineEdit().textEdited.connect(
+            lambda _text="": self.model_user_picked.__setitem__("value", True)
         )
         self.processing_form.addRow("Model", self.model)
         self.page2_layout.addLayout(self.processing_form)
@@ -2024,7 +2029,7 @@ class _JanaWorkflowWizard:
         self.sharped_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.sharped_form.setContentsMargins(18, 4, 0, 0)
 
-        self.server_url = QLineEdit(normalize_server_url(self._shared_or_legacy_value("sharped_base_url", "server_url", DEFAULT_SERVER_URL)))
+        self.server_url = QLineEdit(self._shared_or_legacy_value("sharped_base_url", "server_url", DEFAULT_SERVER_URL))
         self.server_url.setPlaceholderText(DEFAULT_SERVER_URL)
         self.server_url.setToolTip(
             "Base URL of the SharpED service used for model discovery and map processing. "
@@ -2064,12 +2069,17 @@ class _JanaWorkflowWizard:
         self.refresh_results: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.refresh_timer = QTimer(self.dialog)
         self.refresh_timer.setInterval(100)
-        # Request scheduling only; metadata belongs to the shared client catalog.
-        # Back/Next reuses that catalog. Public discovery is independent of tokens.
+        # Session cache: one successful list is reused for the whole Wizard
+        # session, so paging Back/Next never re-queries the server. "key" is the
+        # server configuration the cached list belongs to, so changing the URL
+        # or token invalidates it.
         self.model_cache = {"loaded": False, "inflight": False, "key": None}
 
-        def model_request_key() -> str:
-            return normalize_server_url(self.server_url.text())
+        def model_request_key() -> tuple:
+            return (
+                self.server_url.text().strip() or DEFAULT_SERVER_URL,
+                self.api_token.text().strip(),
+            )
 
         def refresh_available_models(manual: bool = True) -> None:
             base_url = self.server_url.text().strip() or DEFAULT_SERVER_URL
@@ -2083,10 +2093,10 @@ class _JanaWorkflowWizard:
             def worker() -> None:
                 try:
                     client = SharpEDServerClient(base_url=base_url, timeout=30.0)
-                    models_result = client.get_models(max_age=0 if manual else MODEL_METADATA_REUSE_SECONDS)
-                    self.refresh_results.put(("ok", (normalize_server_url(base_url), models_result)))
+                    models_result = client.get_models()
+                    self.refresh_results.put(("ok", models_result))
                 except Exception as exc:
-                    self.refresh_results.put(("error", (normalize_server_url(base_url), sanitize_error_details(exc))))
+                    self.refresh_results.put(("error", str(exc)))
 
             threading.Thread(target=worker, daemon=True).start()
             if not self.refresh_timer.isActive():
@@ -2101,11 +2111,6 @@ class _JanaWorkflowWizard:
             self.refresh_timer.stop()
             self.refresh_models_button.setEnabled(True)
             self.model_cache["inflight"] = False
-            source, payload = payload
-            if source != normalize_server_url(self.server_url.text()):
-                self.model_cache["loaded"] = False
-                refresh_available_models()
-                return
             if state == "error":
                 # Manual retry stays available; a model identifier can still be
                 # typed by hand, so this is a degraded state, not a dead end.
@@ -2117,22 +2122,35 @@ class _JanaWorkflowWizard:
                 )
                 return
 
-            catalog = current_model_catalog(source) or payload
-            self.model_status.setText(apply_model_catalog(self.model, catalog))
+            models_result = payload
+            current = self.model.currentText().strip() or "default"
+            values: List[str] = ["default"]
+            default_model = str(getattr(models_result, "default_model", "") or "").strip()
+            if default_model and default_model not in values:
+                values.append(default_model)
+            for available in list(getattr(models_result, "models", []) or []):
+                value = str(available).strip()
+                if value and value not in values:
+                    values.append(value)
+
+            self.model.blockSignals(True)
+            self.model.clear()
+            self.model.addItems(values)
+            if self.model_user_picked["value"] and current in values:
+                self.model.setCurrentText(current)
+            else:
+                self.model.setCurrentText(current if current in values else "default")
+            self.model.blockSignals(False)
             self._fit_model_popup_width()
             self.model_cache["loaded"] = True
-
-        def sync_shared_catalog() -> None:
-            status = sync_model_catalog(self.model, self.server_url.text())
-            if status is not None:
-                self.model_status.setText(status)
-                self._fit_model_popup_width()
-
-        self.catalog_timer = QTimer(self.dialog)
-        self.catalog_timer.setInterval(200)
-        self.catalog_timer.timeout.connect(sync_shared_catalog)
-        self.catalog_timer.start()
-        sync_shared_catalog()
+            model_count = len(values) - 1
+            noun = "model" if model_count == 1 else "models"
+            if default_model:
+                self.model_status.setText(
+                    f"{model_count} {noun} available · server default: {default_model}"
+                )
+            else:
+                self.model_status.setText(f"{model_count} {noun} available")
 
         self.refresh_models_button.clicked.connect(lambda _checked=False: refresh_available_models(manual=True))
         self.refresh_timer.timeout.connect(poll_model_refresh)

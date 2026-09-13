@@ -206,10 +206,14 @@ class SplitDistributionTests(unittest.TestCase):
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
                         "fitted_dialog_client_size", "fit_dialog_to_available_screen"}
-            if filename == "sharped_server_client.py":
-                # Display-only compatibility status/disabled entries; scientific
-                # transforms and application workflows remain baseline-identical.
-                excluded |= {"model_catalog_status", "apply_model_catalog"}
+            if filename == "app.py":
+                excluded.add("run_sharped_deblur")
+            elif filename == "jana_superflip.py":
+                excluded.add("deblur_with_sharped")
+            elif filename == "sharped_server_client.py":
+                excluded |= {"normalize_server_url", "model_selection", "current_model_catalog",
+                             "model_catalog_status", "apply_model_catalog", "sync_model_catalog",
+                             "resolve_effective_model"}
             for name in old.keys() - excluded:
                 self.assertEqual(old[name], new.get(name), f"{filename}:{name}")
 
