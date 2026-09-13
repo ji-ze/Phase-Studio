@@ -38,6 +38,7 @@ class _Models:
     def __init__(self, models, default_model):
         self.models = list(models)
         self.default_model = default_model
+        self.status = "server"
 
 
 def pump(app, wizard, seconds=3.0):
@@ -131,7 +132,6 @@ def main():
 
     # --- an explicit user choice survives a later refresh ---
     wizard.model.setCurrentText("wombat 1.4")
-    wizard.model_user_picked["value"] = True
     wizard.refresh_models_button.click()
     pump(app, wizard)
     check("manual Refresh models performs a new request", calls["n"] == 2)

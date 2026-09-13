@@ -13,6 +13,13 @@ for every file, checking the exit code) without any additional tooling.
 
 ## What's here
 
+- `test_sharped_catalog.py` -- standard-library unittest coverage of the real
+  model response schema, atomic catalog/default replacement, selection intent,
+  multipart DEFAULT/explicit uploads through both application entry points,
+  late QSettings restoration, widget reconstruction, restart, shared preflight
+  and Wizard state, failed refreshes, custom servers, and bounded reuse.
+  Run directly with `python tests/test_sharped_catalog.py`; no pytest required.
+
 - `test_scientific_core.py` -- golden regression baseline for the pure
   parsing/analysis functions in `phase_studio/app.py`: HKL parsing
   (`read_hkl`), duplicate-reflection merging, completeness analysis

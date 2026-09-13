@@ -74,9 +74,17 @@ except Exception:
     )
 
 try:
-    from phase_studio.sharped_server_client import SharpEDServerClient
+    from phase_studio.sharped_server_client import (
+        SharpEDServerClient, DEFAULT_SERVER_URL,
+        normalize_server_url, current_model_catalog,
+        model_selection, sync_model_catalog,
+    )
 except Exception:
-    from sharped_server_client import SharpEDServerClient
+    from sharped_server_client import (
+        SharpEDServerClient, DEFAULT_SERVER_URL,
+        normalize_server_url, current_model_catalog,
+        model_selection, sync_model_catalog,
+    )
 
 try:
     from phase_studio.sharped_map_scaling import (
@@ -5161,7 +5169,7 @@ def run_sharped_deblur(
     log_both(f"SharpED server HTTP timeout: {timeout} seconds")
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("Immediate stop requested.")
-    if max_upload_mb <= 0 and "jana.fzu.cz" in str(base_url).lower():
+    if max_upload_mb <= 0 and normalize_server_url(base_url) == DEFAULT_SERVER_URL:
         input_bytes = int(Path(input_map).stat().st_size)
         public_limit_bytes = 100_000_000
         if input_bytes > public_limit_bytes:
@@ -5210,20 +5218,12 @@ def run_sharped_deblur(
         log_both(f"SharpED map value detail: exponent {exponent:.3f} applied to {scaled_upload_map.name}")
 
     client = SharpEDServerClient(base_url=base_url, timeout=float(timeout))
-    selected_model = model.strip()
-    if not selected_model or selected_model.lower() in {"default", "server default", "sharped default"}:
-        models = client.get_models(log=log_both)
-        selected_model = models.default_model or "SharpED latest"
-        if models.models:
-            log_both("SharpED server models: " + ", ".join(models.models))
-        log_both(f"SharpED server default model: {selected_model}")
-
     client.execute(
         file_path=upload_map,
         bearer_token=api_token.strip(),
         out_path=output_map,
         elements=elements.strip() or "C N O",
-        model=selected_model,
+        model=model,
         outres=outres,
         poll_seconds=poll_seconds,
         max_polls=max_polls,
@@ -5956,7 +5956,7 @@ INPUT_TOOLTIPS = {
     "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected first from the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
     "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2θ-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
     "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
-    "sharped_base_url": "SharpED inference server base URL. The C++ reference client uses https://jana.fzu.cz.",
+    "sharped_base_url": "SharpED inference server base URL. The current service is https://sharped.fzu.cz.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
     "show_beta_features": "When off (default), beta and experimental Phasing methods and the settings that only apply to them are hidden entirely from the Basic tabs, not just disabled. Enable to make them selectable.",
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
@@ -7266,7 +7266,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         programs_form.addRow("Downloads", program_links)
 
         sharped_api_form = self._add_form_group(setup_tab, "SharpED connection")
-        self._add_text(sharped_api_form, "sharped_base_url", "Server URL", "https://jana.fzu.cz")
+        self._add_text(sharped_api_form, "sharped_base_url", "Server URL", DEFAULT_SERVER_URL)
         self._add_text(sharped_api_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
         try:
             self.inputs["sharped_api_token"].setEchoMode(QLineEdit.Password)  # type: ignore[attr-defined]
@@ -7417,7 +7417,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>Superflip and EDMA are external third-party programs, distributed by their own authors and not bundled with Phase Studio. Both are normally installed with Jana2020; if a path is not configured, Phase Studio looks for them in <code>C:\\Jana2020\\SUPERFLIP</code> when a workflow starts and fills the path in automatically. Official downloads: <a href="https://superflip.fzu.cz/download/superflip_win.zip">superflip_win.zip</a> and <a href="https://superflip.fzu.cz/download/EDMA_win.zip">EDMA_win.zip</a>; license information at <a href="https://superflip.fzu.cz/">superflip.fzu.cz</a>.</p>
             <p>Requirements are checked immediately before a workflow starts, and only for the stages that workflow actually uses -- a workflow that never runs EDMA is never asked for EDMA.</p>
             <h3>SharpED connection</h3>
-            <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
+            <p><b>Server URL</b> is the SharpED inference-server base URL; the current service is <code>https://sharped.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
             <p>SharpED processing needs an active Jana2020 or SharpED account. Sign in at <a href="https://sharped.fzu.cz/sharp-ed">sharped.fzu.cz/sharp-ed</a> and create a token with <b>Create token</b>, then paste it into <b>API token</b> above.</p>
             <h3>Interface</h3>
             <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize SharpED map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
@@ -8085,7 +8085,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         workflow_form.addRow("", self.recycle_note)
 
         model_form = self._add_form_group(workflow_tab, "SharpED model")
-        self._add_combo(model_form, "sharped_model", "Model", ["koala 2.0"], "koala 2.0")
+        self._add_combo(model_form, "sharped_model", "Model", ["default"], "default")
         try:
             self.inputs["sharped_model"].lineEdit().setReadOnly(False)  # type: ignore[attr-defined]
             self.inputs["sharped_model"].lineEdit().setCursor(Qt.CursorShape.IBeamCursor)  # type: ignore[attr-defined]
@@ -8095,6 +8095,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
         self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
         model_form.addRow("", self.refresh_models_btn)
+        self.sharped_model_status = QLabel("Model information not loaded.")
+        self.sharped_model_status.setWordWrap(True)
+        model_form.addRow("", self.sharped_model_status)
+        self._sync_sharped_catalog()
         settings_links_row = QHBoxLayout()
         settings_links_row.setSpacing(10)
         connection_settings_link = QToolButton()
@@ -8961,6 +8965,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _set_widget_value_from_string(self, widget: object, value: str) -> None:
         value = "" if value is None else str(value)
+        if widget is self.inputs.get("sharped_base_url"):
+            value = normalize_server_url(value)
+        if widget is self.inputs.get("sharped_model"):
+            value = model_selection(value)
+            catalog = current_model_catalog(self._line_value("sharped_base_url"))
+            if catalog is not None:
+                self._sync_sharped_catalog()
+                if value not in catalog.models:
+                    value = "default"
         try:
             if isinstance(widget, PathRow):
                 widget.set_value(value)
@@ -10563,21 +10576,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._show_stopping_badge()
         self.log("Immediate stop requested.", level="DETAIL")
 
+    def _sync_sharped_catalog(self) -> None:
+        widget = self.inputs.get("sharped_model")
+        if not isinstance(widget, QComboBox):
+            return
+        status = sync_model_catalog(widget, self._line_value("sharped_base_url"))
+        if status is not None:
+            self.sharped_model_status.setText(status)
+
     def refresh_sharped_models(self) -> None:
         base_widget = self.inputs.get("sharped_base_url")
         timeout_widget = self.inputs.get("sharped_timeout_seconds")
-        base_url = base_widget.text().strip() if isinstance(base_widget, QLineEdit) else "https://jana.fzu.cz"
+        base_url = base_widget.text().strip() if isinstance(base_widget, QLineEdit) else DEFAULT_SERVER_URL
         timeout = 20
         if isinstance(timeout_widget, QSpinBox):
             timeout = max(5, min(60, int(timeout_widget.value())))
 
+        self.sharped_model_status.setText("Loading models…")
+
         def worker() -> None:
             try:
-                client = SharpEDServerClient(base_url=base_url or "https://jana.fzu.cz", timeout=float(timeout))
+                client = SharpEDServerClient(base_url=base_url or DEFAULT_SERVER_URL, timeout=float(timeout))
                 models = client.get_models()
-                self.msg_queue.put(("sharped_models", (models.default_model, models.models)))
-            except Exception as exc:
-                self.msg_queue.put(("log", f"SharpED model refresh failed: {exc}"))
+                self.msg_queue.put(("sharped_models", (normalize_server_url(base_url), models)))
+            except Exception:
+                self.msg_queue.put(("sharped_models_failed", normalize_server_url(base_url)))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -10613,7 +10636,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("powder_wavelength", "0.0")
             set_value("powder_separation_factor", "0.2")
             set_value("powder_redistribution_mix", "1.0")
-            set_value("sharped_model", "koala 2.0")
+            set_value("sharped_model", "default")
             set_value("perform_algorithm", "CF")
             set_value("maxcycles", "2000")
             set_value("repeatmode", "10")
@@ -10734,6 +10757,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._show_error_report(report)
 
     def _poll_queue(self) -> None:
+        self._sync_sharped_catalog()
         try:
             processed = 0
             while processed < 250:
@@ -10775,23 +10799,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self.structure_cell = gemmi.UnitCell(*values)
                         self._update_structure_views()
                 elif kind == "sharped_models":
-                    default_model, models = payload  # type: ignore[misc]
-                    widget = self.inputs.get("sharped_model")
-                    if isinstance(widget, QComboBox):
-                        current = widget.currentText().strip() or "default"
-                        widget.blockSignals(True)
-                        widget.clear()
-                        values = ["default"]
-                        if default_model:
-                            values.append(str(default_model))
-                        for model in list(models):
-                            if model not in values:
-                                values.append(model)
-                        widget.addItems(values)
-                        idx = widget.findText(current)
-                        widget.setCurrentIndex(idx if idx >= 0 else 0)
-                        widget.blockSignals(False)
-                    self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
+                    source, catalog = payload
+                    if source != normalize_server_url(self._line_value("sharped_base_url")):
+                        continue
+                    self._sync_sharped_catalog()
+                    self._append_execution_log(
+                        f"[SharpED] Models refreshed from server · {len(catalog.models)} available · default: {catalog.default_model}",
+                        level="SUCCESS", subsystem="SharpED")
+                elif kind == "sharped_models_failed":
+                    if payload != normalize_server_url(self._line_value("sharped_base_url")):
+                        continue
+                    self._sync_sharped_catalog()
+                    self.sharped_model_status.setText(
+                        "Model refresh failed · " + self.sharped_model_status.text()
+                        if current_model_catalog(payload) else "Model refresh failed · no model information available.")
+                    self._append_execution_log("[SharpED] Model refresh failed · keeping previous catalog if available", subsystem="SharpED")
                 elif kind == "hkl_load_result":
                     parsed_count = len(payload.reflections) if isinstance(payload, HklLoadResult) else 0
                     unique_count = len(payload.unique_reflections) if isinstance(payload, HklLoadResult) else 0
@@ -12832,6 +12854,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.draw_idle()
 
     def get_config(self) -> RunConfig:
+        self._sync_sharped_catalog()
         input_source_mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
         reference_xplor: Optional[Path] = None
         first_model_text = self._path_value("first_cycle_modelfile")
@@ -12937,7 +12960,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             run_edma_deblurred=self._check_value("run_edma_deblurred"),
             compute_omit_maps=self._check_value("compute_omit_maps"),
             compute_omit_rfree=self._check_value("compute_omit_maps") and self._check_value("compute_omit_rfree"),
-            sharped_base_url=self._line_value("sharped_base_url") or "https://jana.fzu.cz",
+            sharped_base_url=self._line_value("sharped_base_url") or DEFAULT_SERVER_URL,
             sharped_api_token=self._line_value("sharped_api_token") or os.environ.get("SHARPED_API_TOKEN", ""),
             sharped_model=self._combo_value("sharped_model") or "default",
             sharped_elements=self._line_value("sharped_elements"),

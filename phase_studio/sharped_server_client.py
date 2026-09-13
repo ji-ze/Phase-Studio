@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import mimetypes
 import ssl
+import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.error import HTTPError, URLError
@@ -19,6 +20,21 @@ except Exception:
 
 
 ProgressLog = Optional[Callable[[str], None]]
+DEFAULT_SERVER_URL = "https://sharped.fzu.cz"
+MODEL_METADATA_REUSE_SECONDS = 15.0
+
+
+def normalize_server_url(value: str) -> str:
+    """Migrate the former bundled host, including persisted configurations."""
+    value = str(value or "").strip().rstrip("/")
+    if not value or value.lower() in {"https://jana.fzu.cz", "http://jana.fzu.cz"}:
+        return DEFAULT_SERVER_URL
+    return value
+
+
+def model_selection(value: str) -> str:
+    value = str(value or "").strip()
+    return "default" if value.lower() in {"", "default", "server default", "sharped default"} else value
 
 
 def redact_server_diagnostic(value: object) -> str:
@@ -54,11 +70,71 @@ class StatusResult:
         return str(self.status or "").strip().lower() in {"failed", "failure", "error", "errored", "cancelled", "canceled"}
 
 
-@dataclass
+@dataclass(frozen=True)
 class ModelsResult:
     default_model: str
-    models: list[str]
+    models: tuple[str, ...]
     raw_json: str
+    fetched_at: float = 0.0
+    source: str = ""
+    status: str = "server"
+
+
+_catalogs: dict[str, ModelsResult] = {}
+_catalog_lock = threading.RLock()
+
+
+def current_model_catalog(base_url: str) -> Optional[ModelsResult]:
+    return _catalogs.get(normalize_server_url(base_url))
+
+
+def model_catalog_status(catalog: ModelsResult) -> str:
+    origin = "from server" if catalog.status == "server" else "using cached model information"
+    return f"{len(catalog.models)} models available · server default: {catalog.default_model} · {origin}"
+
+
+def apply_model_catalog(combo: object, catalog: ModelsResult) -> str:
+    """Replace selector data while retaining only available selection intent."""
+    selected = model_selection(combo.currentText())
+    blocked = combo.blockSignals(True)
+    try:
+        combo.clear()
+        combo.addItems(["default", *catalog.models])
+        combo.setCurrentText(selected if selected in catalog.models else "default")
+        combo._sharped_catalog = catalog
+    finally:
+        combo.blockSignals(blocked)
+    return model_catalog_status(catalog)
+
+
+def sync_model_catalog(combo: object, base_url: str) -> Optional[str]:
+    """Update a view only when the shared snapshot or server changes."""
+    catalog = current_model_catalog(base_url)
+    previous = getattr(combo, "_sharped_catalog", None)
+    if catalog is not None:
+        return apply_model_catalog(combo, catalog) if previous is not catalog else None
+    if previous is not None:
+        # A different custom server must not display the former server's catalog.
+        selected = model_selection(combo.currentText())
+        blocked = combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem("default")
+            combo.setCurrentText(selected)
+            combo._sharped_catalog = None
+        finally:
+            combo.blockSignals(blocked)
+        return "Model information not loaded for this server."
+    return None
+
+
+def resolve_effective_model(selection: str, catalog: Optional[ModelsResult]) -> str:
+    selected = model_selection(selection)
+    if selected != "default":
+        return selected
+    if catalog is None:
+        raise SharpEDServerError("Current SharpED server default is unavailable.")
+    return catalog.default_model
 
 
 class SharpEDServerError(RuntimeError):
@@ -68,11 +144,11 @@ class SharpEDServerError(RuntimeError):
 class SharpEDServerClient:
     def __init__(
         self,
-        base_url: str = "https://jana.fzu.cz",
+        base_url: str = DEFAULT_SERVER_URL,
         user_agent: str = "PhaseStudio-SharpED/1.0",
         timeout: float = 600.0,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        self.base_url = normalize_server_url(base_url)
         self.user_agent = user_agent
         self.timeout = timeout
         self.ssl_context, self.tls_fallback_message = self._create_ssl_context()
@@ -128,17 +204,47 @@ class SharpEDServerClient:
             log(f"TLS fallback detail: {self.tls_fallback_message}")
             self._tls_fallback_logged = True
 
-    def get_models(self, log: ProgressLog = None) -> ModelsResult:
+    def get_models(self, log: ProgressLog = None, *, max_age: float = 0.0) -> ModelsResult:
+        """Refresh by default; adjacent setup/preflight consumers may reuse briefly.
+
+        Explicit Refresh and DEFAULT submission always use max_age=0, so neither
+        can bind a new job to an earlier server default merely to save a request.
+        """
         self._log_tls_fallback(log)
+        # Serialize refreshes so an older response cannot overwrite a newer one.
+        # Publish catalog and default as one immutable snapshot. No disk cache.
+        with _catalog_lock:
+            previous = _catalogs.get(self.base_url)
+            if (max_age > 0 and previous is not None and previous.status == "server"
+                    and 0 <= time.time() - previous.fetched_at < max_age):
+                if log:
+                    log(f"[SharpED] Using recent model metadata · {len(previous.models)} available · default: {previous.default_model}")
+                return previous
+            try:
+                if log:
+                    log("SharpED server: fetching available models")
+                source = self._url("/sharp-ed/models")
+                body = self._request_text("GET", source, headers={"Accept": "application/json", "Cache-Control": "no-cache"})
+                result = self._parse_models(body, source)
+                _catalogs[self.base_url] = result
+            except Exception:
+                if previous is not None:
+                    _catalogs[self.base_url] = replace(previous, status="cached")
+                if log:
+                    log("[SharpED] Model refresh failed · keeping previous catalog if available")
+                raise
         if log:
-            log("SharpED server: fetching available models")
-        body = self._request_text("GET", self._url("/sharp-ed/models"))
+            log(f"[SharpED] Models refreshed from server · {len(result.models)} available · default: {result.default_model}")
+        return result
+
+    def _parse_models(self, body: str, source: str) -> ModelsResult:
         data = self._loads_json(body, "Models")
-        return ModelsResult(
-            default_model=str(data.get("default") or ""),
-            models=[str(item) for item in data.get("models", []) if isinstance(item, str)],
-            raw_json=body,
-        )
+        models, default = data.get("models"), data.get("default")
+        if (not isinstance(models, list) or not models
+                or any(not isinstance(item, str) or not item.strip() or model_selection(item) == "default" for item in models)
+                or not isinstance(default, str) or default not in models):
+            raise SharpEDServerError("Models JSON schema invalid: expected model names and a default present in models.")
+        return ModelsResult(default, tuple(dict.fromkeys(models)), body, time.time(), source)
 
     def execute(
         self,
@@ -146,7 +252,7 @@ class SharpEDServerClient:
         bearer_token: str,
         out_path: Path,
         elements: str,
-        model: str = "SharpED latest",
+        model: str = "default",
         outres: float = 0.2,
         poll_seconds: int = 2,
         max_polls: int = -1,
@@ -189,6 +295,12 @@ class SharpEDServerClient:
             raise SharpEDServerError("Missing SharpED API token.")
         if not file_path.is_file():
             raise SharpEDServerError(f"Input map not found: {file_path}")
+
+        model = model_selection(model)
+        catalog = self.get_models(log=log) if model == "default" else None
+        model = resolve_effective_model(model, catalog)
+        if log:
+            log(f"[SharpED] Effective model: {model}")
 
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         fields = {
