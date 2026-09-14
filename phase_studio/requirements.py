@@ -79,6 +79,10 @@ class RequirementStatus:
     # Set when the check found a usable candidate the configuration does not
     # point at yet, so the caller can repair the setting without asking.
     suggested_path: Optional[Path] = None
+    # A successful SharpED reachability check already fetched the server's
+    # model response. Keep its default for the immediately following run so
+    # DEFAULT does not trigger the same public request a second time.
+    sharped_default_model: str = ""
 
     @property
     def ok(self) -> bool:
@@ -405,7 +409,11 @@ def check_sharped_api(base_url: str, token: str, *, timeout: float = 15.0,
     if models is None or not hasattr(models, "models"):
         return RequirementStatus(kind=RequirementKind.SHARPED,
                                  state=RequirementState.MALFORMED_RESPONSE)
-    return RequirementStatus(kind=RequirementKind.SHARPED, state=RequirementState.OK)
+    return RequirementStatus(
+        kind=RequirementKind.SHARPED,
+        state=RequirementState.OK,
+        sharped_default_model=str(getattr(models, "default_model", "") or "").strip(),
+    )
 
 
 def _classify_sharped_error(exc: BaseException) -> RequirementStatus:

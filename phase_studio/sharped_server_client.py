@@ -17,9 +17,26 @@ try:
 except Exception:
     from error_reporting import sanitize_error_details
 
+try:
+    from phase_studio.performance import profile_stage
+except Exception:
+    from performance import profile_stage
+
 
 ProgressLog = Optional[Callable[[str], None]]
 DEFAULT_SERVER_URL = "https://jana.fzu.cz"
+
+
+def polling_delay_seconds(completed_polls: int, configured_seconds: int) -> float:
+    """Return the bounded wait before the next SharpED status request.
+
+    The first two waits are capped at one second. Long-running jobs then use
+    the configured interval unchanged, adding at most one early status/probe
+    pair for the default two-second setting while reducing short-job detection
+    latency without sustained extra server load.
+    """
+    configured = float(max(1, int(configured_seconds)))
+    return min(configured, 1.0) if int(completed_polls) <= 2 else configured
 
 
 def redact_server_diagnostic(value: object) -> str:
@@ -78,6 +95,7 @@ class SharpEDServerClient:
         self.timeout = timeout
         self.ssl_context, self.tls_fallback_message = self._create_ssl_context()
         self._tls_fallback_logged = False
+        self.performance_profiler = None
 
     @staticmethod
     def _create_ssl_context() -> tuple[ssl.SSLContext, str]:
@@ -133,7 +151,8 @@ class SharpEDServerClient:
         self._log_tls_fallback(log)
         if log:
             log("SharpED server: fetching available models")
-        body = self._request_text("GET", self._url("/sharp-ed/models"))
+        with profile_stage(self.performance_profiler, "SharpED model discovery", "external"):
+            body = self._request_text("GET", self._url("/sharp-ed/models"))
         data = self._loads_json(body, "Models")
         return ModelsResult(
             default_model=str(data.get("default") or ""),
@@ -156,15 +175,16 @@ class SharpEDServerClient:
     ) -> Path:
         self._raise_if_stopped(stop_event)
         upload = self.upload(file_path, bearer_token, elements, model, outres, log=log)
-        status = self.wait_for_completion(
-            upload.status_url,
-            upload.token,
-            bearer_token,
-            poll_seconds=poll_seconds,
-            max_polls=max_polls,
-            log=log,
-            stop_event=stop_event,
-        )
+        with profile_stage(self.performance_profiler, "SharpED server processing and polling", "external"):
+            status = self.wait_for_completion(
+                upload.status_url,
+                upload.token,
+                bearer_token,
+                poll_seconds=poll_seconds,
+                max_polls=max_polls,
+                log=log,
+                stop_event=stop_event,
+            )
         if not status.download_url:
             status.download_url = self._url(f"/api/user/sharp-ed/download/{upload.token}")
         self._raise_if_stopped(stop_event)
@@ -206,7 +226,8 @@ class SharpEDServerClient:
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Content-Length": str(len(body)),
         }
-        text = self._request_text("POST", self._url("/api/user/sharp-ed/upload"), data=body, headers=headers)
+        with profile_stage(self.performance_profiler, "SharpED upload transfer", "external"):
+            text = self._request_text("POST", self._url("/api/user/sharp-ed/upload"), data=body, headers=headers)
         data = self._loads_json(text, "Upload")
         if not data.get("success", False):
             raise SharpEDServerError(f"SharpED upload failed: {redact_server_diagnostic(text)}")
@@ -239,7 +260,8 @@ class SharpEDServerClient:
         last_logged_status = ""
         while max_polls < 0 or polls < max_polls:
             self._raise_if_stopped(stop_event)
-            status = self.get_status(status_url, job_token, bearer_token)
+            with profile_stage(self.performance_profiler, "SharpED status request", "external"):
+                status = self.get_status(status_url, job_token, bearer_token)
             normalized_status = str(status.status or "<empty>").strip().lower()
             if log and normalized_status != last_logged_status:
                 if normalized_status in {"processing", "running", "queued", "pending"}:
@@ -253,7 +275,8 @@ class SharpEDServerClient:
                 return status
             if status.failed:
                 raise SharpEDServerError(f"SharpED processing failed: {status.error_message}")
-            probe = self._probe_download(job_token, bearer_token)
+            with profile_stage(self.performance_profiler, "SharpED compatibility download probe", "external"):
+                probe = self._probe_download(job_token, bearer_token)
             if probe is not None:
                 if log:
                     log("[SharpED] Result available · downloading…")
@@ -270,10 +293,11 @@ class SharpEDServerClient:
                     download_bytes=probe,
                 )
             polls += 1
-            deadline = time.monotonic() + max(1, int(poll_seconds))
-            while time.monotonic() < deadline:
-                self._raise_if_stopped(stop_event)
-                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+            deadline = time.monotonic() + polling_delay_seconds(polls, poll_seconds)
+            with profile_stage(self.performance_profiler, "SharpED polling interval wait", "external"):
+                while time.monotonic() < deadline:
+                    self._raise_if_stopped(stop_event)
+                    time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
         raise SharpEDServerError("SharpED processing did not finish within the polling limit.")
 
     def get_status(self, status_url: str, job_token: str, bearer_token: str) -> StatusResult:
@@ -304,7 +328,8 @@ class SharpEDServerClient:
     ) -> None:
         if log:
             log(f"[SharpED] Downloading result to {out_path}")
-        body = self._request_bytes_with_auth_candidates(download_url, [primary_token, fallback_token])
+        with profile_stage(self.performance_profiler, "SharpED download transfer", "external"):
+            body = self._request_bytes_with_auth_candidates(download_url, [primary_token, fallback_token])
         self._write_download_body(body, out_path)
 
     def _write_download_body(self, body: bytes, out_path: Path) -> None:

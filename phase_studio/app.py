@@ -140,6 +140,11 @@ except Exception:
     from process_utils import allow_external_process_foreground, no_console_popen_kwargs, text_encoding
 
 try:
+    from phase_studio.performance import TimingToken, WorkflowProfiler, profile_stage
+except Exception:
+    from performance import TimingToken, WorkflowProfiler, profile_stage
+
+try:
     import gemmi
 except Exception as exc:
     raise RuntimeError(
@@ -706,6 +711,8 @@ class PipelineState:
     validation_context: Optional[ValidationContext] = None
     pending_powder_repartition_change_percent: Optional[float] = None
     pending_intensity_correction_change_percent: Optional[float] = None
+    performance_profiler: Optional[WorkflowProfiler] = None
+    performance_root: Optional[TimingToken] = None
 
 
 @dataclass(frozen=True)
@@ -2774,6 +2781,14 @@ def xplor_fft_intensity_phase(xplor_map: Path, hkl: Tuple[int, int, int]) -> Tup
 
 def xplor_fft_predictions(xplor_map: Path, hkls: Sequence[Tuple[int, int, int]]) -> Dict[Tuple[int, int, int], Tuple[float, float]]:
     xmap = read_xplor_map(xplor_map)
+    return xplor_fft_predictions_from_map(xmap, hkls)
+
+
+def xplor_fft_predictions_from_map(
+    xmap: XplorMap,
+    hkls: Sequence[Tuple[int, int, int]],
+) -> Dict[Tuple[int, int, int], Tuple[float, float]]:
+    """Calculate requested coefficients from an XPLOR map already in memory."""
     grid = tuple(int(v) for v in xmap.grid)
     nx, ny, nz = grid[0], grid[3], grid[6]
     data = np.asarray(xmap.data, dtype=np.float64).reshape((nz, ny, nx))
@@ -2853,7 +2868,7 @@ def compose_fobs_phicalc_map(
     SharpED in the next recycling cycle."""
     xmap = read_xplor_map(deblurred_map)
     hkls = [(int(r.h), int(r.k), int(r.l)) for r in reflections]
-    predictions = xplor_fft_predictions(deblurred_map, hkls)
+    predictions = xplor_fft_predictions_from_map(xmap, hkls)
     phases_by_hkl = {hkl: phase for hkl, (_intensity, phase) in predictions.items()}
     new_xmap, used = synthesize_xplor_map_from_phases(
         reflections, data_mode, xmap.grid, xmap.cell, xmap.axis_order, phases_by_hkl, title, spacegroup
@@ -3029,18 +3044,23 @@ def build_validation_context(
     )
 
 
-def assess_xplor_map(path: Path, context: ValidationContext) -> MapQualityMetrics:
-    try:
-        xmap = read_xplor_map(path)
-        return compute_map_quality(xmap.data, xmap.grid, xmap.cell, xmap.axis_order, context)
-    except Exception as exc:
-        return MapQualityMetrics(
-            n_measured_reflections=len(context.original_measured_reflections),
-            n_work_reflections=len(context.work_reflections),
-            n_free_reflections=len(context.free_reflections),
-            n_triplets=len(context.triplet_set),
-            unavailable_reason=str(exc),
-        )
+def assess_xplor_map(
+    path: Path,
+    context: ValidationContext,
+    profiler: Optional[WorkflowProfiler] = None,
+) -> MapQualityMetrics:
+    with profile_stage(profiler, "Map-quality metrics"):
+        try:
+            xmap = read_xplor_map(path)
+            return compute_map_quality(xmap.data, xmap.grid, xmap.cell, xmap.axis_order, context)
+        except Exception as exc:
+            return MapQualityMetrics(
+                n_measured_reflections=len(context.original_measured_reflections),
+                n_work_reflections=len(context.work_reflections),
+                n_free_reflections=len(context.free_reflections),
+                n_triplets=len(context.triplet_set),
+                unavailable_reason=str(exc),
+            )
 
 
 def format_validation_log_line(
@@ -4934,9 +4954,9 @@ def run_command(
         # A dedicated reader thread drains the pipe with blocking readline()
         # calls -- pipes/threads are used instead of select()/pty so this
         # works identically on a Windows PyInstaller build. The main loop
-        # below never blocks on it (queue.get(timeout=...)), so stop_event
-        # and the timeout deadline stay checked at the same ~0.2s cadence as
-        # before, regardless of how much (or how little) output arrives.
+        # below waits briefly on that queue, so new output and the reader's EOF
+        # sentinel wake it immediately. The short timeout keeps stop_event and
+        # command deadlines responsive even when the child is silent.
         line_queue: "queue.Queue[Optional[bytes]]" = queue.Queue()
 
         def reader() -> None:
@@ -4977,7 +4997,22 @@ def run_command(
                 proc.kill()
                 proc.wait(timeout=5)
                 raise RuntimeError(f"Command timed out after {timeout} seconds: {' '.join(str(x) for x in cmd)}")
-            drained_any = False
+            try:
+                raw_bytes = line_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if raw_bytes is None:
+                reader_done = True
+                # EOF normally coincides with process exit. A bounded native
+                # wait observes that exit immediately instead of paying one
+                # more queue timeout; if a child deliberately closes stdout
+                # early, cancellation/deadline checks resume after 50 ms.
+                try:
+                    proc.wait(timeout=0.05)
+                except subprocess.TimeoutExpired:
+                    pass
+                continue
+            relay(raw_bytes)
             while True:
                 try:
                     raw_bytes = line_queue.get_nowait()
@@ -4987,9 +5022,6 @@ def run_command(
                     reader_done = True
                     break
                 relay(raw_bytes)
-                drained_any = True
-            if not drained_any:
-                time.sleep(0.2)
         # The process has exited; drain whatever the reader thread already
         # queued (or is about to finish queueing), bounded so a stalled
         # reader can never hang command completion.
@@ -5050,7 +5082,7 @@ def warn_if_windows_unsigned_exe(exe: str, label: str) -> str:
         pass
     return ""
 
-def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext, observed_hkl: Path, model_file: Optional[Path], reference_file: Optional[Path], reference_format: str, superflip_exe: str, perform_algorithm: str, output_format: str, write_auxiliary_outputs: bool, export_superflip_xplor: bool, export_superflip_ccp4: bool, export_superflip_jana: bool, voxel: str, bestdensities_count: int, bestdensities_metric: str, bestdensities_symmetry: bool, polish: bool, maxcycles: int, repeatmode: int, randomseed: str, delta: str, weakratio: str, biso: str, reflection_data_mode: str, normalize: str, nresshells: int, missing: str, searchsymmetry: str, derivesymmetry: str, electrons: str, dataitemwidths: str, extra_superflip_keywords: str, log: Callable[[str], None], stop_event: Optional[threading.Event] = None, on_output_line: Optional[Callable[[str], None]] = None) -> Path:
+def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext, observed_hkl: Path, model_file: Optional[Path], reference_file: Optional[Path], reference_format: str, superflip_exe: str, perform_algorithm: str, output_format: str, write_auxiliary_outputs: bool, export_superflip_xplor: bool, export_superflip_ccp4: bool, export_superflip_jana: bool, voxel: str, bestdensities_count: int, bestdensities_metric: str, bestdensities_symmetry: bool, polish: bool, maxcycles: int, repeatmode: int, randomseed: str, delta: str, weakratio: str, biso: str, reflection_data_mode: str, normalize: str, nresshells: int, missing: str, searchsymmetry: str, derivesymmetry: str, electrons: str, dataitemwidths: str, extra_superflip_keywords: str, log: Callable[[str], None], stop_event: Optional[threading.Event] = None, on_output_line: Optional[Callable[[str], None]] = None, profiler: Optional[WorkflowProfiler] = None) -> Path:
     cycle_dir.mkdir(parents=True, exist_ok=True)
     output_name = f"{prefix}.xplor"
     inp = cycle_dir / f"{prefix}.inflip"
@@ -5107,16 +5139,17 @@ def run_superflip_cycle(cycle_dir: Path, prefix: str, ref_ctx: ReferenceContext,
         except Exception as exc:
             log(f"  Could not remove stale Superflip output {stale}: {exc}")
     run_started_at = time.time()
-    run_command(
-        [superflip_exe, inp.name],
-        cwd=cycle_dir,
-        log_path=log_path,
-        log=log,
-        stop_event=stop_event,
-        allow_foreground=True,
-        on_output_line=on_output_line,
-        hide_console=True,
-    )
+    with profile_stage(profiler, "Superflip process", "external"):
+        run_command(
+            [superflip_exe, inp.name],
+            cwd=cycle_dir,
+            log_path=log_path,
+            log=log,
+            stop_event=stop_event,
+            allow_foreground=True,
+            on_output_line=on_output_line,
+            hide_console=True,
+        )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
         raise RuntimeError(f"Superflip did not create expected XPLOR map: {out}\n" + "\n".join(tail))
@@ -5145,6 +5178,7 @@ def run_superflip_symmetrize_map(
     derivesymmetry: str,
     log: Callable[[str], None],
     stop_event: Optional[threading.Event] = None,
+    profiler: Optional[WorkflowProfiler] = None,
 ) -> Path:
     sym_dir = cycle_dir / "superflip_symmetrized_deblur"
     sym_dir.mkdir(parents=True, exist_ok=True)
@@ -5175,15 +5209,16 @@ def run_superflip_symmetrize_map(
         except Exception as exc:
             log(f"  Could not remove stale Superflip symmetry output {stale}: {exc}")
     run_started_at = time.time()
-    run_command(
-        [superflip_exe, inp.name],
-        cwd=sym_dir,
-        log_path=log_path,
-        log=log,
-        stop_event=stop_event,
-        allow_foreground=True,
-        hide_console=True,
-    )
+    with profile_stage(profiler, "Superflip symmetry process", "external"):
+        run_command(
+            [superflip_exe, inp.name],
+            cwd=sym_dir,
+            log_path=log_path,
+            log=log,
+            stop_event=stop_event,
+            allow_foreground=True,
+            hide_console=True,
+        )
     if not out.is_file() or out.stat().st_size == 0:
         tail = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-120:]
         raise RuntimeError(f"Superflip did not create expected symmetrized XPLOR map: {out}\n" + "\n".join(tail))
@@ -5228,6 +5263,7 @@ def run_sharped_deblur(
     stop_event: Optional[threading.Event] = None,
     progress: Optional[Callable[[str], None]] = None,
     map_value_exponent: float = SHARPED_MAP_VALUE_EXPONENT_DEFAULT,
+    profiler: Optional[WorkflowProfiler] = None,
 ) -> Path:
     output_map.parent.mkdir(parents=True, exist_ok=True)
     log_path = output_map.parent / f"{output_map.stem}.sharped.log"
@@ -5306,6 +5342,7 @@ def run_sharped_deblur(
         log_both(f"SharpED map value detail: exponent {exponent:.3f} applied to {scaled_upload_map.name}")
 
     client = SharpEDServerClient(base_url=base_url, timeout=float(timeout))
+    client.performance_profiler = profiler
     selected_model = model.strip()
     if not selected_model or selected_model.lower() in {"default", "server default", "sharped default"}:
         models = client.get_models(log=log_both)
@@ -5513,6 +5550,7 @@ def run_edma_on_xplor(
     extra_edma_keywords: str = "",
     structure_format: str = "cif",
     write_m40: bool = True,
+    profiler: Optional[WorkflowProfiler] = None,
 ) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     inp = out_dir / f"{prefix}_edma.inp"
@@ -5569,14 +5607,15 @@ def run_edma_on_xplor(
     # edma_log below), so it runs hidden. Command line, working directory,
     # captured output, exit-code handling and stop_event termination are
     # deliberately unchanged.
-    run_command(
-        [edma_exe, inp.name],
-        cwd=out_dir,
-        log_path=edma_log,
-        log=log,
-        stop_event=stop_event,
-        hide_console=True,
-    )
+    with profile_stage(profiler, "EDMA process", "external"):
+        run_command(
+            [edma_exe, inp.name],
+            cwd=out_dir,
+            log_path=edma_log,
+            log=log,
+            stop_event=stop_event,
+            hide_console=True,
+        )
     log_text = edma_log.read_text(encoding="utf-8", errors="replace") if edma_log.is_file() else ""
     lower_log = log_text.lower()
     edma_failed = (
@@ -6963,7 +7002,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         QTimer.singleShot(250, self.refresh_sharped_models)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll_queue)
-        self.timer.start(200)
+        self.timer.start(50)
 
     def _configure_form(self, form: QFormLayout) -> QFormLayout:
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
@@ -10964,6 +11003,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._show_error_report(report)
 
     def _poll_queue(self) -> None:
+        plot_dirty = False
+        structure_dirty = False
+        actions_dirty = False
         try:
             processed = 0
             while processed < 250:
@@ -10980,21 +11022,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self._completed_hkl_task_ids.add(hkl_task_id)
                 if kind == "log":
                     self._append_execution_log(payload)
-                    self._update_action_states()
+                    actions_dirty = True
                 elif kind == "result":
                     result = payload  # type: ignore[assignment]
                     self.results.append(result)  # type: ignore[arg-type]
                     self.superflip_atoms_for_plot = self._safe_parse_structure(result.superflip_edma_cif)  # type: ignore[attr-defined]
                     self.deblur_atoms_for_plot = self._safe_parse_structure(result.deblur_edma_cif)  # type: ignore[attr-defined]
-                    self._update_plot()
-                    self._update_structure_views()
-                    self._update_action_states()
+                    plot_dirty = True
+                    structure_dirty = True
+                    actions_dirty = True
                 elif kind == "validation_profile":
                     try:
                         self.current_validation_profile = ValidationProfile(str(payload))
                     except (TypeError, ValueError):
                         self.current_validation_profile = ValidationProfile.REFERENCE_FREE
-                    self._update_plot()
+                    plot_dirty = True
                 elif kind == "structure_update":
                     panel, cif_path = payload  # type: ignore[misc]
                     atoms = self._safe_parse_structure(Path(cif_path))
@@ -11002,15 +11044,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self.superflip_atoms_for_plot = atoms
                     elif str(panel) == "deblur":
                         self.deblur_atoms_for_plot = atoms
-                    self._update_structure_views()
+                    structure_dirty = True
                 elif kind == "reference_atoms":
                     self.reference_atoms_for_plot = list(payload)  # type: ignore[arg-type]
-                    self._update_structure_views()
+                    structure_dirty = True
                 elif kind == "structure_cell":
                     values = tuple(float(value) for value in payload)  # type: ignore[arg-type]
                     if len(values) == 6 and min(values[:3]) > 0:
                         self.structure_cell = gemmi.UnitCell(*values)
-                        self._update_structure_views()
+                        structure_dirty = True
                 elif kind == "sharped_models":
                     default_model, models = payload  # type: ignore[misc]
                     widget = self.inputs.get("sharped_model")
@@ -11125,6 +11167,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         QTimer.singleShot(0, self._auto_open_jana_result_selector)
         except queue.Empty:
             pass
+        # A worker can enqueue several state changes before one timer tick
+        # (for example two structure updates followed by the completed result).
+        # Apply their final state once per bounded batch so the GUI never pays
+        # for redraws that could not have become visible between queue items.
+        if plot_dirty:
+            self._update_plot()
+        if structure_dirty:
+            self._update_structure_views()
+        if actions_dirty:
+            self._update_action_states()
 
     def _auto_open_jana_result_selector(self) -> None:
         """Open the shared Jana2020 selector after a usable Wizard run.
@@ -13307,6 +13359,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 needs_sharped=needs_sharped,
             )
             if result.ok:
+                for checked in result.statuses:
+                    if (
+                        checked.kind is reqs.RequirementKind.SHARPED
+                        and checked.ok
+                        and checked.sharped_default_model
+                        and str(getattr(cfg, "sharped_model", "default") or "").strip().lower()
+                        in {"", "default", "server default", "sharped default"}
+                    ):
+                        cfg.sharped_model = checked.sharped_default_model
                 return True
             status = result.first_failure
             if status is None:
@@ -13427,23 +13488,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def pipeline_worker(self, cfg: Optional[RunConfig], resume_state: Optional[PipelineState] = None) -> None:
         if resume_state is not None:
+            profiler = WorkflowProfiler.from_environment()
+            resume_state.performance_profiler = profiler
+            resume_state.performance_root = profiler.start("Total workflow")
             try:
-                self.log(
-                    f"=== Workflow resumed at cycle {resume_state.completed_cycles + 1} of {resume_state.cfg.cycles} ===",
-                    level="STEP",
-                )
-                self.msg_queue.put(("progress_setup", resume_state.cfg.cycles))
-                self.msg_queue.put(("progress", resume_state.completed_cycles))
+                with profiler.stage("Continue run preparation"):
+                    self.log(
+                        f"=== Workflow resumed at cycle {resume_state.completed_cycles + 1} of {resume_state.cfg.cycles} ===",
+                        level="STEP",
+                    )
+                    self.msg_queue.put(("progress_setup", resume_state.cfg.cycles))
+                    self.msg_queue.put(("progress", resume_state.completed_cycles))
                 if normalize_reconstruction_mode(resume_state.cfg.reconstruction_mode) == "superflip":
                     self._run_pipeline_cycles(resume_state)
                 else:
                     self._run_sharped_recycle_cycles(resume_state)
+                self._finish_performance_profile(resume_state, "stopped" if self.stop_after_cycle.is_set() else "complete")
             except Exception as exc:
+                self._finish_performance_profile(resume_state, "failed")
                 self.msg_queue.put((
                     "error_report",
                     build_error_report(exc, operation="Run workflow", extra_details=traceback.format_exc()),
                 ))
             return
+        profiler = WorkflowProfiler.from_environment()
+        performance_root = profiler.start("Total workflow")
+        preparation_timing = profiler.start("Phase Studio preparation")
+        state: Optional[PipelineState] = None
         try:
             self.log("=== Workflow started ===", level="STEP")
             mode = normalize_input_source_mode(cfg.input_source_mode)
@@ -13686,13 +13757,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 current_reflections=current_reflections,
                 omit_test_hkls=omit_test_hkls,
                 validation_context=validation_context,
+                performance_profiler=profiler,
+                performance_root=performance_root,
             )
             self._resume_state = state
+            if preparation_timing is not None:
+                preparation_timing.stop()
             if reconstruction_mode == "superflip":
                 self._run_pipeline_cycles(state)
             else:
                 self._run_sharped_recycle_cycles(state)
+            self._finish_performance_profile(state, "stopped" if self.stop_after_cycle.is_set() else "complete")
         except Exception as exc:
+            if preparation_timing is not None:
+                preparation_timing.stop()
+            if state is not None:
+                self._finish_performance_profile(state, "failed")
+            else:
+                if performance_root is not None:
+                    performance_root.stop()
+                if cfg is not None:
+                    profiler.write_report(cfg.work_dir / "workflow_performance.txt", "failed")
             self.msg_queue.put((
                 "error_report",
                 build_error_report(
@@ -13701,6 +13786,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     extra_details=traceback.format_exc(),
                 ),
             ))
+
+    @staticmethod
+    def _finish_performance_profile(state: PipelineState, outcome: str) -> None:
+        profiler = state.performance_profiler
+        if profiler is None or not profiler.enabled:
+            return
+        if state.performance_root is not None:
+            state.performance_root.stop()
+            state.performance_root = None
+        profiler.write_report(state.cfg.work_dir / "workflow_performance.txt", outcome)
 
     def _run_pipeline_cycles(self, state: PipelineState) -> None:
         cfg = state.cfg
@@ -13853,7 +13948,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_export_ccp4 = sf_map_format == "ccp4"
             sf_export_jana = sf_map_format == "jana"
             sf_progress_relay = make_superflip_progress_relay("running")
-            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=sf_progress_relay)
+            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=sf_progress_relay, profiler=state.performance_profiler)
             if sf_progress_relay is not None and not sf_progress_relay.tracker.saw_progress:  # type: ignore[attr-defined]
                 self.log("[Superflip] Live repeat progress unavailable for this executable.", level="DETAIL")
             self.log(f"Superflip map: {sf_map}")
@@ -13874,11 +13969,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 write_observed_reflections(omit_hkl, omit_reflections, cfg.i_over_sigma_min, data_mode=configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 omit_prefix = f"{sf_prefix}_omit"
                 omit_progress_relay = make_superflip_progress_relay("omit map · running")
-                omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay)
+                omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay, profiler=state.performance_profiler)
                 self.log(f"Omit Superflip map ({len(state.omit_test_hkls)} reflections excluded): {omit_sf_map}")
                 omit_sf_correlation = xplor_map_correlation(sf_map, omit_sf_map)
                 if state.validation_context is not None:
-                    omit_sf_quality = assess_xplor_map(omit_sf_map, state.validation_context)
+                    omit_sf_quality = assess_xplor_map(omit_sf_map, state.validation_context, state.performance_profiler)
                     omit_sf_rfree = omit_sf_quality.r_free
                 self.log(
                     f"[Omit] Superflip map correlation={('n/a' if omit_sf_correlation is None else f'{omit_sf_correlation:.4f}')}"
@@ -13917,6 +14012,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
                     write_m40=cfg.jana_inflip is not None,
+                    profiler=state.performance_profiler,
                 )
             else:
                 sf_edma_dir.mkdir(parents=True, exist_ok=True)
@@ -13938,7 +14034,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     sf_heavy_atoms = count_heavy_atoms(sf_edma_cif)
             sf_quality: Optional[MapQualityMetrics] = None
             if state.validation_context is not None:
-                sf_quality = assess_xplor_map(sf_map, state.validation_context)
+                sf_quality = assess_xplor_map(sf_map, state.validation_context, state.performance_profiler)
                 sf_quality = with_reference_metrics(
                     sf_quality,
                     precision=sf_precision,
@@ -13985,6 +14081,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         busy=detail != "completed",
                     ),
                     map_value_exponent=cfg.sharped_map_value_exponent,
+                    profiler=state.performance_profiler,
                 )
             else:
                 shutil.copy2(sf_map, deblur_map)
@@ -14009,11 +14106,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         cycle, cfg.cycles, progress_stages, "SharpED", detail=f"omit map · {detail}", busy=detail != "completed",
                     ),
                     map_value_exponent=cfg.sharped_map_value_exponent,
+                    profiler=state.performance_profiler,
                 )
                 self.log(f"Omit {result_map_label('deblurred')}: {omit_deblur_map}")
                 omit_deblur_correlation = xplor_map_correlation(deblur_map, omit_deblur_map)
                 if state.validation_context is not None:
-                    omit_deblur_quality = assess_xplor_map(omit_deblur_map, state.validation_context)
+                    omit_deblur_quality = assess_xplor_map(omit_deblur_map, state.validation_context, state.performance_profiler)
                     omit_deblur_rfree = omit_deblur_quality.r_free
                 self.log(
                     f"[Omit] {result_map_label('deblurred')} correlation={('n/a' if omit_deblur_correlation is None else f'{omit_deblur_correlation:.4f}')}"
@@ -14045,6 +14143,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     derivesymmetry=cfg.derivesymmetry,
                     log=self.log,
                     stop_event=self.stop_now,
+                    profiler=state.performance_profiler,
                 )
             deblur_prefix = f"cycle_{cyc:03d}_deblurred"
             deblur_edma_dir = cycle_dir / "edma_deblurred"
@@ -14057,6 +14156,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
                     write_m40=cfg.jana_inflip is not None,
+                    profiler=state.performance_profiler,
                 )
             else:
                 deblur_edma_dir.mkdir(parents=True, exist_ok=True)
@@ -14081,7 +14181,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     deblur_heavy_atoms = count_heavy_atoms(deblur_edma_cif)
             deblur_quality: Optional[MapQualityMetrics] = None
             if cfg.run_sharped and not use_superflip_xplor_modelfile and state.validation_context is not None:
-                deblur_quality = assess_xplor_map(deblur_map, state.validation_context)
+                deblur_quality = assess_xplor_map(deblur_map, state.validation_context, state.performance_profiler)
                 deblur_quality = with_reference_metrics(
                     deblur_quality,
                     precision=deblur_precision,
@@ -14143,8 +14243,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             state.pending_powder_repartition_change_percent = None
             state.pending_intensity_correction_change_percent = None
             all_results.append(result)
-            write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
-            write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", all_results)
+            with profile_stage(state.performance_profiler, "Reports and CSV"):
+                write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
+                write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", all_results)
             if sf_quality is not None:
                 self.log(format_validation_log_line(cyc, "superflip", result.validation_profile, sf_quality), subsystem="Validation")
             if deblur_quality is not None:
@@ -14292,6 +14393,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode,
                         cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons,
                         cfg.dataitemwidths, cfg.extra_superflip_keywords, self.log, self.stop_now,
+                        profiler=state.performance_profiler,
                     )
                     self.log(f"[Cycle 1] Superflip map: {input_map}")
                     if self.stop_now.is_set():
@@ -14316,6 +14418,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     cycle, cfg.cycles, progress_stages, "SharpED", detail=detail, busy=detail != "completed",
                 ),
                 map_value_exponent=cfg.sharped_map_value_exponent,
+                profiler=state.performance_profiler,
             )
             self.log(f"{result_map_label('deblurred')}: {deblur_map}")
             if self.stop_now.is_set():
@@ -14323,7 +14426,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Phase calculation", busy=True)
             composed_map = cycle_dir / f"cycle_{cyc:03d}_fobs_phicalc.xplor"
-            compose_fobs_phicalc_map(composed_map, reflections, configured_data_mode, deblur_map, f"cycle_{cyc:03d}_fobs_phicalc", ref_ctx.spacegroup, self.log)
+            with profile_stage(state.performance_profiler, "Phase recycling Fourier composition"):
+                compose_fobs_phicalc_map(composed_map, reflections, configured_data_mode, deblur_map, f"cycle_{cyc:03d}_fobs_phicalc", ref_ctx.spacegroup, self.log)
             self.log(f"Composed |Fobs|+phi_calc map: {composed_map}")
             map_correlation = xplor_map_correlation(composed_map, input_map)
             if map_correlation is not None:
@@ -14347,6 +14451,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
                     cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
                     write_m40=cfg.jana_inflip is not None,
+                    profiler=state.performance_profiler,
                 )
                 deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx)
                 match = atom_reference_match_metrics(deblur_edma_cif, ref_ctx, cfg.merge_distance)
@@ -14361,8 +14466,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             deblur_quality: Optional[MapQualityMetrics] = None
             if state.validation_context is not None:
                 if cyc == 1 and not random_start:
-                    superflip_quality = assess_xplor_map(input_map, state.validation_context)
-                deblur_quality = assess_xplor_map(composed_map, state.validation_context)
+                    superflip_quality = assess_xplor_map(input_map, state.validation_context, state.performance_profiler)
+                deblur_quality = assess_xplor_map(composed_map, state.validation_context, state.performance_profiler)
                 deblur_quality = with_reference_metrics(
                     deblur_quality,
                     precision=deblur_precision,
@@ -14401,8 +14506,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_quality=deblur_quality,
             )
             all_results.append(result)
-            write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
-            write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", all_results)
+            with profile_stage(state.performance_profiler, "Reports and CSV"):
+                write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
+                write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", all_results)
             if superflip_quality is not None:
                 self.log(format_validation_log_line(cyc, "superflip", result.validation_profile, superflip_quality), subsystem="Validation")
             if deblur_quality is not None:

@@ -171,6 +171,8 @@ def main():
     status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                     client_factory=factory(result=_Models()))
     check("a healthy SharpED response is accepted", status.ok)
+    check("a healthy SharpED check keeps the already-fetched server default",
+          status.sharped_default_model == "koala 2.0")
 
     class _HttpError(Exception):
         def __init__(self, code):

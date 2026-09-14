@@ -198,6 +198,8 @@ def main():
     check("valid requirements show no remediation dialog", not modal_seen["value"])
     check("valid requirements proceed to the workflow worker",
           len(started_threads) == before + 1 and started_threads[-1].started)
+    check("preflight passes its already-fetched SharpED default to this run",
+          valid_cfg.sharped_model == "cokoala 4.0")
     window2.close()
 
     # Setting a token in the dedicated dialog persists it, re-checks the

@@ -274,7 +274,13 @@ class SplitDistributionTests(unittest.TestCase):
             if filename == "app.py":
                 # API orchestration is pinned by test_sharped_api_contract.py;
                 # DEFAULT resolution here was restored from commit 396270c.
-                excluded.add("run_sharped_deblur")
+                # Performance-only wrappers and in-memory FFT reuse are pinned
+                # by test_performance.py; the numerical outputs remain covered
+                # by the golden scientific suite.
+                excluded |= {"run_sharped_deblur", "assess_xplor_map",
+                             "run_superflip_cycle", "run_superflip_symmetrize_map",
+                             "run_edma_on_xplor", "run_command",
+                             "xplor_fft_predictions", "compose_fobs_phicalc_map"}
             elif filename == "jana_superflip.py":
                 # UI-only requirement routing: the former generic token warning
                 # became unreachable once the shared dedicated remediation dialog

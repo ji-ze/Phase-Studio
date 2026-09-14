@@ -1034,6 +1034,12 @@ class _JanaWorkflowWizard:
                             and checked.ok and checked.path is not None
                             and str(checked.path) != saved_superflip):
                         persist(checked.kind, str(checked.path))
+                    if (
+                        checked.kind is reqs.RequirementKind.SHARPED
+                        and checked.ok
+                        and checked.sharped_default_model
+                    ):
+                        self._preflight_sharped_default_model = checked.sharped_default_model
                 return True
             status = result.first_failure
             if status is None:
@@ -2712,6 +2718,13 @@ class _JanaWorkflowWizard:
 
         def build_options(action: str) -> JanaRunOptions:
             next_cycle_mode = effective_next_cycle_mode()
+            requested_model = self.model.currentText().strip() or "default"
+            run_model = requested_model
+            if (
+                requested_model.lower() in {"default", "server default", "sharped default"}
+                and getattr(self, "_preflight_sharped_default_model", "")
+            ):
+                run_model = self._preflight_sharped_default_model
             return JanaRunOptions(
                 action=action,
                 cycles=effective_cycles(),
@@ -2719,7 +2732,7 @@ class _JanaWorkflowWizard:
                 next_cycle_modelfile=next_cycle_mode,
                 api_token=self.api_token.text().strip(),
                 server_url=self.server_url.text().strip() or DEFAULT_SERVER_URL,
-                model=self.model.currentText().strip() or "default",
+                model=run_model,
                 elements=effective_elements(),
                 outres=effective_outres(),
                 input_mode=INPUT_MODE_INFLIP,
@@ -2744,6 +2757,7 @@ class _JanaWorkflowWizard:
             )
 
         def attempt_run() -> None:
+            self._preflight_sharped_default_model = ""
             if self.stack.currentWidget() is self.page1 and self._current_workflow() != WORKFLOW_SUPERFLIP_ONLY:
                 go_to_page2()
                 return
