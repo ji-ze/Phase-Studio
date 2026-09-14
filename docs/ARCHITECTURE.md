@@ -254,7 +254,7 @@ header from scratch -- every dialog in the app already shares this look.
 auto-detection, SharpED reachability classification, conditional requirement
 sets, and the official third-party archive installer. It has no application
 startup hook. The shared remediation dialog is built by
-`show_requirement_remediation_dialog()` in `app.py` and is reused by the full
+`show_requirement_remediation_dialog()` in `requirements_ui.py` and is reused by the full
 window and the Jana2020 Wizard.
 
 The full-window route is:

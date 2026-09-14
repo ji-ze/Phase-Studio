@@ -993,7 +993,7 @@ class _JanaWorkflowWizard:
     def _ensure_workflow_requirements(self, *, needs_sharped: bool) -> bool:
         """Run the shared preflight before a lightweight Wizard workflow exits."""
         from phase_studio import requirements as reqs
-        from phase_studio.app import show_requirement_remediation_dialog
+        from phase_studio.requirements_ui import run_remediation_loop
 
         saved_superflip = str(self.shared_settings.value("inputs/superflip_exe", "") or "").strip()
         local_original = application_dir() / reqs.ORIGINAL_EXE_NAME
@@ -1003,7 +1003,7 @@ class _JanaWorkflowWizard:
             needs_superflip=True, needs_edma=False, needs_sharped=needs_sharped,
         )
 
-        def persist(kind: object, value: str) -> None:
+        def persist(kind: object, value: str, _detected: bool) -> None:
             nonlocal superflip_path, token
             if kind is reqs.RequirementKind.SUPERFLIP:
                 superflip_path = value
@@ -1014,8 +1014,8 @@ class _JanaWorkflowWizard:
                 self.shared_settings.setValue("inputs/sharped_api_token", value)
             self.shared_settings.sync()
 
-        while True:
-            result = reqs.run_preflight(
+        def check() -> object:
+            return reqs.run_preflight(
                 required,
                 superflip_path=superflip_path,
                 sharped_base_url=self.server_url.text().strip() or DEFAULT_SERVER_URL,
@@ -1024,37 +1024,31 @@ class _JanaWorkflowWizard:
                 client_factory=getattr(self, "_preflight_client_factory", None),
                 accept_suggestion=lambda _status: True,
             )
-            for repaired in result.repaired:
-                persist(repaired.kind, str(repaired.path))
-            if result.ok:
-                # A wrapper-local original may have entered as the configured
-                # value rather than as a suggestion; synchronize it too.
-                for checked in result.statuses:
-                    if (checked.kind is reqs.RequirementKind.SUPERFLIP
-                            and checked.ok and checked.path is not None
-                            and str(checked.path) != saved_superflip):
-                        persist(checked.kind, str(checked.path))
-                    if (
-                        checked.kind is reqs.RequirementKind.SHARPED
-                        and checked.ok
-                        and checked.sharped_default_model
-                    ):
-                        self._preflight_sharped_default_model = checked.sharped_default_model
-                return True
-            status = result.first_failure
-            if status is None:
-                return True
-            current = superflip_path if status.kind is reqs.RequirementKind.SUPERFLIP else token
-            value = show_requirement_remediation_dialog(
-                self.dialog,
-                status,
-                current,
-                download_dir=getattr(self, "_preflight_download_dir", None),
-                download_opener=getattr(self, "_preflight_download_opener", None),
-            )
-            if value is None:
-                return False
-            persist(status.kind, value)
+
+        def on_success(result: object) -> None:
+            # A wrapper-local original may have entered as the configured
+            # value rather than as a suggestion; synchronize it too.
+            for checked in result.statuses:
+                if (checked.kind is reqs.RequirementKind.SUPERFLIP
+                        and checked.ok and checked.path is not None
+                        and str(checked.path) != saved_superflip):
+                    persist(checked.kind, str(checked.path), True)
+                if (
+                    checked.kind is reqs.RequirementKind.SHARPED
+                    and checked.ok
+                    and checked.sharped_default_model
+                ):
+                    self._preflight_sharped_default_model = checked.sharped_default_model
+
+        return run_remediation_loop(
+            self.dialog,
+            check,
+            lambda kind: superflip_path if kind is reqs.RequirementKind.SUPERFLIP else token,
+            persist,
+            on_success,
+            download_dir=getattr(self, "_preflight_download_dir", None),
+            download_opener=getattr(self, "_preflight_download_opener", None),
+        )
 
     # --- Wizard window width policy ---------------------------------------
     # The Wizard used to take whatever width self.content.sizeHint() happened
@@ -2974,7 +2968,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             apply_phase_studio_style(app)
             if report.category == "sharped_authentication":
                 from phase_studio import requirements as reqs
-                from phase_studio.app import show_requirement_remediation_dialog
+                from phase_studio.requirements_ui import show_requirement_remediation_dialog
 
                 shared = qt["QSettings"]("PhaseStudio", "PhaseStudio")
                 current = str(shared.value("inputs/sharped_api_token", "") or "")

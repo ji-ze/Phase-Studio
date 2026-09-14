@@ -6245,188 +6245,10 @@ from phase_studio.ui_branding import (
     create_phase_studio_context_banner, apply_safe_dialog_geometry,
     fit_dialog_to_available_screen,
 )
-
-
-def show_requirement_remediation_dialog(
-    parent: Optional[QWidget],
-    status: object,
-    configured_value: str = "",
-    *,
-    download_dir: Optional[Path] = None,
-    download_opener: Optional[Callable[..., object]] = None,
-) -> Optional[str]:
-    """Show the dedicated repair UI for one failed workflow requirement.
-
-    A returned value is a path or token that the caller must persist and
-    re-check. ``None`` means *Skip for now*; it never marks the requirement as
-    valid and the requested workflow must remain stopped.
-    """
-    from phase_studio import requirements as reqs
-
-    kind = status.kind
-    dialog = QDialog(parent)
-    dialog.setObjectName("requirementRemediationDialog")
-    dialog.setWindowTitle(f"Phase Studio — {status.title}")
-    dialog.setModal(True)
-    root = QVBoxLayout(dialog)
-    root.setContentsMargins(0, 0, 0, 0)
-    root.setSpacing(0)
-    root.addWidget(create_phase_studio_brand_header())
-    subtitle = {
-        reqs.RequirementKind.SUPERFLIP: "Locate or install the Superflip executable required by this workflow",
-        reqs.RequirementKind.EDMA: "Locate or install the EDMA executable required by this workflow",
-        reqs.RequirementKind.SHARPED: "Configure access before SharpED processing starts",
-    }[kind]
-    root.addWidget(create_phase_studio_context_banner(status.title.upper(), subtitle))
-
-    body = QWidget(dialog)
-    body_layout = QVBoxLayout(body)
-    body_layout.setContentsMargins(22, 18, 22, 18)
-    body_layout.setSpacing(10)
-    explanation = QLabel(status.message)
-    explanation.setObjectName("requirementMessage")
-    explanation.setWordWrap(True)
-    body_layout.addWidget(explanation)
-    feedback = QLabel("")
-    feedback.setObjectName("requirementFeedback")
-    feedback.setWordWrap(True)
-    feedback.setStyleSheet("color: #b94a48;")
-    feedback.setVisible(False)
-
-    selected = {"value": None}
-    buttons = QHBoxLayout()
-    buttons.setSpacing(8)
-
-    def show_feedback(message: str) -> None:
-        feedback.setText(str(message))
-        feedback.setVisible(True)
-        dialog.adjustSize()
-
-    if kind is reqs.RequirementKind.SHARPED:
-        account_text = QLabel(
-            "SharpED processing requires an active Jana2020 or SharpED account and an API token."
-        )
-        account_text.setWordWrap(True)
-        body_layout.addWidget(account_text)
-        token_row = QFormLayout()
-        token_edit = QLineEdit(str(configured_value or ""))
-        token_edit.setObjectName("requirementTokenEdit")
-        token_edit.setEchoMode(QLineEdit.Password)
-        token_edit.setPlaceholderText("Enter API token")
-        token_row.addRow("API token", token_edit)
-        body_layout.addLayout(token_row)
-        open_account = QPushButton("Open SharpED account")
-        open_account.setObjectName("requirementOpenAccountButton")
-        open_account.clicked.connect(
-            lambda _checked=False: QDesktopServices.openUrl(QUrl(reqs.SHARPED_ACCOUNT_URL))
-        )
-        set_token = QPushButton("Set token")
-        set_token.setObjectName("requirementSetTokenButton")
-        set_token.setObjectName("primaryButton")
-
-        def accept_token() -> None:
-            token = token_edit.text().strip()
-            if not token:
-                show_feedback("Enter an API token or choose Skip for now.")
-                return
-            selected["value"] = token
-            dialog.accept()
-
-        set_token.clicked.connect(accept_token)
-        buttons.addWidget(open_account)
-        buttons.addStretch(1)
-        buttons.addWidget(set_token)
-    else:
-        license_text = QLabel(
-            'This third-party program is distributed by its authors. '
-            '<a href="https://superflip.fzu.cz/">Review license information</a> before downloading.'
-        )
-        license_text.setObjectName("requirementLicenseText")
-        license_text.setOpenExternalLinks(True)
-        license_text.setWordWrap(True)
-        body_layout.addWidget(license_text)
-        browse_button = QPushButton("Browse…")
-        browse_button.setObjectName("requirementBrowseButton")
-        open_download = QPushButton("Open download page")
-        open_download.setObjectName("requirementOpenDownloadButton")
-        download_button = QPushButton("Download automatically")
-        download_button.setObjectName("requirementAutoDownloadButton")
-        download_button.setObjectName("primaryButton")
-        download_url = (
-            reqs.SUPERFLIP_DOWNLOAD_URL
-            if kind is reqs.RequirementKind.SUPERFLIP else reqs.EDMA_DOWNLOAD_URL
-        )
-
-        def accept_path(path_text: str) -> bool:
-            path = reqs.resolve_executable(path_text)
-            if path is None or not reqs.is_expected_executable(kind, path):
-                show_feedback(f"The selected file is not a valid {kind.value} executable.")
-                return False
-            if kind is reqs.RequirementKind.SUPERFLIP and reqs.is_phase_studio_wrapper(path):
-                show_feedback("The selected file is the Phase Studio Jana2020 wrapper. Select the real Superflip executable.")
-                return False
-            selected["value"] = str(path)
-            dialog.accept()
-            return True
-
-        def browse() -> None:
-            label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
-            path = QFileDialog.getOpenFileName(
-                dialog, f"Select {label} executable", str(configured_value or ""),
-                "Executables (*.exe);;All files (*)",
-            )[0]
-            if path:
-                accept_path(path)
-
-        def automatic_download() -> None:
-            label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
-            answer = QMessageBox.question(
-                dialog,
-                f"Download {label}",
-                f"{label} is third-party software supplied under its authors' license. "
-                "By choosing Yes, you confirm that you reviewed and accept the license information at "
-                f"{reqs.SUPERFLIP_LICENSE_URL}\n\nDownload and install {label} for Phase Studio now?",
-                QMessageBox.Yes | QMessageBox.Cancel,
-                QMessageBox.Cancel,
-            )
-            if answer != QMessageBox.Yes:
-                return
-            destination = download_dir
-            if destination is None:
-                base = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
-                destination = Path(base or str(Path.home() / ".phase_studio")) / "external_tools" / kind.value
-            QApplication.setOverrideCursor(Qt.WaitCursor)
-            try:
-                path = reqs.download_requirement_executable(
-                    kind, destination, opener=download_opener,
-                )
-            except Exception as exc:
-                show_feedback("Automatic download failed: " + sanitize_error_details(exc))
-            else:
-                accept_path(str(path))
-            finally:
-                QApplication.restoreOverrideCursor()
-
-        browse_button.clicked.connect(browse)
-        open_download.clicked.connect(
-            lambda _checked=False: QDesktopServices.openUrl(QUrl(download_url))
-        )
-        download_button.clicked.connect(automatic_download)
-        buttons.addWidget(browse_button)
-        buttons.addWidget(open_download)
-        buttons.addStretch(1)
-        buttons.addWidget(download_button)
-
-    body_layout.addWidget(feedback)
-    skip_button = QPushButton("Skip for now")
-    skip_button.setObjectName("requirementSkipButton")
-    skip_button.clicked.connect(dialog.reject)
-    buttons.addWidget(skip_button)
-    body_layout.addLayout(buttons)
-    root.addWidget(body)
-    apply_safe_dialog_geometry(dialog, 720, 360)
-    dialog.exec()
-    return selected["value"]
+from phase_studio.requirements_ui import (
+    run_remediation_loop,
+    show_requirement_remediation_dialog,
+)
 
 
 class WorkflowDiagram(QWidget):
@@ -12608,10 +12430,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             accept_suggestion=lambda _status: True,
         )
 
-        for repaired in result.repaired:
-            self._apply_requirement_value(
-                cfg, repaired.kind, str(repaired.path), detected=True,
-            )
         return result
 
     def _ensure_workflow_requirements(self, cfg: RunConfig) -> bool:
@@ -12619,42 +12437,43 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         from phase_studio import requirements as reqs
 
         needs_superflip, needs_edma, needs_sharped = self._workflow_requirement_needs(cfg)
-        while True:
-            result = self._run_workflow_preflight(
+        def check() -> object:
+            return self._run_workflow_preflight(
                 cfg,
                 needs_superflip=needs_superflip,
                 needs_edma=needs_edma,
                 needs_sharped=needs_sharped,
             )
-            if result.ok:
-                for checked in result.statuses:
-                    if (
-                        checked.kind is reqs.RequirementKind.SHARPED
-                        and checked.ok
-                        and checked.sharped_default_model
-                        and str(getattr(cfg, "sharped_model", "default") or "").strip().lower()
-                        in {"", "default", "server default", "sharped default"}
-                    ):
-                        cfg.sharped_model = checked.sharped_default_model
-                return True
-            status = result.first_failure
-            if status is None:
-                return True
-            current_value = (
-                cfg.superflip_exe if status.kind is reqs.RequirementKind.SUPERFLIP
-                else cfg.edma_exe if status.kind is reqs.RequirementKind.EDMA
-                else cfg.sharped_api_token
-            )
-            repaired_value = show_requirement_remediation_dialog(
-                self, status, current_value,
-                download_dir=getattr(self, "_preflight_download_dir", None),
-                download_opener=getattr(self, "_preflight_download_opener", None),
-            )
-            if repaired_value is None:
-                return False
-            self._apply_requirement_value(
-                cfg, status.kind, repaired_value, detected=False,
-            )
+
+        def current_value(kind: object) -> str:
+            if kind is reqs.RequirementKind.SUPERFLIP:
+                return cfg.superflip_exe
+            if kind is reqs.RequirementKind.EDMA:
+                return cfg.edma_exe
+            return cfg.sharped_api_token
+
+        def on_success(result: object) -> None:
+            for checked in result.statuses:
+                if (
+                    checked.kind is reqs.RequirementKind.SHARPED
+                    and checked.ok
+                    and checked.sharped_default_model
+                    and str(getattr(cfg, "sharped_model", "default") or "").strip().lower()
+                    in {"", "default", "server default", "sharped default"}
+                ):
+                    cfg.sharped_model = checked.sharped_default_model
+
+        return run_remediation_loop(
+            self,
+            check,
+            current_value,
+            lambda kind, value, detected: self._apply_requirement_value(
+                cfg, kind, value, detected=detected,
+            ),
+            on_success,
+            download_dir=getattr(self, "_preflight_download_dir", None),
+            download_opener=getattr(self, "_preflight_download_opener", None),
+        )
 
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
