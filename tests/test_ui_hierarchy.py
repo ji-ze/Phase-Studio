@@ -318,6 +318,35 @@ def main():
             real_load_settings(win)
             check("The 0.0 bypass value also persists and is restored, not reset to the default",
                   exponent_widget.value() == 0.0)
+
+            # Representative pre-1.0.9 keys must continue to populate their
+            # current controls without rewriting the user's settings first.
+            win.settings.clear()
+            win.settings.setValue("inputs/bestdensities_symmetry", True)
+            win.settings.setValue("inputs/plimit", "2.75")
+            win.settings.setValue("inputs/export_superflip_jana", True)
+            win.settings.setValue("inputs/superflip_reference_xplor", r"C:\old\reference.xplor")
+            win.settings.setValue("inputs/superflip_exe", "superflip.exe")
+            win.settings.setValue("inputs/edma_exe", "edma.exe")
+            win.settings.sync()
+            win._set_widget_value_from_string(win.inputs["bestdensities_metric"], "contrast")
+            win._set_widget_value_from_string(win.inputs["plimit_superflip"], "0.5")
+            win._set_widget_value_from_string(win.inputs["plimit_deblur"], "0.5")
+            win._set_widget_value_from_string(win.inputs["map_export_format"], "xplor")
+            win._set_widget_value_from_string(win.inputs["reference_cif"], "")
+            real_load_settings(win)
+            check("legacy best-densities symmetry key maps to the current metric choice",
+                  win._widget_value_as_string(win.inputs["bestdensities_metric"]) == "symmetry")
+            check("legacy common EDMA threshold populates both current threshold controls",
+                  abs(float(win._widget_value_as_string(win.inputs["plimit_superflip"])) - 2.75) < 1e-9 and
+                  abs(float(win._widget_value_as_string(win.inputs["plimit_deblur"])) - 2.75) < 1e-9)
+            check("legacy Jana export flag maps to the current map-format control",
+                  win._widget_value_as_string(win.inputs["map_export_format"]) == "jana")
+            check("legacy reference-map key populates the current reference control",
+                  win._widget_value_as_string(win.inputs["reference_cif"]) == r"C:\old\reference.xplor")
+            check("generic legacy executable names migrate to Jana2020 defaults",
+                  win._widget_value_as_string(win.inputs["superflip_exe"]) == r"C:\Jana2020\SUPERFLIP\superflip_original.exe" and
+                  win._widget_value_as_string(win.inputs["edma_exe"]) == r"C:\Jana2020\SUPERFLIP\EDMA.exe")
         finally:
             win.settings = original_settings
             exponent_widget.setValue(1.0)

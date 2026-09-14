@@ -300,6 +300,31 @@ def main():
             "EDMA still receives the stop_event for cancellation",
             "stop_event" in recorded.get("kwargs", {}),
         )
+        expected_edma_input = """inputfile cycle.xplor
+outputbase cyc001_edma
+cell 10.0 10.0 10.0 90.0 90.0 90.0
+centers
+  0.000000  0.000000  0.000000
+endcenters
+symmetry
+  x1 x2 x3
+endsymmetry
+scale fractional
+maxima all
+fullcell no
+plimit 1
+composition C 4
+numberofatoms composition
+centerofcharge yes
+chlimit 0.2500
+chlimlist 0.0057 relative
+m40forjana yes
+writem40 cyc001_edma.m40
+"""
+        check(
+            "EDMA input preserves the exact command parameters and absolute threshold",
+            (out_dir / "cyc001_edma.inp").read_text(encoding="utf-8") == expected_edma_input,
+        )
     finally:
         appmod.run_command = real_run_command
         appmod.normalize_xplor_for_edma = real_normalize

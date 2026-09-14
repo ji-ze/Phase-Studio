@@ -1,4 +1,5 @@
 """Shared Jana2020/standalone profile-aware result-selection tests."""
+import csv
 import dataclasses
 import os
 import sys
@@ -254,12 +255,99 @@ def main():
         appmod.threading.Thread = original_thread
         QDialog.exec = reject_dialog
 
+    # The Wizard-to-full-GUI handoff is a stable compatibility surface. Pin
+    # its complete value mapping, including override precedence and feedback
+    # settings, before deleting any historical selector code.
+    from phase_studio import jana_superflip as jana_superflip
+    handoff_dir = Path(tempfile.mkdtemp())
+    handoff_inflip = handoff_dir / "job.inflip"
+    handoff_inflip.write_text("title guard\n", encoding="utf-8")
+    handoff_options = jana_superflip.JanaRunOptions(
+        action="edit", cycles=4, next_cycle_modelfile="superflip_xplor",
+        api_token="secret-token", server_url="https://jana.fzu.cz", model="default",
+        elements="C N O", outres=0.25, input_mode=jana_superflip.INPUT_MODE_EXTERNAL,
+        hkl_override="override.hkl", reference_override="override.cif",
+        first_cycle_modelfile="seed.xplor", compute_omit_maps=True,
+        compute_omit_rfree=True, enable_missing_completion=True, missing_start_cycle=2,
+        missing_max_added_percent=7.5, enable_intensity_correction=True,
+        intensity_start_cycle=3, intensity_damping=0.4, intensity_sigma_threshold=1.5,
+        enable_powder_repartition=True, powder_start_cycle=2, powder_wavelength=0.71073,
+        powder_separation_factor=0.3, powder_map_ratio_mix=0.8,
+    )
+    handoff = jana_superflip.build_jana_handoff_import(
+        handoff_inflip,
+        handoff_options,
+        {"perform_algorithm": "AAR", "reflection_data_mode": "intensity"},
+    )
+    expected_handoff_values = {
+        "perform_algorithm": "AAR",
+        "reflection_data_mode": "intensity",
+        "input_source_mode": "External HKL + CIF reference",
+        "jana_inflip": str(handoff_inflip.resolve()),
+        "work_dir": str((handoff_dir / "phase_studio_full_run_job").resolve()),
+        "superflip_exe": str(jana_superflip.DEFAULT_JANA_SUPERFLIP),
+        "edma_exe": str(jana_superflip.DEFAULT_JANA_EDMA),
+        "cycles": "4", "run_sharped": "true",
+        "sharped_base_url": "https://jana.fzu.cz", "sharped_api_token": "secret-token",
+        "sharped_model": "default", "sharped_elements": "C N O", "sharped_outres": "0.25",
+        "modelfile_source": "deblurred_xplor", "map_export_format": "jana",
+        "hkl": str((handoff_dir / "override.hkl").resolve()),
+        "compute_omit_maps": "true", "compute_omit_rfree": "true",
+        "map_feedback_missing_enabled": "true", "map_feedback_missing_from_cycle": "2",
+        "map_feedback_missing_percent_limit": "7.5",
+        "map_feedback_intensity_enabled": "true", "map_feedback_intensity_from_cycle": "3",
+        "map_feedback_intensity_damping": "0.4",
+        "map_feedback_intensity_max_i_over_sigma": "1.5",
+        "redistribute_overlaps": "true", "powder_redistribution_from_cycle": "2",
+        "powder_wavelength": "0.71073", "powder_separation_factor": "0.3",
+        "powder_redistribution_mix": "0.8",
+        "first_cycle_modelfile": str((handoff_dir / "seed.xplor").resolve()),
+        "reference_cif": str((handoff_dir / "override.cif").resolve()),
+        "referencefile_mode": "reference_cif",
+    }
+    check("Jana handoff exports the exact pinned full-GUI value mapping",
+          handoff.values == expected_handoff_values)
+    handoff_log = jana_superflip.jana_handoff_log_lines(
+        handoff, handoff_inflip, expected_handoff_values,
+    )
+    check("Jana handoff provenance records exact input, mode, sources and imported count",
+          handoff_log[:7] == [
+              "[Jana2020] Job received",
+              "  Input: job.inflip",
+              f"  Working directory: {(handoff_dir / 'phase_studio_full_run_job').resolve()}",
+              "  Mode: External HKL + CIF reference",
+              f"  Reflections: {(handoff_dir / 'override.hkl').resolve()}",
+              f"  Reference: {(handoff_dir / 'override.cif').resolve()}",
+              "[Input] 2 compatible .inflip settings imported",
+          ])
+    check("Jana handoff provenance never exposes the API token",
+          all("secret-token" not in line for line in handoff_log))
+
     # CSV and human report share the same profile and contain every diagnostic.
     report_dir = Path(tempfile.mkdtemp())
     appmod.write_metrics_csv(report_dir / "metrics.csv", jana_results[:1])
     csv_lines = (report_dir / "metrics.csv").read_text(encoding="utf-8").splitlines()
     check("metrics CSV writes one row per cycle/source", len(csv_lines) == 3)
     check("metrics CSV contains all stable quality columns", all(column in csv_lines[0].split(",") for column in appmod.QUALITY_CSV_COLUMNS))
+    expected_csv_header = "cycle,source,validation_profile,map_path,structure_path,reference_f05,reference_precision,reference_recall,reference_tp,reference_fp,reference_rmsd,reference_phase_agreement,amplitude_rf,amplitude_cc,amplitude_scale,r_work,r_free,cc_work,cc_free,omit_map_correlation,triplet_c3,entropy_normalized,map_concentration,standardized_peakiness,negative_density_mass,n_measured_reflections,n_work_reflections,n_free_reflections,n_triplets,unavailable_reason,model_source,model_in,model_rmsd_A,superflip_map,superflip_edma_cif,superflip_rmsd_A,deblur_map,deblur_edma_cif,deblur_rmsd_A,superflip_saved_run,superflip_rvalue,superflip_peaks,superflip_symm,superflip_derived_sg,superflip_ref_match,superflip_fom,superflip_success_rate_percent,superflip_mean_cycles,recycle_map_correlation,omit_superflip_correlation,omit_superflip_rfree,omit_deblur_correlation,omit_deblur_rfree,superflip_recall,superflip_precision,superflip_heavy_atom_count,deblur_recall,deblur_precision,deblur_heavy_atom_count,powder_repartition_avg_change_percent,intensity_correction_avg_change_percent"
+    check("metrics CSV schema and column order match the pinned 1.0.9 contract",
+          csv_lines[0] == expected_csv_header)
+    with (report_dir / "metrics.csv").open(encoding="utf-8", newline="") as csv_stream:
+        csv_rows = list(csv.DictReader(csv_stream))
+    check("metrics CSV representative Superflip values match the golden row",
+          {key: csv_rows[0][key] for key in (
+              "cycle", "source", "validation_profile", "reference_f05",
+              "reference_rmsd", "amplitude_rf", "amplitude_cc", "r_free",
+              "cc_free", "n_measured_reflections", "n_work_reflections",
+              "n_free_reflections", "model_source", "superflip_rmsd_A",
+          )} == {
+              "cycle": "1", "source": "superflip",
+              "validation_profile": "reference_and_holdout", "reference_f05": "0.61",
+              "reference_rmsd": "0.4", "amplitude_rf": "0.25", "amplitude_cc": "0.75",
+              "r_free": "0.32", "cc_free": "0.7", "n_measured_reflections": "100",
+              "n_work_reflections": "95", "n_free_reflections": "5",
+              "model_source": "superflip", "superflip_rmsd_A": "0.4",
+          })
     for profile, definition in PROFILE_DEFINITIONS.items():
         jana_results[0].validation_profile = profile.value
         report_path = report_dir / f"{profile.value}.txt"
@@ -268,6 +356,10 @@ def main():
         check(f"{profile.value}: report records assessment", f"Assessment: {definition.assessment_label}" in report_text)
         check(f"{profile.value}: report records all three criteria", all(metric.label in report_text for metric in definition.primary_metrics))
         check(f"{profile.value}: report includes all computed diagnostics", "All computed metrics:" in report_text and "amplitude_rf:" in report_text)
+        if profile is ValidationProfile.REFERENCE_AND_HOLDOUT:
+            check("map-quality report representative candidate rows match the golden content",
+                  "1 | Superflip | 0.61 | 0.32 | 0.65" in report_text and
+                  "1 | SharpED | 0.71 | 0.27 | 0.72" in report_text)
 
     # A graceful stop with valid results also auto-opens in Jana context.
     opened.clear()

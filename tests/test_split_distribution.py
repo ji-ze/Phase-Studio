@@ -254,6 +254,36 @@ class SplitDistributionTests(unittest.TestCase):
         self.assertIn('"JanaIntegrationPayload"', spec)
         self.assertTrue((ROOT / "packaging/pyinstaller/PhaseStudioStore.spec").is_file())
 
+    def test_portable_distribution_manifest_schema_is_stable(self):
+        portable = __import__("runpy").run_path(
+            str(ROOT / "packaging/pyinstaller/portable_runtime.py")
+        )
+        manifest_path = Path(self.temp.name) / "portable-runtime.json"
+        portable["write_portable_manifest"](
+            manifest_path,
+            app="PhaseStudio",
+            staged_runtime=[{"name": "vcruntime140.dll", "version": "14.0", "source": "wheel"}],
+            qt_report={"pyside6_version": "6.x", "shiboken6_version": "6.x", "pyside6_path": "Qt"},
+            removed_ucrt=["ucrtbase.dll"],
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(manifest), {
+            "app", "python", "python_prefix", "qt", "msvc_runtime",
+            "removed_app_local_ucrt", "required_binaries",
+        })
+        self.assertEqual(manifest["app"], "PhaseStudio")
+        self.assertEqual(manifest["qt"], {
+            "pyside6_version": "6.x", "shiboken6_version": "6.x", "pyside6_path": "Qt",
+        })
+        self.assertEqual(manifest["msvc_runtime"], [
+            {"name": "vcruntime140.dll", "version": "14.0", "source": "wheel"},
+        ])
+        self.assertEqual(manifest["removed_app_local_ucrt"], ["ucrtbase.dll"])
+        self.assertEqual(
+            manifest["required_binaries"],
+            ["Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"],
+        )
+
     def test_scientific_functions_match_integrated_baseline(self):
         git = r"C:\Program Files\Git\cmd\git.exe" if os.name == "nt" else "git"
         for filename in ("app.py", "jana_superflip.py", "sharped_server_client.py", "sharped_map_scaling.py"):

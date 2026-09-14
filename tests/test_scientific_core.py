@@ -208,6 +208,84 @@ def main():
         appmod.candidate_missing_hkls_from_bounds = original_candidates
         appmod.xplor_fft_predictions = original_predictions
 
+    # Exact Superflip input baseline. A model-seeded calculation must force a
+    # single deterministic repeat and omit randomseed; an unseeded calculation
+    # must preserve both configured values.
+    superflip_hkl = tmpdir / "superflip_guard.hkl"
+    superflip_hkl.write_text("   1   0   0      12.5       0.8\n# ignored\n", encoding="utf-8")
+    superflip_context = appmod.ReferenceContext(
+        cif_path=tmpdir / "guard.cif",
+        work_ref_cif=tmpdir / "guard_work.cif",
+        cell=gemmi.UnitCell(10, 11, 12, 90, 90, 90),
+        spacegroup=gemmi.SpaceGroup("P 1"),
+        spacegroup_hm="P 1",
+        composition="C 2 O 1",
+        atoms=[],
+    )
+    writer_args = dict(
+        prefix="gold", ref_ctx=superflip_context, observed_hkl=superflip_hkl,
+        output_xplor="gold.xplor", reference_file=None, reference_format="cif",
+        perform_algorithm="CF", output_format="xplor", write_auxiliary_outputs=False,
+        export_superflip_xplor=True, export_superflip_ccp4=False,
+        export_superflip_jana=False, voxel="", bestdensities_count=3,
+        bestdensities_metric="contrast", bestdensities_symmetry=False, polish=True,
+        maxcycles=100, repeatmode=7, randomseed="12345", delta="AUTO",
+        weakratio="0.2", biso="0.0",
+        reflection_data_mode=appmod.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        normalize="none", nresshells=1, missing="", searchsymmetry="average",
+        derivesymmetry="yes", electrons="", dataitemwidths="4 14 14",
+        extra_superflip_keywords="", log=None,
+    )
+    common_body = """title gold
+perform CF
+outputfile gold.xplor
+outputformat xplor
+{model_line}dimension  3
+cell 10.000000 11.000000 12.000000 90.0000 90.0000 90.0000
+spacegroup P 1
+centro no
+centers
+  0.000000  0.000000  0.000000
+endcenters
+symmetry
+  x1 x2 x3
+endsymmetry
+composition C 2 O 1
+
+# Keywords for density modification
+repeatmode {repeatmode}
+bestdensities 3 rvalue
+maxcycles 100
+delta AUTO
+weakratio 0.2
+Biso 0.0
+polish yes
+{randomseed_line}searchsymmetry average
+derivesymmetry yes
+dataformat amplitude dummy
+fbegin
+   1   0   0      12.5       0.8
+endf
+"""
+    plain_input = tmpdir / "plain.inflip"
+    appmod.write_superflip_input(plain_input, model_file=None, **writer_args)
+    check(
+        "Superflip input: unseeded output matches the exact golden text",
+        plain_input.read_text(encoding="utf-8") == common_body.format(
+            model_line="", repeatmode=7, randomseed_line="randomseed 12345\n",
+        ),
+    )
+    seeded_input = tmpdir / "seeded.inflip"
+    appmod.write_superflip_input(
+        seeded_input, model_file=tmpdir / "seed.xplor", **writer_args,
+    )
+    check(
+        "Superflip input: model-seeded output forces repeatmode 1 and omits randomseed",
+        seeded_input.read_text(encoding="utf-8") == common_body.format(
+            model_line="modelfile seed.xplor\n", repeatmode=1, randomseed_line="",
+        ),
+    )
+
     import shutil
     shutil.rmtree(tmpdir, ignore_errors=True)
 
