@@ -54,6 +54,8 @@ FIXTURE_LINES = [
 def main():
     import gemmi
     import phase_studio.app as appmod
+    import phase_studio.inflip_io as inflip_io
+    import phase_studio.jana_superflip as jana_superflip
     import phase_studio.process_utils as process_utils
 
     tmpdir = Path(tempfile.mkdtemp())
@@ -284,6 +286,80 @@ endf
         seeded_input.read_text(encoding="utf-8") == common_body.format(
             model_line="modelfile seed.xplor\n", repeatmode=1, randomseed_line="",
         ),
+    )
+
+    # The full GUI and Jana wrapper historically differ only in how comment
+    # markers inside quotes and outputfile comments are treated. Pin both
+    # policies while sharing the genuinely identical ordered M80 rewrite.
+    check(
+        ".inflip tokenizer: Jana preserves comment markers inside quoted paths",
+        inflip_io.split_inflip_line('referencefile "model#1.cif" # note')
+        == ["referencefile", "model#1.cif"],
+    )
+    check(
+        ".inflip tokenizer: full GUI keeps its established first-marker policy",
+        inflip_io.split_inflip_line_legacy('referencefile "model#1.cif" # note')
+        == ["referencefile", '"model'],
+    )
+    inflip_lines = [
+        "title sample",
+        "perform CF",
+        "outputfile original.map # existing output",
+        "randomseed 7",
+        "voxel AUTO",
+        "# Keywords for charge flipping",
+        "fbegin",
+        "1 0 0 12.5 0.8",
+        "endf",
+    ]
+    header = [
+        "title sample",
+        "perform CF",
+        "outputfile original.map # existing output",
+        "randomseed 7",
+        "voxel AUTO",
+    ]
+    check(
+        ".inflip header extraction stops before Jana's charge-flipping block byte-for-byte",
+        inflip_io.inflip_header_for_m80(inflip_lines) == header
+        and inflip_io.inflip_header_for_m80_legacy(inflip_lines) == header,
+    )
+    fixed_tail = [
+        "repeatmode 1",
+        'modelfile "selected.xplor"',
+        "polish no",
+        "maxcycles 0",
+        "searchsymmetry average",
+        "derivesymmetry yes",
+    ]
+    wrapper_m80 = [
+        "title sample",
+        "perform symmetry",
+        'outputfile original.map "sample-ready.xplor" # existing output',
+        *fixed_tail,
+    ]
+    legacy_m80 = [
+        "title sample",
+        "perform symmetry",
+        'outputfile original.map "sample-ready.xplor"',
+        *fixed_tail,
+    ]
+    check(
+        ".inflip M80 rewrite: Jana wrapper preserves exact ordering and inline comment",
+        inflip_io.define_m80_inflip(header, "sample", "selected.xplor") == wrapper_m80,
+    )
+    check(
+        ".inflip M80 rewrite: full GUI preserves its exact historical output text",
+        inflip_io.define_m80_inflip_legacy(header, "sample", "selected.xplor") == legacy_m80,
+    )
+    wrapper_bytes = tmpdir / "wrapper_m80.inflip"
+    legacy_bytes = tmpdir / "legacy_m80.inflip"
+    jana_superflip.write_text_lines(wrapper_bytes, wrapper_m80)
+    appmod.write_text_lines_platform(legacy_bytes, legacy_m80)
+    check(
+        ".inflip M80 files preserve the exact CRLF byte contract",
+        wrapper_bytes.read_bytes() == ("\r\n".join(wrapper_m80) + "\r\n").encode("ascii")
+        and legacy_bytes.read_bytes() == ("\r\n".join(legacy_m80) + "\r\n").encode("ascii"),
     )
 
     import shutil

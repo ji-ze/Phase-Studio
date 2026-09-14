@@ -36,7 +36,6 @@ import math
 import os
 import queue
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -45,7 +44,7 @@ import time
 import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Dict, FrozenSet, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -143,6 +142,25 @@ try:
     from phase_studio.performance import TimingToken, WorkflowProfiler, profile_stage
 except Exception:
     from performance import TimingToken, WorkflowProfiler, profile_stage
+
+try:
+    from phase_studio.inflip_io import (
+        define_m80_inflip_legacy as define_m80_inflip_from_model,
+        first_token_legacy as inflip_first_token,
+        inflip_header_for_m80_legacy as inflip_header_for_m80,
+        insert_before_fbegin_legacy as insert_before_fbegin,
+        split_inflip_line_legacy as split_inflip_line,
+        without_keywords_legacy as without_inflip_keywords,
+    )
+except Exception:
+    from inflip_io import (  # type: ignore[no-redef]
+        define_m80_inflip_legacy as define_m80_inflip_from_model,
+        first_token_legacy as inflip_first_token,
+        inflip_header_for_m80_legacy as inflip_header_for_m80,
+        insert_before_fbegin_legacy as insert_before_fbegin,
+        split_inflip_line_legacy as split_inflip_line,
+        without_keywords_legacy as without_inflip_keywords,
+    )
 
 try:
     import gemmi
@@ -3821,42 +3839,6 @@ def clean_extra_superflip_keywords(value: str, log: Optional[Callable[[str], Non
         safe.append(line)
     return safe
 
-def split_inflip_line(line: str) -> List[str]:
-    text = str(line or "")
-    for marker in ("#", "!", ";"):
-        if marker in text:
-            text = text.split(marker, 1)[0]
-    text = text.strip()
-    if not text:
-        return []
-    try:
-        return shlex.split(text)
-    except Exception:
-        return text.split()
-
-def inflip_first_token(line: str) -> str:
-    parts = split_inflip_line(line)
-    return parts[0].lower() if parts else ""
-
-
-def insert_before_fbegin(lines: Sequence[str], new_line: str) -> List[str]:
-    out: List[str] = []
-    inserted = False
-    for line in lines:
-        if not inserted and inflip_first_token(line) == "fbegin":
-            out.append(new_line)
-            inserted = True
-        out.append(line)
-    if not inserted:
-        out.append(new_line)
-    return out
-
-
-def without_inflip_keywords(lines: Sequence[str], keywords: Iterable[str]) -> List[str]:
-    blocked = {str(k).lower() for k in keywords}
-    return [line for line in lines if inflip_first_token(line) not in blocked]
-
-
 def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Path:
     lines = Path(inflip_path).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     reflections: List[str] = []
@@ -4165,59 +4147,6 @@ def write_reference_cif_from_inflip(inflip_path: Path, output_cif: Path) -> Path
     output_cif.parent.mkdir(parents=True, exist_ok=True)
     write_structure_cif(output_cif, cell, sg, hm, [], composition)
     return output_cif
-
-
-def inflip_header_for_m80(lines: Sequence[str]) -> List[str]:
-    header: List[str] = []
-    marker = "# Keywords for charge flipping"
-    for line in lines:
-        if marker in line:
-            break
-        if inflip_first_token(line) == "fbegin":
-            break
-        header.append(line)
-    return header
-
-
-def define_m80_inflip_from_model(header_lines: Sequence[str], base_name: str, model_name: str) -> List[str]:
-    out: List[str] = []
-    saw_perform = False
-    saw_outputfile = False
-    drop = {
-        "modelfile", "modelformat", "repeatmode", "randomseed",
-        "polish", "maxcycles", "searchsymmetry", "derivesymmetry", "voxel",
-    }
-    for line in header_lines:
-        key = inflip_first_token(line)
-        if key in drop:
-            continue
-        if key == "perform" and not saw_perform:
-            out.append("perform symmetry")
-            saw_perform = True
-            continue
-        if key == "outputfile" and not saw_outputfile:
-            body = str(line).split("#", 1)[0].rstrip()
-            ready = f'{base_name}-ready.xplor'
-            if ready.lower() not in body.lower():
-                spacer = "" if body.endswith((" ", "\t")) else " "
-                body = f'{body}{spacer}"{ready}"'
-            out.append(body)
-            saw_outputfile = True
-            continue
-        out.append(line)
-    if not saw_perform:
-        out = insert_before_fbegin(out, "perform symmetry")
-    if not saw_outputfile:
-        out = insert_before_fbegin(out, f'outputfile "{base_name}-ready.xplor"')
-    out.extend([
-        "repeatmode 1",
-        f'modelfile "{model_name}"',
-        "polish no",
-        "maxcycles 0",
-        "searchsymmetry average",
-        "derivesymmetry yes",
-    ])
-    return out
 
 
 def write_text_lines_platform(path: Path, lines: Sequence[str]) -> None:

@@ -13,7 +13,6 @@ from __future__ import annotations
 import os
 import queue
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -22,7 +21,7 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
 
 try:
     from phase_studio.version import VERSION as __version__
@@ -59,8 +58,29 @@ except Exception:
         text_encoding,
     )
 
+try:
+    from phase_studio.inflip_io import (
+        COMMENT_MARKERS,
+        add_modelseed_modelfile,
+        apply_reference_override,
+        define_m80_inflip,
+        ensure_xplor_output,
+        first_token,
+        inflip_header_for_m80,
+        split_inflip_line,
+    )
+except Exception:
+    from inflip_io import (  # type: ignore[no-redef]
+        COMMENT_MARKERS,
+        add_modelseed_modelfile,
+        apply_reference_override,
+        define_m80_inflip,
+        ensure_xplor_output,
+        first_token,
+        inflip_header_for_m80,
+        split_inflip_line,
+    )
 
-COMMENT_MARKERS = ("#", "!", ";")
 INFLIP_SUFFIXES = {".inflip", ".inp"}
 DEFAULT_JANA_SUPERFLIP = Path(r"C:\Jana2020\SUPERFLIP\superflip_original.exe")
 DEFAULT_JANA_EDMA = Path(r"C:\Jana2020\SUPERFLIP\EDMA.exe")
@@ -381,122 +401,6 @@ def stage_external_file_for_superflip(source: Path, target_dir: Path, base_name:
     return dst
 
 
-def split_inline_comment(line: str) -> Tuple[str, str]:
-    quote = False
-    for i, ch in enumerate(line):
-        if ch == '"':
-            quote = not quote
-        elif not quote and ch in COMMENT_MARKERS:
-            return line[:i].rstrip(), line[i:]
-    return line.rstrip(), ""
-
-
-def split_inflip_line(line: str) -> List[str]:
-    """Split one Superflip/Jana keyword line while preserving quoted paths.
-
-    Inline comments beginning with #, ! or ; are removed only when they occur
-    outside double quotes. This keeps Windows paths and filenames containing
-    spaces intact.
-    """
-    body, _comment = split_inline_comment(str(line or ""))
-    text = body.strip()
-    if not text:
-        return []
-    try:
-        return shlex.split(text, posix=True)
-    except (ValueError, TypeError):
-        return text.split()
-
-
-def first_token(line: str) -> str:
-    parts = split_inflip_line(line)
-    if not parts:
-        return ""
-    return parts[0].lower()
-
-
-def line_has_xplor_output(line: str) -> bool:
-    body, _comment = split_inline_comment(line)
-    parts = body.split()
-    return any(Path(part.strip('"')).suffix.lower() == ".xplor" for part in parts[1:])
-
-
-def insert_before_fbegin(lines: Sequence[str], new_line: str) -> List[str]:
-    out: List[str] = []
-    inserted = False
-    for line in lines:
-        if not inserted and first_token(line) == "fbegin":
-            out.append(new_line)
-            inserted = True
-        out.append(line)
-    if not inserted:
-        out.append(new_line)
-    return out
-
-
-def ensure_xplor_output(lines: Sequence[str], base_name: str) -> List[str]:
-    out: List[str] = []
-    changed = False
-    found = False
-    xplor_name = f'{base_name}.xplor'
-    for line in lines:
-        if first_token(line) == "outputfile":
-            found = True
-            if line_has_xplor_output(line):
-                out.append(line)
-            else:
-                body, comment = split_inline_comment(line)
-                spacer = "" if not body or body.endswith((" ", "\t")) else " "
-                tail = (" " + comment) if comment else ""
-                out.append(f'{body}{spacer}"{xplor_name}"{tail}')
-                changed = True
-        else:
-            out.append(line)
-    if not found:
-        out = insert_before_fbegin(out, f'outputfile "{xplor_name}"')
-        changed = True
-    return out if changed else list(lines)
-
-
-def without_keywords(lines: Sequence[str], keywords: Iterable[str]) -> List[str]:
-    blocked = {k.lower() for k in keywords}
-    return [line for line in lines if first_token(line) not in blocked]
-
-
-def add_modelseed_modelfile(lines: Sequence[str], model_name: str, suffix: str = ".xplor") -> List[str]:
-    """Add a Superflip modelfile using the Phase Studio model-seeded policy.
-
-    A model-seeded Superflip run is deterministic. Therefore repeated attempts
-    are disabled and the randomseed keyword is omitted, matching the logic used
-    by the full Phase Studio pipeline. Phase Studio writes only modelfile and
-    lets Superflip infer the format from the file extension.
-    """
-    cleaned = without_keywords(
-        lines,
-        {"modelfile", "modelformat", "repeatmode", "randomseed"},
-    )
-    cleaned = insert_before_fbegin(cleaned, "repeatmode 1")
-    cleaned = insert_before_fbegin(cleaned, f"modelfile {model_name}")
-    return cleaned
-
-
-def apply_reference_override(lines: Sequence[str], reference_path: Path) -> List[str]:
-    """Replace the Superflip referencefile declaration with a CIF or XPLOR file.
-
-    Phase Studio writes only the referencefile keyword and lets Superflip infer
-    the reference format from the file extension.
-    """
-    suffix = reference_path.suffix.lower()
-    if suffix not in {".cif", ".xplor"}:
-        raise ValueError(
-            "Reference override must be a CIF structure or an XPLOR density map: "
-            f"{reference_path}"
-        )
-    cleaned = without_keywords(lines, {"referencefile", "referenceformat"})
-    cleaned = insert_before_fbegin(cleaned, f"referencefile {Path(reference_path).name}")
-    return cleaned
-
-
 def extract_embedded_hkl(inflip_path: Path) -> Optional[Path]:
     """Export the Jana fbegin/endf reflection block for the full Phase Studio GUI."""
     lines = read_text_lines(inflip_path)
@@ -534,70 +438,6 @@ def inflip_keyword_path(inflip_path: Path, keyword: str) -> Optional[Path]:
                 candidate = inflip_path.parent / candidate
             return candidate.resolve()
     return None
-
-
-def inflip_header_for_m80(lines: Sequence[str]) -> List[str]:
-    header: List[str] = []
-    marker = "# Keywords for charge flipping"
-    for line in lines:
-        if marker in line:
-            break
-        if first_token(line) == "fbegin":
-            break
-        header.append(line)
-    return header
-
-
-def define_m80_inflip(header_lines: Sequence[str], base_name: str, model_name: str) -> List[str]:
-    out: List[str] = []
-    saw_perform = False
-    saw_outputfile = False
-    # These keywords are explicitly controlled for the final model-seeded run.
-    # In particular, randomseed must not be present and repeatmode must be 1.
-    drop = {
-        "modelfile",
-        "modelformat",
-        "repeatmode",
-        "randomseed",
-        "polish",
-        "maxcycles",
-        "searchsymmetry",
-        "derivesymmetry",
-        "voxel",
-    }
-    for line in header_lines:
-        key = first_token(line)
-        if key in drop:
-            continue
-        if key == "perform" and not saw_perform:
-            out.append("perform symmetry")
-            saw_perform = True
-            continue
-        if key == "outputfile" and not saw_outputfile:
-            body, comment = split_inline_comment(line)
-            ready = f'{base_name}-ready.xplor'
-            if ready.lower() not in body.lower():
-                spacer = "" if body.endswith((" ", "\t")) else " "
-                body = f'{body}{spacer}"{ready}"'
-            out.append(body if not comment else f"{body} {comment}")
-            saw_outputfile = True
-            continue
-        out.append(line)
-    if not saw_perform:
-        out = insert_before_fbegin(out, "perform symmetry")
-    if not saw_outputfile:
-        out = insert_before_fbegin(out, f'outputfile "{base_name}-ready.xplor"')
-    out.extend(
-        [
-            "repeatmode 1",
-            f'modelfile "{model_name}"',
-            "polish no",
-            "maxcycles 0",
-            "searchsymmetry average",
-            "derivesymmetry yes",
-        ]
-    )
-    return out
 
 
 def find_inflip_arg(args: Sequence[str], cwd: Path) -> Optional[Tuple[int, Path]]:

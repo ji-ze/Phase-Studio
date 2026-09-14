@@ -310,13 +310,21 @@ class SplitDistributionTests(unittest.TestCase):
                 excluded |= {"run_sharped_deblur", "assess_xplor_map",
                              "run_superflip_cycle", "run_superflip_symmetrize_map",
                              "run_edma_on_xplor", "run_command",
-                             "xplor_fft_predictions", "compose_fobs_phicalc_map"}
+                             "xplor_fft_predictions", "compose_fobs_phicalc_map",
+                             # Moved byte-for-byte policies are pinned by
+                             # test_scientific_core.py and inflip_io.py.
+                             "split_inflip_line", "inflip_first_token",
+                             "insert_before_fbegin", "without_inflip_keywords",
+                             "inflip_header_for_m80", "define_m80_inflip_from_model"}
             elif filename == "jana_superflip.py":
                 # UI-only requirement routing: the former generic token warning
                 # became unreachable once the shared dedicated remediation dialog
                 # was connected, so its removal is intentional and non-scientific.
                 excluded |= {"launch_phase_studio_from_jana", "main", "_show_missing_token_warning",
-                             "deblur_with_sharped"}
+                             "deblur_with_sharped", "split_inline_comment", "split_inflip_line",
+                             "first_token", "line_has_xplor_output", "insert_before_fbegin",
+                             "ensure_xplor_output", "without_keywords", "add_modelseed_modelfile",
+                             "apply_reference_override", "inflip_header_for_m80", "define_m80_inflip"}
             elif filename == "sharped_server_client.py":
                 # These split-catalog helpers postdate the restored historical
                 # client. The one-host behavior is pinned by its contract test.
