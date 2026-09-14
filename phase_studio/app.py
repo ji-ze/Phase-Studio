@@ -163,6 +163,11 @@ except Exception:
     )
 
 try:
+    from phase_studio.result_selection import ResultSelectionDialog, create_result_preview_host
+except Exception:
+    from result_selection import ResultSelectionDialog, create_result_preview_host
+
+try:
     import gemmi
 except Exception as exc:
     raise RuntimeError(
@@ -11046,194 +11051,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         definition = profile_definition(profile)
         recommendation = recommend_best_result(profile, candidates)
         self.result_recommendation = recommendation
-        ordered = sorted(candidates, key=lambda candidate: (
-            int(candidate.cycle), 0 if candidate.source == "superflip" else 1, candidate.source,
-        ))
-        initially_selected = recommendation.selected_candidate or ordered[0]
-        state: Dict[str, Optional[ResultCandidate]] = {"selected": initially_selected}
 
-        class _PreviewHost:
-            _structure_cartesian_geometry = IterativeSuperflipPipelineQtGUI._structure_cartesian_geometry
-            _element_color = IterativeSuperflipPipelineQtGUI._element_color
-            _plot_structure_atoms = IterativeSuperflipPipelineQtGUI._plot_structure_atoms
-            _update_structure_depth_artist = IterativeSuperflipPipelineQtGUI._update_structure_depth_artist
-            _update_structure_depth_cue = IterativeSuperflipPipelineQtGUI._update_structure_depth_cue
-            _structure_axis_limits = staticmethod(IterativeSuperflipPipelineQtGUI._structure_axis_limits)
-            _apply_structure_axis_limits = staticmethod(IterativeSuperflipPipelineQtGUI._apply_structure_axis_limits)
-            _begin_structure_view_drag = IterativeSuperflipPipelineQtGUI._begin_structure_view_drag
-            _apply_structure_view = IterativeSuperflipPipelineQtGUI._apply_structure_view
-            _sync_structure_view_from_event = IterativeSuperflipPipelineQtGUI._sync_structure_view_from_event
-            _finish_structure_view_drag = IterativeSuperflipPipelineQtGUI._finish_structure_view_drag
-
-            def __init__(self, cell, elev: float, azim: float) -> None:
-                self.structure_cell = cell
-                self.structure_elev = elev
-                self.structure_azim = azim
-                self._structure_depth_artists = []
-                self.structure_axes = []
-                self._structure_interactive_axes = []
-                self.structure_view_base_limits = None
-                self.structure_view_limits = None
-                self._structure_view_drag_source = None
-                self.structure_canvas = None
-
-        preview_host = _PreviewHost(self.structure_cell, self.structure_elev, self.structure_azim)
-        dialog = QDialog(self)
-        dialog.setObjectName("resultSelectionDialog")
-        dialog.setProperty("resultContext", "JANA2020" if is_jana else "STANDALONE")
-        dialog.setWindowTitle("Jana2020 result selection" if is_jana else "Save map and model")
-        apply_safe_dialog_geometry(dialog, 1400, 800)
-        outer_layout = QVBoxLayout(dialog)
-        outer_layout.setContentsMargins(0, 0, 0, 0)
-        outer_layout.setSpacing(0)
-        outer_layout.addWidget(create_phase_studio_brand_header())
-        outer_layout.addWidget(create_phase_studio_context_banner(
-            "JANA2020 RESULT SELECTION" if is_jana else "RESULT SELECTION",
-            "Compare completed maps and select the result to pass to Jana2020"
-            if is_jana else "Compare completed maps and select the result to save",
-        ))
-
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.setContentsMargins(14, 10, 14, 14)
-        content_layout.setSpacing(9)
-        outer_layout.addWidget(content, 1)
-        summary_form = QFormLayout()
-        summary_form.setHorizontalSpacing(18)
-        summary_form.setVerticalSpacing(2)
-        reference_available = profile in {
-            ValidationProfile.REFERENCE_AND_HOLDOUT, ValidationProfile.REFERENCE_ONLY,
-        }
-        free_count = max((candidate.metrics.n_free_reflections for candidate in candidates), default=0)
-        summary_values = (
-            ("Assessment", definition.assessment_label),
-            ("Completed cycles", str(len({candidate.cycle for candidate in candidates}))),
-            ("Recommended result", recommendation.recommended_candidate.label if recommendation.recommended_candidate else "Unavailable"),
-            ("Reference", "Available" if reference_available else "Not available"),
-            ("Holdout", f"5% · {free_count} reflections" if free_count else "Not enabled"),
+        preview_host = create_result_preview_host(
+            self, self.structure_cell, self.structure_elev, self.structure_azim,
         )
-        for label_text, value_text in summary_values:
-            value_label = QLabel(value_text)
-            font = value_label.font(); font.setBold(True); value_label.setFont(font)
-            summary_form.addRow(label_text, value_label)
-        content_layout.addLayout(summary_form)
-        reason_label = QLabel(recommendation.reason)
-        reason_label.setObjectName("recommendationReason")
-        reason_label.setWordWrap(True)
-        reason_label.setStyleSheet("color: #52658b;")
-        content_layout.addWidget(reason_label)
-        table_section_label = QLabel("RESULT CANDIDATES")
-        table_section_label.setObjectName("sectionLabel")
-        content_layout.addWidget(table_section_label)
-
-        headers = ["Recommended", "Cycle", "Source"] + [metric.arrow_label for metric in definition.primary_metrics]
-        table = QTableWidget(len(ordered), len(headers))
-        table.setObjectName("diagnosticTable")
-        table.setHorizontalHeaderLabels(headers)
-        table.setAlternatingRowColors(True)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setSelectionMode(QAbstractItemView.SingleSelection)
-        table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-
-        def format_metric(value: Optional[float]) -> str:
-            return "n/a" if value is None else f"{float(value):.3f}"
-
-        selected_row = 0
-        for row, candidate in enumerate(ordered):
-            is_recommended = candidate == recommendation.recommended_candidate
-            values = [
-                "Recommended" if is_recommended else "",
-                str(candidate.cycle),
-                result_source_title(candidate.source) + (" (map only)" if not candidate.usable_structure else ""),
-            ] + [format_metric(candidate.metrics.value(metric.key)) for metric in definition.primary_metrics]
-            for column, value in enumerate(values):
-                item = QTableWidgetItem(value)
-                item.setTextAlignment((Qt.AlignLeft if column in (0, 2) else Qt.AlignRight) | Qt.AlignVCenter)
-                item.setData(Qt.UserRole, row)
-                table.setItem(row, column, item)
-            if candidate == initially_selected:
-                selected_row = row
-
-        preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
-        preview_canvas = FigureCanvas(preview_figure)
-        preview_canvas.setObjectName("resultPreviewCanvas")
-        preview_canvas.setMinimumHeight(260)
-        preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        preview_host.structure_canvas = preview_canvas
-        preview_canvas.mpl_connect("button_press_event", preview_host._begin_structure_view_drag)
-        preview_canvas.mpl_connect("motion_notify_event", preview_host._sync_structure_view_from_event)
-        preview_canvas.mpl_connect("button_release_event", preview_host._finish_structure_view_drag)
-
-        action_btn = QPushButton("Pass to Jana2020" if is_jana else "Save map and model")
-        action_btn.setObjectName("primaryButton")
-
-        def render_preview(candidate: ResultCandidate) -> None:
-            state["selected"] = candidate
-            preview_figure.clear()
-            preview_figure.patch.set_facecolor("#ffffff")
-            preview_host.structure_axes = []
-            preview_host._structure_interactive_axes = []
-            preview_host._structure_depth_artists = []
-            atoms = self._safe_parse_structure(Path(candidate.structure_path)) if candidate.usable_structure else []
-            panels = [(candidate.label, atoms, "Structure model unavailable · map remains usable")]
-            if reference_available:
-                panels.append(("Reference", self.reference_atoms_for_plot, "Reference structure unavailable"))
-            count = len(panels)
-            positions = (0.5,) if count == 1 else (0.25, 0.75)
-            metadata = []
-            for index, (_title, panel_atoms, empty_text) in enumerate(panels, start=1):
-                axis = preview_figure.add_subplot(1, count, index, projection="3d")
-                preview_host.structure_axes.append(axis)
-                metadata.append(preview_host._plot_structure_atoms(axis, panel_atoms, empty_text))
-            for position, (title, _atoms, _empty) in zip(positions, panels):
-                preview_figure.text(position, 0.96, title, ha="center", va="center", fontsize=10, fontweight="bold", color="#001170")
-            for position, details in zip(positions, metadata):
-                preview_figure.text(position, 0.03, details, ha="center", va="center", fontsize=7.5, color="#52658b")
-            if count > 1:
-                preview_figure.add_artist(Line2D([0.5, 0.5], [0.08, 0.90], transform=preview_figure.transFigure, color="#cbd7ea", linewidth=0.45, alpha=0.62))
-            preview_figure.subplots_adjust(left=0.01, right=0.99, bottom=0.09, top=0.90, wspace=0.04)
-            preview_canvas.draw_idle()
-            action_btn.setText(
-                "Pass to Jana2020" if is_jana else
-                ("Save map and model" if candidate.usable_structure else "Save available result")
-            )
-
-        def selected_candidate() -> Optional[ResultCandidate]:
-            row = table.currentRow()
-            return ordered[row] if 0 <= row < len(ordered) else None
-
-        def on_selection_changed() -> None:
-            candidate = selected_candidate()
-            if candidate is not None:
-                render_preview(candidate)
-
-        table.itemSelectionChanged.connect(on_selection_changed)
-        table.selectRow(selected_row)
-        render_preview(initially_selected)
-
-        preview_section = QWidget()
-        preview_layout = QVBoxLayout(preview_section)
-        preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_label = QLabel("STRUCTURE COMPARISON" if reference_available else "STRUCTURE PREVIEW")
-        preview_label.setObjectName("sectionLabel")
-        preview_layout.addWidget(preview_label)
-        preview_layout.addWidget(preview_canvas, 1)
-        splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(table)
-        splitter.addWidget(preview_section)
-        splitter.setSizes([760, 640])
-        content_layout.addWidget(splitter, 1)
-
-        button_row = QHBoxLayout()
-        close_btn = QPushButton("Return to Phase Studio")
-        button_row.addWidget(close_btn)
-        button_row.addStretch(1)
-        button_row.addWidget(action_btn)
-        content_layout.addLayout(button_row)
-        close_btn.clicked.connect(dialog.reject)
-        action_btn.clicked.connect(dialog.accept)
+        dialog = ResultSelectionDialog(
+            self,
+            candidates,
+            profile,
+            definition,
+            recommendation,
+            jana_context=is_jana,
+            preview_host=preview_host,
+            parse_structure=self._safe_parse_structure,
+            reference_atoms=self.reference_atoms_for_plot,
+            source_title=result_source_title,
+        )
 
         self._append_execution_log(
             f"[Results] Result selector opened · {definition.assessment_label}",
@@ -11241,9 +11074,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         if dialog.exec() != QDialog.Accepted:
             return
-        chosen = state["selected"]
-        if chosen is None:
-            return
+        chosen = dialog.selected_candidate
         self.result_recommendation = recommendation.with_selected(chosen)
         if cfg is not None:
             write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", self.results, chosen)

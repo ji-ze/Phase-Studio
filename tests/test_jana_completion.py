@@ -139,7 +139,7 @@ def run_to_completion(win, cycle_results, app):
 
 
 def main():
-    from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QPushButton, QTableWidget
+    from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QPushButton, QTableWidget, QWidget
     from phase_studio import app as appmod
     from phase_studio.map_quality import PROFILE_DEFINITIONS, ValidationProfile
 
@@ -211,6 +211,24 @@ def main():
     check(
         "Jana and standalone recommend the same cycle/source",
         jana.result_recommendation.recommended_candidate == standalone.result_recommendation.recommended_candidate,
+    )
+
+    # A row change updates both the explicit selection returned to the caller
+    # and the lazily rendered preview, without changing the recommendation.
+    selector = opened[-1]
+    selector_table = selector.findChild(QTableWidget)
+    selector_table.selectRow(0)
+    app.processEvents()
+    manual_candidate = standalone._result_candidates()[0]
+    check(
+        "manual override selects the requested cycle/source",
+        selector.selected_candidate == manual_candidate,
+    )
+    preview_canvas = selector.findChild(QWidget, "resultPreviewCanvas")
+    preview_titles = [text.get_text() for text in preview_canvas.figure.texts]
+    check(
+        "preview selection updates to the manually selected result",
+        manual_candidate.label in preview_titles,
     )
 
     # Standalone export copies the selected canonical files without changing
