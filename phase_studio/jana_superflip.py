@@ -35,9 +35,9 @@ except Exception:
     from error_reporting import build_error_report, sanitize_error_details, show_phase_studio_error
 
 try:
-    from phase_studio.sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
+    from phase_studio.sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL, reconcile_model_selection
 except Exception:
-    from sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
+    from sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL, reconcile_model_selection
 
 try:
     from phase_studio.ui_style import apply_phase_studio_style
@@ -2168,21 +2168,13 @@ class _JanaWorkflowWizard:
 
             models_result = payload
             current = self.model.currentText().strip() or "default"
-            values: List[str] = ["default"]
             default_model = str(getattr(models_result, "default_model", "") or "").strip()
-            if default_model and default_model not in values:
-                values.append(default_model)
-            for available in list(getattr(models_result, "models", []) or []):
-                value = str(available).strip()
-                if value and value not in values:
-                    values.append(value)
+            values, displayed = reconcile_model_selection(
+                current, list(getattr(models_result, "models", []) or []), default_model)
             self.model.blockSignals(True)
             self.model.clear()
             self.model.addItems(values)
-            if self.model_user_picked["value"] and current in values:
-                self.model.setCurrentText(current)
-            else:
-                self.model.setCurrentText(current if current in values else "default")
+            self.model.setCurrentText(displayed)
             self.model.blockSignals(False)
             self._fit_model_popup_width()
             self.model_cache["loaded"] = True

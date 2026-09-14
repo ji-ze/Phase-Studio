@@ -51,6 +51,21 @@ class SharpEDAPIContractTests(unittest.TestCase):
                          ("koala 2.0", ["koala 2.0", "viper 3.0"]))
         self.assertEqual(self.requests, [("GET", "https://jana.fzu.cz/sharp-ed/models", None, {})])
 
+    def test_model_selection_reconciliation_is_shared_and_preserves_default(self):
+        values, displayed = api.reconcile_model_selection(
+            "default", ["koala 2.0", "viper 3.0", "koala 2.0"], "koala 2.0",
+        )
+        self.assertEqual(values, ["default", "koala 2.0", "viper 3.0"])
+        self.assertEqual(displayed, "default")
+        _values, displayed = api.reconcile_model_selection(
+            "viper 3.0", ["koala 2.0", "viper 3.0"], "koala 2.0",
+        )
+        self.assertEqual(displayed, "viper 3.0")
+        _values, displayed = api.reconcile_model_selection(
+            "removed model", ["koala 2.0"], "koala 2.0",
+        )
+        self.assertEqual(displayed, "default")
+
     def test_complete_lifecycle_uses_one_base_and_historical_tokens(self):
         client = api.SharpEDServerClient()
         with patch.object(api.SharpEDServerClient, "_request_bytes", self.transport):
@@ -134,4 +149,3 @@ class SharpEDAPIContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

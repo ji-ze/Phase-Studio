@@ -107,9 +107,9 @@ except Exception:
     )
 
 try:
-    from phase_studio.sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
+    from phase_studio.sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL, reconcile_model_selection
 except Exception:
-    from sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
+    from sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL, reconcile_model_selection
 
 try:
     from phase_studio.sharped_map_scaling import (
@@ -10878,17 +10878,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     widget = self.inputs.get("sharped_model")
                     if isinstance(widget, QComboBox):
                         current = widget.currentText().strip() or "default"
+                        values, displayed = reconcile_model_selection(current, list(models), str(default_model))
                         widget.blockSignals(True)
                         widget.clear()
-                        values = ["default"]
-                        if default_model:
-                            values.append(str(default_model))
-                        for available_model in list(models):
-                            if available_model not in values:
-                                values.append(available_model)
                         widget.addItems(values)
-                        idx = widget.findText(current)
-                        widget.setCurrentIndex(idx if idx >= 0 else 0)
+                        widget.setCurrentText(displayed)
                         widget.blockSignals(False)
                     self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
                 elif kind == "hkl_load_result":

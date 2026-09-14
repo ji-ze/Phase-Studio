@@ -79,6 +79,21 @@ class ModelsResult:
     raw_json: str
 
 
+def reconcile_model_selection(
+    previous: str, models: list[str], server_default: str,
+) -> tuple[list[str], str]:
+    """Resolve one stable selector view without network or widget behavior."""
+    default_model = str(server_default or "").strip()
+    values = ["default"]
+    for candidate in [default_model, *list(models or [])]:
+        value = str(candidate or "").strip()
+        if value and value not in values:
+            values.append(value)
+    requested = str(previous or "").strip() or "default"
+    displayed = requested if requested in values else "default"
+    return values, displayed
+
+
 class SharpEDServerError(RuntimeError):
     pass
 
