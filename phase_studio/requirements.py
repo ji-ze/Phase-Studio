@@ -20,11 +20,13 @@ headlessly and the Jana2020 wrapper can use it without pulling in the GUI.
 
 from __future__ import annotations
 
+import io
 import shutil
+import zipfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence
+from typing import BinaryIO, Callable, List, Optional, Sequence
 
 # The canonical Jana2020 location both tools are normally installed into.
 DEFAULT_JANA_SUPERFLIP_DIR = Path(r"C:\Jana2020\SUPERFLIP")
@@ -58,6 +60,7 @@ class RequirementState(str, Enum):
     NOT_CONFIGURED = "not_configured"
     NOT_FOUND = "not_found"
     NOT_A_FILE = "not_a_file"
+    WRONG_EXECUTABLE = "wrong_executable"
     IS_PHASE_STUDIO_WRAPPER = "is_phase_studio_wrapper"
     TOKEN_MISSING = "token_missing"
     TOKEN_REJECTED = "token_rejected"
@@ -114,6 +117,11 @@ class RequirementStatus:
                 f"launcher, not {label} itself. Select the real {label} executable "
                 f"({ORIGINAL_EXE_NAME} in a Phase Studio-integrated Jana2020 "
                 f"installation)."
+            )
+        if self.state is RequirementState.WRONG_EXECUTABLE:
+            return (
+                f"The selected file does not look like the {label} executable. "
+                f"Select the executable supplied by the {label} authors."
             )
         return (
             f"Phase Studio could not find a working {label} executable. Select an "
@@ -187,6 +195,29 @@ def is_phase_studio_wrapper(exe: Path) -> bool:
         return False
 
 
+def is_expected_executable(kind: RequirementKind, exe: Path) -> bool:
+    """Apply a conservative identity check before accepting an executable.
+
+    Phase Studio cannot safely launch an arbitrary ``.exe`` merely because it
+    exists.  The official Windows archives use a small, stable set of names and
+    PE executables start with the ``MZ`` signature.  Wrapper ownership remains a
+    separate marker-based decision in :func:`is_phase_studio_wrapper`.
+    """
+    path = Path(exe)
+    name = path.name.casefold()
+    expected_names = (
+        {"superflip.exe", "superflip_original.exe", "superflip-original.exe", "superflip-orig.exe"}
+        if kind is RequirementKind.SUPERFLIP else {"edma.exe"}
+    )
+    if name not in expected_names:
+        return False
+    try:
+        with path.open("rb") as stream:
+            return stream.read(2) == b"MZ"
+    except OSError:
+        return False
+
+
 def _check_executable(
     kind: RequirementKind,
     configured: object,
@@ -194,35 +225,51 @@ def _check_executable(
 ) -> RequirementStatus:
     """Shared Superflip/EDMA logic: validate, else look in known locations."""
     resolved = resolve_executable(configured)
+    configured_failure: Optional[RequirementStatus] = None
+    search_candidates = list(candidates)
 
     if resolved is not None and resolved.is_file():
-        if kind is RequirementKind.SUPERFLIP and is_phase_studio_wrapper(resolved):
+        if not is_expected_executable(kind, resolved):
+            configured_failure = RequirementStatus(
+                kind=kind,
+                state=RequirementState.WRONG_EXECUTABLE,
+                path=resolved,
+                detail=str(resolved),
+            )
+        elif kind is RequirementKind.SUPERFLIP and is_phase_studio_wrapper(resolved):
             # Configured path points at our own launcher: look for the real one
             # next to it before giving up.
             sibling = resolved.parent / ORIGINAL_EXE_NAME
-            return RequirementStatus(
+            search_candidates.insert(0, sibling)
+            configured_failure = RequirementStatus(
                 kind=kind,
                 state=RequirementState.IS_PHASE_STUDIO_WRAPPER,
                 path=resolved,
-                suggested_path=sibling if sibling.is_file() else None,
                 detail=str(resolved),
             )
-        return RequirementStatus(kind=kind, state=RequirementState.OK,
-                                 path=resolved, detail=str(resolved))
+        else:
+            return RequirementStatus(kind=kind, state=RequirementState.OK,
+                                     path=resolved, detail=str(resolved))
 
-    for candidate in candidates:
+    for candidate in search_candidates:
         candidate = Path(candidate)
         if not candidate.is_file():
+            continue
+        if not is_expected_executable(kind, candidate):
             continue
         if kind is RequirementKind.SUPERFLIP and is_phase_studio_wrapper(candidate):
             continue
         return RequirementStatus(
             kind=kind,
-            state=RequirementState.NOT_FOUND,
+            state=(configured_failure.state if configured_failure is not None
+                   else RequirementState.NOT_FOUND),
             path=resolved,
             suggested_path=candidate.resolve(),
             detail=f"Found a candidate at {candidate}",
         )
+
+    if configured_failure is not None:
+        return configured_failure
 
     state = (RequirementState.NOT_CONFIGURED
              if not str(configured or "").strip()
@@ -260,6 +307,56 @@ def check_edma(configured: object,
     return _check_executable(RequirementKind.EDMA, configured, [jana_dir / EDMA_EXE_NAME])
 
 
+def download_requirement_executable(
+    kind: RequirementKind,
+    destination_dir: Path,
+    *,
+    opener: Optional[Callable[..., BinaryIO]] = None,
+) -> Path:
+    """Download one official archive and install only its expected executable.
+
+    The caller owns the license-acknowledgement UI.  Archive paths are never
+    extracted directly, which avoids path traversal and leaves Jana2020 files
+    untouched.  The destination is a Phase Studio-owned user-data directory.
+    """
+    if kind is RequirementKind.SHARPED:
+        raise ValueError("SharpED is an account requirement, not a downloadable executable.")
+    if opener is None:
+        from urllib.request import urlopen
+
+        opener = urlopen
+    url = SUPERFLIP_DOWNLOAD_URL if kind is RequirementKind.SUPERFLIP else EDMA_DOWNLOAD_URL
+    target_name = WRAPPER_EXE_NAME if kind is RequirementKind.SUPERFLIP else EDMA_EXE_NAME
+    response = opener(url, timeout=60.0)
+    try:
+        payload = response.read()
+    finally:
+        close = getattr(response, "close", None)
+        if callable(close):
+            close()
+    with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
+        members = [
+            name for name in archive.namelist()
+            if not name.endswith("/") and Path(name).name.casefold() == target_name.casefold()
+        ]
+        if not members:
+            raise RuntimeError(f"The downloaded archive did not contain {target_name}.")
+        member = min(members, key=lambda value: (len(Path(value).parts), len(value), value.casefold()))
+        executable = archive.read(member)
+    if not executable.startswith(b"MZ"):
+        raise RuntimeError(f"The downloaded {target_name} is not a Windows executable.")
+
+    destination = Path(destination_dir).expanduser().resolve()
+    destination.mkdir(parents=True, exist_ok=True)
+    target = destination / target_name
+    temporary = destination / (target_name + ".download")
+    temporary.write_bytes(executable)
+    temporary.replace(target)
+    if not is_expected_executable(kind, target):
+        raise RuntimeError(f"The installed {target_name} did not pass executable validation.")
+    return target.resolve()
+
+
 # ---------------------------------------------------------------------------
 # SharpED
 # ---------------------------------------------------------------------------
@@ -268,14 +365,13 @@ def check_sharped_api(base_url: str, token: str, *, timeout: float = 15.0,
                       client_factory: Optional[Callable[..., object]] = None) -> RequirementStatus:
     """Verify SharpED access as far as the existing API client allows.
 
-    This uses the SAME client and shared model catalog as the application.
-    A successful response from the last 15 seconds may be reused; otherwise
-    it performs a real model request. Nothing creates or consumes a job.
+    This uses the SAME client and configured server as the application and
+    performs a real public model request. Nothing creates or consumes a job.
 
     What this proves, honestly:
 
       * a token is configured at all (answered without any request);
-      * the configured server was recently reachable and spoke the expected protocol;
+      * the configured server was reachable and spoke the expected protocol;
       * the response is well formed.
 
     What it CANNOT prove with the current client: that the token will be
@@ -295,14 +391,14 @@ def check_sharped_api(base_url: str, token: str, *, timeout: float = 15.0,
         return RequirementStatus(kind=RequirementKind.SHARPED,
                                  state=RequirementState.TOKEN_MISSING)
 
-    from phase_studio.sharped_server_client import SharpEDServerClient, MODEL_METADATA_REUSE_SECONDS
+    from phase_studio.sharped_server_client import SharpEDServerClient
 
     if client_factory is None:
         client_factory = SharpEDServerClient
 
     try:
         client = client_factory(base_url=base_url, timeout=timeout)
-        models = client.get_models(max_age=MODEL_METADATA_REUSE_SECONDS)
+        models = client.get_models()
     except Exception as exc:  # noqa: BLE001 - classified below
         return _classify_sharped_error(exc)
 
@@ -334,7 +430,9 @@ def _classify_sharped_error(exc: BaseException) -> RequirementStatus:
     elif isinstance(status_code, int) and 500 <= status_code < 600:
         state = RequirementState.SERVER_UNREACHABLE
     else:
-        state = RequirementState.TOKEN_REJECTED
+        # Only explicit HTTP authentication evidence may reject a token.
+        # Public catalog/protocol failures do not establish token validity.
+        state = RequirementState.MALFORMED_RESPONSE
     return RequirementStatus(kind=RequirementKind.SHARPED, state=state)
 
 

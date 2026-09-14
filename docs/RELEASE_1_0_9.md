@@ -1,9 +1,10 @@
 # Split Windows distribution
 
-SharpED subsequently gained a [temporary compatibility bridge](SHARPED_TEMPORARY_BRIDGE.md):
-current model discovery remains on the final domain, while authenticated jobs
-use the legacy backend. Current DEFAULT is unavailable there until `koala 4.0`
-can be served; users must choose a compatible concrete model.
+Phase Studio 1.0.9 temporarily uses the original coherent SharpED API at
+`https://jana.fzu.cz`: model discovery, upload, polling, and download all derive
+from that single base URL. This restores the last known-working client behavior
+while server migration is completed. TODO: after SharpED server unification,
+migrate Phase Studio to the final `sharped.fzu.cz` API in a separate task.
 
 ## Git audit
 
@@ -54,7 +55,36 @@ transactional integration engine stages it into Jana2020.
 
 ## Verification
 
-- All 17 Python regression scripts pass (670 checks). This includes synthetic
+The workflow-preflight audit traced commit `57567f2` through the SharpED API
+rollback and the standalone/Jana distribution split. Its pure checks and the
+full-window call site survived; they were neither reverted nor overwritten.
+The original commit explicitly left remediation dialogs unimplemented, and
+the lightweight Wizard's single-pass actions had never called the shared
+preflight. Version 1.0.9 now connects every execution route and supplies the
+three dedicated repair dialogs. The same focused pass removed the split-host
+bridge accidentally reintroduced by `a83e6d1` and restored `396270c`'s
+single-host SharpED client; it does not define a new endpoint contract.
+
+| Requirement | Check exists | Called before execution | Dedicated repair UI | Full GUI | Wizard |
+| --- | --- | --- | --- | --- | --- |
+| Superflip | yes | yes | yes | pass | pass |
+| EDMA | yes | yes, when an EDMA stage is enabled | yes | pass | pass when required by the full-window configuration |
+| SharpED API | yes | yes, for SharpED workflows | yes | pass | pass |
+
+- Superflip auto-detection prefers `superflip_original.exe`, rejects a marked
+  Phase Studio `superflip.exe` wrapper, and accepts the fallback
+  `superflip.exe` only when wrapper ownership is absent. EDMA detection is
+  read-only. Both detected paths synchronize the current configuration,
+  Advanced -> Setup, and QSettings.
+- SharpED preflight establishes only token presence, current server
+  reachability, and a well-formed public response. It does not label the token
+  valid. Only explicit HTTP 401/403 evidence is classified as authentication
+  rejection.
+- Click-driven Qt tests cover missing Superflip, EDMA and SharpED requirements,
+  silent success, Browse and Set-token repair/resume, Skip blocking, all three
+  Wizard run buttons, and the non-running Open full configuration action.
+
+- All 17 Python regression scripts pass (685 checks). This includes synthetic
   periodic Fourier maps, scale/origin invariance, triplet phase statistics,
   frozen holdout isolation, all four profile orders, both selector contexts,
   manual override state, real-file export, report/CSV contents, and existing
@@ -64,7 +94,7 @@ transactional integration engine stages it into Jana2020.
   marking, splitter balance, structure preview, and context-specific actions
   remained within the intended geometry; widget-level tests verified their
   exact labels and behavior.
-- The automated Python suite covers catalog compatibility, frozen-product
+- The automated Python suite covers the historical single-host API contract, frozen-product
   boundaries, private payload resolution, transactional install/update/repair/
   remove and rollback, UI text/state behavior, and the preserved scientific
   baselines.

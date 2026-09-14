@@ -1,5 +1,8 @@
 # SharpED model discovery: diagnosis and verification
 
+> Historical diagnosis only. The current client intentionally uses the older
+> single-host API until the production server is unified.
+
 ## Confirmed cause
 
 Phase Studio used `GET https://jana.fzu.cz/sharp-ed/models`. That host still

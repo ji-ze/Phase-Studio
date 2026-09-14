@@ -35,6 +35,14 @@ Install them separately from:
 
 https://superflip.fzu.cz/
 
+Phase Studio checks only the programs needed by the selected workflow when
+you click **Run phasing**. It first looks in `C:\Jana2020\SUPERFLIP` and saves
+valid detected paths. If setup is still required, the dedicated Superflip or
+EDMA dialog can browse to an installation, open the official download page, or
+download the program after explicit third-party-license acknowledgement.
+Choosing **Skip for now** returns to configuration without starting the
+workflow.
+
 Configure their executable paths in **Advanced → Setup** if the defaults do not match your installation.
 
 ### 2.3 Jana2020
@@ -58,15 +66,17 @@ https://sharped.fzu.cz/
 The default server configured in Phase Studio is:
 
 ```text
-https://sharped.fzu.cz/
+https://jana.fzu.cz/
 ```
 
-During the temporary compatibility bridge, Phase Studio discovers models from
-this current service and routes authenticated inference through
-`https://jana.fzu.cz/` internally. Incompatible current models and DEFAULT are
-disabled; Phase Studio never substitutes another model silently.
-
 Never commit API tokens to a repository or include them in shared logs.
+
+When a SharpED workflow starts, Phase Studio checks that a token is configured
+and that the current service can be reached. Public model discovery does not
+prove that a token is valid. An explicit HTTP 401/403 from an authenticated
+operation is reported as **SharpED access required**, where a replacement token
+can be saved. The dialog never displays the server URL or writes the token to
+the Execution Log.
 
 ### 2.5 Source installation
 
@@ -272,11 +282,13 @@ Because FWHM is not comparable in scale or meaning to σ, an `I/FWHM` ratio is n
 
 ### 6.1 Starting preset
 
-**Starting preset** applies a bundle of starting values in one step; every value stays individually editable afterward, and re-selecting a preset re-applies its values. **Recommended** is the default: a general-purpose baseline (cycles 5, Phasing method Superflip, next-cycle model deblurred_xplor, XPLOR damping 0.3, all optional processing enabled except symmetry averaging, SharpED model default) that matches the built-in defaults, so a fresh install and a fresh selection of **Recommended** produce the same configuration. The other presets (MOF atomic resolution, MOF medium resolution, small molecule, inorganic) tune a handful of settings for a specific sample type. **custom** applies nothing and is only a placeholder for "I've configured this by hand" — selecting it does not change or reset any current value.
+**Starting preset** applies a bundle of starting values in one step; every value stays individually editable afterward, and re-selecting a preset re-applies its values. **Recommended** is the default: a general-purpose baseline (cycles 5, Phasing method Superflip, next-cycle model deblurred_xplor, XPLOR damping 0.3, all optional processing enabled except symmetry averaging, SharpED model koala 2.0) that matches the built-in defaults, so a fresh install and a fresh selection of **Recommended** produce the same configuration. The other presets (MOF atomic resolution, MOF medium resolution, small molecule, inorganic) tune a handful of settings for a specific sample type. **custom** applies nothing and is only a placeholder for "I've configured this by hand" — selecting it does not change or reset any current value.
 
-The SharpED model selector and Jana2020 Wizard use the current server catalog. **default** remains a selection preference and resolves to the live server default immediately before upload. Refresh replaces the catalog and its default together; removed selections return to **default**. If discovery fails, the last successful catalog remains visibly marked as cached. A default-model job requires a successful fresh lookup, while an explicit model identifier is sent unchanged.
-
-The current service is `https://sharped.fzu.cz`; saved URLs for the former bundled `https://jana.fzu.cz` host migrate to it. Use an API token issued by the current service: tokens accepted by the former host may be rejected by the current host. Custom server URLs remain supported. See [model discovery diagnostics](docs/SHARPED_MODEL_DISCOVERY.md).
+The SharpED model selector and Jana2020 Wizard query the configured server. The
+temporary Phase Studio 1.0.9 default remains `https://jana.fzu.cz`; model
+discovery, upload, polling, and download use that same base URL. **default** is
+resolved from that server's model response immediately before upload. Custom
+server URLs remain supported and are used unchanged.
 
 Treat presets as starting points rather than universal scientific recommendations.
 
@@ -455,12 +467,8 @@ The SharpED model selector is on the **Basic → Workflow** page. Server connect
 The current default is:
 
 ```text
-https://sharped.fzu.cz/
+https://jana.fzu.cz/
 ```
-
-The temporary compatibility bridge keeps the current catalog at this address
-while authenticated inference uses `https://jana.fzu.cz/` internally. See
-[Temporary SharpED compatibility bridge](docs/SHARPED_TEMPORARY_BRIDGE.md).
 
 #### API token
 

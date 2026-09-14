@@ -14,6 +14,8 @@ so the failure classification is asserted rather than hoped for.
 import os
 import sys
 import tempfile
+import io
+import zipfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -58,6 +60,11 @@ def main():
     status = reqs.check_superflip(str(tmp / "does_not_exist.exe"), jana_dir=empty)
     check("a missing Superflip path is reported as not found",
           status.state is State.NOT_FOUND)
+
+    wrong = make_exe(tmp, "unrelated.exe")
+    status = reqs.check_superflip(str(wrong), jana_dir=empty)
+    check("an arbitrary executable is not accepted as Superflip",
+          status.state is State.WRONG_EXECUTABLE)
 
     # --- auto-detection from the standard Jana2020 directory ----------
     jana = Path(tempfile.mkdtemp())
@@ -111,6 +118,30 @@ def main():
           reqs.check_edma("", jana_dir=jana).suggested_path == edma.resolve())
     check("a missing EDMA is reported as not found",
           reqs.check_edma(str(tmp / "nope.exe"), jana_dir=empty).state is State.NOT_FOUND)
+    check("an arbitrary executable is not accepted as EDMA",
+          reqs.check_edma(str(wrong), jana_dir=empty).state is State.WRONG_EXECUTABLE)
+
+    # The automatic installer copies only the expected member from the
+    # official-style ZIP into a Phase Studio-owned directory.
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("package/readme.txt", "third-party package")
+        archive.writestr("package/superflip.exe", b"MZ downloaded Superflip")
+
+    class _Response(io.BytesIO):
+        pass
+
+    download_root = Path(tempfile.mkdtemp()) / "tools"
+    downloaded = reqs.download_requirement_executable(
+        Kind.SUPERFLIP,
+        download_root,
+        opener=lambda *_args, **_kwargs: _Response(archive_bytes.getvalue()),
+    )
+    check("automatic download installs the expected executable", downloaded.is_file())
+    check("automatic download does not extract unrelated archive files",
+          not (download_root / "readme.txt").exists())
+    check("the automatically installed executable passes the same validation",
+          reqs.check_superflip(str(downloaded), jana_dir=empty).ok)
 
     # =====================================================================
     # SharpED: classification, with the network stubbed out
@@ -178,6 +209,13 @@ def main():
     check("a 5xx server error is classified as unreachable, not a bad token",
           status.state is State.SERVER_UNREACHABLE)
 
+    status = reqs.check_sharped_api(
+        "https://jana.fzu.cz", "tok",
+        client_factory=factory(error=RuntimeError("unexpected public catalog failure")),
+    )
+    check("an unknown public request failure does not reject the token",
+          status.state is State.MALFORMED_RESPONSE)
+
     # --- the token must never appear anywhere user-visible -------------
     secret = "SECRET-TOKEN-abcdef123456"
     leaks = []
@@ -200,6 +238,23 @@ def main():
     result = reqs.run_preflight(required, superflip_path=str(real), edma_path="",
                                 jana_dir=empty)
     check("an EDMA-free workflow is not blocked by a missing EDMA", result.ok)
+
+    result = reqs.run_preflight(
+        reqs.requirements_for_workflow(
+            needs_superflip=True, needs_edma=False, needs_sharped=False,
+        ),
+        superflip_path=str(real), sharped_token="", jana_dir=empty,
+    )
+    check("a SharpED-disabled workflow is not blocked by a missing token", result.ok)
+
+    result = reqs.run_preflight(
+        reqs.requirements_for_workflow(
+            needs_superflip=True, needs_edma=False, needs_sharped=True,
+        ),
+        superflip_path=str(real), sharped_token="", jana_dir=empty,
+    )
+    check("a SharpED-enabled workflow is blocked by a missing token",
+          not result.ok and result.first_failure.kind is Kind.SHARPED)
 
     required = reqs.requirements_for_workflow(needs_superflip=True, needs_edma=True,
                                               needs_sharped=False)
@@ -225,6 +280,23 @@ def main():
           all(r.path.name != reqs.WRAPPER_EXE_NAME
               for r in result.repaired if r.kind is Kind.SUPERFLIP))
 
+    marked_edma = make_exe(marked, reqs.EDMA_EXE_NAME)
+    result = reqs.run_preflight(
+        required, superflip_path=str(wrapper), edma_path="",
+        jana_dir=marked, accept_suggestion=lambda _status: True,
+    )
+    check("combined Jana auto-detection chooses original Superflip beside the marked wrapper",
+          result.ok and any(
+              repaired.kind is Kind.SUPERFLIP and repaired.path == marked_original.resolve()
+              for repaired in result.repaired
+          ))
+    check("combined Jana auto-detection chooses Jana's EDMA without modifying it",
+          marked_edma.read_bytes() == b"MZ fake executable"
+          and any(
+              repaired.kind is Kind.EDMA and repaired.path == marked_edma.resolve()
+              for repaired in result.repaired
+          ))
+
     # Declining a suggestion must not silently satisfy the requirement.
     result = reqs.run_preflight(required, superflip_path="", edma_path="",
                                 jana_dir=jana, accept_suggestion=lambda _s: False)
@@ -240,10 +312,17 @@ def main():
     source = inspect.getsource(appmod.IterativeSuperflipPipelineQtGUI)
     check("the main window runs the shared preflight before a workflow starts",
           "_run_workflow_preflight" in source)
-    check("the preflight is driven from run validation",
-          "preflight_issues" in source)
+    check("the preflight is driven after configuration validation and before the worker",
+          "if not self._ensure_workflow_requirements(cfg)" in source)
     check("the main window imports the shared requirements module",
           "from phase_studio import requirements as reqs" in source)
+
+    import phase_studio.jana_superflip as jana
+    wizard_source = inspect.getsource(jana._JanaWorkflowWizard)
+    check("the Jana Wizard calls the shared requirement gate",
+          "_ensure_workflow_requirements" in wizard_source)
+    check("the obsolete generic missing-token warning is gone",
+          "_show_missing_token_warning" not in inspect.getsource(jana))
 
     failures = [name for name, ok in results_log if not ok]
     print()

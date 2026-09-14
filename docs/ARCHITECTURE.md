@@ -248,6 +248,56 @@ Reuse the existing branded chrome builders (`create_phase_studio_brand_header`,
 `create_phase_studio_context_banner`) rather than building a new dialog's
 header from scratch -- every dialog in the app already shares this look.
 
+## Execution-time requirements preflight
+
+`phase_studio/requirements.py` owns executable identity, Jana2020-directory
+auto-detection, SharpED reachability classification, conditional requirement
+sets, and the official third-party archive installer. It has no application
+startup hook. The shared remediation dialog is built by
+`show_requirement_remediation_dialog()` in `app.py` and is reused by the full
+window and the Jana2020 Wizard.
+
+The full-window route is:
+
+```text
+Run phasing
+  -> get_config()
+  -> _validate_run_config()                 [local input/configuration checks]
+  -> _ensure_workflow_requirements()
+  -> requirements.run_preflight()
+  -> dedicated remediation -> re-check      [only on failure]
+  -> create work directory
+  -> workflow worker
+```
+
+The lightweight Wizard routes are:
+
+```text
+Superflip only / Superflip + SharpED
+  -> Wizard Run phasing
+  -> _ensure_workflow_requirements()
+  -> requirements.run_preflight()
+  -> dedicated remediation -> re-check
+  -> close Wizard with action=run
+  -> run_jana_superflip()
+
+Phase recycling
+  -> Wizard Run phasing
+  -> the same Wizard preflight
+  -> launch full window with auto_start=True
+  -> full-window preflight above
+  -> workflow worker
+
+Open full configuration
+  -> open full window without starting
+  -> later Run phasing uses the full-window route above
+```
+
+Skip returns `False` from the requirement gate and never starts the requested
+workflow. A detected or user-selected executable updates the active RunConfig,
+Advanced -> Setup, and the existing QSettings store. The SharpED dialog edits
+only the masked token; it neither exposes nor changes the server URL.
+
 ## How to bump the application version
 
 Edit `phase_studio/version.py`'s `VERSION` only. Every other version

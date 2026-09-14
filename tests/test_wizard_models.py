@@ -39,8 +39,6 @@ class _Models:
         self.models = list(models)
         self.default_model = default_model
         self.status = "server"
-        self.inference_source = ""
-        self.inference_models = None
 
 
 def pump(app, wizard, seconds=3.0):

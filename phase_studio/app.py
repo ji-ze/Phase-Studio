@@ -107,17 +107,9 @@ except Exception:
     )
 
 try:
-    from phase_studio.sharped_server_client import (
-        SharpEDServerClient, DEFAULT_SERVER_URL,
-        normalize_server_url, current_model_catalog,
-        model_selection, sync_model_catalog,
-    )
+    from phase_studio.sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
 except Exception:
-    from sharped_server_client import (
-        SharpEDServerClient, DEFAULT_SERVER_URL,
-        normalize_server_url, current_model_catalog,
-        model_selection, sync_model_catalog,
-    )
+    from sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL
 
 try:
     from phase_studio.sharped_map_scaling import (
@@ -159,7 +151,7 @@ except Exception as exc:
 # Import the selected Qt binding before Matplotlib's Qt backend.
 # The application and the frozen executable use PySide6 exclusively.
 try:
-    from PySide6.QtCore import Qt, QTimer, QSettings, QUrl, QPoint, QRect, QRectF, QSize
+    from PySide6.QtCore import Qt, QTimer, QSettings, QStandardPaths, QUrl, QPoint, QRect, QRectF, QSize
     from PySide6.QtGui import QColor, QDesktopServices, QFont, QGuiApplication, QIcon, QKeySequence, QPainter, QPen, QPixmap, QShortcut, QTextBlockFormat, QTextCharFormat, QTextCursor
     from PySide6.QtWidgets import (
         QApplication, QButtonGroup, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame,
@@ -5265,7 +5257,7 @@ def run_sharped_deblur(
     log_both(f"SharpED server HTTP timeout: {timeout} seconds")
     if stop_event is not None and stop_event.is_set():
         raise RuntimeError("Immediate stop requested.")
-    if max_upload_mb <= 0 and normalize_server_url(base_url) == DEFAULT_SERVER_URL:
+    if max_upload_mb <= 0 and "jana.fzu.cz" in str(base_url).lower():
         input_bytes = int(Path(input_map).stat().st_size)
         public_limit_bytes = 100_000_000
         if input_bytes > public_limit_bytes:
@@ -5314,12 +5306,19 @@ def run_sharped_deblur(
         log_both(f"SharpED map value detail: exponent {exponent:.3f} applied to {scaled_upload_map.name}")
 
     client = SharpEDServerClient(base_url=base_url, timeout=float(timeout))
+    selected_model = model.strip()
+    if not selected_model or selected_model.lower() in {"default", "server default", "sharped default"}:
+        models = client.get_models(log=log_both)
+        selected_model = models.default_model or "SharpED latest"
+        if models.models:
+            log_both("SharpED server models: " + ", ".join(models.models))
+        log_both(f"SharpED server default model: {selected_model}")
     client.execute(
         file_path=upload_map,
         bearer_token=api_token.strip(),
         out_path=output_map,
         elements=elements.strip() or "C N O",
-        model=model,
+        model=selected_model,
         outres=outres,
         poll_seconds=poll_seconds,
         max_polls=max_polls,
@@ -6149,7 +6148,7 @@ INPUT_TOOLTIPS = {
     "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected first from the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
     "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2θ-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
     "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
-    "sharped_base_url": "SharpED service URL. The current service is https://sharped.fzu.cz.",
+    "sharped_base_url": "SharpED inference server base URL. The reference client uses https://jana.fzu.cz.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
     "show_beta_features": "When off (default), beta and experimental Phasing methods and the settings that only apply to them are hidden entirely from the Basic tabs, not just disabled. Enable to make them selectable.",
     "sharped_model": "SharpED server model name. Use default to query /sharp-ed/models and select the server default.",
@@ -6209,6 +6208,188 @@ from phase_studio.ui_branding import (
     create_phase_studio_context_banner, apply_safe_dialog_geometry,
     fitted_dialog_client_size, fit_dialog_to_available_screen,
 )
+
+
+def show_requirement_remediation_dialog(
+    parent: Optional[QWidget],
+    status: object,
+    configured_value: str = "",
+    *,
+    download_dir: Optional[Path] = None,
+    download_opener: Optional[Callable[..., object]] = None,
+) -> Optional[str]:
+    """Show the dedicated repair UI for one failed workflow requirement.
+
+    A returned value is a path or token that the caller must persist and
+    re-check. ``None`` means *Skip for now*; it never marks the requirement as
+    valid and the requested workflow must remain stopped.
+    """
+    from phase_studio import requirements as reqs
+
+    kind = status.kind
+    dialog = QDialog(parent)
+    dialog.setObjectName("requirementRemediationDialog")
+    dialog.setWindowTitle(f"Phase Studio — {status.title}")
+    dialog.setModal(True)
+    root = QVBoxLayout(dialog)
+    root.setContentsMargins(0, 0, 0, 0)
+    root.setSpacing(0)
+    root.addWidget(create_phase_studio_brand_header())
+    subtitle = {
+        reqs.RequirementKind.SUPERFLIP: "Locate or install the Superflip executable required by this workflow",
+        reqs.RequirementKind.EDMA: "Locate or install the EDMA executable required by this workflow",
+        reqs.RequirementKind.SHARPED: "Configure access before SharpED processing starts",
+    }[kind]
+    root.addWidget(create_phase_studio_context_banner(status.title.upper(), subtitle))
+
+    body = QWidget(dialog)
+    body_layout = QVBoxLayout(body)
+    body_layout.setContentsMargins(22, 18, 22, 18)
+    body_layout.setSpacing(10)
+    explanation = QLabel(status.message)
+    explanation.setObjectName("requirementMessage")
+    explanation.setWordWrap(True)
+    body_layout.addWidget(explanation)
+    feedback = QLabel("")
+    feedback.setObjectName("requirementFeedback")
+    feedback.setWordWrap(True)
+    feedback.setStyleSheet("color: #b94a48;")
+    feedback.setVisible(False)
+
+    selected = {"value": None}
+    buttons = QHBoxLayout()
+    buttons.setSpacing(8)
+
+    def show_feedback(message: str) -> None:
+        feedback.setText(str(message))
+        feedback.setVisible(True)
+        dialog.adjustSize()
+
+    if kind is reqs.RequirementKind.SHARPED:
+        account_text = QLabel(
+            "SharpED processing requires an active Jana2020 or SharpED account and an API token."
+        )
+        account_text.setWordWrap(True)
+        body_layout.addWidget(account_text)
+        token_row = QFormLayout()
+        token_edit = QLineEdit(str(configured_value or ""))
+        token_edit.setObjectName("requirementTokenEdit")
+        token_edit.setEchoMode(QLineEdit.Password)
+        token_edit.setPlaceholderText("Enter API token")
+        token_row.addRow("API token", token_edit)
+        body_layout.addLayout(token_row)
+        open_account = QPushButton("Open SharpED account")
+        open_account.setObjectName("requirementOpenAccountButton")
+        open_account.clicked.connect(
+            lambda _checked=False: QDesktopServices.openUrl(QUrl(reqs.SHARPED_ACCOUNT_URL))
+        )
+        set_token = QPushButton("Set token")
+        set_token.setObjectName("requirementSetTokenButton")
+        set_token.setObjectName("primaryButton")
+
+        def accept_token() -> None:
+            token = token_edit.text().strip()
+            if not token:
+                show_feedback("Enter an API token or choose Skip for now.")
+                return
+            selected["value"] = token
+            dialog.accept()
+
+        set_token.clicked.connect(accept_token)
+        buttons.addWidget(open_account)
+        buttons.addStretch(1)
+        buttons.addWidget(set_token)
+    else:
+        license_text = QLabel(
+            'This third-party program is distributed by its authors. '
+            '<a href="https://superflip.fzu.cz/">Review license information</a> before downloading.'
+        )
+        license_text.setObjectName("requirementLicenseText")
+        license_text.setOpenExternalLinks(True)
+        license_text.setWordWrap(True)
+        body_layout.addWidget(license_text)
+        browse_button = QPushButton("Browse…")
+        browse_button.setObjectName("requirementBrowseButton")
+        open_download = QPushButton("Open download page")
+        open_download.setObjectName("requirementOpenDownloadButton")
+        download_button = QPushButton("Download automatically")
+        download_button.setObjectName("requirementAutoDownloadButton")
+        download_button.setObjectName("primaryButton")
+        download_url = (
+            reqs.SUPERFLIP_DOWNLOAD_URL
+            if kind is reqs.RequirementKind.SUPERFLIP else reqs.EDMA_DOWNLOAD_URL
+        )
+
+        def accept_path(path_text: str) -> bool:
+            path = reqs.resolve_executable(path_text)
+            if path is None or not reqs.is_expected_executable(kind, path):
+                show_feedback(f"The selected file is not a valid {kind.value} executable.")
+                return False
+            if kind is reqs.RequirementKind.SUPERFLIP and reqs.is_phase_studio_wrapper(path):
+                show_feedback("The selected file is the Phase Studio Jana2020 wrapper. Select the real Superflip executable.")
+                return False
+            selected["value"] = str(path)
+            dialog.accept()
+            return True
+
+        def browse() -> None:
+            label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
+            path = QFileDialog.getOpenFileName(
+                dialog, f"Select {label} executable", str(configured_value or ""),
+                "Executables (*.exe);;All files (*)",
+            )[0]
+            if path:
+                accept_path(path)
+
+        def automatic_download() -> None:
+            label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
+            answer = QMessageBox.question(
+                dialog,
+                f"Download {label}",
+                f"{label} is third-party software supplied under its authors' license. "
+                "By choosing Yes, you confirm that you reviewed and accept the license information at "
+                f"{reqs.SUPERFLIP_LICENSE_URL}\n\nDownload and install {label} for Phase Studio now?",
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            destination = download_dir
+            if destination is None:
+                base = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
+                destination = Path(base or str(Path.home() / ".phase_studio")) / "external_tools" / kind.value
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                path = reqs.download_requirement_executable(
+                    kind, destination, opener=download_opener,
+                )
+            except Exception as exc:
+                show_feedback("Automatic download failed: " + sanitize_error_details(exc))
+            else:
+                accept_path(str(path))
+            finally:
+                QApplication.restoreOverrideCursor()
+
+        browse_button.clicked.connect(browse)
+        open_download.clicked.connect(
+            lambda _checked=False: QDesktopServices.openUrl(QUrl(download_url))
+        )
+        download_button.clicked.connect(automatic_download)
+        buttons.addWidget(browse_button)
+        buttons.addWidget(open_download)
+        buttons.addStretch(1)
+        buttons.addWidget(download_button)
+
+    body_layout.addWidget(feedback)
+    skip_button = QPushButton("Skip for now")
+    skip_button.setObjectName("requirementSkipButton")
+    skip_button.clicked.connect(dialog.reject)
+    buttons.addWidget(skip_button)
+    body_layout.addLayout(buttons)
+    root.addWidget(body)
+    apply_safe_dialog_geometry(dialog, 720, 360)
+    dialog.exec()
+    return selected["value"]
 
 
 class WorkflowDiagram(QWidget):
@@ -7444,7 +7625,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p>Superflip and EDMA are external third-party programs, distributed by their own authors and not bundled with Phase Studio. Both are normally installed with Jana2020; if a path is not configured, Phase Studio looks for them in <code>C:\\Jana2020\\SUPERFLIP</code> when a workflow starts and fills the path in automatically. Official downloads: <a href="https://superflip.fzu.cz/download/superflip_win.zip">superflip_win.zip</a> and <a href="https://superflip.fzu.cz/download/EDMA_win.zip">EDMA_win.zip</a>; license information at <a href="https://superflip.fzu.cz/">superflip.fzu.cz</a>.</p>
             <p>Requirements are checked immediately before a workflow starts, and only for the stages that workflow actually uses -- a workflow that never runs EDMA is never asked for EDMA.</p>
             <h3>SharpED connection</h3>
-            <p><b>Server URL</b> selects the SharpED service; the current service is <code>https://sharped.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
+            <p><b>Server URL</b> is the SharpED inference-server base URL; the reference client uses <code>https://jana.fzu.cz</code>. <b>API token</b> authorizes upload/status/download requests and is never written to logs or error messages.</p>
             <p>SharpED processing needs an active Jana2020 or SharpED account. Sign in at <a href="https://sharped.fzu.cz/sharp-ed">sharped.fzu.cz/sharp-ed</a> and create a token with <b>Create token</b>, then paste it into <b>API token</b> above.</p>
             <h3>Interface</h3>
             <p><b>Show beta and experimental features</b> is unchecked by default. While off, the beta/experimental Phasing methods and Symmetrize SharpED map with Superflip (beta) are removed from the Basic tabs entirely, not just disabled. Enable it to make them selectable; turning it off again while one is active falls back to standard Superflip.</p>
@@ -8086,10 +8267,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.refresh_models_btn.setToolTip("Fetch the current list of SharpED server models and update the model selector.")
         self.refresh_models_btn.clicked.connect(self.refresh_sharped_models)
         model_form.addRow("", self.refresh_models_btn)
-        self.sharped_model_status = QLabel("Model information not loaded.")
-        self.sharped_model_status.setWordWrap(True)
-        model_form.addRow("", self.sharped_model_status)
-        self._sync_sharped_catalog()
         settings_links_row = QHBoxLayout()
         settings_links_row.setSpacing(10)
         connection_settings_link = QToolButton()
@@ -8984,15 +9161,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _set_widget_value_from_string(self, widget: object, value: str) -> None:
         value = "" if value is None else str(value)
-        if widget is self.inputs.get("sharped_base_url"):
-            value = normalize_server_url(value)
-        if widget is self.inputs.get("sharped_model"):
-            value = model_selection(value)
-            catalog = current_model_catalog(self._line_value("sharped_base_url"))
-            if catalog is not None:
-                self._sync_sharped_catalog()
-                if value not in catalog.models:
-                    value = "default"
         try:
             if isinstance(widget, PathRow):
                 widget.set_value(value)
@@ -10586,14 +10754,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._show_stopping_badge()
         self.log("Immediate stop requested.", level="DETAIL")
 
-    def _sync_sharped_catalog(self) -> None:
-        widget = self.inputs.get("sharped_model")
-        if not isinstance(widget, QComboBox):
-            return
-        status = sync_model_catalog(widget, self._line_value("sharped_base_url"))
-        if status is not None:
-            self.sharped_model_status.setText(status)
-
     def refresh_sharped_models(self) -> None:
         base_widget = self.inputs.get("sharped_base_url")
         timeout_widget = self.inputs.get("sharped_timeout_seconds")
@@ -10602,15 +10762,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if isinstance(timeout_widget, QSpinBox):
             timeout = max(5, min(60, int(timeout_widget.value())))
 
-        self.sharped_model_status.setText("Loading models…")
-
         def worker() -> None:
             try:
                 client = SharpEDServerClient(base_url=base_url or DEFAULT_SERVER_URL, timeout=float(timeout))
                 models = client.get_models()
-                self.msg_queue.put(("sharped_models", (normalize_server_url(base_url), models)))
-            except Exception:
-                self.msg_queue.put(("sharped_models_failed", normalize_server_url(base_url)))
+                self.msg_queue.put(("sharped_models", (models.default_model, models.models)))
+            except Exception as exc:
+                self.msg_queue.put(("log", f"SharpED model refresh failed: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -10646,7 +10804,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             set_value("powder_wavelength", "0.0")
             set_value("powder_separation_factor", "0.2")
             set_value("powder_redistribution_mix", "1.0")
-            set_value("sharped_model", "default")
+            set_value("sharped_model", "koala 2.0")
             set_value("perform_algorithm", "CF")
             set_value("maxcycles", "2000")
             set_value("repeatmode", "10")
@@ -10764,6 +10922,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             # diagnostic (including any traceback) is not duplicated here -- it
             # stays fully available via the error dialog's "Show details".
             self._append_execution_log(report.title + ".", level="ERROR", subsystem=report.subsystem)
+        if report.category == "sharped_authentication":
+            from phase_studio import requirements as reqs
+
+            status = reqs.RequirementStatus(
+                kind=reqs.RequirementKind.SHARPED,
+                state=reqs.RequirementState.TOKEN_REJECTED,
+            )
+            current = self._line_value("sharped_api_token") if "sharped_api_token" in self.inputs else ""
+            token = show_requirement_remediation_dialog(self, status, current)
+            if token is not None:
+                widget = self.inputs.get("sharped_api_token")
+                if widget is not None:
+                    self._set_widget_value_from_string(widget, token)
+                if self.last_run_config is not None:
+                    self.last_run_config.sharped_api_token = token
+                try:
+                    self.save_settings()
+                except Exception:
+                    pass
+                return "Set token"
+            return ""
         return show_phase_studio_error(self, report, self._error_actions(report))
 
     def _handle_pipeline_error(self, report: ErrorReport) -> None:
@@ -10785,7 +10964,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._show_error_report(report)
 
     def _poll_queue(self) -> None:
-        self._sync_sharped_catalog()
         try:
             processed = 0
             while processed < 250:
@@ -10834,21 +11012,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         self.structure_cell = gemmi.UnitCell(*values)
                         self._update_structure_views()
                 elif kind == "sharped_models":
-                    source, catalog = payload
-                    if source != normalize_server_url(self._line_value("sharped_base_url")):
-                        continue
-                    self._sync_sharped_catalog()
-                    self._append_execution_log(
-                        f"[SharpED] Models refreshed from server · {len(catalog.models)} available · default: {catalog.default_model}",
-                        level="SUCCESS", subsystem="SharpED")
-                elif kind == "sharped_models_failed":
-                    if payload != normalize_server_url(self._line_value("sharped_base_url")):
-                        continue
-                    self._sync_sharped_catalog()
-                    self.sharped_model_status.setText(
-                        "Model refresh failed · " + self.sharped_model_status.text()
-                        if current_model_catalog(payload) else "Model refresh failed · no model information available.")
-                    self._append_execution_log("[SharpED] Model refresh failed · keeping previous catalog if available", subsystem="SharpED")
+                    default_model, models = payload  # type: ignore[misc]
+                    widget = self.inputs.get("sharped_model")
+                    if isinstance(widget, QComboBox):
+                        current = widget.currentText().strip() or "default"
+                        widget.blockSignals(True)
+                        widget.clear()
+                        values = ["default"]
+                        if default_model:
+                            values.append(str(default_model))
+                        for available_model in list(models):
+                            if available_model not in values:
+                                values.append(available_model)
+                        widget.addItems(values)
+                        idx = widget.findText(current)
+                        widget.setCurrentIndex(idx if idx >= 0 else 0)
+                        widget.blockSignals(False)
+                    self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
                 elif kind == "hkl_load_result":
                     parsed_count = len(payload.reflections) if isinstance(payload, HklLoadResult) else 0
                     unique_count = len(payload.unique_reflections) if isinstance(payload, HklLoadResult) else 0
@@ -12841,7 +13021,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.draw_idle()
 
     def get_config(self) -> RunConfig:
-        self._sync_sharped_catalog()
         input_source_mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
         reference_xplor: Optional[Path] = None
         first_model_text = self._path_value("first_cycle_modelfile")
@@ -13033,23 +13212,49 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"FWHM value ({format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM)} or {format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM)}). This mechanism only applies to FWHM-carrying data."
             )
             details.append("Enable powder overlap repartitioning: Basic → Map feedback → Powder overlap repartitioning")
-        reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
-        is_recycling = reconstruction_mode != "superflip"
-        if (cfg.run_sharped or is_recycling) and not cfg.sharped_api_token.strip():
-            issues.append("A SharpED API token is required for the selected workflow.")
-        needs_superflip = not is_recycling or reconstruction_mode == "sharped_recycle"
-        needs_edma = (not is_recycling and (cfg.run_edma_superflip or cfg.run_edma_deblurred)) or (is_recycling and cfg.run_edma_recycle_final)
-        needs_sharped = bool(cfg.run_sharped or is_recycling)
-        preflight_issues, preflight_details = self._run_workflow_preflight(
-            cfg, needs_superflip=needs_superflip, needs_edma=needs_edma,
-            needs_sharped=needs_sharped,
-        )
-        issues.extend(preflight_issues)
-        details.extend(preflight_details)
         return list(dict.fromkeys(issues)), sanitize_error_details("\n".join(details))
 
+    @staticmethod
+    def _workflow_requirement_needs(cfg: RunConfig) -> Tuple[bool, bool, bool]:
+        """Return Superflip, EDMA and SharpED needs for the final configuration."""
+        reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
+        is_recycling = reconstruction_mode != "superflip"
+        needs_superflip = not is_recycling or reconstruction_mode == "sharped_recycle"
+        needs_edma = (
+            (not is_recycling and (cfg.run_edma_superflip or cfg.run_edma_deblurred))
+            or (is_recycling and cfg.run_edma_recycle_final)
+        )
+        needs_sharped = bool(cfg.run_sharped or is_recycling)
+        return needs_superflip, needs_edma, needs_sharped
+
+    def _apply_requirement_value(self, cfg: RunConfig, kind: object, value: str, *, detected: bool) -> None:
+        """Synchronize a repaired requirement into this run, Setup and QSettings."""
+        from phase_studio import requirements as reqs
+
+        key = {
+            reqs.RequirementKind.SUPERFLIP: "superflip_exe",
+            reqs.RequirementKind.EDMA: "edma_exe",
+            reqs.RequirementKind.SHARPED: "sharped_api_token",
+        }[kind]
+        widget = self.inputs.get(key)
+        if widget is not None:
+            self._set_widget_value_from_string(widget, value)
+        setattr(cfg, key, value)
+        self.settings.setValue(f"inputs/{key}", value)
+        self.settings.sync()
+        try:
+            self.save_settings()
+        except Exception:
+            pass
+        if kind is not reqs.RequirementKind.SHARPED:
+            label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
+            verb = "detected automatically" if detected else "configured"
+            self._append_execution_log(
+                f"{label} executable {verb}: {value}", level="DETAIL", subsystem="Setup",
+            )
+
     def _run_workflow_preflight(self, cfg: RunConfig, *, needs_superflip: bool,
-                                needs_edma: bool, needs_sharped: bool) -> Tuple[List[str], List[str]]:
+                                needs_edma: bool, needs_sharped: bool) -> object:
         """Check the external programs and services THIS workflow will use.
 
         Runs through the one shared requirements module, so the full GUI and the
@@ -13065,14 +13270,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """
         from phase_studio import requirements as reqs
 
-        issues: List[str] = []
-        details: List[str] = []
         required = reqs.requirements_for_workflow(
             needs_superflip=needs_superflip, needs_edma=needs_edma,
             needs_sharped=needs_sharped,
         )
         if not required.kinds():
-            return issues, details
+            return reqs.PreflightResult()
 
         result = reqs.run_preflight(
             required,
@@ -13080,41 +13283,49 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             edma_path=cfg.edma_exe,
             sharped_base_url=cfg.sharped_base_url,
             sharped_token=cfg.sharped_api_token,
+            jana_dir=getattr(self, "_preflight_jana_dir", reqs.DEFAULT_JANA_SUPERFLIP_DIR),
+            client_factory=getattr(self, "_preflight_client_factory", None),
             accept_suggestion=lambda _status: True,
         )
 
         for repaired in result.repaired:
-            key = ("superflip_exe" if repaired.kind is reqs.RequirementKind.SUPERFLIP
-                   else "edma_exe")
-            path_text = str(repaired.path)
-            widget = self.inputs.get(key)
-            if widget is not None:
-                self._set_widget_value_from_string(widget, path_text)
-            if key == "superflip_exe":
-                cfg.superflip_exe = path_text
-            else:
-                cfg.edma_exe = path_text
-            label = "Superflip" if key == "superflip_exe" else "EDMA"
-            self._append_execution_log(
-                f"{label} executable detected automatically: {path_text}",
-                level="DETAIL", subsystem="Setup",
+            self._apply_requirement_value(
+                cfg, repaired.kind, str(repaired.path), detected=True,
             )
-        if result.repaired:
-            try:
-                self.save_settings()
-            except Exception:
-                pass
+        return result
 
-        for status in result.failures:
-            issues.append(status.message)
-            if status.kind is reqs.RequirementKind.SHARPED:
-                # Never echo the token, the server URL or the raw error text.
-                details.append(f"SharpED requirement: {status.state.value}")
-            else:
-                label = ("Superflip" if status.kind is reqs.RequirementKind.SUPERFLIP
-                         else "EDMA")
-                details.append(f"{label} executable: {status.detail or '(not selected)'}")
-        return issues, details
+    def _ensure_workflow_requirements(self, cfg: RunConfig) -> bool:
+        """Run preflight, repair one dedicated requirement at a time, then re-check."""
+        from phase_studio import requirements as reqs
+
+        needs_superflip, needs_edma, needs_sharped = self._workflow_requirement_needs(cfg)
+        while True:
+            result = self._run_workflow_preflight(
+                cfg,
+                needs_superflip=needs_superflip,
+                needs_edma=needs_edma,
+                needs_sharped=needs_sharped,
+            )
+            if result.ok:
+                return True
+            status = result.first_failure
+            if status is None:
+                return True
+            current_value = (
+                cfg.superflip_exe if status.kind is reqs.RequirementKind.SUPERFLIP
+                else cfg.edma_exe if status.kind is reqs.RequirementKind.EDMA
+                else cfg.sharped_api_token
+            )
+            repaired_value = show_requirement_remediation_dialog(
+                self, status, current_value,
+                download_dir=getattr(self, "_preflight_download_dir", None),
+                download_opener=getattr(self, "_preflight_download_opener", None),
+            )
+            if repaired_value is None:
+                return False
+            self._apply_requirement_value(
+                cfg, status.kind, repaired_value, detected=False,
+            )
 
     def start_run(self) -> None:
         if self.worker and self.worker.is_alive():
@@ -13128,6 +13339,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         issues, technical_details = self._validate_run_config(cfg)
         if issues:
             self._show_error_report(build_validation_report(issues, technical_details=technical_details))
+            return
+        if not self._ensure_workflow_requirements(cfg):
             return
         try:
             cfg.work_dir.mkdir(parents=True, exist_ok=True)

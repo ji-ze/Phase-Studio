@@ -1,5 +1,8 @@
 # Temporary SharpED compatibility bridge in 1.0.9
 
+> Historical design record only. This bridge is not present in the current
+> client; Phase Studio temporarily uses the single `https://jana.fzu.cz` base.
+
 Before the URL migration, inference worked through `jana.fzu.cz`, but its model
 catalog was stale. Moving everything to `sharped.fzu.cz` corrected discovery,
 while the previously accepted token received HTTP 401 on authenticated upload.

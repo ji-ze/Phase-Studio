@@ -19,12 +19,10 @@ for every file, checking the exit code) without any additional tooling.
   scientific functions with the integrated baseline; standard-library unittest.
 
 
-- `test_sharped_catalog.py` -- standard-library unittest coverage of the real
-  model response schema, atomic catalog/default replacement, selection intent,
-  multipart DEFAULT/explicit uploads through both application entry points,
-  late QSettings restoration, widget reconstruction, restart, shared preflight
-  and Wizard state, failed refreshes, custom servers, and bounded reuse.
-  Run directly with `python tests/test_sharped_catalog.py`; no pytest required.
+- `test_sharped_api_contract.py` -- standard-library unittest coverage proving
+  that model discovery and the complete authenticated lifecycle use the same
+  historical base URL, preserve token headers, resolve DEFAULT historically,
+  and never route a custom server request to a hidden production host.
 
 - `test_scientific_core.py` -- golden regression baseline for the pure
   parsing/analysis functions in `phase_studio/app.py`: HKL parsing
@@ -69,6 +67,16 @@ for every file, checking the exit code) without any additional tooling.
 - `test_map_quality.py` -- pure periodic-map metrics, immutable validation
   data, all four profiles, and exact source-neutral lexicographic ranking.
 
+- `test_requirements.py` -- pure shared preflight checks: executable identity,
+  wrapper-safe Jana auto-detection, conditional requirement sets, safe official
+  ZIP extraction, SharpED reachability/authentication classification, and token
+  redaction.
+
+- `test_preflight_ui.py` -- click-driven Qt coverage from the full window's
+  Run phasing button and every Jana Wizard run path. It verifies the three
+  dedicated remediation dialogs, silent success, repair/re-check/resume,
+  settings synchronization, and Skip semantics.
+
 - `test_wizard_geometry.py` -- the Jana2020 Wizard's window geometry: the
   preferred width is substantially wider than the old narrow layout, always
   clamped inside the available screen at 1920x1080 / 1600x900 / 1366x768,
@@ -92,10 +100,10 @@ for every file, checking the exit code) without any additional tooling.
 
 ## Adding a new golden regression test
 
-`test_sharped_bridge.py` tests the temporary metadata/inference split, separate
-compatibility state, disabled unsupported selections, exact DEFAULT resolution,
-job-host confinement, authentication/redaction, and future unified deployment.
-It uses mocked HTTP transport and real client/Qt code; no live token is needed.
+`test_sharped_api_contract.py` proves model discovery, upload, polling, and
+download all derive from one configured base URL, with the historical token
+headers and DEFAULT resolution. It uses mocked HTTP transport; no live token is
+needed.
 
 1. Build a small, fully hand-verifiable fixture (few reflections/cycles,
    not a large randomized one) so a human can sanity-check the pinned

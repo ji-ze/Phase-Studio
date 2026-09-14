@@ -64,14 +64,11 @@ Server-side SharpED processing requires an API token:
 
 **[SharpED and API-token access](https://sharped.fzu.cz/)**
 
-The temporary 1.0.9 compatibility bridge discovers the live model catalog at:
+The application default SharpED server is:
 
 ```text
-https://sharped.fzu.cz/
+https://jana.fzu.cz/
 ```
-
-Authenticated inference jobs temporarily use the legacy Jana endpoint. The UI
-blocks catalog models that endpoint cannot serve and never substitutes a model.
 
 ## Quick start
 

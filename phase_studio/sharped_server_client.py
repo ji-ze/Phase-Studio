@@ -3,15 +3,14 @@ from __future__ import annotations
 import json
 import mimetypes
 import ssl
-import threading
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.error import HTTPError, URLError
-from urllib.parse import urljoin, urlsplit, urlunsplit
-from urllib.request import Request, build_opener, HTTPSHandler, HTTPRedirectHandler
+from urllib.parse import urljoin
+from urllib.request import Request, urlopen
 
 try:
     from phase_studio.error_reporting import sanitize_error_details
@@ -20,38 +19,7 @@ except Exception:
 
 
 ProgressLog = Optional[Callable[[str], None]]
-DEFAULT_SERVER_URL = "https://sharped.fzu.cz"
-MODEL_METADATA_REUSE_SECONDS = 15.0
-
-
-@dataclass(frozen=True)
-class SharpEDEndpoints:
-    metadata_base_url: str
-    inference_base_url: str
-
-
-# Temporary compatibility bridge: metadata uses the final domain while
-# authenticated inference still uses Jana. Remove the split here once SharpED
-# authentication/inference is migrated to the final domain.
-PRODUCTION_ENDPOINTS = SharpEDEndpoints(DEFAULT_SERVER_URL, "https://jana.fzu.cz")
-
-
-def endpoints_for_server(base_url: str) -> SharpEDEndpoints:
-    base_url = normalize_server_url(base_url)
-    return PRODUCTION_ENDPOINTS if base_url == DEFAULT_SERVER_URL else SharpEDEndpoints(base_url, base_url)
-
-
-def normalize_server_url(value: str) -> str:
-    """Migrate the former bundled host, including persisted configurations."""
-    value = str(value or "").strip().rstrip("/")
-    if not value or value.lower() in {"https://jana.fzu.cz", "http://jana.fzu.cz"}:
-        return DEFAULT_SERVER_URL
-    return value
-
-
-def model_selection(value: str) -> str:
-    value = str(value or "").strip()
-    return "default" if value.lower() in {"", "default", "server default", "sharped default"} else value
+DEFAULT_SERVER_URL = "https://jana.fzu.cz"
 
 
 def redact_server_diagnostic(value: object) -> str:
@@ -87,106 +55,15 @@ class StatusResult:
         return str(self.status or "").strip().lower() in {"failed", "failure", "error", "errored", "cancelled", "canceled"}
 
 
-@dataclass(frozen=True)
+@dataclass
 class ModelsResult:
     default_model: str
-    models: tuple[str, ...]
+    models: list[str]
     raw_json: str
-    fetched_at: float = 0.0
-    source: str = ""
-    status: str = "server"
-    inference_models: Optional[tuple[str, ...]] = None
-    inference_source: str = ""
-
-
-_catalogs: dict[str, ModelsResult] = {}
-_catalog_lock = threading.RLock()
-
-
-def current_model_catalog(base_url: str) -> Optional[ModelsResult]:
-    return _catalogs.get(normalize_server_url(base_url))
-
-
-def model_catalog_status(catalog: ModelsResult) -> str:
-    status = f"{len(catalog.models)} models available · server default: {catalog.default_model}"
-    if catalog.status != "server":
-        status += " · cached model information"
-    if catalog.inference_source:
-        if catalog.inference_models is None:
-            status += "\nInference compatibility unavailable · refresh before starting"
-        elif catalog.default_model not in catalog.inference_models:
-            status += "\nServer default temporarily unavailable for inference · select a compatible model"
-    return status
-
-
-def apply_model_catalog(combo: object, catalog: ModelsResult) -> str:
-    """Replace selector data while retaining only available selection intent."""
-    selected = model_selection(combo.currentText())
-    blocked = combo.blockSignals(True)
-    try:
-        combo.clear()
-        combo.addItems(["default", *catalog.models])
-        if catalog.inference_source and catalog.inference_models is not None:
-            for index, name in enumerate([catalog.default_model, *catalog.models]):
-                item = combo.model().item(index)
-                if name not in catalog.inference_models:
-                    item.setEnabled(False)
-                    item.setToolTip("Temporarily unavailable for inference. Select a compatible concrete model.")
-        desired = selected if selected in catalog.models else "default"
-        desired_index = combo.findText(desired)
-        desired_item = combo.model().item(desired_index) if desired_index >= 0 else None
-        if desired_item is not None and not desired_item.isEnabled():
-            combo.setCurrentIndex(-1)
-            if combo.lineEdit() is not None:
-                combo.lineEdit().setPlaceholderText("Select a compatible model")
-        else:
-            combo.setCurrentText(desired)
-        combo._sharped_catalog = catalog
-    finally:
-        combo.blockSignals(blocked)
-    return model_catalog_status(catalog)
-
-
-def sync_model_catalog(combo: object, base_url: str) -> Optional[str]:
-    """Update a view only when the shared snapshot or server changes."""
-    catalog = current_model_catalog(base_url)
-    previous = getattr(combo, "_sharped_catalog", None)
-    if catalog is not None:
-        return apply_model_catalog(combo, catalog) if previous is not catalog else None
-    if previous is not None:
-        # A different custom server must not display the former server's catalog.
-        selected = model_selection(combo.currentText())
-        blocked = combo.blockSignals(True)
-        try:
-            combo.clear()
-            combo.addItem("default")
-            combo.setCurrentText(selected)
-            combo._sharped_catalog = None
-        finally:
-            combo.blockSignals(blocked)
-        return "Model information not loaded for this server."
-    return None
-
-
-def resolve_effective_model(selection: str, catalog: Optional[ModelsResult]) -> str:
-    selected = model_selection(selection)
-    if selected != "default":
-        return selected
-    if catalog is None:
-        raise SharpEDServerError("Current SharpED server default is unavailable.")
-    return catalog.default_model
 
 
 class SharpEDServerError(RuntimeError):
     pass
-
-
-class _SameOriginRedirectHandler(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        old, new = urlsplit(req.full_url), urlsplit(newurl)
-        if (old.scheme, old.netloc) != (new.scheme, new.netloc):
-            raise SharpEDServerError("SharpED redirected outside the selected endpoint; no credentials were forwarded.")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 class SharpEDServerClient:
@@ -195,15 +72,11 @@ class SharpEDServerClient:
         base_url: str = DEFAULT_SERVER_URL,
         user_agent: str = "PhaseStudio-SharpED/1.0",
         timeout: float = 600.0,
-        *,
-        endpoints: Optional[SharpEDEndpoints] = None,
     ) -> None:
-        self.endpoints = endpoints or endpoints_for_server(base_url)
-        self.base_url = self.endpoints.metadata_base_url.rstrip("/")
+        self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent
         self.timeout = timeout
         self.ssl_context, self.tls_fallback_message = self._create_ssl_context()
-        self._opener = build_opener(HTTPSHandler(context=self.ssl_context), _SameOriginRedirectHandler())
         self._tls_fallback_logged = False
 
     @staticmethod
@@ -256,78 +129,17 @@ class SharpEDServerClient:
             log(f"TLS fallback detail: {self.tls_fallback_message}")
             self._tls_fallback_logged = True
 
-    def get_models(self, log: ProgressLog = None, *, max_age: float = 0.0) -> ModelsResult:
-        """Refresh by default; adjacent setup/preflight consumers may reuse briefly.
-
-        Explicit Refresh and DEFAULT submission always use max_age=0, so neither
-        can bind a new job to an earlier server default merely to save a request.
-        """
+    def get_models(self, log: ProgressLog = None) -> ModelsResult:
         self._log_tls_fallback(log)
-        # Serialize refreshes so an older response cannot overwrite a newer one.
-        # Publish catalog and default as one immutable snapshot. No disk cache.
-        with _catalog_lock:
-            previous = _catalogs.get(self.base_url)
-            inference_source = (self.endpoints.inference_base_url
-                                if self.endpoints.metadata_base_url != self.endpoints.inference_base_url else "")
-            if (max_age > 0 and previous is not None and previous.status == "server"
-                    and previous.inference_source == inference_source
-                    and 0 <= time.time() - previous.fetched_at < max_age):
-                if log:
-                    log(f"[SharpED] Using recent model metadata · {len(previous.models)} available · default: {previous.default_model}")
-                return previous
-            try:
-                if log:
-                    log("SharpED server: fetching available models")
-                source = urljoin(self.base_url + "/", "sharp-ed/models")
-                body = self._request_text("GET", source, headers={"Accept": "application/json", "Cache-Control": "no-cache"})
-                result = self._parse_models(body, source)
-                if self.endpoints.metadata_base_url != self.endpoints.inference_base_url:
-                    support = None
-                    try:
-                        support = self.get_inference_models().models
-                    except SharpEDServerError:
-                        if log:
-                            log("[SharpED] Temporary inference compatibility unavailable; model catalog remains current.")
-                    result = replace(result, inference_models=support,
-                                     inference_source=self.endpoints.inference_base_url)
-                _catalogs[self.base_url] = result
-            except Exception:
-                if previous is not None:
-                    _catalogs[self.base_url] = replace(previous, status="cached")
-                if log:
-                    log("[SharpED] Model refresh failed · keeping previous catalog if available")
-                raise
         if log:
-            log(f"[SharpED] Models refreshed from server · {len(result.models)} available · default: {result.default_model}")
-        return result
-
-    def get_inference_models(self) -> ModelsResult:
-        """Compatibility evidence only; never publish this as the current catalog."""
-        source = self._url("/sharp-ed/models")
-        body = self._request_text("GET", source, headers={"Accept": "application/json", "Cache-Control": "no-cache"})
-        return self._parse_models(body, source)
-
-    def validate_inference_model(self, model: str) -> None:
-        if self.endpoints.metadata_base_url == self.endpoints.inference_base_url:
-            return
-        try:
-            supported = self.get_inference_models().models
-        except SharpEDServerError as exc:
-            raise SharpEDServerError("Cannot verify temporary inference model compatibility. Refresh models and retry.") from exc
-        if model not in supported:
-            raise SharpEDServerError(
-                f"SharpED model {model} is temporarily unavailable for inference. "
-                "Select a compatible concrete model; the current DEFAULT cannot be replaced by the legacy default."
-            )
-
-    def _parse_models(self, body: str, source: str) -> ModelsResult:
+            log("SharpED server: fetching available models")
+        body = self._request_text("GET", self._url("/sharp-ed/models"))
         data = self._loads_json(body, "Models")
-        models, default = data.get("models"), data.get("default")
-        if (not isinstance(models, list) or not models
-                or any(not isinstance(item, str) or not item.strip() or model_selection(item) == "default" for item in models)
-                or not isinstance(default, str) or default not in models):
-            raise SharpEDServerError("Models JSON schema invalid: expected model names and a default present in models.")
-        return ModelsResult(default, tuple(dict.fromkeys(models)), body, time.time(), source)
+        return ModelsResult(
+            default_model=str(data.get("default") or ""),
+            models=[str(item) for item in data.get("models", []) if isinstance(item, str)],
+            raw_json=body,
+        )
 
     def execute(
         self,
@@ -335,7 +147,7 @@ class SharpEDServerClient:
         bearer_token: str,
         out_path: Path,
         elements: str,
-        model: str = "default",
+        model: str = "SharpED latest",
         outres: float = 0.2,
         poll_seconds: int = 2,
         max_polls: int = -1,
@@ -379,13 +191,6 @@ class SharpEDServerClient:
         if not file_path.is_file():
             raise SharpEDServerError(f"Input map not found: {file_path}")
 
-        model = model_selection(model)
-        catalog = self.get_models(log=log) if model == "default" else None
-        model = resolve_effective_model(model, catalog)
-        self.validate_inference_model(model)
-        if log:
-            log(f"[SharpED] Effective model: {model}")
-
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         fields = {
             "elements": elements,
@@ -398,7 +203,6 @@ class SharpEDServerClient:
 
         headers = {
             "Authorization": f"Bearer {bearer_token}",
-            "Accept": "application/json",
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Content-Length": str(len(body)),
         }
@@ -473,7 +277,7 @@ class SharpEDServerClient:
         raise SharpEDServerError("SharpED processing did not finish within the polling limit.")
 
     def get_status(self, status_url: str, job_token: str, bearer_token: str) -> StatusResult:
-        text = self._request_text_with_auth_candidates(self._absolute_url(status_url), [bearer_token, job_token])
+        text = self._request_text_with_auth_candidates(status_url, [bearer_token, job_token])
         data = self._loads_json(text, "Status")
         status = self._find_string(data, {"status", "state", "phase"})
         download_url = self._find_string(data, {"downloadurl", "downloadlink", "resulturl"})
@@ -500,7 +304,7 @@ class SharpEDServerClient:
     ) -> None:
         if log:
             log(f"[SharpED] Downloading result to {out_path}")
-        body = self._request_bytes_with_auth_candidates(self._absolute_url(download_url), [primary_token, fallback_token])
+        body = self._request_bytes_with_auth_candidates(download_url, [primary_token, fallback_token])
         self._write_download_body(body, out_path)
 
     def _write_download_body(self, body: bytes, out_path: Path) -> None:
@@ -513,18 +317,11 @@ class SharpEDServerClient:
             raise SharpEDServerError(f"SharpED download did not look like an XPLOR/CCP4 map. Response starts with: {snippet}")
 
     def _url(self, path: str) -> str:
-        return urljoin(self.endpoints.inference_base_url.rstrip("/") + "/", path.lstrip("/"))
+        return urljoin(self.base_url + "/", path.lstrip("/"))
 
     def _absolute_url(self, url: str) -> str:
-        parsed = urlsplit(url)
-        if parsed.scheme and not parsed.netloc:
-            raise SharpEDServerError("SharpED returned an invalid job URL.")
-        if parsed.netloc:
-            allowed = {urlsplit(value).netloc for value in
-                       (self.endpoints.metadata_base_url, self.endpoints.inference_base_url)}
-            if parsed.scheme not in {"http", "https"} or parsed.netloc not in allowed:
-                raise SharpEDServerError("SharpED returned a job URL outside the configured service.")
-            return self._url(urlunsplit(("", "", parsed.path, parsed.query, "")))
+        if url.startswith(("http://", "https://")):
+            return url
         return self._url(url)
 
     def _raise_if_stopped(self, stop_event: object = None) -> None:
@@ -581,13 +378,10 @@ class SharpEDServerClient:
         req_headers.update(headers or {})
         req = Request(url, data=data, headers=req_headers, method=method)
         try:
-            with self._opener.open(req, timeout=self.timeout) as resp:
+            with urlopen(req, timeout=self.timeout, context=self.ssl_context) as resp:
                 return resp.read()
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            credential = req_headers.get("Authorization", "").removeprefix("Bearer ")
-            if credential:
-                body = body.replace(credential, "[REDACTED]")
             raise SharpEDServerError(
                 f"SharpED HTTP error {exc.code} for {redact_server_diagnostic(url)}. "
                 f"Body: {redact_server_diagnostic(body)}"
