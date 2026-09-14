@@ -313,7 +313,7 @@ def main():
 
     source = inspect.getsource(appmod.IterativeSuperflipPipelineQtGUI)
     check("the main window runs the shared preflight before a workflow starts",
-          "_run_workflow_preflight" in source)
+          "return reqs.run_preflight(" in source)
     check("the preflight is driven after configuration validation and before the worker",
           "if not self._ensure_workflow_requirements(cfg)" in source)
     check("the main window imports the shared requirements module",

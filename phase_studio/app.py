@@ -12350,19 +12350,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             details.append("Enable powder overlap repartitioning: Basic → Map feedback → Powder overlap repartitioning")
         return list(dict.fromkeys(issues)), sanitize_error_details("\n".join(details))
 
-    @staticmethod
-    def _workflow_requirement_needs(cfg: RunConfig) -> Tuple[bool, bool, bool]:
-        """Return Superflip, EDMA and SharpED needs for the final configuration."""
-        reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
-        is_recycling = reconstruction_mode != "superflip"
-        needs_superflip = not is_recycling or reconstruction_mode == "sharped_recycle"
-        needs_edma = (
-            (not is_recycling and (cfg.run_edma_superflip or cfg.run_edma_deblurred))
-            or (is_recycling and cfg.run_edma_recycle_final)
-        )
-        needs_sharped = bool(cfg.run_sharped or is_recycling)
-        return needs_superflip, needs_edma, needs_sharped
-
     def _apply_requirement_value(self, cfg: RunConfig, kind: object, value: str, *, detected: bool) -> None:
         """Synchronize a repaired requirement into this run, Setup and QSettings."""
         from phase_studio import requirements as reqs
@@ -12389,54 +12376,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"{label} executable {verb}: {value}", level="DETAIL", subsystem="Setup",
             )
 
-    def _run_workflow_preflight(self, cfg: RunConfig, *, needs_superflip: bool,
-                                needs_edma: bool, needs_sharped: bool) -> object:
-        """Check the external programs and services THIS workflow will use.
-
-        Runs through the one shared requirements module, so the full GUI and the
-        Jana2020 Wizard apply identical rules. Only what the configured workflow
-        actually needs is checked -- a workflow that never runs EDMA is never
-        asked for EDMA.
-
-        When a requirement is unsatisfied but a usable installation is found in
-        the standard Jana2020 location, the configured path is repaired in place
-        (config, the Advanced -> Setup widget and the saved settings) and the
-        workflow continues, rather than stopping to ask about something Phase
-        Studio can see for itself.
-        """
-        from phase_studio import requirements as reqs
-
-        required = reqs.requirements_for_workflow(
-            needs_superflip=needs_superflip, needs_edma=needs_edma,
-            needs_sharped=needs_sharped,
-        )
-        if not required.kinds():
-            return reqs.PreflightResult()
-
-        result = reqs.run_preflight(
-            required,
-            superflip_path=cfg.superflip_exe,
-            edma_path=cfg.edma_exe,
-            sharped_base_url=cfg.sharped_base_url,
-            sharped_token=cfg.sharped_api_token,
-            jana_dir=getattr(self, "_preflight_jana_dir", reqs.DEFAULT_JANA_SUPERFLIP_DIR),
-            client_factory=getattr(self, "_preflight_client_factory", None),
-            accept_suggestion=lambda _status: True,
-        )
-
-        return result
-
     def _ensure_workflow_requirements(self, cfg: RunConfig) -> bool:
         """Run preflight, repair one dedicated requirement at a time, then re-check."""
         from phase_studio import requirements as reqs
 
-        needs_superflip, needs_edma, needs_sharped = self._workflow_requirement_needs(cfg)
+        reconstruction_mode = normalize_reconstruction_mode(cfg.reconstruction_mode)
+        is_recycling = reconstruction_mode != "superflip"
+        required = reqs.requirements_for_workflow(
+            needs_superflip=not is_recycling or reconstruction_mode == "sharped_recycle",
+            needs_edma=(
+                (not is_recycling and (cfg.run_edma_superflip or cfg.run_edma_deblurred))
+                or (is_recycling and cfg.run_edma_recycle_final)
+            ),
+            needs_sharped=bool(cfg.run_sharped or is_recycling),
+        )
+
         def check() -> object:
-            return self._run_workflow_preflight(
-                cfg,
-                needs_superflip=needs_superflip,
-                needs_edma=needs_edma,
-                needs_sharped=needs_sharped,
+            if not required.kinds():
+                return reqs.PreflightResult()
+            return reqs.run_preflight(
+                required,
+                superflip_path=cfg.superflip_exe,
+                edma_path=cfg.edma_exe,
+                sharped_base_url=cfg.sharped_base_url,
+                sharped_token=cfg.sharped_api_token,
+                jana_dir=getattr(self, "_preflight_jana_dir", reqs.DEFAULT_JANA_SUPERFLIP_DIR),
+                client_factory=getattr(self, "_preflight_client_factory", None),
+                accept_suggestion=lambda _status: True,
             )
 
         def current_value(kind: object) -> str:

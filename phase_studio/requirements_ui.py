@@ -87,7 +87,6 @@ def show_requirement_remediation_dialog(
             lambda _checked=False: QDesktopServices.openUrl(QUrl(reqs.SHARPED_ACCOUNT_URL))
         )
         set_token = QPushButton("Set token")
-        set_token.setObjectName("requirementSetTokenButton")
         set_token.setObjectName("primaryButton")
 
         def accept_token() -> None:
@@ -116,8 +115,8 @@ def show_requirement_remediation_dialog(
         open_download = QPushButton("Open download page")
         open_download.setObjectName("requirementOpenDownloadButton")
         download_button = QPushButton("Download automatically")
-        download_button.setObjectName("requirementAutoDownloadButton")
         download_button.setObjectName("primaryButton")
+        label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
         download_url = (
             reqs.SUPERFLIP_DOWNLOAD_URL
             if kind is reqs.RequirementKind.SUPERFLIP else reqs.EDMA_DOWNLOAD_URL
@@ -136,7 +135,6 @@ def show_requirement_remediation_dialog(
             return True
 
         def browse() -> None:
-            label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
             path = QFileDialog.getOpenFileName(
                 dialog, f"Select {label} executable", str(configured_value or ""),
                 "Executables (*.exe);;All files (*)",
@@ -145,7 +143,6 @@ def show_requirement_remediation_dialog(
                 accept_path(path)
 
         def automatic_download() -> None:
-            label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
             answer = QMessageBox.question(
                 dialog,
                 f"Download {label}",
