@@ -2,7 +2,7 @@
 
 The Store product is the standalone Phase Studio desktop application.
 The Jana2020 installer and its payload are distributed separately and must
-never enter an MSIX. Scientific support for Jana .inflip files is retained.
+never enter an MSIX. Scientific support for Jana2020 .inflip files is retained.
 
 ## Build
 

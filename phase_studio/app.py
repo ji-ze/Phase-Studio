@@ -653,9 +653,9 @@ METADATA_SOURCE_LABELS = {
 
 def normalize_metadata_source(value: str) -> str:
     text = str(value or "").strip().lower()
-    if text in {METADATA_SOURCE_INFLIP, "inflip", "jana", "jana .inflip"}:
+    if text in {METADATA_SOURCE_INFLIP, "inflip", "jana", "jana .inflip", "jana2020 .inflip"}:
         return METADATA_SOURCE_INFLIP
-    if text in {METADATA_SOURCE_REFERENCE, "reference", "reference file"}:
+    if text in {METADATA_SOURCE_REFERENCE, "reference", "reference file", "reference structure"}:
         return METADATA_SOURCE_REFERENCE
     if text in {METADATA_SOURCE_MANUAL, "manual input"}:
         return METADATA_SOURCE_MANUAL
@@ -8531,12 +8531,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
 
     def _resolve_crystal_metadata_from_inputs(self) -> CrystalMetadata:
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode"))
         jana_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
         reference_text = self._path_value("reference_cif").strip() if "reference_cif" in self.inputs else ""
         manual_cell, manual_number, manual_symbol, manual_composition = self._manual_metadata_values()
         return resolve_crystal_metadata(
             self._metadata_source_value(),
-            jana_inflip=Path(jana_text).expanduser().resolve() if jana_text else None,
+            jana_inflip=(Path(jana_text).expanduser().resolve()
+                         if jana_text and mode != INPUT_MODE_EXTERNAL else None),
             reference_file=Path(reference_text).expanduser().resolve() if reference_text else None,
             manual_cell=manual_cell,
             manual_spacegroup_number=manual_number,
@@ -8598,6 +8600,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if not hasattr(self, "manual_metadata_panel"):
             return
         source = self._metadata_source_value()
+        mode = normalize_input_source_mode(self._combo_value("input_source_mode"))
+        inflip_text = self._path_value("jana_inflip").strip()
+        reference_text = self._path_value("reference_cif").strip()
+        inflip_available = bool(
+            mode != INPUT_MODE_EXTERNAL and inflip_text
+            and Path(inflip_text).expanduser().is_file()
+        )
+        reference_available = bool(
+            reference_text and Path(reference_text).expanduser().is_file()
+            and Path(reference_text).suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES
+        )
+        if ((source == METADATA_SOURCE_INFLIP and not inflip_available)
+                or (source == METADATA_SOURCE_REFERENCE and not reference_available)):
+            fallback = METADATA_SOURCE_REFERENCE if reference_available else (
+                METADATA_SOURCE_INFLIP if inflip_available else METADATA_SOURCE_MANUAL
+            )
+            widget = self.inputs.get("metadata_source")
+            if isinstance(widget, QComboBox):
+                index = widget.findText(METADATA_SOURCE_LABELS[fallback])
+                if index >= 0:
+                    self._syncing_metadata_controls = True
+                    try:
+                        widget.setCurrentIndex(index)
+                    finally:
+                        self._syncing_metadata_controls = False
+            self._metadata_source_user_selected = False
+            source = fallback
         manual = source == METADATA_SOURCE_MANUAL
         self.manual_metadata_panel.setVisible(manual)
         self.metadata_summary_panel.setVisible(not manual)
@@ -12009,6 +12038,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         first_model = Path(first_model_text).expanduser().resolve() if first_model_text else None
         jana_inflip_text = self._path_value("jana_inflip") if "jana_inflip" in self.inputs else ""
         jana_inflip = Path(jana_inflip_text).expanduser().resolve() if jana_inflip_text else None
+        active_jana_inflip = (
+            jana_inflip
+            if input_source_mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}
+            else None
+        )
         hkl_text = self._path_value("hkl")
         reference_cif_text = self._path_value("reference_cif")
         external_reference_file = Path(reference_cif_text).expanduser().resolve() if reference_cif_text else None
@@ -12029,7 +12063,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             cycles_value = 1
         crystal_metadata = self._resolve_crystal_metadata_from_inputs()
         resolved_wavelength, wavelength_source = resolve_powder_wavelength(
-            self._dspin_value("powder_wavelength"), jana_inflip, external_reference_file,
+            self._dspin_value("powder_wavelength"), active_jana_inflip, external_reference_file,
         )
         if self._check_value("redistribute_overlaps") and resolved_wavelength > 0 and wavelength_source != "manual entry":
             self.log(f"Powder overlap repartitioning: wavelength {resolved_wavelength:g} A auto-detected from {wavelength_source}.", level="DETAIL")
@@ -12040,9 +12074,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             superflip_referencefile=superflip_referencefile,
             first_cycle_modelfile=first_model,
             input_source_mode=input_source_mode,
-            jana_inflip=jana_inflip,
+            jana_inflip=active_jana_inflip,
             crystal_metadata=crystal_metadata,
-            jana_return_to_jana=bool(jana_inflip is not None),
+            jana_return_to_jana=bool(
+                active_jana_inflip is not None
+                and self.jana_wizard_context.launched_from_jana_wizard
+            ),
             work_dir=Path(self._path_value("work_dir")).expanduser().resolve(),
             cycles=cycles_value,
             superflip_exe=self._path_value("superflip_exe") or "superflip",
@@ -12145,7 +12182,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         hkl_text = self._path_value("hkl").strip() if "hkl" in self.inputs else ""
         inflip_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
-        inflip_path = Path(inflip_text) if inflip_text else None
+        inflip_path = Path(inflip_text) if inflip_text and mode != INPUT_MODE_EXTERNAL else None
         try:
             return resolve_reflection_data_mode_from_sources(Path(hkl_text), configured, inflip_path)
         except Exception:
@@ -12645,7 +12682,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 observed_hkl = cfg.work_dir / observed_hkl_name_for_mode(data_mode)
                 n_written = write_observed_reflections(observed_hkl, current_reflections, cfg.i_over_sigma_min, data_mode=data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 observed_hkls[data_mode] = observed_hkl
-                self.log(f"Prepared HKL for {data_mode}: {observed_hkl} ({n_written} reflections)")
+                self.log(
+                    f"Prepared HKL for {format_reflection_data_mode(data_mode)}: "
+                    f"{observed_hkl} ({n_written} reflections)"
+                )
             if omit_test_hkls:
                 self.log(
                     f"Holdout: excluded {len(omit_test_hkls)}/{len(refl)} reflections in complete symmetry/Friedel orbits; "

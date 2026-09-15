@@ -803,7 +803,7 @@ General project/support contact:
 ## Windows distribution targets
 
 Phase Studio standalone and the Phase Studio Jana2020 Installer are separate
-applications. The standalone application supports Jana .inflip scientific data,
+applications. The standalone application supports Jana2020 .inflip scientific data,
 but does not install, update, repair, or remove Jana integration.
 
 Run `PhaseStudioJanaInstaller.exe` from its complete distribution directory to

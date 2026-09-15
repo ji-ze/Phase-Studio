@@ -51,6 +51,37 @@ def main() -> int:
         check("loaded input changes the idle log without adding a line",
               win.log_text.toPlainText() == "Ready. Review the settings and run phasing.")
 
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp = Path(temp_dir)
+        stale_inflip = temp / "remembered.inflip"
+        stale_inflip.write_text("title remembered inactive input\n", encoding="utf-8")
+        external_hkl = temp / "external.hkl"
+        external_hkl.write_text("1 0 0 10 1\n", encoding="utf-8")
+        reference_cif = temp / "reference.cif"
+        reference_cif.write_text(
+            "data_ref\n_cell_length_a 10\n_cell_length_b 10\n_cell_length_c 10\n"
+            "_cell_angle_alpha 90\n_cell_angle_beta 90\n_cell_angle_gamma 90\n"
+            "_space_group_name_H-M_alt 'P 1'\n_chemical_formula_sum 'C 1'\n",
+            encoding="utf-8",
+        )
+        win._set_widget_value_from_string(win.inputs["jana_inflip"], str(stale_inflip))
+        win._set_widget_value_from_string(
+            win.inputs["input_source_mode"], appmod.INPUT_MODE_LABELS[appmod.INPUT_MODE_EXTERNAL],
+        )
+        win._set_widget_value_from_string(win.inputs["hkl"], str(external_hkl))
+        win._set_widget_value_from_string(win.inputs["reference_cif"], str(reference_cif))
+        win._set_widget_value_from_string(
+            win.inputs["metadata_source"], appmod.METADATA_SOURCE_LABELS[appmod.METADATA_SOURCE_INFLIP],
+        )
+        win._sync_metadata_source_widgets()
+        check("External HKL mode rejects an inactive Jana2020 metadata source",
+              win._metadata_source_value() == appmod.METADATA_SOURCE_REFERENCE)
+        external_cfg = win.get_config()
+        check("External HKL mode omits a remembered inactive .inflip from RunConfig",
+              external_cfg.jana_inflip is None)
+        check("standalone RunConfig never enables Jana2020 handoff",
+              not external_cfg.jana_return_to_jana)
+
     inflip = build_error_report(RuntimeError("invalid .inflip"), subsystem="Jana2020")
     check("Jana handoff action names its destination",
           [action.label for action in win._error_actions(inflip)] == ["Open Input settings"])
