@@ -10896,10 +10896,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     value = int(payload)
                     self.progress_bar.setValue(value)
                     self._set_overall_progress_text("Running")
-                elif kind == "error":
-                    report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run workflow")
-                    self._handle_pipeline_error(report)
-                elif kind == "error_report":
+                elif kind in {"error", "error_report"}:
                     report = payload if isinstance(payload, ErrorReport) else build_error_report(payload, operation="Run workflow")
                     self._handle_pipeline_error(report)
                 elif kind == "cancelled":
@@ -12649,41 +12646,84 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             write_map_quality_report(
                 state.cfg.work_dir / "map_quality_assessment.txt", state.all_results
             )
-        if result.superflip_quality is not None:
-            self.log(
-                format_validation_log_line(
-                    result.cycle, "superflip", result.validation_profile, result.superflip_quality
-                ),
-                subsystem="Validation",
-            )
-        if result.deblur_quality is not None:
-            self.log(
-                format_validation_log_line(
-                    result.cycle, "deblurred", result.validation_profile, result.deblur_quality
-                ),
-                subsystem="Validation",
-            )
+        for source, quality in (
+            ("superflip", result.superflip_quality), ("deblurred", result.deblur_quality),
+        ):
+            if quality is not None:
+                self.log(
+                    format_validation_log_line(result.cycle, source, result.validation_profile, quality),
+                    subsystem="Validation",
+                )
         self.msg_queue.put(("result", result))
 
+    @staticmethod
+    def _validation_profile_for_result(state: PipelineState) -> str:
+        return (
+            state.validation_context.profile.value
+            if state.validation_context is not None else ValidationProfile.REFERENCE_FREE.value
+        )
+
     def _finalize_completed_cycle(
-        self,
-        state: PipelineState,
-        cycle: int,
-        progress_stages: Sequence[str],
+        self, state: PipelineState, cycle: int, progress_stages: Sequence[str],
     ) -> bool:
         """Checkpoint one valid cycle and apply terminal-intent precedence."""
         state.completed_cycles = cycle
         self.log(f"Cycle {cycle} complete.", level="SUCCESS")
         self.msg_queue.put(("progress", state.completed_cycles))
         self._emit_cycle_progress(
-            cycle,
-            state.cfg.cycles,
-            progress_stages,
-            "Finalizing cycle",
-            detail="completed",
-            complete=True,
+            cycle, state.cfg.cycles, progress_stages, "Finalizing cycle",
+            detail="completed", complete=True,
         )
         return self._emit_requested_workflow_stop(state.completed_cycles)
+
+    def _run_configured_sharped_stage(
+        self, state: PipelineState, input_map: Path, output_map: Path, cycle: int,
+        progress_stages: Sequence[str], detail_prefix: str = "",
+    ) -> Path:
+        """Run one explicitly selected SharpED stage with shared plumbing."""
+        cfg = state.cfg
+        self._emit_cycle_progress(
+            cycle, cfg.cycles, progress_stages, "SharpED",
+            detail=detail_prefix + "preparing upload", busy=True,
+        )
+        return run_sharped_deblur(
+            input_map, output_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model,
+            state.sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb,
+            cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds, cfg.sharped_max_polls,
+            self.log, self.stop_now,
+            progress=lambda detail: self._emit_cycle_progress(
+                cycle, cfg.cycles, progress_stages, "SharpED",
+                detail=detail_prefix + detail, busy=detail != "completed",
+            ),
+            map_value_exponent=cfg.sharped_map_value_exponent,
+            profiler=state.performance_profiler,
+        )
+
+    def _run_configured_edma_stage(
+        self, state: PipelineState, input_map: Path, output_dir: Path,
+        prefix: str, plimit: float,
+    ) -> Path:
+        """Run EDMA with captured configuration and an explicit map role."""
+        cfg = state.cfg
+        return run_edma_on_xplor(
+            input_map, output_dir, prefix, state.ref_ctx, plimit, cfg.merge_distance,
+            cfg.edma_exe, self.log, self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
+            cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit, cfg.edma_chlimlist,
+            cfg.extra_edma_keywords, cfg.structure_export_format,
+            write_m40=cfg.jana_inflip is not None,
+            profiler=state.performance_profiler,
+        )
+
+    @staticmethod
+    def _edma_reference_metrics(
+        cif_path: Path, ref_ctx: ReferenceContext, merge_distance: float, enabled: bool,
+    ) -> Tuple[Optional[float], Optional[Tuple[float, float, int, int]]]:
+        if not enabled:
+            return None, None
+        return (
+            nearest_metric_to_reference(cif_path, ref_ctx),
+            atom_reference_match_metrics(cif_path, ref_ctx, merge_distance),
+        )
 
     def _run_pipeline_cycles(self, state: PipelineState) -> None:
         cfg = state.cfg
@@ -12696,7 +12736,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         use_xplor_modelfile = state.use_xplor_modelfile
         use_cif_modelfile = state.use_cif_modelfile
         use_superflip_xplor_modelfile = state.use_superflip_xplor_modelfile
-        sharped_elements = state.sharped_elements
         exclude_labels = state.exclude_labels
         progress_stages = state.progress_stages
         # Some Superflip diagnostics (e.g. the normalize-keyword-unsupported
@@ -12888,21 +12927,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_edma_dir = cycle_dir / "edma_superflip"
             if cfg.run_edma_superflip:
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · Superflip map", busy=True)
-                sf_edma_cif = run_edma_on_xplor(
-                    sf_map, sf_edma_dir, sf_prefix, ref_ctx, cfg.plimit_superflip,
-                    cfg.merge_distance, cfg.edma_exe, self.log,
-                    self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
-                    cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
-                    cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
-                    write_m40=cfg.jana_inflip is not None,
-                    profiler=state.performance_profiler,
+                sf_edma_cif = self._run_configured_edma_stage(
+                    state, sf_map, sf_edma_dir, sf_prefix, cfg.plimit_superflip,
                 )
             else:
                 sf_edma_dir.mkdir(parents=True, exist_ok=True)
                 sf_edma_cif = sf_edma_dir / f"{sf_prefix}_edma.cif"
                 write_structure_bundle(sf_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
                 self.log("EDMA after Superflip disabled; empty placeholder CIF/XYZ/PDB written.")
-            sf_metric = nearest_metric_to_reference(sf_edma_cif, ref_ctx) if cfg.run_edma_superflip else None
+            sf_metric, sf_match = self._edma_reference_metrics(
+                sf_edma_cif, ref_ctx, cfg.merge_distance, cfg.run_edma_superflip
+            )
             sf_metric_text = "n/a" if sf_metric is None else f"{float(sf_metric):.3f}"
             sf_recall: Optional[float] = None
             sf_precision: Optional[float] = None
@@ -12910,7 +12945,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_fp: Optional[int] = None
             sf_heavy_atoms: Optional[float] = None
             if cfg.run_edma_superflip:
-                sf_match = atom_reference_match_metrics(sf_edma_cif, ref_ctx, cfg.merge_distance)
                 if sf_match is not None:
                     sf_recall, sf_precision, sf_tp, sf_fp = sf_match
                 else:
@@ -12940,31 +12974,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if cfg.run_sharped and not use_superflip_xplor_modelfile:
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
-                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="preparing upload", busy=True)
-                run_sharped_deblur(
-                    sf_map,
-                    deblur_map,
-                    cfg.sharped_base_url,
-                    cfg.sharped_api_token,
-                    cfg.sharped_model,
-                    sharped_elements,
-                    cfg.sharped_outres,
-                    cfg.sharped_max_upload_mb,
-                    cfg.sharped_timeout_seconds,
-                    cfg.sharped_poll_seconds,
-                    cfg.sharped_max_polls,
-                    self.log,
-                    self.stop_now,
-                    progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
-                        cycle,
-                        cfg.cycles,
-                        progress_stages,
-                        "SharpED",
-                        detail=detail,
-                        busy=detail != "completed",
-                    ),
-                    map_value_exponent=cfg.sharped_map_value_exponent,
-                    profiler=state.performance_profiler,
+                self._run_configured_sharped_stage(
+                    state, sf_map, deblur_map, cyc, progress_stages
                 )
             else:
                 shutil.copy2(sf_map, deblur_map)
@@ -12979,17 +12990,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if cfg.compute_omit_maps and state.omit_test_hkls and omit_sf_map is not None and cfg.run_sharped and not use_superflip_xplor_modelfile:
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
-                self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="omit map · preparing upload", busy=True)
                 omit_deblur_map = cycle_dir / f"{sf_prefix}_omit_deblurred.xplor"
-                run_sharped_deblur(
-                    omit_sf_map, omit_deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model,
-                    sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds,
-                    cfg.sharped_poll_seconds, cfg.sharped_max_polls, self.log, self.stop_now,
-                    progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
-                        cycle, cfg.cycles, progress_stages, "SharpED", detail=f"omit map · {detail}", busy=detail != "completed",
-                    ),
-                    map_value_exponent=cfg.sharped_map_value_exponent,
-                    profiler=state.performance_profiler,
+                self._run_configured_sharped_stage(
+                    state, omit_sf_map, omit_deblur_map, cyc, progress_stages,
+                    detail_prefix="omit map · ",
                 )
                 self.log(f"Omit {result_map_label('deblurred')}: {omit_deblur_map}")
                 omit_deblur_correlation = xplor_map_correlation(deblur_map, omit_deblur_map)
@@ -13032,14 +13036,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             deblur_edma_dir = cycle_dir / "edma_deblurred"
             if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, f"EDMA · {result_map_label('deblurred')}", busy=True)
-                deblur_edma_cif = run_edma_on_xplor(
-                    deblur_map, deblur_edma_dir, deblur_prefix, ref_ctx, cfg.plimit_deblur,
-                    cfg.merge_distance, cfg.edma_exe, self.log,
-                    self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
-                    cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
-                    cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
-                    write_m40=cfg.jana_inflip is not None,
-                    profiler=state.performance_profiler,
+                deblur_edma_cif = self._run_configured_edma_stage(
+                    state, deblur_map, deblur_edma_dir, deblur_prefix, cfg.plimit_deblur,
                 )
             else:
                 deblur_edma_dir.mkdir(parents=True, exist_ok=True)
@@ -13049,7 +13047,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log(f"EDMA after {result_map_label('deblurred').lower()} skipped for Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
                 else:
                     self.log(f"EDMA after {result_map_label('deblurred').lower()} disabled; empty placeholder CIF/XYZ/PDB written.")
-            deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx) if cfg.run_edma_deblurred else None
+            deblur_metric, deblur_match = self._edma_reference_metrics(
+                deblur_edma_cif, ref_ctx, cfg.merge_distance, cfg.run_edma_deblurred
+            )
             deblur_metric_text = "n/a" if deblur_metric is None else f"{float(deblur_metric):.3f}"
             deblur_recall: Optional[float] = None
             deblur_precision: Optional[float] = None
@@ -13057,7 +13057,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             deblur_fp: Optional[int] = None
             deblur_heavy_atoms: Optional[float] = None
             if cfg.run_edma_deblurred:
-                deblur_match = atom_reference_match_metrics(deblur_edma_cif, ref_ctx, cfg.merge_distance)
                 if deblur_match is not None:
                     deblur_recall, deblur_precision, deblur_tp, deblur_fp = deblur_match
                 else:
@@ -13116,10 +13115,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_heavy_atom_count=deblur_heavy_atoms,
                 powder_repartition_avg_change_percent=state.pending_powder_repartition_change_percent,
                 intensity_correction_avg_change_percent=state.pending_intensity_correction_change_percent,
-                validation_profile=(
-                    state.validation_context.profile.value
-                    if state.validation_context is not None else ValidationProfile.REFERENCE_FREE.value
-                ),
+                validation_profile=self._validation_profile_for_result(state),
                 superflip_quality=sf_quality,
                 deblur_quality=deblur_quality,
             )
@@ -13213,7 +13209,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ref_ctx = state.ref_ctx
         reflections = state.current_reflections
         configured_data_mode = state.configured_data_mode
-        sharped_elements = state.sharped_elements
         random_start = normalize_reconstruction_mode(cfg.reconstruction_mode) == "sharped_recycle_random"
         progress_stages = ["Preparing cycle", "Superflip", "SharpED", "Phase calculation", "Finalizing cycle"]
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
@@ -13263,17 +13258,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
             if self.stop_now.is_set():
                 raise RuntimeError("Immediate stop requested.")
-            self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "SharpED", detail="preparing upload", busy=True)
             deblur_map = cycle_dir / f"cycle_{cyc:03d}_deblurred.xplor"
-            run_sharped_deblur(
-                input_map, deblur_map, cfg.sharped_base_url, cfg.sharped_api_token, cfg.sharped_model, sharped_elements,
-                cfg.sharped_outres, cfg.sharped_max_upload_mb, cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds,
-                cfg.sharped_max_polls, self.log, self.stop_now,
-                progress=lambda detail, cycle=cyc: self._emit_cycle_progress(
-                    cycle, cfg.cycles, progress_stages, "SharpED", detail=detail, busy=detail != "completed",
-                ),
-                map_value_exponent=cfg.sharped_map_value_exponent,
-                profiler=state.performance_profiler,
+            self._run_configured_sharped_stage(
+                state, input_map, deblur_map, cyc, progress_stages
             )
             self.log(f"{result_map_label('deblurred')}: {deblur_map}")
             if self.stop_now.is_set():
@@ -13299,17 +13286,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if is_final_cycle and cfg.run_edma_recycle_final:
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="EDMA on final map", busy=True)
                 edma_dir = cycle_dir / "edma_final"
-                deblur_edma_cif = run_edma_on_xplor(
-                    composed_map, edma_dir, f"cycle_{cyc:03d}_final", ref_ctx, cfg.plimit_deblur,
-                    cfg.merge_distance, cfg.edma_exe, self.log,
-                    self.stop_now, cfg.edma_maxima, cfg.edma_fullcell,
-                    cfg.edma_numberofatoms, cfg.edma_centerofcharge, cfg.edma_chlimit,
-                    cfg.edma_chlimlist, cfg.extra_edma_keywords, cfg.structure_export_format,
-                    write_m40=cfg.jana_inflip is not None,
-                    profiler=state.performance_profiler,
+                deblur_edma_cif = self._run_configured_edma_stage(
+                    state, composed_map, edma_dir, f"cycle_{cyc:03d}_final",
+                    cfg.plimit_deblur,
                 )
-                deblur_metric = nearest_metric_to_reference(deblur_edma_cif, ref_ctx)
-                match = atom_reference_match_metrics(deblur_edma_cif, ref_ctx, cfg.merge_distance)
+                deblur_metric, match = self._edma_reference_metrics(
+                    deblur_edma_cif, ref_ctx, cfg.merge_distance, True
+                )
                 if match is not None:
                     deblur_recall, deblur_precision, deblur_tp, deblur_fp = match
                 self.log(f"[EDMA] Completed · Final map · output: {deblur_edma_cif}", subsystem="EDMA")
@@ -13353,10 +13336,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 superflip_success_rate=sf_log_metrics.success_rate,
                 superflip_mean_cycles=sf_log_metrics.mean_cycles,
                 recycle_map_correlation=map_correlation,
-                validation_profile=(
-                    state.validation_context.profile.value
-                    if state.validation_context is not None else ValidationProfile.REFERENCE_FREE.value
-                ),
+                validation_profile=self._validation_profile_for_result(state),
                 superflip_quality=superflip_quality,
                 deblur_quality=deblur_quality,
             )

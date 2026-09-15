@@ -508,6 +508,75 @@ def main():
     check("immediate stop during Map Feedback resolves to CANCELLED", terminals == ["cancelled"])
     check("Map Feedback cancellation prevents cycle transition", cycles == ["cycle_001_superflip"])
 
+    # Invocation and progress baseline for the plumbing consolidated in the
+    # final Phase 3B commit. Both scientific EDMA positions remain distinct.
+    win, _cycle_results = running_window()
+    invocation_state = ordinary_cycle_state(win)
+    invocation_state.cfg.run_sharped = True
+    invocation_state.cfg.run_edma_superflip = True
+    invocation_state.cfg.run_edma_deblurred = True
+    invocation_state.cfg.plimit_superflip = 1.25
+    invocation_state.cfg.plimit_deblur = 2.5
+    invocation_state.progress_stages = appmod.cycle_progress_stages(invocation_state.cfg)
+    superflip_invocations = []
+    sharped_invocations = []
+    edma_invocations = []
+
+    def counted_superflip(cycle_dir, prefix, *_args, **_kwargs):
+        superflip_invocations.append(prefix)
+        output = cycle_dir / (prefix + ".xplor")
+        output.write_text("deterministic map\n", encoding="utf-8")
+        return output
+
+    def counted_sharped(input_map, output_map, *_args, **_kwargs):
+        sharped_invocations.append((Path(input_map).name, Path(output_map).name))
+        Path(output_map).write_text("deterministic deblurred map\n", encoding="utf-8")
+        return output_map
+
+    def counted_edma(input_map, output_dir, prefix, _ref_ctx, plimit, *_args, **_kwargs):
+        edma_invocations.append((Path(input_map).name, Path(output_dir).name, prefix, plimit))
+        output = Path(output_dir) / (prefix + "_edma.cif")
+        fake_structure(output)
+        return output
+
+    with patch.object(appmod, "run_superflip_cycle", side_effect=counted_superflip), \
+         patch.object(appmod, "export_phased_reflections_from_map"), \
+         patch.object(appmod, "parse_superflip_cycle_metrics", return_value=appmod.SuperflipLogMetrics()), \
+         patch.object(appmod, "run_sharped_deblur", side_effect=counted_sharped), \
+         patch.object(appmod, "run_edma_on_xplor", side_effect=counted_edma), \
+         patch.object(appmod, "nearest_metric_to_reference", return_value=None), \
+         patch.object(appmod, "atom_reference_match_metrics", return_value=None), \
+         patch.object(appmod, "count_heavy_atoms", return_value=0), \
+         patch.object(appmod, "cif_has_readable_atoms", return_value=True), \
+         patch.object(appmod, "write_metrics_csv"), \
+         patch.object(appmod, "write_map_quality_report"):
+        win._run_pipeline_cycles(invocation_state)
+
+    invocation_events = drain_events(win)
+    invocation_progress = [
+        payload.stage_name for kind, payload in invocation_events if kind == "cycle_progress"
+    ]
+    expected_cycle_progress = [
+        "Preparing cycle", "Superflip", "Superflip", "EDMA · Superflip map",
+        "SharpED", "EDMA · SharpED map", "Finalizing cycle", "Finalizing cycle",
+    ]
+    check("two ordinary cycles invoke Superflip exactly twice", superflip_invocations == ["cycle_001_superflip", "cycle_002_superflip"])
+    check("two ordinary cycles invoke SharpED exactly twice", len(sharped_invocations) == 2)
+    check("two ordinary cycles invoke both EDMA positions exactly four times", len(edma_invocations) == 4)
+    check(
+        "EDMA stage prefixes and thresholds remain distinct and ordered",
+        [(item[2], item[3]) for item in edma_invocations] == [
+            ("cycle_001_superflip", 1.25), ("cycle_001_deblurred", 2.5),
+            ("cycle_002_superflip", 1.25), ("cycle_002_deblurred", 2.5),
+        ],
+    )
+    check("stage progress order is identical for both ordinary cycles", invocation_progress == expected_cycle_progress * 2)
+    check("ordinary invocation baseline records exactly two results", [result.cycle for result in invocation_state.all_results] == [1, 2])
+    check(
+        "ordinary invocation baseline completes once",
+        [kind for kind, _payload in invocation_events if kind in {"done", "stopped", "cancelled"}] == ["done"],
+    )
+
     failures = [name for name, ok in results_log if not ok]
     print()
     if failures:
