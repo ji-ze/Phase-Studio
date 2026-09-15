@@ -337,7 +337,7 @@ class SplitDistributionTests(unittest.TestCase):
                 excluded |= {"robust_detail_range"}
                 # Presentation aliases accepted by the metadata-source combo;
                 # authoritative resolution is covered by test_final_ui.py.
-                excluded |= {"normalize_metadata_source"}
+                excluded |= {"normalize_metadata_source", "normalize_input_source_mode"}
                 # Startup-only handoff from PyInstaller's extraction splash to
                 # the existing Qt splash; no scientific code is involved.
                 excluded |= {"main"}
@@ -363,6 +363,12 @@ class SplitDistributionTests(unittest.TestCase):
                 metrics_ui = (ROOT / "phase_studio" / "workflow_metrics_ui.py").read_text(encoding="utf-8")
                 moved = functions(metrics_ui)
                 self.assertEqual(old["robust_detail_range"], moved.get("robust_detail_range"))
+                input_context = (ROOT / "phase_studio" / "input_context.py").read_text(encoding="utf-8")
+                moved_inputs = functions(input_context)
+                self.assertEqual(
+                    old["normalize_input_source_mode"],
+                    moved_inputs.get("normalize_input_source_mode"),
+                )
 
 
 if __name__ == "__main__":

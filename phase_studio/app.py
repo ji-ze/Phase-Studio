@@ -163,6 +163,27 @@ except Exception:
     )
 
 try:
+    from phase_studio.input_context import (
+        INPUT_MODE_EXTERNAL, INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES,
+        INPUT_MODE_LABELS, METADATA_SOURCE_INFLIP, METADATA_SOURCE_LABELS,
+        METADATA_SOURCE_MANUAL, METADATA_SOURCE_REFERENCE, active_jana_inflip,
+        default_metadata_source, input_control_availability,
+        jana_handoff_available, normalize_input_source_mode,
+        normalize_metadata_source, reconcile_metadata_source,
+        resolve_run_inputs, uses_embedded_hkl,
+    )
+except Exception:
+    from input_context import (  # type: ignore[no-redef]
+        INPUT_MODE_EXTERNAL, INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES,
+        INPUT_MODE_LABELS, METADATA_SOURCE_INFLIP, METADATA_SOURCE_LABELS,
+        METADATA_SOURCE_MANUAL, METADATA_SOURCE_REFERENCE, active_jana_inflip,
+        default_metadata_source, input_control_availability,
+        jana_handoff_available, normalize_input_source_mode,
+        normalize_metadata_source, reconcile_metadata_source,
+        resolve_run_inputs, uses_embedded_hkl,
+    )
+
+try:
     from phase_studio.result_selection import ResultSelectionDialog, create_result_preview_host
 except Exception:
     from result_selection import ResultSelectionDialog, create_result_preview_host
@@ -644,47 +665,6 @@ class OrdinaryCycleCheckpoint:
         for name in order[start:]:
             setattr(self, flags[name], False)
 
-
-INPUT_MODE_INFLIP = "jana_inflip"
-INPUT_MODE_INFLIP_OVERRIDES = "jana_inflip_overrides"
-INPUT_MODE_EXTERNAL = "external_hkl_cif"
-
-INPUT_MODE_LABELS = {
-    INPUT_MODE_INFLIP: "Jana2020 .inflip",
-    INPUT_MODE_INFLIP_OVERRIDES: "Jana2020 .inflip with external HKL/reference overrides",
-    INPUT_MODE_EXTERNAL: "External HKL + CIF reference",
-}
-
-METADATA_SOURCE_INFLIP = "jana_inflip"
-METADATA_SOURCE_REFERENCE = "reference_file"
-METADATA_SOURCE_MANUAL = "manual"
-
-METADATA_SOURCE_LABELS = {
-    METADATA_SOURCE_INFLIP: "Jana2020 .inflip",
-    METADATA_SOURCE_REFERENCE: "Reference structure",
-    METADATA_SOURCE_MANUAL: "Manual",
-}
-
-
-def normalize_metadata_source(value: str) -> str:
-    text = str(value or "").strip().lower()
-    if text in {METADATA_SOURCE_INFLIP, "inflip", "jana", "jana .inflip", "jana2020 .inflip"}:
-        return METADATA_SOURCE_INFLIP
-    if text in {METADATA_SOURCE_REFERENCE, "reference", "reference file", "reference structure"}:
-        return METADATA_SOURCE_REFERENCE
-    if text in {METADATA_SOURCE_MANUAL, "manual input"}:
-        return METADATA_SOURCE_MANUAL
-    return METADATA_SOURCE_INFLIP
-
-def normalize_input_source_mode(value: str) -> str:
-    text = str(value or "").strip().lower()
-    if text in {INPUT_MODE_INFLIP, "inflip", "jana", "jana .inflip"}:
-        return INPUT_MODE_INFLIP
-    if text in {INPUT_MODE_INFLIP_OVERRIDES, "inflip_overrides"} or ("inflip" in text and "override" in text):
-        return INPUT_MODE_INFLIP_OVERRIDES
-    if text in {INPUT_MODE_EXTERNAL, "external"} or text.startswith("external"):
-        return INPUT_MODE_EXTERNAL
-    return INPUT_MODE_INFLIP
 
 @dataclass
 class RunConfig:
@@ -8351,17 +8331,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._sync_metadata_source_widgets()
 
     def _default_metadata_source_for_input(self) -> str:
-        mode = normalize_input_source_mode(
-            self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else ""
+        return default_metadata_source(
+            self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "",
+            self._path_value("reference_cif") if "reference_cif" in self.inputs else "",
+            REFERENCE_STRUCTURE_SUFFIXES,
         )
-        if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
-            return METADATA_SOURCE_INFLIP
-        reference_text = self._path_value("reference_cif").strip() if "reference_cif" in self.inputs else ""
-        if reference_text:
-            path = Path(reference_text).expanduser()
-            if path.is_file() and path.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
-                return METADATA_SOURCE_REFERENCE
-        return METADATA_SOURCE_MANUAL
 
     def _input_mode_user_changed(self, _index: int = -1) -> None:
         self._metadata_source_user_selected = False
@@ -8495,8 +8469,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         manual_cell, manual_number, manual_symbol, manual_composition = self._manual_metadata_values()
         return resolve_crystal_metadata(
             self._metadata_source_value(),
-            jana_inflip=(Path(jana_text).expanduser().resolve()
-                         if jana_text and mode != INPUT_MODE_EXTERNAL else None),
+            jana_inflip=active_jana_inflip(mode, jana_text),
             reference_file=Path(reference_text).expanduser().resolve() if reference_text else None,
             manual_cell=manual_cell,
             manual_spacegroup_number=manual_number,
@@ -8561,22 +8534,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         mode = normalize_input_source_mode(self._combo_value("input_source_mode"))
         inflip_text = self._path_value("jana_inflip").strip()
         reference_text = self._path_value("reference_cif").strip()
-        inflip_available = bool(
-            mode != INPUT_MODE_EXTERNAL and inflip_text
-            and Path(inflip_text).expanduser().is_file()
+        resolved_source = reconcile_metadata_source(
+            source, mode, inflip_text, reference_text, REFERENCE_STRUCTURE_SUFFIXES,
         )
-        reference_available = bool(
-            reference_text and Path(reference_text).expanduser().is_file()
-            and Path(reference_text).suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES
-        )
-        if ((source == METADATA_SOURCE_INFLIP and not inflip_available)
-                or (source == METADATA_SOURCE_REFERENCE and not reference_available)):
-            fallback = METADATA_SOURCE_REFERENCE if reference_available else (
-                METADATA_SOURCE_INFLIP if inflip_available else METADATA_SOURCE_MANUAL
-            )
+        if resolved_source != source:
             widget = self.inputs.get("metadata_source")
             if isinstance(widget, QComboBox):
-                index = widget.findText(METADATA_SOURCE_LABELS[fallback])
+                index = widget.findText(METADATA_SOURCE_LABELS[resolved_source])
                 if index >= 0:
                     self._syncing_metadata_controls = True
                     try:
@@ -8584,7 +8548,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     finally:
                         self._syncing_metadata_controls = False
             self._metadata_source_user_selected = False
-            source = fallback
+            source = resolved_source
         manual = source == METADATA_SOURCE_MANUAL
         self.manual_metadata_panel.setVisible(manual)
         self.metadata_summary_panel.setVisible(not manual)
@@ -8913,16 +8877,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if self._configuration_locked:
             return
         mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
-        jana_enabled = mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES} or self._metadata_source_value() == METADATA_SOURCE_INFLIP
-        override_enabled = mode == INPUT_MODE_INFLIP_OVERRIDES
-        external_enabled = mode == INPUT_MODE_EXTERNAL
-        reflection_data_mode_enabled = mode != INPUT_MODE_INFLIP
-        for key, enabled in (
-            ("jana_inflip", jana_enabled),
-            ("hkl", override_enabled or external_enabled),
-            ("reference_cif", True),
-            ("reflection_data_mode", reflection_data_mode_enabled),
-        ):
+        availability = input_control_availability(mode, self._metadata_source_value())
+        for key, enabled in availability.items():
             widget = self.inputs.get(key)
             if hasattr(widget, "setEnabled"):
                 widget.setEnabled(bool(enabled))  # type: ignore[attr-defined]
@@ -8933,18 +8889,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if hasattr(reflection_data_mode_widget, "setToolTip"):
             reflection_data_mode_widget.setToolTip(  # type: ignore[attr-defined]
                 "Ignored: the dataformat keyword is read directly from the Jana2020 .inflip file."
-                if not reflection_data_mode_enabled else INPUT_TOOLTIPS.get("reflection_data_mode", "")
+                if not availability["reflection_data_mode"] else INPUT_TOOLTIPS.get("reflection_data_mode", "")
             )
         jana_inflip_widget = self.inputs.get("jana_inflip")
         if isinstance(jana_inflip_widget, PathRow):
             jana_inflip_widget.set_tooltip(
-                INPUT_TOOLTIPS.get("jana_inflip", "") if jana_enabled
+                INPUT_TOOLTIPS.get("jana_inflip", "") if availability["jana_inflip"]
                 else "Not used in External HKL mode."
             )
         hkl_widget = self.inputs.get("hkl")
         if isinstance(hkl_widget, PathRow):
             hkl_widget.set_tooltip(
-                INPUT_TOOLTIPS.get("hkl", "") if (override_enabled or external_enabled)
+                INPUT_TOOLTIPS.get("hkl", "") if availability["hkl"]
                 else "Not used with the Jana2020 .inflip input mode; reflections come from the .inflip file."
             )
         self._sync_metadata_source_widgets()
@@ -10529,12 +10485,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         Wizard (Full configuration or Phase recycling), with a completed run
         whose results came from a Jana2020 .inflip. A standalone session that
         happens to load a .inflip manually must never satisfy this."""
-        return bool(
-            self.results
-            and self.last_run_config
-            and self.last_run_config.jana_inflip is not None
-            and self.jana_wizard_context.launched_from_jana_wizard
-            and self.jana_wizard_context.launch_mode in ("full_configuration", "phase_recycling")
+        return jana_handoff_available(
+            results_available=bool(self.results),
+            run_inflip=(self.last_run_config.jana_inflip if self.last_run_config else None),
+            launched_from_jana=self.jana_wizard_context.launched_from_jana_wizard,
+            launch_mode=self.jana_wizard_context.launch_mode,
         )
 
     def _sync_window_title(self) -> None:
@@ -11644,54 +11599,38 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.draw_idle()
 
     def get_config(self) -> RunConfig:
-        input_source_mode = normalize_input_source_mode(self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "")
-        reference_xplor: Optional[Path] = None
-        first_model_text = self._path_value("first_cycle_modelfile")
-        first_model = Path(first_model_text).expanduser().resolve() if first_model_text else None
-        jana_inflip_text = self._path_value("jana_inflip") if "jana_inflip" in self.inputs else ""
-        jana_inflip = Path(jana_inflip_text).expanduser().resolve() if jana_inflip_text else None
-        active_jana_inflip = (
-            jana_inflip
-            if input_source_mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}
-            else None
+        resolved_inputs = resolve_run_inputs(
+            input_mode=self._combo_value("input_source_mode") if "input_source_mode" in self.inputs else "",
+            hkl_value=self._path_value("hkl"),
+            jana_inflip_value=self._path_value("jana_inflip") if "jana_inflip" in self.inputs else "",
+            reference_value=self._path_value("reference_cif"),
+            first_model_value=self._path_value("first_cycle_modelfile"),
+            launched_from_jana_wizard=self.jana_wizard_context.launched_from_jana_wizard,
+            structure_suffixes=REFERENCE_STRUCTURE_SUFFIXES,
         )
-        hkl_text = self._path_value("hkl")
-        reference_cif_text = self._path_value("reference_cif")
-        external_reference_file = Path(reference_cif_text).expanduser().resolve() if reference_cif_text else None
-        superflip_referencefile = external_reference_file
-        hkl_path = Path(hkl_text).expanduser().resolve() if hkl_text else Path("__phase_studio_no_external_hkl_selected__").resolve()
-        if external_reference_file is not None and external_reference_file.suffix.lower() in REFERENCE_STRUCTURE_SUFFIXES:
-            reference_cif_path = external_reference_file
-        else:
-            reference_cif_path = Path("__phase_studio_no_external_reference_cif_selected__").resolve()
-        if input_source_mode == INPUT_MODE_INFLIP and external_reference_file is None:
-            hkl_path = Path("__phase_studio_use_hkl_from_inflip__").resolve()
-            reference_cif_path = Path("__phase_studio_use_reference_from_inflip__").resolve()
-            superflip_referencefile = None
-        referencefile_mode = referencefile_mode_for_path(superflip_referencefile)
+        input_source_mode = resolved_inputs.input_source_mode
+        referencefile_mode = referencefile_mode_for_path(resolved_inputs.superflip_referencefile)
         modelfile_source_value = normalize_modelfile_source(self._combo_value("modelfile_source"))
         cycles_value = max(1, self._spin_value("cycles"))
         if modelfile_source_value == "none":
             cycles_value = 1
         crystal_metadata = self._resolve_crystal_metadata_from_inputs()
         resolved_wavelength, wavelength_source = resolve_powder_wavelength(
-            self._dspin_value("powder_wavelength"), active_jana_inflip, external_reference_file,
+            self._dspin_value("powder_wavelength"), resolved_inputs.jana_inflip,
+            resolved_inputs.external_reference_file,
         )
         if self._check_value("redistribute_overlaps") and resolved_wavelength > 0 and wavelength_source != "manual entry":
             self.log(f"Powder overlap repartitioning: wavelength {resolved_wavelength:g} A auto-detected from {wavelength_source}.", level="DETAIL")
         return RunConfig(
-            hkl=hkl_path,
-            reference_cif=reference_cif_path,
-            superflip_reference_xplor=reference_xplor,
-            superflip_referencefile=superflip_referencefile,
-            first_cycle_modelfile=first_model,
+            hkl=resolved_inputs.hkl,
+            reference_cif=resolved_inputs.reference_cif,
+            superflip_reference_xplor=None,
+            superflip_referencefile=resolved_inputs.superflip_referencefile,
+            first_cycle_modelfile=resolved_inputs.first_cycle_modelfile,
             input_source_mode=input_source_mode,
-            jana_inflip=active_jana_inflip,
+            jana_inflip=resolved_inputs.jana_inflip,
             crystal_metadata=crystal_metadata,
-            jana_return_to_jana=bool(
-                active_jana_inflip is not None
-                and self.jana_wizard_context.launched_from_jana_wizard
-            ),
+            jana_return_to_jana=resolved_inputs.jana_return_to_jana,
             work_dir=Path(self._path_value("work_dir")).expanduser().resolve(),
             cycles=cycles_value,
             superflip_exe=self._path_value("superflip_exe") or "superflip",
@@ -11794,7 +11733,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         hkl_text = self._path_value("hkl").strip() if "hkl" in self.inputs else ""
         inflip_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
-        inflip_path = Path(inflip_text) if inflip_text and mode != INPUT_MODE_EXTERNAL else None
+        inflip_path = active_jana_inflip(mode, inflip_text)
         try:
             return resolve_reflection_data_mode_from_sources(Path(hkl_text), configured, inflip_path)
         except Exception:
@@ -11804,18 +11743,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         issues: List[str] = []
         details: List[str] = []
         mode = normalize_input_source_mode(cfg.input_source_mode)
-        hkl_text = self._path_value("hkl").strip()
-        ref_text = self._path_value("reference_cif").strip()
         ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
         if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
             if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
                 issues.append("The Jana2020 .inflip file does not exist or cannot be read.")
                 details.append(f"Jana2020 .inflip: {cfg.jana_inflip or '(not selected)'}")
             if mode == INPUT_MODE_INFLIP_OVERRIDES:
-                if hkl_text and not cfg.hkl.is_file():
+                if not uses_embedded_hkl(cfg.hkl) and not cfg.hkl.is_file():
                     issues.append("The external HKL override does not exist.")
                     details.append(f"HKL override: {cfg.hkl}")
-                if ref_text and (cfg.superflip_referencefile is None or not cfg.superflip_referencefile.is_file()):
+                if cfg.superflip_referencefile is not None and not cfg.superflip_referencefile.is_file():
                     issues.append("The external reference file does not exist.")
                     details.append(f"Reference: {cfg.superflip_referencefile}")
         elif not cfg.hkl.is_file():
@@ -11958,9 +11895,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if mode == INPUT_MODE_INFLIP:
             self._append_execution_log("Input mode: Jana2020 .inflip. Embedded HKL data will be used.")
         elif mode == INPUT_MODE_INFLIP_OVERRIDES:
-            if not self._path_value("hkl").strip():
+            if uses_embedded_hkl(cfg.hkl):
                 self._append_execution_log("HKL override is empty; the Jana2020 .inflip fbegin/endf block will be used.", level="DETAIL")
-            if not self._path_value("reference_cif").strip():
+            if cfg.superflip_referencefile is None:
                 self._append_execution_log("External reference file is empty; no external reference density or atom sites will be used.", level="DETAIL")
         self.stop_after_cycle.clear()
         self.stop_now.clear()

@@ -64,6 +64,11 @@ for every file, checking the exit code) without any additional tooling.
   all four column sets, absence of Selection score, matching recommendations,
   and the standalone Save map and model action.
 
+- `test_input_context.py` -- pure and GUI-bound guards for the resolved input
+  boundary: External/embedded HKL, active versus stale Jana `.inflip`, metadata
+  precedence, reference/initial models, captured `RunConfig`, QSettings
+  compatibility, and Jana-versus-standalone handoff eligibility.
+
 - `test_map_quality.py` -- pure periodic-map metrics, immutable validation
   data, all four profiles, and exact source-neutral lexicographic ranking.
 

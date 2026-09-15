@@ -1,9 +1,10 @@
 # Phase Studio 1.0.9 cleanup plan
 
-Status: Phase 3B is complete through commit `6792fde`. Sections 1-12 retain the
-original audit measurements from commit `8cc87b9`; section 13 records the
-Phase 3B analysis and implementation result. The optional large orchestration
-module move has not started.
+Status: Phase 3D is complete in the current working branch. Sections 1-12 retain
+the original audit measurements from commit `8cc87b9`; section 13 records Phase
+3B and section 14 records the refreshed post-hardening baseline, Phase 3C, and
+the focused Phase 3D input/configuration boundary. No further cleanup phase is
+authorized by this plan.
 
 ## Measurement method and compatibility boundary
 
@@ -936,3 +937,108 @@ SharpED request and performance goldens remained unchanged.
 
 The optional 350-450 LOC one-way module move remains a separate decision. Do
 not begin it or Phase 3C without a new review.
+
+## 14. Refreshed baseline and Phase 3D result
+
+The baseline was recalculated at `f7d2b18`, after release hardening, Phase 3C,
+and the test-only Jana2020 handoff audit commit. It supersedes the old size and
+test totals for current planning; earlier sections remain historical evidence.
+
+| Surface | Files | Physical lines | Production LOC |
+|---|---:|---:|---:|
+| Runtime package (`phase_studio`) | 21 | 22,569 | 19,791 |
+| Build/package/config source | 20 | 2,177 | 1,688 |
+| **Production total** | **41** | **24,746** | **21,479** |
+| `phase_studio/app.py` | 1 | 13,320 | 11,998 |
+| `phase_studio/jana_superflip.py` | 1 | 2,799 | 2,172 |
+| Regression suite | 18 scripts | — | 846 checks |
+
+The largest remaining `app.py` responsibility groups at that baseline were the
+ordinary cycle loop (about 592 physical lines), HKL Completeness dialog (536),
+workflow preparation/dispatch (314), Input-page construction (208), queue
+drain (176), HKL Validation dialog (155), recycling loop (144), workflow-widget
+synchronization (137), and `get_config` (about 125). The execution, terminal,
+scientific, Result Selection, and packaging groups were explicitly outside
+Phase 3D.
+
+### Pre-extraction context decision
+
+Rounded review envelopes include the call sites and policy needed to change a
+behavior safely. They are context measures, not moved/deleted LOC claims.
+
+| Task | Before Phase 3D | Expected with one pure boundary | Decision |
+|---|---:|---:|---|
+| A. External HKL handling | about 185 LOC / 1 large module | about 85 / 2 | proceed, about 54% less |
+| B. Jana2020 `.inflip` handling | about 260 / 2 | about 125 / 2 | proceed, about 52% less |
+| C. Reference/initial model input | about 210 / 1 | about 115 / 2 | proceed, about 45% less |
+| D. One Basic input control | about 90 / 1 | about 58 / 2 | useful but only about 36% less |
+| E. One QSettings workflow setting | about 87 / 1 | unchanged | retain cohesive loader/saver |
+| F. Jana versus standalone context | about 145 / 2 | about 60 / 2 | proceed, about 59% less |
+
+Four tasks cleared the 40% threshold. `input_context.py` now owns only stable
+tokens, path normalization, metadata-source reconciliation, input-control
+availability, and Jana handoff eligibility. Its frozen `ResolvedRunInputs` is a
+short-lived value returned while constructing the existing `RunConfig`; it is
+not a second settings store or execution model. QWidgets remain editors,
+QSettings remains persistence, and the captured `RunConfig` remains the one
+workflow configuration.
+
+The final measured review envelopes are:
+
+| Task | After Phase 3D | Reduction |
+|---|---:|---:|
+| A. External HKL handling | about 80 LOC / 2 modules | about 57% |
+| B. Jana2020 `.inflip` handling | about 118 / 2 | about 55% |
+| C. Reference/initial model input | about 108 / 2 | about 49% |
+| D. One Basic input control | about 56 / 2 | about 38% |
+| E. One QSettings workflow setting | about 87 / 1 | 0%; intentionally unchanged |
+| F. Jana versus standalone context | about 52 / 2 | about 64% |
+
+`get_config` fell to 109 physical lines and delegates its path/context portion
+to one function. Pre-run validation and input-mode logging now read the captured
+configuration instead of returning to live path widgets. Focused tests prove
+that later widget edits do not mutate the captured paths, old and current
+QSettings fixtures load identically, standalone stale `.inflip` state cannot
+enable handoff, and Jana full-configuration context remains authoritative.
+
+### Phase 3D accounting
+
+All figures use the nonblank/non-comment definition. Constants and the two
+normalizers moved out of `app.py`; they are not counted as deletion.
+
+| Category | LOC |
+|---|---:|
+| Actual dead LOC removed | 1 (`reference_xplor` local fixed permanently to `None`) |
+| Duplicate/inline context-resolution LOC removed | 82 |
+| LOC moved | 38 |
+| New boundary/interface and call-site LOC | 175 |
+| Total production LOC change | +92 |
+| `app.py` LOC change | -57 |
+| `jana_superflip.py` LOC change | 0 |
+| Production module count change | +1 |
+
+The final regression baseline is 19 scripts and 867 checks (21 new focused
+input-context checks). All scientific goldens, Jana handoff guards, workflow
+states, requirements/preflight checks, UI contracts, and distribution checks
+pass with no output differences.
+
+No other dead branch was proven. Compatibility fields, `.inflip` parsing,
+QSettings migrations, and public helpers remain. HKL Validation and
+Completeness still combine substantial Qt table/dialog behavior with callbacks
+and scientific analysis results; the new boundary removes input ambiguity but
+does not remove that coupling, so both dialogs appropriately remain in
+`app.py`.
+
+### Repository-level cleanup decision
+
+| Area | Classification | Reason |
+|---|---|---|
+| Input/configuration resolution, `.inflip` primitives, Result Selection, metrics presentation, requirements, branding, process policy | **EXTRACTED / CLEAN** | Each now has a focused one-way module boundary and direct guards. |
+| QSettings load/save, widget construction/synchronization, Jana Wizard, installer transactions | **APPROPRIATE TO REMAIN** | These are cohesive owners of GUI persistence or distinct executable flows. |
+| Metrics interaction controller and small test-support repetition | **POSSIBLE FUTURE CLEANUP** | Possible locality benefit, but no current bug or measured release need. |
+| Scientific parsers/calculations, HKL dialogs, cycle loops, worker/queue/terminal precedence, SharpED/Superflip/EDMA invocation, Jana handoff, packaging profiles | **HIGH RISK / DO NOT TOUCH** | Behavior is mature, heavily coupled to scientific or distribution contracts, and already guarded. |
+
+Structural cleanup has reached diminishing returns for 1.0.9. Further moves
+would primarily redistribute cohesive code, increase review surface, or enter
+scientific/process/packaging paths without a demonstrated defect. Stop
+structural cleanup for this release.
