@@ -6237,7 +6237,7 @@ from phase_studio.ui_branding import (
     create_phase_studio_logo_pixmap, create_phase_studio_app_icon,
     apply_phase_studio_app_icon, create_phase_studio_brand_header,
     create_phase_studio_context_banner, apply_safe_dialog_geometry,
-    fit_dialog_to_available_screen,
+    fit_dialog_to_available_screen, close_bootloader_splash,
 )
 from phase_studio.requirements_ui import (
     run_remediation_loop,
@@ -13656,9 +13656,12 @@ def main() -> None:
     splash = create_startup_splash()
     splash.show()
     app.processEvents()
+    close_bootloader_splash()
     win = initialize_main_window(app, splash)
     if win is None:
         raise SystemExit(1)
+    if os.environ.get("PHASE_STUDIO_STARTUP_PROBE") == "1":
+        QTimer.singleShot(250, app.quit)
     raise SystemExit(app.exec())
 
 if __name__ == "__main__":

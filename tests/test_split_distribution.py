@@ -252,6 +252,12 @@ class SplitDistributionTests(unittest.TestCase):
         self.assertIn('$publicFiles.Count -ne 2', build)
         self.assertIn('a.binaries, a.datas', spec)
         self.assertIn('"JanaIntegrationPayload"', spec)
+        self.assertIn('Splash(', spec)
+        self.assertIn('phase_studio_splash.png', spec)
+        self.assertIn('splash, splash.binaries, a.binaries, a.datas', spec)
+        self.assertIn('PHASE_STUDIO_STARTUP_PROBE', (ROOT / "phase_studio/app.py").read_text(encoding="utf-8"))
+        self.assertIn('PHASE_STUDIO_STARTUP_PROBE', (ROOT / "phase_studio/jana_installer.py").read_text(encoding="utf-8"))
+        self.assertTrue((ROOT / "phase_studio/assets/phase_studio_splash.png").is_file())
         self.assertTrue((ROOT / "packaging/pyinstaller/PhaseStudioStore.spec").is_file())
 
     def test_portable_distribution_manifest_schema_is_stable(self):
@@ -316,6 +322,9 @@ class SplitDistributionTests(unittest.TestCase):
                              "split_inflip_line", "inflip_first_token",
                              "insert_before_fbegin", "without_inflip_keywords",
                              "inflip_header_for_m80", "define_m80_inflip_from_model"}
+                # Startup-only handoff from PyInstaller's extraction splash to
+                # the existing Qt splash; no scientific code is involved.
+                excluded |= {"main"}
             elif filename == "jana_superflip.py":
                 # UI-only requirement routing: the former generic token warning
                 # became unreachable once the shared dedicated remediation dialog

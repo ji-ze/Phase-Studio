@@ -1,17 +1,19 @@
 """Dedicated Jana2020 integration manager; never imports the scientific GUI."""
 from __future__ import annotations
 import html
+import os
 import sys
 from pathlib import Path
 from typing import Dict, Optional
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout,
     QScrollArea, QFrame, QGroupBox, QLineEdit, QPushButton, QLabel, QTextEdit,
     QFileDialog, QMessageBox)
 from phase_studio.version import VERSION
 from phase_studio.ui_style import apply_phase_studio_style
 from phase_studio.ui_branding import (create_phase_studio_brand_header,
-    create_phase_studio_context_banner, apply_safe_dialog_geometry, apply_phase_studio_app_icon)
+    create_phase_studio_context_banner, apply_safe_dialog_geometry, apply_phase_studio_app_icon,
+    close_bootloader_splash)
 
 
 def create_integration_dialog(parent=None, configured_paths=()):
@@ -303,6 +305,11 @@ def main():
     paths = [Path(value) for key in ("superflip_exe", "edma_exe")
              if (value := str(settings.value(f"inputs/{key}", ""))).strip()]
     dialog = create_integration_dialog(configured_paths=paths)
+    dialog.show()
+    app.processEvents()
+    close_bootloader_splash()
+    if os.environ.get("PHASE_STUDIO_STARTUP_PROBE") == "1":
+        QTimer.singleShot(250, dialog.accept)
     dialog.exec()
     return 0
 

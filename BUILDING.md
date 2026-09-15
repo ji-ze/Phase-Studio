@@ -58,7 +58,10 @@ Get-ChildItem tests/test_*.py | ForEach-Object {
 ## 3. Two independent Windows products
 
 Use a plain CPython x64 virtual environment with the PyPI PySide6 wheel,
-not a Conda Qt installation. Install the build dependencies in that environment:
+not a Conda Qt installation. The interpreter must include its matching Tcl/Tk
+runtime and library scripts; PyInstaller uses them for the early ONEFILE launch
+splash shown while the archive is extracted. Install the build dependencies in
+that environment:
 
 ```powershell
 python -m pip install -e ".[dev]"

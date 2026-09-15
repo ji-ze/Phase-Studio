@@ -7,6 +7,18 @@ from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QIcon, QGuiApplicatio
 from PySide6.QtWidgets import QWidget, QApplication, QDialog, QHBoxLayout, QVBoxLayout, QLabel, QSizePolicy
 from phase_studio.version import VERSION as __version__
 
+
+def close_bootloader_splash() -> None:
+    """Close PyInstaller's early splash after the first Qt surface is visible."""
+    try:
+        import pyi_splash  # type: ignore[import-not-found]
+
+        if pyi_splash.is_alive():
+            pyi_splash.close()
+    except (ImportError, RuntimeError):
+        # Source runs and Store/ONEDIR builds do not provide pyi_splash.
+        pass
+
 def fitted_dialog_client_size(
     available_size: QSize,
     frame_extra: QSize = QSize(0, 0),

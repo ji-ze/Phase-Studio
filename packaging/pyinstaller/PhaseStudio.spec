@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.building.splash import Splash
 
 
 # SPECPATH (supplied by PyInstaller) is the directory CONTAINING this spec
@@ -157,8 +158,19 @@ if store_build:
     coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False,
                    upx_exclude=[], name=target_name)
 else:
+    splash = Splash(
+        str(project_dir / "phase_studio" / "assets" / "phase_studio_splash.png"),
+        binaries=a.binaries,
+        datas=a.datas,
+        text_pos=(32, 218),
+        text_size=10,
+        text_font="Segoe UI",
+        text_color="#52658b",
+        text_default="Starting Phase Studio…",
+        always_on_top=True,
+    )
     exe = EXE(
-        pyz, a.scripts, a.binaries, a.datas, [], exclude_binaries=False,
+        pyz, a.scripts, splash, splash.binaries, a.binaries, a.datas, [], exclude_binaries=False,
         name=target_name, version=version_resource(target_name, project_dir),
         debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
         console=False, disable_windowed_traceback=False, argv_emulation=False,
