@@ -274,6 +274,11 @@ def main():
     check("immediate-stop race reaches the deterministic report checkpoint", report_checkpoint_reached == [True])
     check("immediate stop during report finalization has cancellation priority", terminal_events == ["cancelled"])
     check("immediate stop prevents the next scientific cycle", started_cycles == ["cycle_001_superflip"])
+    check("report-finalization cancellation records one valid cycle result", len(state.all_results) == 1)
+    check(
+        "report-finalization cancellation publishes that valid result exactly once",
+        sum(kind == "result" for kind, _payload in race_events) == 1,
+    )
 
     # Both request orders resolve through the same priority policy. This pins
     # the case where a graceful request is upgraded before terminalization as

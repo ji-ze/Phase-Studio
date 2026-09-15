@@ -12641,6 +12641,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             state.performance_root = None
         profiler.write_report(state.cfg.work_dir / "workflow_performance.txt", outcome)
 
+    def _record_completed_cycle_result(self, state: PipelineState, result: CycleResult) -> None:
+        """Persist and publish one fully constructed cycle result."""
+        state.all_results.append(result)
+        with profile_stage(state.performance_profiler, "Reports and CSV"):
+            write_metrics_csv(state.cfg.work_dir / "metrics.csv", state.all_results)
+            write_map_quality_report(
+                state.cfg.work_dir / "map_quality_assessment.txt", state.all_results
+            )
+        if result.superflip_quality is not None:
+            self.log(
+                format_validation_log_line(
+                    result.cycle, "superflip", result.validation_profile, result.superflip_quality
+                ),
+                subsystem="Validation",
+            )
+        if result.deblur_quality is not None:
+            self.log(
+                format_validation_log_line(
+                    result.cycle, "deblurred", result.validation_profile, result.deblur_quality
+                ),
+                subsystem="Validation",
+            )
+        self.msg_queue.put(("result", result))
+
     def _run_pipeline_cycles(self, state: PipelineState) -> None:
         cfg = state.cfg
         ref_ctx = state.ref_ctx
@@ -12655,7 +12679,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sharped_elements = state.sharped_elements
         exclude_labels = state.exclude_labels
         progress_stages = state.progress_stages
-        all_results = state.all_results
         # Some Superflip diagnostics (e.g. the normalize-keyword-unsupported
         # notice) repeat byte-for-byte on every cycle since Superflip's input
         # is regenerated each time; demote every repeat after the first to
@@ -13082,15 +13105,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             state.pending_powder_repartition_change_percent = None
             state.pending_intensity_correction_change_percent = None
-            all_results.append(result)
-            with profile_stage(state.performance_profiler, "Reports and CSV"):
-                write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
-                write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", all_results)
-            if sf_quality is not None:
-                self.log(format_validation_log_line(cyc, "superflip", result.validation_profile, sf_quality), subsystem="Validation")
-            if deblur_quality is not None:
-                self.log(format_validation_log_line(cyc, "deblurred", result.validation_profile, deblur_quality), subsystem="Validation")
-            self.msg_queue.put(("result", result))
+            self._record_completed_cycle_result(state, result)
             if cyc < cfg.cycles:
                 add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
                 correct_intensities = cfg.map_feedback_intensity_enabled and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
@@ -13190,7 +13205,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         reflections = state.current_reflections
         configured_data_mode = state.configured_data_mode
         sharped_elements = state.sharped_elements
-        all_results = state.all_results
         random_start = normalize_reconstruction_mode(cfg.reconstruction_mode) == "sharped_recycle_random"
         progress_stages = ["Preparing cycle", "Superflip", "SharpED", "Phase calculation", "Finalizing cycle"]
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
@@ -13337,15 +13351,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 superflip_quality=superflip_quality,
                 deblur_quality=deblur_quality,
             )
-            all_results.append(result)
-            with profile_stage(state.performance_profiler, "Reports and CSV"):
-                write_metrics_csv(cfg.work_dir / "metrics.csv", all_results)
-                write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", all_results)
-            if superflip_quality is not None:
-                self.log(format_validation_log_line(cyc, "superflip", result.validation_profile, superflip_quality), subsystem="Validation")
-            if deblur_quality is not None:
-                self.log(format_validation_log_line(cyc, "deblurred", result.validation_profile, deblur_quality), subsystem="Validation")
-            self.msg_queue.put(("result", result))
+            self._record_completed_cycle_result(state, result)
             state.completed_cycles = cyc
             self.log(f"Cycle {cyc} complete.", level="SUCCESS")
             self.msg_queue.put(("progress", state.completed_cycles))
