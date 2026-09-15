@@ -384,6 +384,52 @@ def main():
     check("immediate stop during completed-cycle bookkeeping resolves to CANCELLED", finalization_terminals == ["cancelled"])
     check("completed-cycle cancellation prevents cycle transition", finalization_cycles == ["cycle_001_superflip"])
 
+    # A graceful checkpoint followed by Continue must start at the following
+    # cycle and append one row/result, without replaying the completed cycle.
+    win, _cycle_results = running_window()
+    resume_state = ordinary_cycle_state(win)
+    resumed_cycles = []
+    report_result_counts = []
+    stop_after_first_report = [True]
+
+    def resume_superflip(cycle_dir, prefix, *_args, **_kwargs):
+        resumed_cycles.append(prefix)
+        output = cycle_dir / (prefix + ".xplor")
+        output.write_text("deterministic map\n", encoding="utf-8")
+        return output
+
+    def checkpoint_report(_path, results):
+        report_result_counts.append(len(results))
+        if stop_after_first_report[0]:
+            stop_after_first_report[0] = False
+            win.request_stop_after_cycle()
+
+    with patch.object(appmod, "run_superflip_cycle", side_effect=resume_superflip), \
+         patch.object(appmod, "export_phased_reflections_from_map"), \
+         patch.object(appmod, "parse_superflip_cycle_metrics", return_value=appmod.SuperflipLogMetrics()), \
+         patch.object(appmod, "write_structure_bundle", side_effect=fake_structure), \
+         patch.object(appmod, "write_metrics_csv", side_effect=checkpoint_report), \
+         patch.object(appmod, "write_map_quality_report"):
+        win._run_pipeline_cycles(resume_state)
+        first_terminals = [
+            kind for kind, _payload in drain_events(win)
+            if kind in {"done", "stopped", "cancelled", "error_report"}
+        ]
+        win.stop_after_cycle.clear()
+        win.stop_now.clear()
+        win._run_pipeline_cycles(resume_state)
+
+    resumed_events = drain_events(win)
+    resumed_terminals = [
+        kind for kind, _payload in resumed_events
+        if kind in {"done", "stopped", "cancelled", "error_report"}
+    ]
+    check("graceful checkpoint before Continue is STOPPED", first_terminals == ["stopped"])
+    check("Continue starts exactly at the next cycle", resumed_cycles == ["cycle_001_superflip", "cycle_002_superflip"])
+    check("Continue preserves one result per completed cycle", [result.cycle for result in resume_state.all_results] == [1, 2])
+    check("Continue rewrites reports with non-duplicated accumulated rows", report_result_counts == [1, 2])
+    check("continued requested work finishes COMPLETE", resumed_terminals == ["done"])
+
     # Exercise the remaining ordinary-cycle non-process checkpoints through the
     # real loop. Each hook requests cancellation synchronously and the shared
     # terminal gate must prevent cycle 2.

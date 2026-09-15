@@ -12665,6 +12665,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
         self.msg_queue.put(("result", result))
 
+    def _finalize_completed_cycle(
+        self,
+        state: PipelineState,
+        cycle: int,
+        progress_stages: Sequence[str],
+    ) -> bool:
+        """Checkpoint one valid cycle and apply terminal-intent precedence."""
+        state.completed_cycles = cycle
+        self.log(f"Cycle {cycle} complete.", level="SUCCESS")
+        self.msg_queue.put(("progress", state.completed_cycles))
+        self._emit_cycle_progress(
+            cycle,
+            state.cfg.cycles,
+            progress_stages,
+            "Finalizing cycle",
+            detail="completed",
+            complete=True,
+        )
+        return self._emit_requested_workflow_stop(state.completed_cycles)
+
     def _run_pipeline_cycles(self, state: PipelineState) -> None:
         cfg = state.cfg
         ref_ctx = state.ref_ctx
@@ -13180,18 +13200,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             else:
                 state.auto_reference_cif = None
             state.auto_reference_xplor = deblur_map
-            state.completed_cycles = cyc
-            self.log(f"Cycle {cyc} complete.", level="SUCCESS")
-            self.msg_queue.put(("progress", state.completed_cycles))
-            self._emit_cycle_progress(
-                cyc,
-                cfg.cycles,
-                progress_stages,
-                "Finalizing cycle",
-                detail="completed",
-                complete=True,
-            )
-            if self._emit_requested_workflow_stop(state.completed_cycles):
+            if self._finalize_completed_cycle(state, cyc, progress_stages):
                 return
         self.msg_queue.put(("done", state.completed_cycles))
 
@@ -13352,11 +13361,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 deblur_quality=deblur_quality,
             )
             self._record_completed_cycle_result(state, result)
-            state.completed_cycles = cyc
-            self.log(f"Cycle {cyc} complete.", level="SUCCESS")
-            self.msg_queue.put(("progress", state.completed_cycles))
-            self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="completed", complete=True)
-            if self._emit_requested_workflow_stop(state.completed_cycles):
+            if self._finalize_completed_cycle(state, cyc, progress_stages):
                 return
         self.msg_queue.put(("done", state.completed_cycles))
 
