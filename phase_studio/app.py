@@ -571,6 +571,65 @@ class CycleResult:
     deblur_quality: Optional[MapQualityMetrics] = None
 
 
+@dataclass
+class OrdinaryCycleCheckpoint:
+    """Completed work for the one ordinary cycle that is still in progress.
+
+    A checkpoint is deliberately limited to the existing ordinary pipeline.
+    It records the real stage outputs needed by the next stage; completed
+    ``CycleResult`` objects remain the authority for finalized cycles.
+    """
+
+    cycle: int
+    superflip_completed: bool = False
+    superflip_edma_completed: bool = False
+    superflip_validation_completed: bool = False
+    sharped_completed: bool = False
+    sharped_edma_completed: bool = False
+    validation_completed: bool = False
+    result_recorded: bool = False
+    feedback_completed: bool = False
+    continuation_completed: bool = False
+    values: Dict[str, object] = field(default_factory=dict)
+
+    def first_incomplete_stage(self) -> str:
+        for complete, label in (
+            (self.superflip_completed, "Superflip"),
+            (self.superflip_edma_completed, "EDMA / Superflip"),
+            (self.superflip_validation_completed, "Superflip validation"),
+            (self.sharped_completed, "SharpED"),
+            (self.sharped_edma_completed, "EDMA / SharpED"),
+            (self.validation_completed, "validation"),
+            (self.result_recorded, "reports"),
+            (self.feedback_completed, "Map Feedback"),
+            (self.continuation_completed, "cycle finalization"),
+        ):
+            if not complete:
+                return label
+        return "cycle finalization"
+
+    def invalidate_from(self, stage: str) -> None:
+        """Discard a missing stage output and every dependent checkpoint."""
+        order = (
+            "superflip", "superflip_edma", "superflip_validation", "sharped",
+            "sharped_edma", "validation", "result", "feedback", "continuation",
+        )
+        flags = {
+            "superflip": "superflip_completed",
+            "superflip_edma": "superflip_edma_completed",
+            "superflip_validation": "superflip_validation_completed",
+            "sharped": "sharped_completed",
+            "sharped_edma": "sharped_edma_completed",
+            "validation": "validation_completed",
+            "result": "result_recorded",
+            "feedback": "feedback_completed",
+            "continuation": "continuation_completed",
+        }
+        start = order.index(stage)
+        for name in order[start:]:
+            setattr(self, flags[name], False)
+
+
 INPUT_MODE_INFLIP = "jana_inflip"
 INPUT_MODE_INFLIP_OVERRIDES = "jana_inflip_overrides"
 INPUT_MODE_EXTERNAL = "external_hkl_cif"
@@ -736,6 +795,7 @@ class PipelineState:
     pending_intensity_correction_change_percent: Optional[float] = None
     performance_profiler: Optional[WorkflowProfiler] = None
     performance_root: Optional[TimingToken] = None
+    ordinary_cycle_checkpoint: Optional[OrdinaryCycleCheckpoint] = None
 
 
 @dataclass(frozen=True)
@@ -12291,6 +12351,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ]))
             return
         state.cfg.cycles = requested_cycles
+        # Continue preserves the captured scientific configuration. Only
+        # connection controls may be repaired after a failed SharpED request;
+        # changing them does not invalidate completed Superflip/EDMA outputs.
+        state.cfg.sharped_base_url = self._line_value("sharped_base_url") or DEFAULT_SERVER_URL
+        state.cfg.sharped_api_token = (
+            self._line_value("sharped_api_token") or os.environ.get("SHARPED_API_TOKEN", "")
+        )
+        state.cfg.sharped_timeout_seconds = self._spin_value("sharped_timeout_seconds")
+        state.cfg.sharped_poll_seconds = self._spin_value("sharped_poll_seconds")
+        state.cfg.sharped_max_polls = self._spin_value("sharped_max_polls")
         self.last_run_config = state.cfg
         self.stop_after_cycle.clear()
         self.stop_now.clear()
@@ -12308,9 +12378,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.run_btn.setEnabled(False)
         self.handoff_btn.setEnabled(False)
         self.run_btn.setText("Running…")
+        checkpoint = state.ordinary_cycle_checkpoint
+        resume_cycle = checkpoint.cycle if checkpoint is not None else state.completed_cycles + 1
+        resume_stage = checkpoint.first_incomplete_stage() if checkpoint is not None else "Preparing cycle"
         self._append_execution_log(
-            f"Continuing workflow from cycle {state.completed_cycles + 1} of {requested_cycles}, "
-            "reusing the previous run's metadata, reflections and cycle feedback.",
+            f"Continuing workflow at {resume_stage} in cycle {resume_cycle} of {requested_cycles}, "
+            "reusing valid completed stage outputs and the previous run's scientific configuration.",
             level="DETAIL",
         )
         QApplication.processEvents()
@@ -12326,8 +12399,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             resume_state.performance_root = profiler.start("Total workflow")
             try:
                 with profiler.stage("Continue run preparation"):
+                    checkpoint = resume_state.ordinary_cycle_checkpoint
+                    resume_cycle = checkpoint.cycle if checkpoint is not None else resume_state.completed_cycles + 1
+                    resume_stage = checkpoint.first_incomplete_stage() if checkpoint is not None else "Preparing cycle"
                     self.log(
-                        f"=== Workflow resumed at cycle {resume_state.completed_cycles + 1} of {resume_state.cfg.cycles} ===",
+                        f"=== Workflow resumed at {resume_stage} · cycle {resume_cycle} of {resume_state.cfg.cycles} ===",
                         level="STEP",
                     )
                     self.msg_queue.put(("progress_setup", resume_state.cfg.cycles))
@@ -12640,12 +12716,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _record_completed_cycle_result(self, state: PipelineState, result: CycleResult) -> None:
         """Persist and publish one fully constructed cycle result."""
-        state.all_results.append(result)
+        pending_results = [item for item in state.all_results if item.cycle != result.cycle]
+        pending_results.append(result)
+        pending_results.sort(key=lambda item: item.cycle)
         with profile_stage(state.performance_profiler, "Reports and CSV"):
-            write_metrics_csv(state.cfg.work_dir / "metrics.csv", state.all_results)
+            write_metrics_csv(state.cfg.work_dir / "metrics.csv", pending_results)
             write_map_quality_report(
-                state.cfg.work_dir / "map_quality_assessment.txt", state.all_results
+                state.cfg.work_dir / "map_quality_assessment.txt", pending_results
             )
+        state.all_results[:] = pending_results
         for source, quality in (
             ("superflip", result.superflip_quality), ("deblurred", result.deblur_quality),
         ):
@@ -12667,13 +12746,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self, state: PipelineState, cycle: int, progress_stages: Sequence[str],
     ) -> bool:
         """Checkpoint one valid cycle and apply terminal-intent precedence."""
-        state.completed_cycles = cycle
         self.log(f"Cycle {cycle} complete.", level="SUCCESS")
-        self.msg_queue.put(("progress", state.completed_cycles))
         self._emit_cycle_progress(
             cycle, state.cfg.cycles, progress_stages, "Finalizing cycle",
             detail="completed", complete=True,
         )
+        state.completed_cycles = cycle
+        self.msg_queue.put(("progress", state.completed_cycles))
         return self._emit_requested_workflow_stop(state.completed_cycles)
 
     def _run_configured_sharped_stage(
@@ -12761,6 +12840,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
             self.log(f"=== Cycle {cyc} of {cfg.cycles} ===", level="STEP")
+            checkpoint = state.ordinary_cycle_checkpoint
+            if checkpoint is None or checkpoint.cycle != cyc:
+                checkpoint = OrdinaryCycleCheckpoint(cycle=cyc)
+                state.ordinary_cycle_checkpoint = checkpoint
+            elif any((
+                checkpoint.superflip_completed,
+                checkpoint.superflip_edma_completed,
+                checkpoint.sharped_completed,
+                checkpoint.sharped_edma_completed,
+                checkpoint.validation_completed,
+                checkpoint.result_recorded,
+            )):
+                self.log(
+                    f"[Continue] Resuming cycle {cyc} at its first incomplete stage; "
+                    "completed scientific outputs will be reused.",
+                    level="STEP",
+                )
             model_for_sf: Optional[Path] = None
             model_source = "none"
             model_metric = state.current_model_metric
@@ -12870,7 +12966,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_export_ccp4 = sf_map_format == "ccp4"
             sf_export_jana = sf_map_format == "jana"
             sf_progress_relay = make_superflip_progress_relay("running")
-            sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=sf_progress_relay, profiler=state.performance_profiler)
+            saved_sf_map = checkpoint.values.get("superflip_map")
+            if (
+                checkpoint.superflip_completed
+                and isinstance(saved_sf_map, Path)
+                and saved_sf_map.is_file()
+                and saved_sf_map.stat().st_size > 0
+            ):
+                sf_map = saved_sf_map
+                self.log(f"[Continue] Reusing completed Superflip map: {sf_map}")
+                sf_progress_relay = None
+            else:
+                checkpoint.invalidate_from("superflip")
+                sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=sf_progress_relay, profiler=state.performance_profiler)
+                checkpoint.values["superflip_map"] = sf_map
+                checkpoint.superflip_completed = True
             if sf_progress_relay is not None and not sf_progress_relay.tracker.saw_progress:  # type: ignore[attr-defined]
                 self.log("[Superflip] Live repeat progress unavailable for this executable.", level="DETAIL")
             self.log(f"Superflip map: {sf_map}")
@@ -12891,7 +13001,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 write_observed_reflections(omit_hkl, omit_reflections, cfg.i_over_sigma_min, data_mode=configured_data_mode, cell=ref_ctx.cell, resolution_d_min=cfg.resolution_d_min)
                 omit_prefix = f"{sf_prefix}_omit"
                 omit_progress_relay = make_superflip_progress_relay("omit map · running")
-                omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay, profiler=state.performance_profiler)
+                saved_omit_sf_map = checkpoint.values.get("omit_superflip_map")
+                if (
+                    isinstance(saved_omit_sf_map, Path)
+                    and saved_omit_sf_map.is_file()
+                    and saved_omit_sf_map.stat().st_size > 0
+                ):
+                    omit_sf_map = saved_omit_sf_map
+                    omit_progress_relay = None
+                else:
+                    omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay, profiler=state.performance_profiler)
+                    checkpoint.values["omit_superflip_map"] = omit_sf_map
                 self.log(f"Omit Superflip map ({len(state.omit_test_hkls)} reflections excluded): {omit_sf_map}")
                 omit_sf_correlation = xplor_map_correlation(sf_map, omit_sf_map)
                 if state.validation_context is not None:
@@ -12927,14 +13047,29 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_edma_dir = cycle_dir / "edma_superflip"
             if cfg.run_edma_superflip:
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "EDMA · Superflip map", busy=True)
-                sf_edma_cif = self._run_configured_edma_stage(
-                    state, sf_map, sf_edma_dir, sf_prefix, cfg.plimit_superflip,
-                )
+                saved_sf_edma_cif = checkpoint.values.get("superflip_edma_cif")
+                if (
+                    checkpoint.superflip_edma_completed
+                    and isinstance(saved_sf_edma_cif, Path)
+                    and saved_sf_edma_cif.is_file()
+                    and saved_sf_edma_cif.stat().st_size > 0
+                ):
+                    sf_edma_cif = saved_sf_edma_cif
+                    self.log(f"[Continue] Reusing completed EDMA/Superflip structure: {sf_edma_cif}")
+                else:
+                    checkpoint.invalidate_from("superflip_edma")
+                    sf_edma_cif = self._run_configured_edma_stage(
+                        state, sf_map, sf_edma_dir, sf_prefix, cfg.plimit_superflip,
+                    )
+                    checkpoint.values["superflip_edma_cif"] = sf_edma_cif
+                    checkpoint.superflip_edma_completed = True
             else:
                 sf_edma_dir.mkdir(parents=True, exist_ok=True)
                 sf_edma_cif = sf_edma_dir / f"{sf_prefix}_edma.cif"
                 write_structure_bundle(sf_edma_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, [], cfg.structure_export_format)
                 self.log("EDMA after Superflip disabled; empty placeholder CIF/XYZ/PDB written.")
+                checkpoint.values["superflip_edma_cif"] = sf_edma_cif
+                checkpoint.superflip_edma_completed = True
             sf_metric, sf_match = self._edma_reference_metrics(
                 sf_edma_cif, ref_ctx, cfg.merge_distance, cfg.run_edma_superflip
             )
@@ -12951,19 +13086,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     sf_heavy_atoms = count_heavy_atoms(sf_edma_cif)
             sf_quality: Optional[MapQualityMetrics] = None
             if state.validation_context is not None:
-                sf_quality = assess_xplor_map(sf_map, state.validation_context, state.performance_profiler)
-                sf_quality = with_reference_metrics(
-                    sf_quality,
-                    precision=sf_precision,
-                    recall=sf_recall,
-                    rmsd=sf_metric,
-                    true_positives=sf_tp,
-                    false_positives=sf_fp,
-                )
-                if state.omit_test_hkls:
-                    sf_quality = with_holdout_metrics(
-                        sf_quality, sf_quality, omit_sf_correlation,
+                saved_sf_quality = checkpoint.values.get("superflip_quality")
+                if checkpoint.superflip_validation_completed and isinstance(saved_sf_quality, MapQualityMetrics):
+                    sf_quality = saved_sf_quality
+                else:
+                    sf_quality = assess_xplor_map(sf_map, state.validation_context, state.performance_profiler)
+                    sf_quality = with_reference_metrics(
+                        sf_quality,
+                        precision=sf_precision,
+                        recall=sf_recall,
+                        rmsd=sf_metric,
+                        true_positives=sf_tp,
+                        false_positives=sf_fp,
                     )
+                    if state.omit_test_hkls:
+                        sf_quality = with_holdout_metrics(
+                            sf_quality, sf_quality, omit_sf_correlation,
+                        )
+                    checkpoint.values["superflip_quality"] = sf_quality
+                    checkpoint.superflip_validation_completed = True
+            else:
+                checkpoint.superflip_validation_completed = True
             self.log(
                 f"[EDMA] Completed · Superflip map · RMSD={sf_metric_text} Å\n"
                 f"  output: {sf_edma_cif}",
@@ -12972,11 +13115,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.msg_queue.put(("structure_update", ("superflip", sf_edma_cif)))
             deblur_map = cycle_dir / f"cycle_{cyc:03d}_deblurred.xplor"
             if cfg.run_sharped and not use_superflip_xplor_modelfile:
-                if self.stop_now.is_set():
-                    raise RuntimeError("Immediate stop requested.")
-                self._run_configured_sharped_stage(
-                    state, sf_map, deblur_map, cyc, progress_stages
-                )
+                saved_deblur_map = checkpoint.values.get("deblur_map")
+                if (
+                    checkpoint.sharped_completed
+                    and isinstance(saved_deblur_map, Path)
+                    and saved_deblur_map.is_file()
+                    and saved_deblur_map.stat().st_size > 0
+                ):
+                    deblur_map = saved_deblur_map
+                    self.log(f"[Continue] Reusing completed SharpED map: {deblur_map}")
+                else:
+                    checkpoint.invalidate_from("sharped")
+                    if self.stop_now.is_set():
+                        raise RuntimeError("Immediate stop requested.")
+                    self._run_configured_sharped_stage(
+                        state, sf_map, deblur_map, cyc, progress_stages
+                    )
             else:
                 shutil.copy2(sf_map, deblur_map)
                 if use_superflip_xplor_modelfile:
@@ -12987,7 +13141,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             omit_deblur_correlation: Optional[float] = None
             omit_deblur_rfree: Optional[float] = None
             omit_deblur_quality: Optional[MapQualityMetrics] = None
-            if cfg.compute_omit_maps and state.omit_test_hkls and omit_sf_map is not None and cfg.run_sharped and not use_superflip_xplor_modelfile:
+            if checkpoint.sharped_completed:
+                omit_deblur_correlation = checkpoint.values.get("omit_deblur_correlation")  # type: ignore[assignment]
+                omit_deblur_rfree = checkpoint.values.get("omit_deblur_rfree")  # type: ignore[assignment]
+                omit_deblur_quality = checkpoint.values.get("omit_deblur_quality")  # type: ignore[assignment]
+            if (not checkpoint.sharped_completed and cfg.compute_omit_maps and state.omit_test_hkls
+                    and omit_sf_map is not None and cfg.run_sharped and not use_superflip_xplor_modelfile):
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
                 omit_deblur_map = cycle_dir / f"{sf_prefix}_omit_deblurred.xplor"
@@ -13005,7 +13164,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     f" · R_free={('n/a' if omit_deblur_rfree is None else f'{omit_deblur_rfree:.4f}')}",
                     subsystem="SharpED",
                 )
-            if cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
+            if not checkpoint.sharped_completed and cfg.symmetrize_deblurred_map and not use_superflip_xplor_modelfile:
                 if self.stop_now.is_set():
                     raise RuntimeError("Immediate stop requested.")
                 self._emit_cycle_progress(
@@ -13032,13 +13191,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     stop_event=self.stop_now,
                     profiler=state.performance_profiler,
                 )
+            checkpoint.values["omit_deblur_correlation"] = omit_deblur_correlation
+            checkpoint.values["omit_deblur_rfree"] = omit_deblur_rfree
+            checkpoint.values["omit_deblur_quality"] = omit_deblur_quality
+            checkpoint.values["deblur_map"] = deblur_map
+            checkpoint.sharped_completed = True
             deblur_prefix = f"cycle_{cyc:03d}_deblurred"
             deblur_edma_dir = cycle_dir / "edma_deblurred"
             if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
                 self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, f"EDMA · {result_map_label('deblurred')}", busy=True)
-                deblur_edma_cif = self._run_configured_edma_stage(
-                    state, deblur_map, deblur_edma_dir, deblur_prefix, cfg.plimit_deblur,
-                )
+                saved_deblur_edma_cif = checkpoint.values.get("deblur_edma_cif")
+                if (
+                    checkpoint.sharped_edma_completed
+                    and isinstance(saved_deblur_edma_cif, Path)
+                    and saved_deblur_edma_cif.is_file()
+                    and saved_deblur_edma_cif.stat().st_size > 0
+                ):
+                    deblur_edma_cif = saved_deblur_edma_cif
+                    self.log(f"[Continue] Reusing completed EDMA/SharpED structure: {deblur_edma_cif}")
+                else:
+                    checkpoint.invalidate_from("sharped_edma")
+                    deblur_edma_cif = self._run_configured_edma_stage(
+                        state, deblur_map, deblur_edma_dir, deblur_prefix, cfg.plimit_deblur,
+                    )
+                    checkpoint.values["deblur_edma_cif"] = deblur_edma_cif
+                    checkpoint.sharped_edma_completed = True
             else:
                 deblur_edma_dir.mkdir(parents=True, exist_ok=True)
                 deblur_edma_cif = deblur_edma_dir / f"{deblur_prefix}_edma.cif"
@@ -13047,6 +13224,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log(f"EDMA after {result_map_label('deblurred').lower()} skipped for Superflip XPLOR cycling; empty placeholder CIF/XYZ/PDB written.")
                 else:
                     self.log(f"EDMA after {result_map_label('deblurred').lower()} disabled; empty placeholder CIF/XYZ/PDB written.")
+                checkpoint.values["deblur_edma_cif"] = deblur_edma_cif
+                checkpoint.sharped_edma_completed = True
             deblur_metric, deblur_match = self._edma_reference_metrics(
                 deblur_edma_cif, ref_ctx, cfg.merge_distance, cfg.run_edma_deblurred
             )
@@ -13063,19 +13242,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     deblur_heavy_atoms = count_heavy_atoms(deblur_edma_cif)
             deblur_quality: Optional[MapQualityMetrics] = None
             if cfg.run_sharped and not use_superflip_xplor_modelfile and state.validation_context is not None:
-                deblur_quality = assess_xplor_map(deblur_map, state.validation_context, state.performance_profiler)
-                deblur_quality = with_reference_metrics(
-                    deblur_quality,
-                    precision=deblur_precision,
-                    recall=deblur_recall,
-                    rmsd=deblur_metric,
-                    true_positives=deblur_tp,
-                    false_positives=deblur_fp,
-                )
-                if state.omit_test_hkls:
-                    deblur_quality = with_holdout_metrics(
-                        deblur_quality, deblur_quality, omit_deblur_correlation,
+                saved_deblur_quality = checkpoint.values.get("deblur_quality")
+                if checkpoint.validation_completed and isinstance(saved_deblur_quality, MapQualityMetrics):
+                    deblur_quality = saved_deblur_quality
+                else:
+                    deblur_quality = assess_xplor_map(deblur_map, state.validation_context, state.performance_profiler)
+                    deblur_quality = with_reference_metrics(
+                        deblur_quality,
+                        precision=deblur_precision,
+                        recall=deblur_recall,
+                        rmsd=deblur_metric,
+                        true_positives=deblur_tp,
+                        false_positives=deblur_fp,
                     )
+                    if state.omit_test_hkls:
+                        deblur_quality = with_holdout_metrics(
+                            deblur_quality, deblur_quality, omit_deblur_correlation,
+                        )
+                    checkpoint.values["deblur_quality"] = deblur_quality
+            checkpoint.validation_completed = True
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
             self.log(
                 f"[EDMA] Completed · {result_map_label('deblurred')} · RMSD={deblur_metric_text} Å\n"
@@ -13119,10 +13304,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 superflip_quality=sf_quality,
                 deblur_quality=deblur_quality,
             )
+            existing_result = next(
+                (item for item in state.all_results if item.cycle == cyc), None,
+            )
+            if checkpoint.result_recorded and existing_result is not None:
+                result = existing_result
+            else:
+                checkpoint.result_recorded = False
+                self._record_completed_cycle_result(state, result)
+                checkpoint.result_recorded = True
             state.pending_powder_repartition_change_percent = None
             state.pending_intensity_correction_change_percent = None
-            self._record_completed_cycle_result(state, result)
-            if cyc < cfg.cycles:
+            if cyc < cfg.cycles and not checkpoint.feedback_completed:
                 add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
                 correct_intensities = cfg.map_feedback_intensity_enabled and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
                 redistribute = cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength > 0
@@ -13167,7 +13360,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     )
                     observed_hkls[configured_data_mode] = feedback_hkl
                     self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
-            if use_xplor_modelfile:
+            checkpoint.feedback_completed = True
+            if not checkpoint.continuation_completed and use_xplor_modelfile:
                 next_xplor_model = sf_map if use_superflip_xplor_modelfile else deblur_map
                 effective_damping = effective_xplor_damping_factor(cfg.damping_factor)
                 if state.current_model is not None and effective_damping > 1.0:
@@ -13176,7 +13370,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 else:
                     state.current_model = next_xplor_model
                 state.current_model_metric = sf_metric if use_superflip_xplor_modelfile else deblur_metric
-            elif use_cif_modelfile:
+            elif not checkpoint.continuation_completed and use_cif_modelfile:
                 if cfg.run_edma_deblurred:
                     state.current_model = deblur_edma_cif
                     state.current_model_metric = deblur_metric
@@ -13186,18 +13380,21 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 else:
                     state.current_model = None
                     state.current_model_metric = None
-            else:
+            elif not checkpoint.continuation_completed:
                 state.current_model = None
                 state.current_model_metric = None
-            if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile and cif_has_readable_atoms(deblur_edma_cif):
+            if not checkpoint.continuation_completed and cfg.run_edma_deblurred and not use_superflip_xplor_modelfile and cif_has_readable_atoms(deblur_edma_cif):
                 state.auto_reference_cif = deblur_edma_cif
-            elif cfg.run_edma_superflip and cif_has_readable_atoms(sf_edma_cif):
+            elif not checkpoint.continuation_completed and cfg.run_edma_superflip and cif_has_readable_atoms(sf_edma_cif):
                 state.auto_reference_cif = sf_edma_cif
-            else:
+            elif not checkpoint.continuation_completed:
                 state.auto_reference_cif = None
-            state.auto_reference_xplor = deblur_map
+            if not checkpoint.continuation_completed:
+                state.auto_reference_xplor = deblur_map
+                checkpoint.continuation_completed = True
             if self._finalize_completed_cycle(state, cyc, progress_stages):
                 return
+            state.ordinary_cycle_checkpoint = None
         self.msg_queue.put(("done", state.completed_cycles))
 
     def _run_sharped_recycle_cycles(self, state: PipelineState) -> None:

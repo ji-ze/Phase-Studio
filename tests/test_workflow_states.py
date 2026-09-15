@@ -577,6 +577,167 @@ def main():
         [kind for kind, _payload in invocation_events if kind in {"done", "stopped", "cancelled"}] == ["done"],
     )
 
+    # A failed ordinary cycle checkpoints each completed scientific stage.
+    # The five SharpED transport/postprocessing failure labels intentionally
+    # enter through the same configured SharpED stage: transport retries stay
+    # inside that stage and never restart Superflip or EDMA/Superflip.
+    def stage_resume_case(failure_name):
+        resume_win, _results = running_window()
+        resume_state = ordinary_cycle_state(resume_win, cycles=1)
+        resume_state.cfg.run_sharped = True
+        resume_state.cfg.run_edma_superflip = True
+        resume_state.cfg.run_edma_deblurred = True
+        resume_state.progress_stages = appmod.cycle_progress_stages(resume_state.cfg)
+        calls = {"superflip": 0, "edma_superflip": 0, "sharped": 0,
+                 "edma_sharped": 0, "validation": 0, "reports": 0,
+                 "finalization": 0}
+        failed = [False]
+
+        def fail_once(stage):
+            if failure_name == stage and not failed[0]:
+                failed[0] = True
+                raise RuntimeError("synthetic " + stage + " failure")
+
+        def matrix_superflip(cycle_dir, prefix, *_args, **_kwargs):
+            calls["superflip"] += 1
+            fail_once("Superflip")
+            output = Path(cycle_dir) / (prefix + ".xplor")
+            output.write_text("stable superflip map\n", encoding="utf-8")
+            return output
+
+        def matrix_edma(_input, output_dir, prefix, *_args, **_kwargs):
+            stage = "edma_superflip" if "superflip" in prefix else "edma_sharped"
+            calls[stage] += 1
+            fail_once("EDMA / Superflip" if stage == "edma_superflip" else "EDMA / SharpED")
+            output = Path(output_dir) / (prefix + "_edma.cif")
+            fake_structure(output)
+            return output
+
+        def matrix_sharped(_input, output, *_args, **_kwargs):
+            calls["sharped"] += 1
+            if failure_name in {
+                "SharpED upload", "SharpED polling", "SharpED download",
+                "SharpED postprocessing",
+            } and not failed[0]:
+                failed[0] = True
+                raise RuntimeError("synthetic " + failure_name + " failure")
+            Path(output).write_text("stable sharped map\n", encoding="utf-8")
+            return output
+
+        def matrix_validation(*_args, **_kwargs):
+            calls["validation"] += 1
+            # Superflip validation is first; exercise the final validation.
+            if failure_name == "validation" and calls["validation"] == 2 and not failed[0]:
+                failed[0] = True
+                raise RuntimeError("synthetic validation failure")
+            return appmod.MapQualityMetrics()
+
+        def matrix_report(_path, _results):
+            calls["reports"] += 1
+            fail_once("reports")
+
+        original_finalize = resume_win._finalize_completed_cycle
+
+        def matrix_finalize(*args, **kwargs):
+            calls["finalization"] += 1
+            fail_once("cycle finalization")
+            return original_finalize(*args, **kwargs)
+
+        with patch.object(appmod, "run_superflip_cycle", side_effect=matrix_superflip), \
+             patch.object(appmod, "export_phased_reflections_from_map"), \
+             patch.object(appmod, "parse_superflip_cycle_metrics", return_value=appmod.SuperflipLogMetrics()), \
+             patch.object(appmod, "run_sharped_deblur", side_effect=matrix_sharped), \
+             patch.object(appmod, "run_edma_on_xplor", side_effect=matrix_edma), \
+             patch.object(appmod, "nearest_metric_to_reference", return_value=None), \
+             patch.object(appmod, "atom_reference_match_metrics", return_value=None), \
+             patch.object(appmod, "count_heavy_atoms", return_value=0), \
+             patch.object(appmod, "cif_has_readable_atoms", return_value=True), \
+             patch.object(appmod, "assess_xplor_map", side_effect=matrix_validation), \
+             patch.object(appmod, "write_metrics_csv", side_effect=matrix_report), \
+             patch.object(appmod, "write_map_quality_report"), \
+             patch.object(resume_win, "_finalize_completed_cycle", side_effect=matrix_finalize):
+            try:
+                resume_win._run_pipeline_cycles(resume_state)
+            except RuntimeError:
+                pass
+            resume_win._run_pipeline_cycles(resume_state)
+        return calls, resume_state
+
+    expected_before_failure = {
+        "Superflip": (2, 1, 1, 1),
+        "EDMA / Superflip": (1, 2, 1, 1),
+        "SharpED upload": (1, 1, 2, 1),
+        "SharpED polling": (1, 1, 2, 1),
+        "SharpED download": (1, 1, 2, 1),
+        "SharpED postprocessing": (1, 1, 2, 1),
+        "EDMA / SharpED": (1, 1, 1, 2),
+        "validation": (1, 1, 1, 1),
+        "reports": (1, 1, 1, 1),
+        "cycle finalization": (1, 1, 1, 1),
+    }
+    for failure_name, expected_calls in expected_before_failure.items():
+        calls, resumed_state = stage_resume_case(failure_name)
+        observed_calls = (
+            calls["superflip"], calls["edma_superflip"], calls["sharped"],
+            calls["edma_sharped"],
+        )
+        check(failure_name + " resumes without replaying completed scientific stages",
+              observed_calls == expected_calls)
+        check(failure_name + " records exactly one result row",
+              [item.cycle for item in resumed_state.all_results] == [1])
+        check(failure_name + " keeps cycle numbering and completes once",
+              resumed_state.completed_cycles == 1)
+
+    feedback_win, _results = running_window()
+    feedback_state = ordinary_cycle_state(feedback_win, cycles=2)
+    feedback_state.cfg.map_feedback_missing_enabled = True
+    feedback_state.cfg.map_feedback_missing_from_cycle = 1
+    feedback_state.cfg.map_feedback_missing_percent_limit = 5.0
+    feedback_state.progress_stages = appmod.cycle_progress_stages(feedback_state.cfg)
+    feedback_superflip_calls = []
+    feedback_attempts = [0]
+
+    def feedback_superflip(cycle_dir, prefix, *_args, **_kwargs):
+        feedback_superflip_calls.append(prefix)
+        output = Path(cycle_dir) / (prefix + ".xplor")
+        output.write_text("stable map\n", encoding="utf-8")
+        return output
+
+    def failing_feedback(reflections, *_args, **_kwargs):
+        feedback_attempts[0] += 1
+        if feedback_attempts[0] == 1:
+            raise RuntimeError("synthetic Map Feedback failure")
+        return list(reflections), None
+
+    with patch.object(appmod, "run_superflip_cycle", side_effect=feedback_superflip), \
+         patch.object(appmod, "export_phased_reflections_from_map"), \
+         patch.object(appmod, "parse_superflip_cycle_metrics", return_value=appmod.SuperflipLogMetrics()), \
+         patch.object(appmod, "write_structure_bundle", side_effect=fake_structure), \
+         patch.object(appmod, "apply_map_feedback_to_reflections", side_effect=failing_feedback), \
+         patch.object(appmod, "write_metrics_csv"), \
+         patch.object(appmod, "write_map_quality_report"):
+        try:
+            feedback_win._run_pipeline_cycles(feedback_state)
+        except RuntimeError:
+            pass
+        feedback_win._run_pipeline_cycles(feedback_state)
+    check("Map Feedback resume does not rerun cycle 1 Superflip",
+          feedback_superflip_calls == ["cycle_001_superflip", "cycle_002_superflip"])
+    check("Map Feedback resume does not duplicate result/report rows",
+          [item.cycle for item in feedback_state.all_results] == [1, 2])
+    check("Map Feedback resumes at the unchanged cycle number",
+          feedback_state.completed_cycles == 2)
+
+    # Consuming an error event changes only the terminal UI. It cannot invoke
+    # Continue or start another worker behind the user's back.
+    auto_retry_win, _results = running_window()
+    auto_retry_calls = []
+    auto_retry_win.continue_run = lambda: auto_retry_calls.append("continue")
+    auto_retry_win._show_error_report = lambda *_args, **_kwargs: None
+    auto_retry_win.msg_queue.put(("error_report", appmod.build_error_report(RuntimeError("offline"))))
+    auto_retry_win._poll_queue()
+    check("a workflow failure never invokes Continue automatically", auto_retry_calls == [])
+
     failures = [name for name, ok in results_log if not ok]
     print()
     if failures:
