@@ -401,32 +401,6 @@ def stage_external_file_for_superflip(source: Path, target_dir: Path, base_name:
     return dst
 
 
-def extract_embedded_hkl(inflip_path: Path) -> Optional[Path]:
-    """Export the Jana fbegin/endf reflection block for the full Phase Studio GUI."""
-    lines = read_text_lines(inflip_path)
-    reflections: List[str] = []
-    in_block = False
-    for line in lines:
-        key = first_token(line)
-        if key == "fbegin":
-            in_block = True
-            continue
-        if in_block and key == "endf":
-            break
-        if in_block and line.strip() and not line.lstrip().startswith(COMMENT_MARKERS):
-            reflections.append(line.rstrip())
-    if not reflections:
-        return None
-    output = inflip_path.parent / f"{inflip_path.stem}_embedded_reflections.hkl"
-    output.write_text(
-        "# Reflections exported from the Jana2020 .inflip fbegin/endf block.\n"
-        + "\n".join(reflections)
-        + "\n",
-        encoding="utf-8",
-    )
-    return output
-
-
 def inflip_keyword_path(inflip_path: Path, keyword: str) -> Optional[Path]:
     """Resolve a file path declared by a single-value keyword in the incoming Jana .inflip."""
     key = keyword.strip().lower()

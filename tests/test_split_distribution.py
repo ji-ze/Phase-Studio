@@ -330,6 +330,11 @@ class SplitDistributionTests(unittest.TestCase):
                              "split_inflip_line", "inflip_first_token",
                              "insert_before_fbegin", "without_inflip_keywords",
                              "inflip_header_for_m80", "define_m80_inflip_from_model"}
+                # Uncalled legacy Authenticode warning chain; current
+                # requirement/error dialogs own executable guidance.
+                excluded |= {"resolve_executable_for_validation", "warn_if_windows_unsigned_exe"}
+                # Moved unchanged with the workflow-metrics presentation.
+                excluded |= {"robust_detail_range"}
                 # Presentation aliases accepted by the metadata-source combo;
                 # authoritative resolution is covered by test_final_ui.py.
                 excluded |= {"normalize_metadata_source"}
@@ -341,6 +346,7 @@ class SplitDistributionTests(unittest.TestCase):
                 # became unreachable once the shared dedicated remediation dialog
                 # was connected, so its removal is intentional and non-scientific.
                 excluded |= {"launch_phase_studio_from_jana", "main", "_show_missing_token_warning",
+                             "extract_embedded_hkl",
                              "deblur_with_sharped", "split_inline_comment", "split_inflip_line",
                              "first_token", "line_has_xplor_output", "insert_before_fbegin",
                              "ensure_xplor_output", "without_keywords", "add_modelseed_modelfile",
@@ -353,6 +359,10 @@ class SplitDistributionTests(unittest.TestCase):
                              "resolve_effective_model"}
             for name in old.keys() - excluded:
                 self.assertEqual(old[name], new.get(name), f"{filename}:{name}")
+            if filename == "app.py":
+                metrics_ui = (ROOT / "phase_studio" / "workflow_metrics_ui.py").read_text(encoding="utf-8")
+                moved = functions(metrics_ui)
+                self.assertEqual(old["robust_detail_range"], moved.get("robust_detail_range"))
 
 
 if __name__ == "__main__":
