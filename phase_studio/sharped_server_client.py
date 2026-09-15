@@ -209,6 +209,9 @@ class SharpEDServerClient:
             self._write_download_body(status.download_bytes, out_path)
         else:
             self.download(status.download_url, out_path, primary_token=upload.token, fallback_token=bearer_token, log=log)
+        # A blocking transfer is an atomic network/file operation. Observe a
+        # cancellation raised during it before any caller starts postprocessing.
+        self._raise_if_stopped(stop_event)
         return out_path
 
     def upload(

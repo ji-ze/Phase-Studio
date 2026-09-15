@@ -10540,12 +10540,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.log("Stop after current cycle requested.", level="DETAIL")
 
     def request_immediate_stop(self) -> None:
-        self.stop_after_cycle.set()
+        # Publish the higher-priority intent first. The worker may inspect the
+        # flags between these two calls, and must never see an immediate request
+        # as graceful-only.
         self.stop_now.set()
+        self.stop_after_cycle.set()
         self._annotate_cycle_progress("Stopping immediately…")
         self._update_action_states()
         self._show_stopping_badge()
         self.log("Immediate stop requested.", level="DETAIL")
+
+    def _requested_workflow_stop_kind(self) -> str:
+        """Return the authoritative terminal intent in priority order."""
+        if self.stop_now.is_set():
+            return "cancelled"
+        if self.stop_after_cycle.is_set():
+            return "stopped"
+        return ""
+
+    def _emit_requested_workflow_stop(self, completed_cycles: int) -> bool:
+        """Emit the authoritative requested terminal intent, if any."""
+        kind = self._requested_workflow_stop_kind()
+        if not kind:
+            return False
+        self.msg_queue.put((kind, int(completed_cycles)))
+        return True
 
     def refresh_sharped_models(self) -> None:
         base_widget = self.inputs.get("sharped_base_url")
@@ -10886,8 +10905,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 elif kind == "cancelled":
                     self._finish_cancelled_run()
                 elif kind == "stopped":
-                    self._finish_stopped_run(int(payload) if payload is not None else len(self.results))
+                    # An immediate request may arrive after the worker queued a
+                    # graceful terminal event but before the GUI consumes it.
+                    if self._requested_workflow_stop_kind() == "cancelled":
+                        self._finish_cancelled_run()
+                    else:
+                        self._finish_stopped_run(int(payload) if payload is not None else len(self.results))
                 elif kind == "done":
+                    # The Run controls remain active until this queued event is
+                    # consumed, so a last-moment immediate request still wins.
+                    if self._requested_workflow_stop_kind() == "cancelled":
+                        self._finish_cancelled_run()
+                        continue
                     self.worker = None
                     self.stop_after_cycle.clear()
                     self.stop_now.clear()
@@ -12310,9 +12339,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self._run_pipeline_cycles(resume_state)
                 else:
                     self._run_sharped_recycle_cycles(resume_state)
-                self._finish_performance_profile(resume_state, "stopped" if self.stop_after_cycle.is_set() else "complete")
+                self._finish_performance_profile(
+                    resume_state, self._requested_workflow_stop_kind() or "complete"
+                )
             except Exception as exc:
-                self._finish_performance_profile(resume_state, "failed")
+                self._finish_performance_profile(
+                    resume_state, self._requested_workflow_stop_kind() or "failed"
+                )
                 self.msg_queue.put((
                     "error_report",
                     build_error_report(exc, operation="Run workflow", extra_details=traceback.format_exc()),
@@ -12574,12 +12607,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._run_pipeline_cycles(state)
             else:
                 self._run_sharped_recycle_cycles(state)
-            self._finish_performance_profile(state, "stopped" if self.stop_after_cycle.is_set() else "complete")
+            self._finish_performance_profile(
+                state, self._requested_workflow_stop_kind() or "complete"
+            )
         except Exception as exc:
             if preparation_timing is not None:
                 preparation_timing.stop()
             if state is not None:
-                self._finish_performance_profile(state, "failed")
+                self._finish_performance_profile(
+                    state, self._requested_workflow_stop_kind() or "failed"
+                )
             else:
                 if performance_root is not None:
                     performance_root.stop()
@@ -12631,11 +12668,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ("Superflip normalize value", "  Ignored duplicate/managed Superflip keyword"),
         )
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
-            if self.stop_after_cycle.is_set():
-                # Graceful stop: the cycle above finished normally and its
-                # results are valid, which is NOT the same terminal state as
-                # an immediate interruption.
-                self.msg_queue.put(("stopped", state.completed_cycles))
+            if self._emit_requested_workflow_stop(state.completed_cycles):
                 return
             self._emit_cycle_progress(
                 cyc,
@@ -13143,11 +13176,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 detail="completed",
                 complete=True,
             )
-            if self.stop_after_cycle.is_set():
-                # Graceful stop: the cycle above finished normally and its
-                # results are valid, which is NOT the same terminal state as
-                # an immediate interruption.
-                self.msg_queue.put(("stopped", state.completed_cycles))
+            if self._emit_requested_workflow_stop(state.completed_cycles):
                 return
         self.msg_queue.put(("done", state.completed_cycles))
 
@@ -13165,11 +13194,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         random_start = normalize_reconstruction_mode(cfg.reconstruction_mode) == "sharped_recycle_random"
         progress_stages = ["Preparing cycle", "Superflip", "SharpED", "Phase calculation", "Finalizing cycle"]
         for cyc in range(state.completed_cycles + 1, cfg.cycles + 1):
-            if self.stop_after_cycle.is_set():
-                # Graceful stop: the cycle above finished normally and its
-                # results are valid, which is NOT the same terminal state as
-                # an immediate interruption.
-                self.msg_queue.put(("stopped", state.completed_cycles))
+            if self._emit_requested_workflow_stop(state.completed_cycles):
                 return
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Preparing cycle", detail="preparing input map")
             cycle_dir = cfg.work_dir / f"cycle_{cyc:03d}"; cycle_dir.mkdir(parents=True, exist_ok=True)
@@ -13325,11 +13350,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.log(f"Cycle {cyc} complete.", level="SUCCESS")
             self.msg_queue.put(("progress", state.completed_cycles))
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="completed", complete=True)
-            if self.stop_after_cycle.is_set():
-                # Graceful stop: the cycle above finished normally and its
-                # results are valid, which is NOT the same terminal state as
-                # an immediate interruption.
-                self.msg_queue.put(("stopped", state.completed_cycles))
+            if self._emit_requested_workflow_stop(state.completed_cycles):
                 return
         self.msg_queue.put(("done", state.completed_cycles))
 

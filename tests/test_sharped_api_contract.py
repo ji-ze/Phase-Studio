@@ -1,5 +1,6 @@
 """Regression coverage for the restored one-server SharpED API contract."""
 import json
+import threading
 from pathlib import Path
 import sys
 import tempfile
@@ -84,6 +85,63 @@ class SharpEDAPIContractTests(unittest.TestCase):
         visible = "\n".join(self.logs)
         self.assertNotIn(self.user_token, visible)
         self.assertNotIn(self.job_token, visible)
+
+    def test_immediate_stop_after_upload_prevents_polling(self):
+        stop = threading.Event()
+
+        def transport(_client, method, url, data=None, headers=None):
+            body = self.transport(method, url, data, headers)
+            if method == "POST":
+                stop.set()
+            return body
+
+        client = api.SharpEDServerClient()
+        with patch.object(api.SharpEDServerClient, "_request_bytes", transport):
+            with self.assertRaisesRegex(api.SharpEDServerError, "Immediate stop requested"):
+                client.execute(
+                    self.source, self.user_token, self.output, "C", "viper 3.0",
+                    max_polls=1, stop_event=stop,
+                )
+        self.assertEqual([request[0] for request in self.requests], ["POST"])
+
+    def test_immediate_stop_during_polling_prevents_another_request(self):
+        stop = threading.Event()
+
+        def transport(_client, method, url, data=None, headers=None):
+            if "/status/" in url:
+                self.requests.append((method, url, data, headers or {}))
+                stop.set()
+                return json.dumps({"status": "processing"}).encode()
+            return self.transport(method, url, data, headers)
+
+        client = api.SharpEDServerClient()
+        with patch.object(api.SharpEDServerClient, "_request_bytes", transport), \
+             patch.object(api.SharpEDServerClient, "_probe_download", return_value=None):
+            with self.assertRaisesRegex(api.SharpEDServerError, "Immediate stop requested"):
+                client.execute(
+                    self.source, self.user_token, self.output, "C", "viper 3.0",
+                    poll_seconds=2, max_polls=2, stop_event=stop,
+                )
+        self.assertEqual([request[0] for request in self.requests], ["POST", "GET"])
+
+    def test_immediate_stop_during_download_is_observed_after_atomic_write(self):
+        stop = threading.Event()
+
+        def transport(_client, method, url, data=None, headers=None):
+            body = self.transport(method, url, data, headers)
+            if "/download/" in url:
+                stop.set()
+            return body
+
+        client = api.SharpEDServerClient()
+        with patch.object(api.SharpEDServerClient, "_request_bytes", transport):
+            with self.assertRaisesRegex(api.SharpEDServerError, "Immediate stop requested"):
+                client.execute(
+                    self.source, self.user_token, self.output, "C", "viper 3.0",
+                    max_polls=1, stop_event=stop,
+                )
+        self.assertEqual(self.output.read_bytes(), self.source.read_bytes())
+        self.assertEqual([request[0] for request in self.requests], ["POST", "GET", "GET"])
 
     def test_custom_base_drives_every_route_without_a_hidden_host(self):
         client = api.SharpEDServerClient("https://custom.invalid/service")
