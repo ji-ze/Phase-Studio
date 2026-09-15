@@ -448,7 +448,234 @@ def main():
     app.processEvents()
     check("graceful stop: selector opens automatically", len(opened) == 1)
 
-    for window in (win, standalone, map_only, jana, stopped):
+    # Exercise the two lightweight Jana wrapper workflows through their real
+    # orchestration, replacing only the external Superflip/SharpED processes.
+    # This pins the original .inflip restoration and the exact final-map path
+    # passed to Jana without depending on a network token or test installation.
+    wrapper_dir = Path(tempfile.mkdtemp())
+    wrapper_bin = wrapper_dir / "bin"
+    (wrapper_bin / "deblurrer").mkdir(parents=True)
+    wrapper_exe = wrapper_bin / "superflip_original.exe"
+    wrapper_exe.write_bytes(b"test executable")
+    wrapper_inflip = wrapper_dir / "wrapper-job.inflip"
+    wrapper_text = (
+        "title Jana context guard\n"
+        "outputfile wrapper-job.m81 wrapper-job.m80\n"
+        "cell 10 10 10 90 90 90\n"
+        "spacegroup P1\n"
+        "# Keywords for charge flipping\n"
+        "perform CF\n"
+        "fbegin\n0 0 1 10 1\nfend\n"
+    )
+    wrapper_inflip.write_text(wrapper_text, encoding="utf-8")
+    wrapper_calls = []
+    deblur_calls = []
+    original_cwd = Path.cwd()
+    original_application_dir = jana_superflip.application_dir
+    original_resolve = jana_superflip.resolve_original_superflip
+    original_run_process = jana_superflip.run_process
+    original_deblur = jana_superflip.deblur_with_sharped
+
+    def fake_wrapper_process(cmd, cwd, log):
+        wrapper_calls.append((tuple(map(str, cmd)), Path(cwd)))
+        if len(wrapper_calls) == 1:
+            (wrapper_dir / "wrapper-job.xplor").write_bytes(b"scientific superflip map")
+        return 0
+
+    def fake_wrapper_deblur(input_map, output_map, options, log):
+        deblur_calls.append((Path(input_map), Path(output_map)))
+        Path(output_map).write_bytes(b"scientific sharped map")
+
+    try:
+        os.chdir(wrapper_dir)
+        jana_superflip.application_dir = lambda: wrapper_bin
+        jana_superflip.resolve_original_superflip = lambda _directory: wrapper_exe
+        jana_superflip.run_process = fake_wrapper_process
+        jana_superflip.deblur_with_sharped = fake_wrapper_deblur
+
+        wrapper_calls.clear()
+        superflip_only = jana_superflip.JanaRunOptions(
+            action="run", next_cycle_modelfile="none",
+        )
+        code = jana_superflip.run_jana_superflip(
+            [wrapper_inflip.name], superflip_only, lambda _line: None,
+        )
+        check("Superflip only: wrapper returns the original Superflip exit code", code == 0)
+        check("Superflip only: original Jana .inflip is passed exactly once",
+              len(wrapper_calls) == 1 and wrapper_calls[0][0] == (str(wrapper_exe), wrapper_inflip.name))
+        check("Superflip only: original Jana working directory is preserved",
+              wrapper_calls[0][1] == wrapper_dir)
+        check("Superflip only: original .inflip content remains byte-identical",
+              wrapper_inflip.read_text(encoding="utf-8") == wrapper_text)
+        check("Superflip only: no SharpED or second handoff recomputation occurs",
+              deblur_calls == [] and len(wrapper_calls) == 1)
+
+        wrapper_calls.clear()
+        deblur_calls.clear()
+        sharped_single = jana_superflip.JanaRunOptions(
+            action="run", next_cycle_modelfile="deblurred_xplor",
+            api_token="test-token", server_url="https://example.invalid",
+        )
+        code = jana_superflip.run_jana_superflip(
+            [wrapper_inflip.name], sharped_single, lambda _line: None,
+        )
+        calc_m80 = wrapper_bin / "deblurrer" / "calc_m80.inflip"
+        calc_text = calc_m80.read_text(encoding="utf-8")
+        check("Superflip + SharpED: wrapper completes one scientific and one final Jana call",
+              code == 0 and len(wrapper_calls) == 2)
+        check("Superflip + SharpED: SharpED consumes the current Superflip map once",
+              deblur_calls == [(wrapper_dir / "wrapper-job.xplor", wrapper_dir / "wrapper-job-deb.xplor")])
+        check("Superflip + SharpED: final Jana handoff uses the actual SharpED map",
+              'modelfile "wrapper-job-deb.xplor"' in calc_text
+              and (wrapper_dir / "wrapper-job-deb.xplor").read_bytes() == b"scientific sharped map")
+        check("Superflip + SharpED: final Jana command uses calc_m80 in the original context",
+              wrapper_calls[1] == ((str(wrapper_exe), str(calc_m80)), wrapper_dir))
+        check("Superflip + SharpED: original .inflip content is restored byte-for-byte",
+              wrapper_inflip.read_text(encoding="utf-8") == wrapper_text)
+        check("Superflip + SharpED: calc_m80 preserves the original Jana header",
+              "title Jana context guard" in calc_text and "cell 10 10 10 90 90 90" in calc_text)
+    finally:
+        os.chdir(original_cwd)
+        jana_superflip.application_dir = original_application_dir
+        jana_superflip.resolve_original_superflip = original_resolve
+        jana_superflip.run_process = original_run_process
+        jana_superflip.deblur_with_sharped = original_deblur
+
+    # Run the GUI selector through the real filesystem handoff. The external
+    # Superflip invocation is captured, while copying and calc_m80 generation
+    # remain production code. This covers Phase recycling, Full configuration,
+    # graceful stop, and an explicit non-recommended candidate override.
+    original_run_command = appmod.run_command
+    original_handoff_thread = appmod.threading.Thread
+    gui_handoff_calls = []
+
+    def fake_run_command(cmd, cwd, **kwargs):
+        gui_handoff_calls.append((tuple(map(str, cmd)), Path(cwd), kwargs))
+        return 0
+
+    def configure_real_handoff(window, results):
+        inflip_path = Path(window.last_run_config.jana_inflip)
+        inflip_path.write_text(wrapper_text.replace("wrapper-job", "job"), encoding="utf-8")
+        executable = inflip_path.parent / "jana-bin" / "superflip_original.exe"
+        (executable.parent / "deblurrer").mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"test executable")
+        window.last_run_config.superflip_exe = str(executable)
+        preview = inflip_path.parent / "preview-only.xplor"
+        preview.write_bytes(b"preview data must never be handed off")
+        return inflip_path, executable, preview
+
+    def accept_candidate(predicate):
+        def execute(dialog):
+            table = dialog.findChild(QTableWidget)
+            candidates = dialog._ordered
+            row = next(index for index, candidate in enumerate(candidates) if predicate(candidate))
+            table.selectRow(row)
+            app.processEvents()
+            return QDialog.Accepted
+        return execute
+
+    gui_windows = []
+    try:
+        appmod.run_command = fake_run_command
+        appmod.threading.Thread = ImmediateThread
+
+        # Phase recycling: accept the automatic recommendation after successful
+        # completion and verify the selected cycle/source's canonical files.
+        recycling, recycling_results = build_window(appmod, launch_mode="phase_recycling")
+        gui_windows.append(recycling)
+        recycling.results = recycling_results
+        recycling_inflip, recycling_exe, recycling_preview = configure_real_handoff(recycling, recycling_results)
+        gui_handoff_calls.clear()
+        QDialog.exec = lambda _dialog: QDialog.Accepted
+        recycling.open_result_selector("jana")
+        recycling_choice = recycling.result_recommendation.selected_candidate
+        recycling_target = recycling_inflip.parent / "job-deb.xplor"
+        check("phase recycling: recommended completed candidate is cycle 3 SharpED",
+              recycling_choice is not None and recycling_choice.cycle == 3 and recycling_choice.source == "deblurred")
+        check("phase recycling: selected scientific map bytes reach Jana, never preview bytes",
+              recycling_target.read_bytes() == Path(recycling_choice.map_path).read_bytes()
+              and recycling_target.read_bytes() != recycling_preview.read_bytes())
+        check("phase recycling: matching SharpED CIF remains attached to the selected result",
+              Path(recycling_choice.structure_path) == Path(recycling_results[2].deblur_edma_cif))
+        check("phase recycling: handoff invokes Jana exactly once in original .inflip directory",
+              len(gui_handoff_calls) == 1
+              and gui_handoff_calls[0][0] == (str(recycling_exe), str(recycling_exe.parent / "deblurrer" / "calc_m80.inflip"))
+              and gui_handoff_calls[0][1] == recycling_inflip.parent)
+
+        # Full configuration starts idle. A manually completed run auto-opens
+        # the shared selector; the Pass button opens that same component again.
+        full, full_results = build_window(appmod, launch_mode="full_configuration")
+        gui_windows.append(full)
+        full_inflip, _full_exe, _full_preview = configure_real_handoff(full, full_results)
+        check("full configuration: opening from Jana does not start a run",
+              full._run_status == "READY" and full.results == [])
+        opened.clear()
+        QDialog.exec = reject_dialog
+        run_to_completion(full, full_results, app)
+        check("full configuration: manual completion auto-opens Result Selection once",
+              len(opened) == 1 and opened[0].property("resultContext") == "JANA2020")
+        opened.clear()
+        QDialog.exec = reject_dialog
+        full._on_jana_action_clicked()
+        check("full configuration: Pass to Jana2020 reopens the same Result Selection",
+              len(opened) == 1 and opened[0].property("resultContext") == "JANA2020")
+        check("full configuration: original Jana context remains the active run context",
+              Path(full.last_run_config.jana_inflip) == full_inflip)
+        gui_handoff_calls.clear()
+        QDialog.exec = lambda _dialog: QDialog.Accepted
+        full._on_jana_action_clicked()
+        full_choice = full.result_recommendation.selected_candidate
+        check("full configuration: recommended cycle 3 SharpED result is handed off",
+              full_choice is not None and full_choice.cycle == 3 and full_choice.source == "deblurred"
+              and (full_inflip.parent / "job-deb.xplor").read_bytes() == Path(full_choice.map_path).read_bytes())
+        check("full configuration: accepted selector invokes one handoff only",
+              len(gui_handoff_calls) == 1)
+
+        # Graceful stop retains the last completed result and can hand it off.
+        stopped_choice_window, stopped_choice_results = build_window(appmod, launch_mode="phase_recycling")
+        gui_windows.append(stopped_choice_window)
+        stopped_inflip, _stopped_exe, _stopped_preview = configure_real_handoff(stopped_choice_window, stopped_choice_results)
+        stopped_choice_window.results = stopped_choice_results[:2]
+        stopped_choice_window._set_run_status("Running")
+        opened.clear()
+        QDialog.exec = reject_dialog
+        stopped_choice_window._finish_stopped_run(2)
+        app.processEvents()
+        check("graceful stop: completed result remains handoff-capable",
+              stopped_choice_window._run_status == "STOPPED"
+              and stopped_choice_window.jana_action_btn.isEnabled() and len(opened) == 1)
+        gui_handoff_calls.clear()
+        QDialog.exec = lambda _dialog: QDialog.Accepted
+        stopped_choice_window._on_jana_action_clicked()
+        stopped_choice = stopped_choice_window.result_recommendation.selected_candidate
+        check("graceful stop: best completed cycle 2 SharpED map is handed off",
+              stopped_choice is not None and stopped_choice.cycle == 2 and stopped_choice.source == "deblurred"
+              and (stopped_inflip.parent / "job-deb.xplor").read_bytes() == Path(stopped_choice.map_path).read_bytes()
+              and len(gui_handoff_calls) == 1)
+
+        # Manual override selects an existing non-recommended Superflip result.
+        override, override_results = build_window(appmod, launch_mode="full_configuration")
+        gui_windows.append(override)
+        override.results = override_results
+        override_inflip, _override_exe, override_preview = configure_real_handoff(override, override_results)
+        gui_handoff_calls.clear()
+        QDialog.exec = accept_candidate(lambda candidate: candidate.cycle == 1 and candidate.source == "superflip")
+        override.open_result_selector("jana")
+        override_choice = override.result_recommendation.selected_candidate
+        override_target = override_inflip.parent / "job-phase-studio-superflip-cycle_001.xplor"
+        check("manual override: requested cycle 1 Superflip candidate replaces recommendation",
+              override_choice is not None and override_choice.cycle == 1 and override_choice.source == "superflip")
+        check("manual override: exact Superflip map and matching CIF stay paired",
+              override_target.read_bytes() == Path(override_results[0].superflip_map).read_bytes()
+              and Path(override_choice.structure_path) == Path(override_results[0].superflip_edma_cif))
+        check("manual override: no preview substitution, duplicate handoff, or recomputation",
+              override_target.read_bytes() != override_preview.read_bytes() and len(gui_handoff_calls) == 1)
+    finally:
+        appmod.run_command = original_run_command
+        appmod.threading.Thread = original_handoff_thread
+        QDialog.exec = reject_dialog
+
+    for window in (win, standalone, map_only, jana, stopped, *gui_windows):
         window.timer.stop()
         window.close()
     failures = [name for name, ok in results_log if not ok]
