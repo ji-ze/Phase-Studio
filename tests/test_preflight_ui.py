@@ -315,6 +315,32 @@ def main():
     wizard.refresh_timer.stop()
     wizard.dialog.deleteLater()
 
+    # Automatic third-party downloads require a named, explicit license
+    # decision. Closing or cancelling never counts as consent.
+    from phase_studio.requirements_ui import confirm_third_party_download
+
+    consent_buttons = []
+    def choose_consent(label):
+        dialog = QApplication.activeModalWidget()
+        if dialog is None:
+            return
+        consent_buttons.extend(button.text() for button in dialog.findChildren(QPushButton))
+        button = next((item for item in dialog.findChildren(QPushButton)
+                       if item.text() == label), None)
+        if button is not None:
+            button.click()
+
+    QTimer.singleShot(0, lambda: choose_consent("Cancel"))
+    check("download license cancellation is not consent",
+          not confirm_third_party_download(window, "Superflip"))
+    check("download consent offers all three explicit actions",
+          all(label in consent_buttons for label in (
+              "View license information", "Cancel", "Agree and download"
+          )))
+    QTimer.singleShot(0, lambda: choose_consent("Agree and download"))
+    check("Agree and download is explicit consent",
+          confirm_third_party_download(window, "EDMA"))
+
     QDialog.exec = original_exec
     appmod.threading.Thread = original_thread
     app.processEvents()

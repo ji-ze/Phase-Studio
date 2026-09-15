@@ -193,7 +193,7 @@ class SplitDistributionTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
 
     def test_installer_dialog_drives_lifecycle(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
         from phase_studio.jana_installer import create_integration_dialog
         app = QApplication.instance() or QApplication([])
         self.install("1.0.8")
@@ -203,6 +203,14 @@ class SplitDistributionTests(unittest.TestCase):
              patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
             dialog = create_integration_dialog()
             self.assertIn(VERSION, dialog.windowTitle())
+            self.assertEqual(dialog.path_edit.text(), str(self.root))
+            status_text = " ".join(label.text() for label in dialog.status_group.findChildren(QLabel))
+            self.assertIn("SUPERFLIP directory detected", status_text)
+            self.assertIn("Original Superflip detected", status_text)
+            self.assertIn("EDMA detected", status_text)
+            self.assertIn("Integration package: Ready", dialog.signature_label.text())
+            self.assertIn("Package integrity:", dialog.signature_label.text())
+            self.assertIn("Digital signature: Not present", dialog.signature_label.text())
             self.assertEqual(dialog.primary_button.text(), "Update integration")
             dialog.primary_button.click()
             self.assertEqual(dialog.primary_button.text(), "Repair integration")
@@ -322,6 +330,9 @@ class SplitDistributionTests(unittest.TestCase):
                              "split_inflip_line", "inflip_first_token",
                              "insert_before_fbegin", "without_inflip_keywords",
                              "inflip_header_for_m80", "define_m80_inflip_from_model"}
+                # Presentation aliases accepted by the metadata-source combo;
+                # authoritative resolution is covered by test_final_ui.py.
+                excluded |= {"normalize_metadata_source"}
                 # Startup-only handoff from PyInstaller's extraction splash to
                 # the existing Qt splash; no scientific code is involved.
                 excluded |= {"main"}

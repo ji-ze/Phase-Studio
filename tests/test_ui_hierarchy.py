@@ -154,7 +154,7 @@ def main():
     check("Metrics tab bar uses scroll buttons rather than eliding", win.metrics_tabs.usesScrollButtons())
     from PySide6.QtCore import Qt as _Qt
     check("Metrics tab bar never silently elides", win.metrics_tabs.tabBar().elideMode() == _Qt.TextElideMode.ElideNone)
-    expected_metrics_tabs = {"Amplitude R_F", "Amplitude CC", "Weighted triplet C3"}
+    expected_metrics_tabs = {"Amplitude agreement R factor", "Amplitude CC", "Weighted triplet C3"}
     actual_metrics_tabs = {win.metrics_tabs.tabText(i) for i in range(win.metrics_tabs.count())}
     check("Exactly 3 reference-free profile metric tabs are shown initially", actual_metrics_tabs == expected_metrics_tabs)
 

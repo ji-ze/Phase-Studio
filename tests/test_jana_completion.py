@@ -139,9 +139,11 @@ def run_to_completion(win, cycle_results, app):
 
 
 def main():
+    from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QLabel, QPushButton, QTableWidget, QWidget
     from phase_studio import app as appmod
     from phase_studio.map_quality import PROFILE_DEFINITIONS, ValidationProfile
+    from phase_studio.result_selection import result_selection_metric_columns
 
     app = QApplication.instance() or QApplication([sys.argv[0]])
     opened = []
@@ -171,11 +173,60 @@ def main():
         win.open_result_selector("jana")
         table = opened[-1].findChild(QTableWidget)
         headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
-        expected = ["Recommended", "Cycle", "Source"] + [metric.arrow_label for metric in definition.primary_metrics]
+        columns = result_selection_metric_columns(definition)
+        expected = ["Recommended", "Cycle", "Source"] + [column[0] for column in columns]
         check(f"{profile.value}: selector columns follow profile", headers == expected)
+        check(
+            f"{profile.value}: selector exposes full metric names",
+            all(table.horizontalHeaderItem(index + 3).toolTip() == column[1]
+                for index, column in enumerate(columns)),
+        )
+        check(
+            f"{profile.value}: selector exposes accessible metric descriptions",
+            all(table.horizontalHeaderItem(index + 3).data(Qt.AccessibleDescriptionRole) == column[1]
+                for index, column in enumerate(columns)),
+        )
         labels = [label.text() for label in opened[-1].findChildren(QLabel)]
         check(f"{profile.value}: selector summary names assessment", definition.assessment_label in labels)
         check(f"{profile.value}: obsolete Selection score is absent", "Selection score" not in " ".join(headers + labels))
+
+    # Candidate-count geometry uses the same dialog at small and large run
+    # sizes. Six to eight rows are reserved; larger result sets scroll inside
+    # the table while the dialog footer remains outside that viewport.
+    count_window, count_results = build_window(
+        appmod, launch_mode="standalone", cycles=15,
+    )
+    count_window.results = count_results
+    all_candidates = count_window._result_candidates()
+    original_candidates = count_window._result_candidates
+    for candidate_count in (1, 2, 4, 10, 30):
+        count_window._result_candidates = lambda n=candidate_count: all_candidates[:n]
+        opened.clear()
+        count_window.open_result_selector("standalone")
+        dialog = opened[-1]
+        table = dialog.findChild(QTableWidget)
+        dialog.resize(1280, 760)
+        dialog.show()
+        app.processEvents()
+        check(f"{candidate_count} candidates: exact row count", table.rowCount() == candidate_count)
+        check(
+            f"{candidate_count} candidates: table viewport is capped at eight rows",
+            table.maximumHeight() <= table.horizontalHeader().sizeHint().height()
+            + 8 * table.verticalHeader().defaultSectionSize() + 2 * table.frameWidth(),
+        )
+        check(
+            f"{candidate_count} candidates: no horizontal table scrollbar",
+            table.horizontalScrollBar().maximum() == 0,
+        )
+        if candidate_count >= 10:
+            check(
+                f"{candidate_count} candidates: table scrolls vertically",
+                table.verticalScrollBar().maximum() > 0,
+            )
+        dialog.close()
+    count_window._result_candidates = original_candidates
+    count_window.timer.stop()
+    count_window.close()
 
     # Standalone completion stays quiet; its visible action opens this same component.
     opened.clear()
@@ -229,6 +280,14 @@ def main():
     check(
         "preview selection updates to the manually selected result",
         manual_candidate.label in preview_titles,
+    )
+    recommendation_markers = [
+        selector_table.item(row, 0).text() for row in range(selector_table.rowCount())
+    ]
+    check(
+        "manual selection leaves the automatic recommendation marker unchanged",
+        recommendation_markers.count("★ Recommended") == 1
+        and recommendation_markers[selector_table.currentRow()] != "★ Recommended",
     )
 
     # Standalone export copies the selected canonical files without changing

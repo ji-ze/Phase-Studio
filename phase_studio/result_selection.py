@@ -7,7 +7,7 @@ from typing import Callable, Optional, Sequence
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView, QDialog, QFormLayout, QHBoxLayout, QHeaderView, QLabel,
     QPushButton, QSizePolicy, QSplitter, QTableWidget, QTableWidgetItem,
@@ -22,6 +22,34 @@ from phase_studio.ui_branding import (
     apply_safe_dialog_geometry, create_phase_studio_brand_header,
     create_phase_studio_context_banner,
 )
+
+
+_COMPACT_METRIC_COLUMNS = {
+    "reference_f05": ("F0.5 ↑", "Reference F0.5"),
+    "reference_rmsd": ("RMSD (Å) ↓", "Matched-peak RMSD"),
+    "reference_phase_agreement": ("Phase agreement ↑", "Reference phase agreement"),
+    "r_free": ("R_free ↓", "R_free"),
+    "cc_free": ("CC_free ↑", "CC_free"),
+    "omit_map_correlation": ("OMIT CC ↑", "OMIT map correlation"),
+    "amplitude_rf": ("R factor ↓", "Amplitude agreement R factor"),
+    "amplitude_cc": ("Amplitude CC ↑", "Amplitude CC"),
+    "triplet_c3": ("C3 ↑", "Weighted triplet C3"),
+}
+
+
+def result_selection_metric_columns(
+    definition: ValidationProfileDefinition,
+) -> tuple[tuple[str, str, str], ...]:
+    """Return compact heading, full accessible name, and metric key."""
+    return tuple(
+        (*_COMPACT_METRIC_COLUMNS[metric.key], metric.key)
+        for metric in definition.primary_metrics
+    )
+
+
+def format_result_metric(value: Optional[float]) -> str:
+    """Format candidate metrics consistently without changing their values."""
+    return "n/a" if value is None else f"{float(value):.3f}"
 
 
 def create_result_preview_host(renderer: object, cell: object, elev: float, azim: float) -> object:
@@ -91,7 +119,7 @@ class ResultSelectionDialog(QDialog):
         self.setObjectName("resultSelectionDialog")
         self.setProperty("resultContext", "JANA2020" if jana_context else "STANDALONE")
         self.setWindowTitle("Jana2020 result selection" if jana_context else "Save map and model")
-        apply_safe_dialog_geometry(self, 1400, 800)
+        apply_safe_dialog_geometry(self, 1280, 760)
         outer_layout = QVBoxLayout(self)
         outer_layout.setContentsMargins(0, 0, 0, 0)
         outer_layout.setSpacing(0)
@@ -129,12 +157,9 @@ class ResultSelectionDialog(QDialog):
         reason_label.setWordWrap(True)
         reason_label.setStyleSheet("color: #52658b;")
         content_layout.addWidget(reason_label)
-        table_section_label = QLabel("RESULT CANDIDATES")
-        table_section_label.setObjectName("sectionLabel")
-        content_layout.addWidget(table_section_label)
-
+        metric_columns = result_selection_metric_columns(definition)
         headers = ["Recommended", "Cycle", "Source"] + [
-            metric.arrow_label for metric in definition.primary_metrics
+            compact for compact, _full, _key in metric_columns
         ]
         table = QTableWidget(len(self._ordered), len(headers))
         table.setObjectName("diagnosticTable")
@@ -144,17 +169,27 @@ class ResultSelectionDialog(QDialog):
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setSelectionMode(QAbstractItemView.SingleSelection)
         table.verticalHeader().setVisible(False)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = table.horizontalHeader()
+        header.setMinimumSectionSize(58)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for column in range(3, len(headers)):
+            header.setSectionResizeMode(column, QHeaderView.Stretch)
+            item = table.horizontalHeaderItem(column)
+            full_name = metric_columns[column - 3][1]
+            item.setToolTip(full_name)
+            item.setData(Qt.AccessibleDescriptionRole, full_name)
+            item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
         selected_row = 0
         for row, candidate in enumerate(self._ordered):
             values = [
-                "Recommended" if candidate == recommendation.recommended_candidate else "",
+                "★ Recommended" if candidate == recommendation.recommended_candidate else "",
                 str(candidate.cycle),
                 source_title(candidate.source)
                 + (" (map only)" if not candidate.usable_structure else ""),
             ] + [
-                "n/a" if (value := candidate.metrics.value(metric.key)) is None
-                else f"{float(value):.3f}"
+                format_result_metric(candidate.metrics.value(metric.key))
                 for metric in definition.primary_metrics
             ]
             for column, value in enumerate(values):
@@ -167,6 +202,12 @@ class ResultSelectionDialog(QDialog):
             if candidate == self._selected:
                 selected_row = row
         self._table = table
+        visible_rows = min(8, max(6, len(self._ordered)))
+        table.setMaximumHeight(
+            header.sizeHint().height()
+            + visible_rows * table.verticalHeader().defaultSectionSize()
+            + 2 * table.frameWidth()
+        )
 
         self._preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
         preview_canvas = FigureCanvas(self._preview_figure)
@@ -195,11 +236,24 @@ class ResultSelectionDialog(QDialog):
         preview_label.setObjectName("sectionLabel")
         preview_layout.addWidget(preview_label)
         preview_layout.addWidget(preview_canvas, 1)
+        table_section = QWidget()
+        table_layout = QVBoxLayout(table_section)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_label = QLabel("RESULT CANDIDATES")
+        table_label.setObjectName("sectionLabel")
+        table_layout.addWidget(table_label)
+        table_layout.addWidget(table)
+        table_layout.addStretch(1)
+
         splitter = QSplitter(Qt.Horizontal)
-        splitter.addWidget(table)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(table_section)
         splitter.addWidget(preview_section)
-        splitter.setSizes([760, 640])
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
         content_layout.addWidget(splitter, 1)
+        self._splitter = splitter
+        QTimer.singleShot(0, self._set_initial_splitter_sizes)
 
         button_row = QHBoxLayout()
         close_button = QPushButton("Return to Phase Studio")
@@ -209,6 +263,18 @@ class ResultSelectionDialog(QDialog):
         content_layout.addLayout(button_row)
         close_button.clicked.connect(self.reject)
         action_button.clicked.connect(self.accept)
+
+    def _set_initial_splitter_sizes(self) -> None:
+        """Allocate enough table width for headings, then give preview the rest."""
+        header = self._table.horizontalHeader()
+        table_width = sum(
+            max(self._table.sizeHintForColumn(column), header.sectionSizeHint(column))
+            for column in range(self._table.columnCount())
+        ) + self._table.frameWidth() * 2 + 8
+        available = max(1, self._splitter.width() - self._splitter.handleWidth())
+        minimum_preview = max(420, int(available * 0.38))
+        table_width = min(table_width, max(1, available - minimum_preview))
+        self._splitter.setSizes([table_width, max(1, available - table_width)])
 
     @property
     def selected_candidate(self) -> ResultCandidate:

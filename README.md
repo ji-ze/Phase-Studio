@@ -93,7 +93,7 @@ Phase Studio chooses one of four profiles from reference and 5% holdout availabi
 | Reference + cross-validation | Reference F0.5 higher; R_free lower; OMIT map correlation higher |
 | Reference-backed | Reference F0.5 higher; matched-peak RMSD lower; reference phase agreement higher |
 | Cross-validation | R_free lower; CC_free higher; OMIT map correlation higher |
-| Reference-free map assessment | Amplitude R_F lower; Amplitude CC higher; Weighted triplet C3 higher |
+| Reference-free map assessment | Amplitude agreement R factor lower; Amplitude CC higher; Weighted triplet C3 higher |
 
 The recommendation is lexicographic and source-neutral: Superflip and SharpED use the same frozen measured reflections, holdout, triplets, and weights. There is no combined selection score and no automatic preference for SharpED or the latest cycle. The GUI plots only the active profile's three metrics; `metrics.csv` and `map_quality_assessment.txt` retain all computed diagnostics.
 

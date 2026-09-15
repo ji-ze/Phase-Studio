@@ -92,6 +92,13 @@ def main() -> int:
     sharped = build_validation_report(["A SharpED API token is required for the selected workflow."])
     check("SharpED preflight routes directly to the API token",
           [action.label for action in win._error_actions(sharped)] == ["Update API token"])
+    unavailable = build_error_report(
+        RuntimeError("connection refused"), subsystem="SharpED", operation="Upload map"
+    )
+    check("SharpED connectivity guidance does not direct users to edit the server URL",
+          "try again" in unavailable.guidance
+          and "temporarily unavailable" in unavailable.guidance
+          and "server URL" not in unavailable.guidance)
 
     splash = appmod.PhaseStudioSplash()
     check("splash progress is determinate", splash.progress.minimum() == 0 and splash.progress.maximum() == 100)

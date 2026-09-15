@@ -127,7 +127,10 @@ def build_error_report(
             category = "sharped_network"
             title = "SharpED server unavailable"
             summary = "Phase Studio could not connect to the configured SharpED server."
-            guidance = "Check your internet connection and the SharpED server URL."
+            guidance = (
+                "Check your internet connection and try again. "
+                "If the problem persists, the SharpED service may be temporarily unavailable."
+            )
         else:
             category = "sharped_server"
             title = "SharpED processing failed"

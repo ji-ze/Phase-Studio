@@ -15,9 +15,34 @@ from phase_studio import requirements as reqs
 from phase_studio.error_reporting import sanitize_error_details
 from phase_studio.ui_branding import (
     apply_safe_dialog_geometry,
-    create_phase_studio_brand_header,
     create_phase_studio_context_banner,
 )
+
+
+def confirm_third_party_download(parent: QWidget, label: str) -> bool:
+    """Require an explicit license decision before downloading a tool."""
+    confirmation = QMessageBox(parent)
+    confirmation.setWindowTitle(f"Download {label}")
+    confirmation.setIcon(QMessageBox.Information)
+    confirmation.setText(f"{label} is third-party software supplied under its authors' license.")
+    confirmation.setInformativeText(
+        "Review and accept the third-party license terms before Phase Studio downloads it."
+    )
+    view_license = confirmation.addButton("View license information", QMessageBox.ActionRole)
+    agree = confirmation.addButton("Agree and download", QMessageBox.AcceptRole)
+    cancel = confirmation.addButton("Cancel", QMessageBox.RejectRole)
+    confirmation.setDefaultButton(agree)
+    confirmation.setEscapeButton(cancel)
+
+    while True:
+        confirmation.exec()
+        clicked = confirmation.clickedButton()
+        if clicked is agree:
+            return True
+        if clicked is view_license:
+            QDesktopServices.openUrl(QUrl(reqs.SUPERFLIP_LICENSE_URL))
+            continue
+        return False
 
 
 def show_requirement_remediation_dialog(
@@ -37,7 +62,6 @@ def show_requirement_remediation_dialog(
     root = QVBoxLayout(dialog)
     root.setContentsMargins(0, 0, 0, 0)
     root.setSpacing(0)
-    root.addWidget(create_phase_studio_brand_header())
     subtitle = {
         reqs.RequirementKind.SUPERFLIP: "Locate or install the Superflip executable required by this workflow",
         reqs.RequirementKind.EDMA: "Locate or install the EDMA executable required by this workflow",
@@ -143,16 +167,7 @@ def show_requirement_remediation_dialog(
                 accept_path(path)
 
         def automatic_download() -> None:
-            answer = QMessageBox.question(
-                dialog,
-                f"Download {label}",
-                f"{label} is third-party software supplied under its authors' license. "
-                "By choosing Yes, you confirm that you reviewed and accept the license information at "
-                f"{reqs.SUPERFLIP_LICENSE_URL}\n\nDownload and install {label} for Phase Studio now?",
-                QMessageBox.Yes | QMessageBox.Cancel,
-                QMessageBox.Cancel,
-            )
-            if answer != QMessageBox.Yes:
+            if not confirm_third_party_download(dialog, label):
                 return
             destination = download_dir
             if destination is None:
@@ -187,7 +202,7 @@ def show_requirement_remediation_dialog(
     buttons.addWidget(skip_button)
     body_layout.addLayout(buttons)
     root.addWidget(body)
-    apply_safe_dialog_geometry(dialog, 720, 360)
+    apply_safe_dialog_geometry(dialog, 680, 300)
     dialog.exec()
     return selected["value"]
 
