@@ -1,7 +1,9 @@
 # Phase Studio 1.0.9 cleanup plan
 
-Status: planning only. Measurements are from commit `8cc87b9` on
-`release/1.0.9-split-distribution`. No production change is part of this plan.
+Status: Phase 3B is complete through commit `6792fde`. Sections 1-12 retain the
+original audit measurements from commit `8cc87b9`; section 13 records the
+Phase 3B analysis and implementation result. The optional large orchestration
+module move has not started.
 
 ## Measurement method and compatibility boundary
 
@@ -466,3 +468,471 @@ Each commit starts and ends with green focused tests; commits 2, 4, and 5 also
 run the complete suite. Do not combine these into a broad formatting, rename, or
 module-move diff, and do not push cleanup until each reviewable unit has passed
 its scientific and distribution baselines.
+
+## 13. Phase 3B orchestration preparation
+
+This section describes the code at `4618611` after the Phase 3A result-selector
+extraction. The current baseline is 21,137 production LOC, including 12,081 LOC
+in `app.py` and 2,196 LOC in `jana_superflip.py`; the suite has 18 scripts and
+715 checks. Phase 3B must start with tests and must preserve the compatibility
+boundary in the opening section of this plan.
+
+| Current method | LOC | Physical lines |
+|---|---:|---:|
+| `_run_pipeline_cycles` | 517 | 546 |
+| `pipeline_worker` | 290 | 300 |
+| `_poll_queue` | 156 | 169 |
+| `_run_sharped_recycle_cycles` | 169 | 181 |
+
+These counts use the plan's nonblank/non-comment LOC definition. The physical
+line count is included so the measurements remain comparable with the original
+largest-function inventory.
+
+### Current execution graph
+
+```text
+Run phasing
+  start_run
+    get_config -> validate config -> requirements remediation
+    create work directory -> save QSettings -> reset GUI/run controls
+    Thread(pipeline_worker(cfg))
+      fresh-run preparation
+        resolve Jana .inflip/HKL inputs and metadata
+        parse/merge reflections and write observed HKL
+        derive reference, model, validation and holdout configuration
+        construct PipelineState and retain it as _resume_state
+      reconstruction_mode == superflip
+        -> _run_pipeline_cycles(state)
+      reconstruction_mode == sharped_recycle[_random]
+        -> _run_sharped_recycle_cycles(state)
+      -> queue events -> _poll_queue -> GUI/result state
+
+Continue run
+  continue_run
+    require _resume_state and a larger requested cycle count
+    update state.cfg.cycles -> reset stop events and GUI/run controls
+    Thread(pipeline_worker(None, resume_state=state))
+      restart profiler -> emit progress_setup/current progress
+      dispatch to the same ordinary or recycling loop at completed_cycles + 1
+      -> queue events -> _poll_queue -> GUI/result state
+
+Terminal/result path
+  cycle loop -> result event(s) -> done | stopped | cancellation error | error
+  _poll_queue
+    done       -> COMPLETE -> enable result action
+    stopped    -> STOPPED  -> keep completed results -> enable result action
+    cancelled  -> CANCELLED
+    error      -> ERROR (the current GUI spelling of behavioral FAILED)
+  COMPLETE or STOPPED in a Jana-Wizard-owned session
+    -> _auto_open_jana_result_selector -> open_result_selector("jana")
+    -> accepted selection -> perform_jana_handoff in a worker
+    -> handoff_done | handoff_error
+  standalone completed results
+    -> "Save map and model" -> open_result_selector("standalone")
+    -> accepted selection -> copy selected map and usable structure
+```
+
+`_poll_queue` is called by the GUI timer and is the only consumer of worker
+events. `PipelineState` is created before the first cycle and retained after a
+normal completion or graceful stop, so Continue reuses reflections, model and
+reference feedback, accumulated results, validation context and cycle number.
+The GUI's `results`, progress widgets and `_run_status` are projections of that
+execution, not substitutes for `PipelineState`.
+
+### Ordinary-cycle stage map
+
+The actual order is more detailed than the short labels shown in the GUI. An
+ordinary cycle currently executes this sequence:
+
+```text
+prepare cycle
+  choose external/previous model
+  choose observed HKL and explicit/automatic reference
+  choose SharpED-limited voxel and effective repeat count
+Superflip
+  write generated input and run primary map
+  export phased reflections
+  optionally run the fixed OMIT Superflip map
+Superflip metrics and EDMA
+  parse Superflip log metrics
+  run EDMA on the Superflip map, or write the disabled placeholder bundle
+  collect atom-match/reference and Superflip map-quality metrics
+SharpED
+  deblur the Superflip map, or copy it when SharpED is disabled
+  optionally deblur the OMIT map
+  optionally symmetry-average the deblurred map with Superflip
+SharpED-map EDMA and validation
+  run EDMA on the deblurred map, or write the disabled placeholder bundle
+  collect atom-match/reference and deblurred map-quality metrics
+record result
+  construct CycleResult
+  append PipelineState.all_results
+  rewrite metrics.csv and map_quality_assessment.txt
+  emit result
+map feedback
+  optionally add missing data, correct intensities and/or repartition powder
+  write the next cycle's observed-HKL file
+prepare next cycle
+  select/damp the next model and select the automatic reference
+  update PipelineState model/reference/reflection feedback
+finalize
+  set PipelineState.completed_cycles
+  emit progress and completed cycle_progress
+  emit stopped at a graceful boundary, otherwise continue; emit done after loop
+```
+
+| Area | Scientific work | `PipelineState` mutation | GUI events | Files | Control/cancellation |
+|---|---|---|---|---|---|
+| Prepare | Reflection/model/reference selection; voxel and repeat semantics | Reads current model, references and reflections | Preparing/Superflip progress and logs | Cycle directory; later generated Superflip input | Graceful stop at the cycle boundary |
+| Superflip | Phasing, OMIT phasing, map export and log metrics | No durable mutation | Progress, repeat progress and logs | Input/log/maps/phased reflections/OMIT files | `stop_now` reaches the child process; explicit checks follow primary/optional work |
+| EDMA on Superflip | Peak finding, structure export, atom/reference metrics | No durable mutation | Progress, structure update and logs | EDMA directory and CIF/XYZ/PDB, plus Jana output when applicable | Child process receives `stop_now` |
+| SharpED/symmetry | Upload/deblur/download, optional OMIT deblur and symmetry averaging | No durable mutation | SharpED progress and logs | Deblurred and optional OMIT/symmetrized maps; SharpED log | Server client and Superflip process receive `stop_now`; checks bracket stages |
+| EDMA on deblurred map | Peak finding, structure export and atom/reference metrics | No durable mutation | Progress, structure update and logs | EDMA directory and structure bundle | Child process receives `stop_now` |
+| Validation | Reference, holdout and reference-free map metrics | Reads fixed validation/holdout context | Validation logs through result processing | Values are later written to CSV/report | Failure currently escapes to the worker boundary |
+| Result recording | No new calculation beyond formatting | Appends result; clears pending feedback percentages | `result` | Rewrites metrics CSV and quality report | The result becomes valid before feedback/finalization |
+| Map feedback | Missing-reflection, intensity and powder algorithms | Replaces current reflections and pending percentages; updates observed HKL path | Logs | Next-cycle HKL and powder log | Runs only before a requested later cycle |
+| Next/finalize | Map blending and next model/reference selection | Model, metrics, references and completed cycle | Progress, completed cycle, `stopped`/`done` | Optional damped XPLOR model | Graceful stop occurs only after the result and state checkpoint are complete |
+
+The recycling branch has a different scientific sequence. It runs Superflip
+only for the first cycle in `sharped_recycle`, or synthesizes random phases in
+`sharped_recycle_random`; every cycle runs SharpED, composes an
+`|Fobs|+phi_calc` map, stores that as `recycle_map`, and optionally runs EDMA
+only on the final requested cycle. That branch must remain explicit rather than
+being forced through ordinary-stage conditionals.
+
+### Duplicated orchestration
+
+The LOC below are nonblank, non-comment physical lines rounded only where a
+long call occupies one physical line in one branch and many lines in another.
+"Redundant LOC" counts the later copies that a consolidation could remove,
+not the one retained implementation. Blocks overlap only at their stated
+boundary; the measured redundant total is approximately 126 LOC.
+
+| Repeated block | Copies | Redundant LOC | Material differences | Safe to consolidate? |
+|---|---:|---:|---|---|
+| Cycle directory/name/log setup | 2 | 5 | Ordinary and recycling log text/stage detail differ | No useful saving; keep explicit |
+| Graceful boundary and end-of-cycle stop handling | 2 | 15 | Same checkpoint rule and event; different surrounding stage lists | Yes, after stop/resume traces; keep the check visible at both loop boundaries |
+| Immediate-stop checks | 7 | 8 | Same predicate, but checks occur at scientifically meaningful interruption points | No; a helper would hide boundaries and save no real LOC |
+| Primary SharpED call/progress plumbing | 2 | 20 | Input/output maps differ; ordinary has disabled-copy behavior; recycling always calls SharpED | Yes for the configured invocation only; keep branch policy outside it |
+| EDMA invocation/config plumbing | 3 | 25 | Superflip/deblur/final map, prefix, threshold, directory and enable condition differ | Only a narrow argument-builder/call helper is safe after command goldens |
+| Reference/atom metric collection | 3 | 26 | Superflip, ordinary deblur and final recycling outputs feed different result fields | Yes as a pure result-returning helper |
+| Result append, CSV/report write, quality logs and `result` event | 2 | 17 | The two branches construct different `CycleResult` values first | Yes; keep `CycleResult` construction branch-specific |
+| Common `CycleResult` fields | 2 | 18 | Recycling deliberately reinterprets map/model fields and has correlation fields | No; explicit constructors are safer than a generic field mapper |
+| Worker dispatch/profile/error boundary | 2 | 12 | Fresh preparation owns an extra timing span; resume starts from an existing state | Postpone; cancellation and partial-result semantics need end-to-end tests first |
+
+About 78 of the 126 redundant LOC are candidates for safe consolidation after
+the guards below. Approximately 420 existing orchestration LOC can be split
+into named stage functions to reduce the review envelope; those are moved or
+rebounded LOC, not deleted LOC. The first implementation should aim for 45-80
+net production LOC removed after adding roughly 45-70 LOC of explicit stage
+interfaces. A larger apparent reduction would probably be logic hiding.
+
+### Behavioral state machine
+
+The behavioral name FAILED maps to the current GUI's `_run_status == "ERROR"`;
+changing that visible spelling would be a GUI change and is outside cleanup.
+There is no stored STOPPING state: it is a temporary badge while the stored
+status remains RUNNING so controls and configuration stay locked correctly.
+
+| From | Trigger | Worker/state rule | Queue event | Terminal GUI state |
+|---|---|---|---|---|
+| READY | Valid Run | Clear both stop events, create worker; fresh worker creates `_resume_state` | `progress_setup` | RUNNING |
+| COMPLETE, STOPPED, CANCELLED or FAILED | Run again | A fresh worker creates a new `PipelineState`; existing GUI results currently remain until Clear and new result events append | `progress_setup` | RUNNING |
+| COMPLETE, STOPPED or FAILED with `_resume_state` | Continue with larger cycle count | Reuse the same state, increase requested cycles, start at `completed_cycles + 1` | `progress_setup`, existing `progress` | RUNNING |
+| RUNNING | Stop after current cycle | Set `stop_after_cycle`; active cycle and all recording/checkpoint work finish normally | `stopped(completed_cycles)` | STOPPED; completed results remain valid |
+| RUNNING | Stop after current cycle before next cycle starts | Boundary check emits without starting another cycle | `stopped(completed_cycles)` | STOPPED |
+| RUNNING | Stop immediately | Set both `stop_after_cycle` and `stop_now`; active external process/server polling observes `stop_now` | normally `error_report(category=cancelled)`; consumer also accepts `cancelled` | CANCELLED; only previously completed results are valid |
+| RUNNING | Requested cycles finish | `completed_cycles == cfg.cycles` after final checkpoint | `done(completed_cycles)` | COMPLETE |
+| RUNNING | Non-cancellation exception | Worker records failed performance outcome and preserves traceback in `ErrorReport` | `error_report`; consumer also accepts `error` | FAILED behavior, displayed as ERROR |
+| COMPLETE or STOPPED | Eligible Jana Wizard result set | Auto-open selector once; accepted candidate starts handoff worker | `handoff_done` or `handoff_error` | TRANSFERRED or ERROR |
+
+An immediate stop raised by `run_command`, SharpED polling, or an explicit
+post-stage check is recognized by `build_error_report` from the message text.
+The fresh and resume worker catches currently record that profiler outcome as
+`failed` before the GUI classifies it as CANCELLED. This mismatch is existing
+diagnostic behavior and must be pinned before anyone considers changing it.
+
+The audit also found a narrow race: an immediate request received during
+validation, report writing, feedback or recycling Fourier work could encounter
+the common graceful-stop check first and display STOPPED. A deterministic
+report-finalization test reproduced it. Prerequisite commit `9425524` fixed it
+separately from structural work by applying the single precedence rule
+immediate cancellation > graceful stop > normal continuation at every cycle
+gate and when the GUI consumes queued terminal events.
+
+### State ownership and mirrors
+
+`PipelineState` remains the only active execution authority. `CycleResult`
+remains the immutable completed-cycle record. `RunConfig` is captured for the
+run, although current fresh-run preparation resolves a few paths in place and
+Continue mutates `state.cfg.cycles`; Phase 3B should enforce immutability by
+convention first and must not introduce a second state container merely to make
+the type formally frozen.
+
+| Value | Current role | Phase 3B treatment |
+|---|---|---|
+| `PipelineState.current_*`, automatic references, feedback percentages, `recycle_map`, `completed_cycles`, `all_results` | Authoritative resumable execution state | Retain and pass explicitly to stages |
+| Local aliases for config/reference/mode flags in both loops | Read-only shorthand copied from state | Remove only when an extracted stage has a narrower signature; do not make replacement booleans |
+| `all_results` local | Alias of the same list, not a second list | Prefer direct `state.all_results` in recording/finalization |
+| `self.results` | GUI projection populated by `result` events | Retain; never use it to resume scientific work |
+| `_resume_state` | Owner/reference to the authoritative state between worker invocations | Retain |
+| `_run_status` and progress widgets | GUI lifecycle projection | Retain; worker decisions must not read widget text |
+| `stop_after_cycle`, `stop_now` | Thread-safe control signals; immediate stop intentionally sets both | Retain as signals, with exact boundary tests |
+| `CycleProgressState` | Immutable presentation snapshot | Retain; it does not hold scientific state |
+
+### GUI event boundary
+
+| Event | Classification | Consumer effect |
+|---|---|---|
+| `log` | Log | Append classified execution log; refresh actions |
+| `progress_setup`, `cycle_progress`, `progress` | Progress update | Initialize/update overall, stage and repeat progress |
+| `validation_profile` | Metric/state update | Set the displayed assessment profile and dirty plots |
+| `result` | Result update | Append GUI result, parse displayed structures, dirty plots/actions |
+| `structure_update`, `reference_atoms`, `structure_cell` | State update | Update only visualization inputs |
+| `sharped_models` | State update | Reconcile the model combo and log refresh success |
+| `hkl_load_result`, `hkl_completeness_result` | Result update for a separate HKL task | Finish task and open its result dialog |
+| `hkl_task_error`, `hkl_task_finished` | Terminal event for a separate HKL task | Report/clear task ownership with stale-task gating |
+| `handoff_done`, `handoff_error` | Terminal event for Jana handoff | TRANSFERRED/ERROR, close or restore handoff control |
+| `error`, `error_report` | Terminal workflow event | Identical report conversion and `_handle_pipeline_error` path |
+| `cancelled` | Terminal workflow event | Apply CANCELLED directly; retained consumer compatibility |
+| `stopped` | Terminal workflow event | Apply STOPPED, retain results and enable selection/handoff |
+| `done` | Terminal workflow event | Apply COMPLETE and schedule eligible Jana selector |
+
+The two error event branches are exactly duplicated and may become one
+membership branch after queue contract tests. The remaining handlers apply
+different domains and should not be hidden behind a registry or event bus.
+The HKL and Jana events share the queue for GUI-thread safety, but neither is
+workflow scientific state. `_poll_queue` should continue to coalesce redraws
+after a bounded batch of 250 messages.
+
+### Error boundary
+
+There is one broad exception boundary around fresh preparation plus execution
+and another around resume execution. Stage functions generally let failures
+escape; child-process and SharpED helpers add their own command/server detail.
+This preserves authentication classification and full traceback, but the
+top-level operation is only `Run workflow`.
+
+Do not add a generic try/except stage executor. After failure traces exist, a
+plain boundary may attach structured stage name and cycle number and re-raise
+with the original exception as its cause. It must preserve the original
+message used for authentication and cancellation classification, the already
+checkpointed `PipelineState.all_results`, and all existing output files. The
+fresh/resume worker catch should be consolidated only after tests show the same
+error report, profiler outcome and terminal event for both paths.
+
+### Required guards before production edits
+
+The existing tests pin terminal GUI states and result selection by manually
+enqueuing events, and they pin individual Superflip/EDMA/process/scientific
+helpers. They do not yet execute the cycle loops as an orchestration contract.
+The first Phase 3B commit must add semantic traces around real cycle-loop
+decisions with deterministic fake executables/server responses:
+
+1. Pin the exact enabled-stage trace for a two-cycle ordinary run, including
+   cycle numbers, stage-progress snapshots, result/progress order and `done`.
+2. Pin invocation matrices: ordinary primary/OMIT Superflip, ordinary
+   SharpED/OMIT SharpED, both EDMA positions, first-Superflip recycling,
+   random-start recycling, and optional final recycling EDMA.
+3. Pin every generated relative filename and the final cycle directory tree,
+   including disabled-stage placeholder structure bundles, map-feedback HKL,
+   damped models and Jana auxiliary output when enabled.
+4. Request graceful stop during a cycle and at a boundary; prove the full
+   current cycle is recorded once, no next process starts, resumable state is
+   complete, and the GUI/result selector reaches STOPPED.
+5. Request immediate stop during Superflip, EDMA and SharpED polling; prove the
+   active work is interrupted, no incomplete `CycleResult` is appended, prior
+   results remain, and the GUI reaches CANCELLED through error classification.
+   Keep the deterministic post-process race guard from prerequisite commit
+   `9425524` green throughout extraction.
+6. Continue an ordinary and recycling run; prove the next cycle number,
+   inherited reflection/model/reference/recycle state, accumulated results,
+   output names, progress start and terminal event.
+7. Inject failures at preparation, Superflip, Superflip EDMA, SharpED,
+   symmetry averaging, deblurred EDMA, validation, feedback and report writing;
+   pin the last valid result, files, error category/text, traceback presence and
+   FAILED/ERROR state.
+8. Pin COMPLETE and STOPPED automatic selector eligibility for both Jana launch
+   modes, ineligibility for standalone, accepted Jana handoff exactly once,
+   and standalone save availability/copies after usable results.
+9. Pin queue ordering, the 250-event batch limit, redraw coalescing, identical
+   `error`/`error_report` handling and the accepted direct `cancelled` event.
+
+Use an event recorder at the external-process/server, file and GUI-event
+boundaries. Tests should assert meaningful stage/file/state traces rather than
+method names, private helper call counts or a proposed future decomposition.
+
+For a small deterministic scientific fixture, freeze:
+
+- exact generated primary and OMIT Superflip input, including repeat reduction
+  when a model is present, seed, reference and export directives;
+- exact EDMA input/command/working directory and deterministic CIF/XYZ/PDB or
+  Jana auxiliary bytes;
+- the SharpED upload bytes, endpoint/model/elements/options and returned map;
+- hashes for deterministic primary, deblurred, symmetrized, recycled and final
+  maps, with an explicit exclusion for genuinely nondeterministic external
+  executable bytes;
+- final selected map/model bytes, `CycleResult` fields, validation metrics,
+  exact `metrics.csv` rows and exact quality-report text.
+
+Any future orchestration commit must run these guards, the focused
+process/scientific/workflow/Jana tests, all scientific goldens and the complete
+18-script suite.
+
+### Proposed extraction boundaries
+
+Use plain functions or small methods with explicit arguments and returns. Keep
+ordinary and recycling top-level sequences separate. A safe target is:
+
+```text
+pipeline_worker
+  prepare_pipeline_state(cfg)              # fresh-run work only
+  run_requested_cycles(state)              # explicit two-branch dispatch
+
+ordinary cycle
+  prepare_ordinary_cycle(state, cycle)
+  run_superflip_stage(state, prepared)
+  run_superflip_edma_stage(state, outputs)
+  run_sharped_stage(state, outputs)
+  run_sharped_edma_stage(state, outputs)
+  collect_validation(state, outputs)
+  record_cycle_result(state, result)
+  apply_cycle_feedback(state, result)
+  prepare_next_cycle(state, result)
+  finalize_cycle(state, cycle)
+
+recycling cycle
+  prepare_recycling_input(state, cycle)
+  run_sharped_stage(state, prepared)        # shared configured invocation only
+  compose_recycling_map(state, outputs)
+  optional final EDMA and validation
+  record_cycle_result(state, result)        # shared persistence/event boundary
+  finalize_cycle(state, cycle)              # shared checkpoint/terminal rule
+```
+
+Stage outputs should be direct paths, metrics or existing domain values. Do not
+introduce another mutable workflow-state object, a generic stage/result bag, a
+task graph, an event bus, dependency-injection framework or plugin system.
+Keep branch-specific `CycleResult` construction visible. Keep stop checks next
+to the operations they guard. A local immutable tuple/dataclass is acceptable
+only when it names the fixed output contract of one stage and cannot resume or
+drive the workflow independently.
+
+Start with in-file boundaries so each diff can prove identical behavior and
+net duplicate removal. Move a cohesive boundary to another module only when
+its imports are one-way and the move materially reduces the normal review
+context; do not use lazy circular imports or callback registries to manufacture
+an `app.py` reduction.
+
+### Context benefit and limits
+
+These are rounded nonblank/non-comment LOC review envelopes: the directly
+edited orchestration block plus the state/event boundary normally needed to
+reason about the change. They are not claims that every listed line changes.
+
+| Task | Current context (LOC/modules) | Phase 3B target | Reduction |
+|---|---:|---:|---:|
+| A. Change Superflip stage behavior | about 760 / 2 | about 260 / 2 | 66% |
+| B. Change SharpED stage behavior | about 610 / 3 | about 230 / 3 | 62% |
+| C. Add one per-cycle validation step | about 430 / 2 | about 180 / 2 | 58% |
+| D. Modify cycle finalization | about 310 / 1 | about 105 / 1 | 66% |
+| E. Debug graceful stop | about 420 / 1 | about 235 / 1 | 44% |
+| F. Debug immediate cancellation | about 620 / 3 | about 360 / 3 | 42% |
+| G. Change progress reporting | about 700 / 1 | about 280 / 1 | 60% |
+
+The value comes from making each stage and terminal checkpoint readable without
+loading both 517-LOC and 169-LOC cycle bodies plus the full worker/queue path.
+The target clears the 40% threshold for every listed task. Raw production LOC
+is expected to fall only 45-80; an in-file first pass reduces `app.py` by the
+same amount. A later one-way module move could reduce `app.py` by roughly
+350-450 LOC while adding the same LOC elsewhere and therefore must be reported
+separately as moved LOC, with no claim of net reduction.
+
+### Risk order and implementation commits
+
+The highest-value boundary is result recording plus the final cycle checkpoint:
+it is duplicated, scientifically downstream, and defines when a result becomes
+valid for stop/resume/selection. The highest-risk boundary is immediate
+cancellation across a live Superflip/EDMA process or SharpED polling because
+message classification currently converts an exception into CANCELLED. The
+recycling algorithm, map feedback, OMIT/R_free, repeat/random behavior and
+Jana handoff must remain explicit and untouched internally.
+
+Recommended reviewable commits, each starting from green guards:
+
+1. **Add workflow orchestration trace baselines.** Add the stage/count/file,
+   terminal, resume, failure, selector and save/handoff tests plus deterministic
+   output goldens. No production change.
+2. **Extract cycle result recording and checkpointing.** Share CSV/report/log/
+   result emission and the completed-cycle/graceful-stop boundary; preserve
+   branch-specific `CycleResult` construction. Require a real net LOC decrease.
+3. **Extract ordinary scientific stages.** Split preparation, Superflip,
+   EDMA, SharpED, validation and feedback into explicit functions without
+   changing calls, arguments, filenames, progress order or stop checks.
+4. **Reduce only proven cross-branch duplication.** Share the narrow SharpED
+   invocation, reference-metric collection and safe EDMA configuration after
+   exact invocation goldens pass. Keep recycling control flow separate.
+5. **Narrow worker and queue coordination.** Consolidate fresh/resume dispatch
+   and the identical error-event branches only after failure/cancellation
+   traces pass. Do not otherwise split `_poll_queue` for appearance.
+
+Stop after these commits for a new measurement and review. Phase 3B must not
+change scientific helpers, process policy, the result selector, Jana behavior,
+QSettings, filenames or packaging profiles.
+
+### Phase 3B implementation result
+
+Phase 3B was implemented as three reviewable commits after the prerequisite
+immediate-cancellation fix:
+
+1. `cb83cd8 Extract completed-cycle result recording`
+2. `85e7e21 Consolidate completed-cycle finalization and stop gate`
+3. `6792fde Remove duplicate orchestration plumbing`
+
+The ordinary and recycling algorithms remain separate. Six small boundaries
+now own result persistence, validation-profile selection, completed-cycle
+checkpointing, configured SharpED invocation/progress, configured EDMA
+invocation and EDMA reference metrics. `PipelineState` remains authoritative;
+no state object, workflow engine, event bus, registry or module boundary was
+added. The existing terminal-intent helper remains the single policy owner.
+
+| Measurement | At `9425524` | At `6792fde` | Change |
+|---|---:|---:|---:|
+| Production LOC | 21,162 | 21,147 | -15 |
+| `app.py` LOC | 12,105 | 12,090 | -15 |
+| `_run_pipeline_cycles` LOC | 515 | 451 | -64 |
+| `_run_sharped_recycle_cycles` LOC | 168 | 139 | -29 |
+| `pipeline_worker` LOC | 299 | 299 | 0 |
+| `_poll_queue` LOC | 162 | 159 | -3 |
+| Module-moved LOC | 0 | 0 | 0 |
+| New helper/interface LOC | 0 | 81 | +81 |
+| Regression checks | 739 | 753 | +14 |
+
+Git records 126 old orchestration lines removed and 117 replacement lines
+added in `app.py` across the three commits. A line-by-line classification puts
+70 of the removed lines in redundant plumbing or redundant local mirrors and
+56 in canonical behavior re-expressed by the helpers. The physical-line net is
+-9; under this plan's nonblank/non-comment definition the net is -15. No LOC
+was moved between modules.
+
+The main context benefit is locality rather than a large raw deletion. The
+review envelopes measured after extraction are:
+
+| Task | Before | After | Reduction |
+|---|---:|---:|---:|
+| Debug completed-cycle finalization | about 310 LOC / 1 module | about 105 LOC / 1 module | about 66% |
+| Change per-cycle result recording | about 250 LOC / 1 module | about 85 LOC / 1 module | about 66% |
+| Add a per-cycle validation output | about 430 LOC / 2 modules | about 260 LOC / 2 modules | about 40% |
+| Debug graceful stop | about 420 LOC / 1 module | about 235 LOC / 1 module | about 44% |
+| Inspect the cycle-to-cycle transition | about 360 LOC / 1 module | about 180 LOC / 1 module | about 50% |
+
+The new semantic guards execute the real ordinary/recycling cycle boundaries
+with deterministic stage substitutes. They pin result/report cardinality,
+graceful-stop resume from cycle 1 to cycle 2, terminal precedence, stage
+progress order, two-cycle Superflip/SharpED/EDMA invocation counts and the
+absence of a second cycle after cancellation. The final complete run passed all
+18 scripts and 753 checks. Scientific, CSV/report, Jana, process-console,
+SharpED request and performance goldens remained unchanged.
+
+The optional 350-450 LOC one-way module move remains a separate decision. Do
+not begin it or Phase 3C without a new review.
