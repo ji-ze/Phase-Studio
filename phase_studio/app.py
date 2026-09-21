@@ -12557,6 +12557,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 elif state.auto_reference_xplor is not None:
                     reference_file_for_cycle = state.auto_reference_xplor
                     self.log(f"[Cycle reference] Auto referencefile (previous-cycle XPLOR map, EDMA unavailable): {reference_file_for_cycle}", level="DETAIL")
+            elif referencefile_mode == "omit" and cyc == 1 and cfg.first_cycle_modelfile is not None:
+                # No user-selected reference file, but an Initial model was supplied:
+                # anchor cycle 1's phase origin against that same model, mirroring the
+                # automatic previous-cycle anchor a continuing series already gets above
+                # -- a fresh series has no previous cycle, but the Initial model itself
+                # is the scientifically equivalent anchor (it is the same file a
+                # continuing series would have used as both modelfile and referencefile
+                # had this cycle instead been reached by continuation).
+                reference_file_for_cycle = cfg.first_cycle_modelfile
+                self.log(f"[Cycle reference] Auto referencefile (Initial model): {reference_file_for_cycle}", level="DETAIL")
             sf_voxel = cfg.voxel
             sf_extra_superflip_keywords = cfg.extra_superflip_keywords
             if cfg.run_sharped and not use_superflip_xplor_modelfile:
