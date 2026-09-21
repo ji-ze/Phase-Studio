@@ -118,6 +118,13 @@ def build_window(appmod, source="deblurred", launch_mode="phase_recycling", cycl
     win.reference_atoms_for_plot = win._safe_parse_structure(cycle_results[0].superflip_edma_cif)
     inflip = model("job.inflip")
     win.last_run_config = make_run_config(appmod, tmp, inflip)
+    # cfg.run_sharped gates whether the SharpED result-selection tab is shown
+    # at all (a disabled SharpED run still leaves a placeholder deblur_map
+    # copied from Superflip); this fixture's sharped_maps flag already
+    # encodes "SharpED genuinely produced distinct results", so it drives
+    # run_sharped too instead of leaving it at make_run_config's blanket
+    # bool default of False.
+    win.last_run_config.run_sharped = sharped_maps
     win.jana_wizard_context = appmod.JanaWizardContext(
         launched_from_jana_wizard=launch_mode in {"phase_recycling", "full_configuration"},
         launch_mode=launch_mode,
@@ -171,22 +178,24 @@ def main():
         win.results[0].validation_profile = profile.value
         opened.clear()
         win.open_result_selector("jana")
-        table = opened[-1].findChild(QTableWidget)
+        dialog = opened[-1]
+        table = dialog._views[dialog.active_source].table
         headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
         columns = result_selection_metric_columns(definition)
-        expected = ["Recommended", "Cycle", "Source"] + [column[0] for column in columns]
+        expected = ["Recommended", "Cycle"] + [column[0] for column in columns]
         check(f"{profile.value}: selector columns follow profile", headers == expected)
+        check(f"{profile.value}: selector has no Source column", "Source" not in headers)
         check(
             f"{profile.value}: selector exposes full metric names",
-            all(table.horizontalHeaderItem(index + 3).toolTip() == column[1]
+            all(table.horizontalHeaderItem(index + 2).toolTip() == column[1]
                 for index, column in enumerate(columns)),
         )
         check(
             f"{profile.value}: selector exposes accessible metric descriptions",
-            all(table.horizontalHeaderItem(index + 3).data(Qt.AccessibleDescriptionRole) == column[1]
+            all(table.horizontalHeaderItem(index + 2).data(Qt.AccessibleDescriptionRole) == column[1]
                 for index, column in enumerate(columns)),
         )
-        labels = [label.text() for label in opened[-1].findChildren(QLabel)]
+        labels = [label.text() for label in dialog.findChildren(QLabel)]
         check(f"{profile.value}: selector summary names assessment", definition.assessment_label in labels)
         check(f"{profile.value}: obsolete Selection score is absent", "Selection score" not in " ".join(headers + labels))
 
@@ -194,17 +203,21 @@ def main():
     # sizes. Six to eight rows are reserved; larger result sets scroll inside
     # the table while the dialog footer remains outside that viewport.
     count_window, count_results = build_window(
-        appmod, launch_mode="standalone", cycles=15,
+        appmod, launch_mode="standalone", cycles=30,
     )
     count_window.results = count_results
-    all_candidates = count_window._result_candidates()
+    # Superflip-only slice: isolates the shared table-geometry logic
+    # (_build_candidate_table) from the source split -- SharpED stays hidden
+    # throughout so the one visible table's row count is exactly n.
+    all_candidates = [c for c in count_window._result_candidates() if c.source == "superflip"]
     original_candidates = count_window._result_candidates
     for candidate_count in (1, 2, 4, 10, 30):
         count_window._result_candidates = lambda n=candidate_count: all_candidates[:n]
         opened.clear()
         count_window.open_result_selector("standalone")
         dialog = opened[-1]
-        table = dialog.findChild(QTableWidget)
+        check(f"{candidate_count} candidates: SharpED tab hidden, no source ambiguity", dialog.active_source == "superflip")
+        table = dialog._views["superflip"].table
         dialog.resize(1280, 760)
         dialog.show()
         app.processEvents()
@@ -247,11 +260,148 @@ def main():
     opened.clear()
     map_only.open_result_selector("standalone")
     map_only_dialog = opened[-1]
-    map_only_table = map_only_dialog.findChild(QTableWidget)
-    source_values = [map_only_table.item(row, 2).text() for row in range(map_only_table.rowCount())]
+    # The SharpED result is the map-only one in this fixture; switch there
+    # explicitly rather than depending on the initial-source default.
+    map_only_dialog._apply_source("deblurred")
+    map_only_table = map_only_dialog._views["deblurred"].table
+    cycle_values = [map_only_table.item(row, 1).text() for row in range(map_only_table.rowCount())]
     primary_button = map_only_dialog.findChild(QPushButton, "primaryButton")
-    check("map-only candidate is identified in its row", any("map only" in value for value in source_values))
+    check("map-only candidate is identified in its row", any("map only" in value for value in cycle_values))
     check("map-only selection uses honest save wording", primary_button is not None and primary_button.text() == "Save available result")
+
+    # --- Source split: independent tables, recommendations, selection, and
+    # source-appropriate validation warnings. ---
+    from phase_studio.result_selection import result_warning_callout_text
+
+    split_window, split_results = build_window(appmod, launch_mode="standalone", cycles=4)
+    split_window.results = split_results
+    opened.clear()
+    split_window.open_result_selector("standalone")
+    split_dialog = opened[-1]
+    # isVisible() reflects real on-screen visibility (ancestor chain
+    # included), unlike a bare setVisible() call on an unshown dialog.
+    split_dialog.show()
+    app.processEvents()
+    check("split: both source tabs available", set(split_dialog._views.keys()) == {"superflip", "deblurred"})
+    check(
+        "split: switch buttons exist, are checkable and exclusive",
+        split_dialog._superflip_btn is not None and split_dialog._sharped_btn is not None
+        and split_dialog._superflip_btn.isCheckable() and split_dialog._sharped_btn.isCheckable(),
+    )
+    check("split: two independent tables exist", len(split_dialog.findChildren(QTableWidget)) == 2)
+    check(
+        "split: row counts match each source independently",
+        split_dialog._views["superflip"].table.rowCount() == 4
+        and split_dialog._views["deblurred"].table.rowCount() == 4,
+    )
+    # This fixture's reference_f05 rises with cycle for both sources, so the
+    # independent per-source recommendation is cycle 4 in both -- computed
+    # separately (no SharpED bonus, no cross-source competition).
+    check(
+        "split: independent recommendations computed per source",
+        split_dialog._views["superflip"].recommendation.recommended_candidate.cycle == 4
+        and split_dialog._views["deblurred"].recommendation.recommended_candidate.cycle == 4,
+    )
+
+    # Selection persistence: Superflip -> SharpED -> Superflip must not lose
+    # or overwrite either source's own selection.
+    split_dialog._apply_source("superflip")
+    split_dialog._views["superflip"].table.selectRow(0)
+    app.processEvents()
+    split_dialog._apply_source("deblurred")
+    split_dialog._views["deblurred"].table.selectRow(1)
+    app.processEvents()
+    split_dialog._apply_source("superflip")
+    check(
+        "split: switching sources preserves each source's own selection",
+        split_dialog._views["superflip"].selected.cycle == 1
+        and split_dialog._views["deblurred"].selected.cycle == 2,
+    )
+    check(
+        "split: final action uses the currently active source's selection",
+        split_dialog.selected_candidate == split_dialog._views["superflip"].selected,
+    )
+
+    # Warnings: pure-function coverage of all four combinations, plus the
+    # live dialog reflecting the same text for its active source.
+    check("split: no warning for plain Superflip with Map Feedback off", result_warning_callout_text("superflip", False) is None)
+    sharped_only_warning = result_warning_callout_text("deblurred", False)
+    check("split: SharpED always warns", sharped_only_warning is not None and "neural-network" in sharped_only_warning)
+    superflip_mf_warning = result_warning_callout_text("superflip", True)
+    check("split: Superflip warns when Map Feedback is on", superflip_mf_warning is not None and "Map Feedback" in superflip_mf_warning)
+    combined_warning = result_warning_callout_text("deblurred", True)
+    check(
+        "split: SharpED + Map Feedback uses one combined warning",
+        combined_warning is not None and "neural-network" in combined_warning and "Map Feedback" in combined_warning,
+    )
+    check("split: live callout hidden for plain Superflip with Map Feedback off", not split_dialog._warning_callout.isVisible())
+    split_dialog._apply_source("deblurred")
+    check("split: live callout visible for SharpED", split_dialog._warning_callout.isVisible())
+    split_dialog.close()
+
+    # Map Feedback intensity correction on: 4th column appears in both
+    # tables (cycle-level value, same figure in both source tables), with
+    # "—" for cycles where it was never computed.
+    mf_window, mf_results = build_window(appmod, launch_mode="standalone", cycles=2)
+    mf_results[1].intensity_correction_avg_change_percent = -3.25
+    mf_window.results = mf_results
+    mf_window.last_run_config.map_feedback_intensity_enabled = True
+    opened.clear()
+    mf_window.open_result_selector("standalone")
+    mf_dialog = opened[-1]
+    mf_dialog._apply_source("superflip")
+    check(
+        "split: Map Feedback column appears when intensity correction is enabled",
+        "Map Feedback Δ (%)" in [
+            mf_dialog._views["superflip"].table.horizontalHeaderItem(i).text()
+            for i in range(mf_dialog._views["superflip"].table.columnCount())
+        ],
+    )
+    feedback_column = mf_dialog._views["superflip"].table.columnCount() - 1
+    feedback_cell_values = [
+        mf_dialog._views["superflip"].table.item(row, feedback_column).text()
+        for row in range(mf_dialog._views["superflip"].table.rowCount())
+    ]
+    check("split: Map Feedback value renders for the cycle it was computed on", "-3.2%" in feedback_cell_values)
+    check("split: Map Feedback shows an em dash where unavailable", "—" in feedback_cell_values)
+    check(
+        "split: Map Feedback column absent when intensity correction is off",
+        "Map Feedback Δ (%)" not in [
+            split_dialog._views["superflip"].table.horizontalHeaderItem(i).text()
+            for i in range(split_dialog._views["superflip"].table.columnCount())
+        ],
+    )
+
+    # Only one source available: the switch bar disappears and the dialog
+    # opens directly on the available source, without an empty misleading
+    # table for the missing one.
+    superflip_only, superflip_only_results = build_window(
+        appmod, launch_mode="standalone", cycles=2, sharped_maps=False,
+    )
+    superflip_only.results = superflip_only_results
+    opened.clear()
+    superflip_only.open_result_selector("standalone")
+    superflip_only_dialog = opened[-1]
+    check("split: SharpED-only-missing hides the switch bar", superflip_only_dialog._superflip_btn is None)
+    check("split: SharpED-only-missing opens directly on Superflip", superflip_only_dialog.active_source == "superflip")
+    check("split: SharpED-only-missing has no SharpED view at all", "deblurred" not in superflip_only_dialog._views)
+
+    # cfg.run_sharped=False must hide the SharpED tab even when a real-looking
+    # deblurred candidate technically exists (the pipeline's own copy of the
+    # Superflip map when SharpED was disabled) -- this is the trap a naive
+    # "candidates non-empty" check would miss.
+    disabled_sharped, disabled_sharped_results = build_window(appmod, launch_mode="standalone", cycles=2)
+    disabled_sharped.results = disabled_sharped_results
+    disabled_sharped.last_run_config.run_sharped = False
+    opened.clear()
+    disabled_sharped.open_result_selector("standalone")
+    disabled_sharped_dialog = opened[-1]
+    check(
+        "split: run_sharped=False hides SharpED even with a populated deblurred candidate",
+        "deblurred" not in disabled_sharped_dialog._views
+        and disabled_sharped_dialog._superflip_btn is None
+        and disabled_sharped_dialog.active_source == "superflip",
+    )
 
     # Identical candidates produce the same recommendation in both contexts.
     jana, jana_results = build_window(appmod, launch_mode="phase_recycling")
@@ -267,7 +417,8 @@ def main():
     # A row change updates both the explicit selection returned to the caller
     # and the lazily rendered preview, without changing the recommendation.
     selector = opened[-1]
-    selector_table = selector.findChild(QTableWidget)
+    selector._apply_source("superflip")
+    selector_table = selector._views["superflip"].table
     selector_table.selectRow(0)
     app.processEvents()
     manual_candidate = standalone._result_candidates()[0]
@@ -565,12 +716,23 @@ def main():
         return inflip_path, executable, preview
 
     def accept_candidate(predicate):
+        """Switch to whichever source tab actually holds the matching
+        candidate, then select it there -- mirroring how a user would
+        operate the split dialog (switch tab, then pick a row) and
+        confirming the final action uses whatever is active at click time."""
         def execute(dialog):
-            table = dialog.findChild(QTableWidget)
-            candidates = dialog._ordered
-            row = next(index for index, candidate in enumerate(candidates) if predicate(candidate))
-            table.selectRow(row)
-            app.processEvents()
+            for source, view in dialog._views.items():
+                match = next((c for c in view.ordered if predicate(c)), None)
+                if match is None:
+                    continue
+                button = dialog._superflip_btn if source == "superflip" else dialog._sharped_btn
+                if button is not None:
+                    button.setChecked(True)
+                else:
+                    dialog._apply_source(source)
+                view.table.selectRow(view.ordered.index(match))
+                app.processEvents()
+                break
             return QDialog.Accepted
         return execute
 

@@ -223,6 +223,25 @@ def create_phase_studio_context_banner(title: str, subtitle: str, badge: Optiona
     return banner
 
 
+def create_callout_label(title: str, text: str, kind: str = "note", *, compact: bool = False) -> QLabel:
+    """kind is one of "warning" (scientific caveat, always prominent), "note"
+    (concise operational clarification, the default) or "tip" (optional
+    workflow advice, visually the lightest) -- see QLabel#settingsCallout's
+    kind-specific QSS rules in ui_style.py. The shared callout label used by
+    the settings pages, Help pages, and any other Phase Studio surface (the
+    Result Selection dialog, ...) that needs the same warning/note/tip
+    presentation without a main-window `self` reference."""
+    label = QLabel(f"<b>{title}</b><br>{text}" if title else text)
+    label.setObjectName("settingsCallout")
+    label.setProperty("calloutKind", kind)
+    if compact:
+        label.setProperty("compactPadding", "true")
+    label.setTextFormat(Qt.RichText)
+    label.setWordWrap(True)
+    label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+    return label
+
+
 def apply_safe_dialog_geometry(dialog: QWidget, width: int, height: int) -> None:
     """Int-based convenience wrapper around the existing
     fit_dialog_to_available_screen() (frame-aware: measures the dialog's

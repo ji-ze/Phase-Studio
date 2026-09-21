@@ -677,9 +677,11 @@ Explicit Jana2020 values and `.inflip` values take precedence over stale unrelat
 
 After successful completion, or a graceful stop with usable completed results, a Jana2020-launched session opens the shared **Result Selection** dialog automatically. **Pass to Jana2020** reopens it later.
 
-Every valid `(cycle, source)` pair is a candidate. The table shows only the active profile's three metrics and preselects the lexicographic recommendation. The user may choose another candidate; the report records whether the recommendation was accepted or manually overridden. Handoff uses the selected existing map and structure files without recomputing them.
+Superflip and SharpED are shown as two independent candidate sets, switched with a compact **Superflip | SharpED** control above the table when both are available. Each source has its own table (only the active profile's three metrics, plus a 4th **Map Feedback change (%)** column when intensity correction is enabled), its own lexicographic recommendation, and its own remembered manual selection — switching sources never overwrites the other source's selection. When only one source produced usable results (SharpED disabled or unavailable, or a graceful stop before SharpED ran), the switch is hidden and that source's table opens directly. The action always operates on whichever candidate is selected in the currently visible source; switching source never happens implicitly. The SharpED table always carries a compact warning that its map/model comes from a neural-network model and should be validated against the original measured data and an independent refinement; the Superflip table adds a Map Feedback warning whenever intensity correction is enabled (combined into one callout when both apply).
 
-Standalone Phase Studio does not open the selector automatically. After a valid result exists, **Save map and model** opens the same dialog and copies the selected canonical output files. A map remains exportable when no structure model is available, and existing destination files require confirmation before replacement.
+The user may choose another candidate within a source; the report records whether the recommendation was accepted or manually overridden. Handoff uses the selected existing map and structure files without recomputing them.
+
+Standalone Phase Studio does not open the selector automatically. After a valid result exists, **Save map and model** opens the same source-split dialog and copies the selected canonical output files. A map remains exportable when no structure model is available, and existing destination files require confirmation before replacement.
 
 After hand-off, detailed model completion and final refinement should be performed in Jana2020.
 

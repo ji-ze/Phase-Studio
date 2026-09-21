@@ -6203,6 +6203,7 @@ from phase_studio.ui_branding import (
     apply_phase_studio_app_icon, create_phase_studio_brand_header,
     create_phase_studio_context_banner, apply_safe_dialog_geometry,
     fit_dialog_to_available_screen, close_bootloader_splash,
+    create_callout_label,
 )
 from phase_studio.requirements_ui import (
     run_remediation_loop,
@@ -8275,20 +8276,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return form
 
     def _settings_callout(self, title: str, text: str, kind: str = "note") -> QLabel:
-        """kind is one of "warning" (scientific caveat, always prominent),
-        "note" (concise operational clarification, the default) or "tip"
-        (optional workflow advice, visually the lightest) -- see
-        QLabel#settingsCallout's kind-specific QSS rules in ui_style.py.
-        Callers that mutate the label's text later via setText() (e.g. the
+        """Callers that mutate the label's text later via setText() (e.g. the
         Phasing-method warning, whose message depends on the selected
-        method) keep whatever kind was set here at construction."""
-        label = QLabel(f"<b>{title}</b><br>{text}" if title else text)
-        label.setObjectName("settingsCallout")
-        label.setProperty("calloutKind", kind)
-        label.setTextFormat(Qt.RichText)
-        label.setWordWrap(True)
-        label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        return label
+        method) keep whatever kind was set here at construction. See
+        create_callout_label() in ui_branding.py for the shared presentation."""
+        return create_callout_label(title, text, kind)
 
     def _make_result_section(self, title: str) -> Tuple[QWidget, QVBoxLayout]:
         section = QWidget()
@@ -11084,6 +11076,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         return True
 
+    def _initial_result_source(
+        self, cfg: Optional[RunConfig], superflip_available: bool, sharped_available: bool,
+    ) -> str:
+        """Deterministic starting tab: the workflow's own feed-forward choice
+        (RunConfig.modelfile_source, already the single existing signal for
+        "which source the workflow is actually continuing from"), falling
+        back to whichever source actually has candidates. "superflip" is the
+        final fallback when genuinely ambiguous -- matching the existing
+        stable convention already in recommend_best_result's own tie-break
+        (source_order in map_quality.py) and the candidate sort order, not a
+        new claim that Superflip is scientifically preferable."""
+        preferred = "superflip"
+        if cfg is not None:
+            mode = normalize_modelfile_source(str(getattr(cfg, "modelfile_source", "")))
+            if mode in ("deblurred_xplor", "deblurred_edma_cif"):
+                preferred = "deblurred"
+        if preferred == "deblurred" and not sharped_available:
+            return "superflip"
+        if preferred == "superflip" and not superflip_available:
+            return "deblurred"
+        return preferred
+
     def open_result_selector(self, context: str = "standalone") -> None:
         """Open the shared profile-aware selector for Jana2020 or standalone."""
         candidates = self._result_candidates()
@@ -11108,18 +11122,40 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         profile = self._active_validation_profile()
         definition = profile_definition(profile)
-        recommendation = recommend_best_result(profile, candidates)
-        self.result_recommendation = recommendation
+        superflip_candidates = [c for c in candidates if c.source == "superflip"]
+        sharped_candidates = [c for c in candidates if c.source == "deblurred"]
+        superflip_recommendation = recommend_best_result(profile, superflip_candidates)
+        sharped_recommendation = recommend_best_result(profile, sharped_candidates)
+
+        # SharpED disabled for this run still leaves a "deblurred" map/quality
+        # on each CycleResult -- a byte-for-byte copy of the Superflip map,
+        # kept only for pipeline uniformity. Candidates built from it are not
+        # a real SharpED result, so cfg.run_sharped gates the tab on top of
+        # (not instead of) candidate presence.
+        superflip_tab_available = bool(superflip_candidates)
+        sharped_tab_available = bool(sharped_candidates) and (cfg is None or cfg.run_sharped)
+        initial_source = self._initial_result_source(cfg, superflip_tab_available, sharped_tab_available)
+        map_feedback_intensity_enabled = bool(cfg.map_feedback_intensity_enabled) if cfg is not None else False
+
+        self.result_recommendation = (
+            superflip_recommendation if initial_source == "superflip" else sharped_recommendation
+        )
 
         preview_host = create_result_preview_host(
             self, self.structure_cell, self.structure_elev, self.structure_azim,
         )
         dialog = ResultSelectionDialog(
             self,
-            candidates,
+            superflip_candidates,
+            sharped_candidates,
             profile,
             definition,
-            recommendation,
+            superflip_recommendation,
+            sharped_recommendation,
+            superflip_tab_available=superflip_tab_available,
+            sharped_tab_available=sharped_tab_available,
+            initial_source=initial_source,
+            map_feedback_intensity_enabled=map_feedback_intensity_enabled,
             jana_context=is_jana,
             preview_host=preview_host,
             parse_structure=self._safe_parse_structure,
@@ -11134,7 +11170,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         chosen = dialog.selected_candidate
-        self.result_recommendation = recommendation.with_selected(chosen)
+        active_recommendation = dialog.active_recommendation
+        if active_recommendation is not None:
+            self.result_recommendation = active_recommendation.with_selected(chosen)
         if cfg is not None:
             write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", self.results, chosen)
         if not is_jana:
