@@ -85,7 +85,7 @@ try {
 
     if ($buildStandalone) {
         Write-Step "Building standalone release (ONEFILE)"
-        $standaloneExe = Join-Path $releaseDir "PhaseStudio-1.0.9-x64.exe"
+        $standaloneExe = Join-Path $releaseDir "PhaseStudio-1.0.10-x64.exe"
         if ($Clean) { Remove-SafePath $standaloneExe }
         Invoke-PyInstaller "packaging\pyinstaller\PhaseStudio.spec" "PhaseStudio" $releaseDir
         Assert-PathExists $standaloneExe "Standalone release"
@@ -105,7 +105,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Could not package the authoritative Jana wrapper." }
         $env:PHASE_STUDIO_WRAPPER_PAYLOAD = $wrapperDir
         try {
-            $installerExe = Join-Path $releaseDir "PhaseStudio-Jana2020-Installer-1.0.9-x64.exe"
+            $installerExe = Join-Path $releaseDir "PhaseStudio-Jana2020-Installer-1.0.10-x64.exe"
             if ($Clean) { Remove-SafePath $installerExe }
             Invoke-PyInstaller "packaging\pyinstaller\PhaseStudioJanaInstaller.spec" "PhaseStudioJanaInstaller" $releaseDir
         } finally {
@@ -120,7 +120,7 @@ try {
 
     $publicFiles = @(Get-ChildItem -LiteralPath $releaseDir -File)
     $unexpected = @($publicFiles | Where-Object { $_.Name -notin @(
-        "PhaseStudio-1.0.9-x64.exe", "PhaseStudio-Jana2020-Installer-1.0.9-x64.exe"
+        "PhaseStudio-1.0.10-x64.exe", "PhaseStudio-Jana2020-Installer-1.0.10-x64.exe"
     ) })
     if ($unexpected.Count) { throw "Unexpected public release files: $($unexpected.Name -join ', ')" }
     if ($Target -eq "All" -and $publicFiles.Count -ne 2) { throw "All must produce exactly two public EXEs." }

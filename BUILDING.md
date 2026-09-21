@@ -83,8 +83,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 
 Outputs:
 
 ```text
-dist/release/PhaseStudio-1.0.9-x64.exe
-dist/release/PhaseStudio-Jana2020-Installer-1.0.9-x64.exe
+dist/release/PhaseStudio-1.0.10-x64.exe
+dist/release/PhaseStudio-Jana2020-Installer-1.0.10-x64.exe
 dist/superflip/superflip.exe            internal authoritative wrapper build
 dist/superflip/_internal/               internal wrapper runtime
 ```

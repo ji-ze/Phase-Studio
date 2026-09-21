@@ -29,7 +29,7 @@ Default outputs:
 - `dist/store/PhaseStudio-<version>-x64.msix`
 - `dist/store/manifest/AppxManifest.xml`
 
-The manifest version is canonical `VERSION + ".0"` (currently 1.0.9.0).
+The manifest version is canonical `VERSION + ".0"` (currently 1.0.10.0).
 An explicit `-Version` must agree; it cannot override the application version.
 No Jana wrapper signing parameters or integration payload markers are used by
 this Store build.

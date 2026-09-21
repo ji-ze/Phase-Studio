@@ -21,11 +21,11 @@ store_build = globals().get("store_build", False)
 if installer_build and store_build:
     raise ValueError("Installer and Store build profiles are mutually exclusive.")
 if installer_build:
-    target_name = "PhaseStudio-Jana2020-Installer-1.0.9-x64"
+    target_name = "PhaseStudio-Jana2020-Installer-1.0.10-x64"
 elif store_build:
     target_name = "PhaseStudio"
 else:
-    target_name = "PhaseStudio-1.0.9-x64"
+    target_name = "PhaseStudio-1.0.10-x64"
 entry_point = project_dir / "phase_studio" / ("jana_installer.py" if installer_build else "standalone.py")
 if not entry_point.is_file():
     raise FileNotFoundError(

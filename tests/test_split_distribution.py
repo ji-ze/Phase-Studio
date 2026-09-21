@@ -39,7 +39,7 @@ class SplitDistributionTests(unittest.TestCase):
         return {str(p.relative_to(self.target)): p.read_bytes() for p in self.target.rglob("*") if p.is_file()}
 
     def test_canonical_version(self):
-        self.assertEqual(VERSION, "1.0.9")
+        self.assertEqual(VERSION, "1.0.10")
         self.assertEqual(ji.bundled_integration_version(), VERSION)
         import phase_studio.app as app, phase_studio.jana_superflip as wizard
         self.assertEqual(app.__version__, VERSION)
@@ -255,8 +255,8 @@ class SplitDistributionTests(unittest.TestCase):
     def test_public_release_contract_is_two_onefile_executables(self):
         build = (ROOT / "packaging/build_windows.ps1").read_text()
         spec = (ROOT / "packaging/pyinstaller/PhaseStudio.spec").read_text()
-        self.assertIn('PhaseStudio-1.0.9-x64.exe', build)
-        self.assertIn('PhaseStudio-Jana2020-Installer-1.0.9-x64.exe', build)
+        self.assertIn('PhaseStudio-1.0.10-x64.exe', build)
+        self.assertIn('PhaseStudio-Jana2020-Installer-1.0.10-x64.exe', build)
         self.assertIn('$publicFiles.Count -ne 2', build)
         self.assertIn('a.binaries, a.datas', spec)
         self.assertIn('"JanaIntegrationPayload"', spec)

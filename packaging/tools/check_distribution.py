@@ -11,8 +11,8 @@ from PyInstaller.archive.readers import CArchiveReader
 
 
 NAMES = {
-    "standalone": "PhaseStudio-1.0.9-x64.exe",
-    "installer": "PhaseStudio-Jana2020-Installer-1.0.9-x64.exe",
+    "standalone": "PhaseStudio-1.0.10-x64.exe",
+    "installer": "PhaseStudio-Jana2020-Installer-1.0.10-x64.exe",
     "wrapper": "superflip.exe",
     "store": "PhaseStudio.exe",
 }
