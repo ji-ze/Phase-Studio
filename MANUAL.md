@@ -619,7 +619,7 @@ Phase Studio does not need to fabricate time-based percentages when no reliable 
 
 ### 11.6 Map-quality metrics
 
-The metrics panel always has exactly three tabs. Phase Studio chooses their contents automatically from two independent facts: whether a reference structure is available and whether the 5% holdout is enabled.
+The metrics panel always has three profile-aware tabs. Phase Studio chooses their contents automatically from two independent facts: whether a reference structure is available and whether the 5% holdout is enabled.
 
 | Assessment | Three plotted metrics and direction |
 |---|---|
@@ -629,6 +629,8 @@ The metrics panel always has exactly three tabs. Phase Studio chooses their cont
 | Reference-free · no holdout | Amplitude R_F ↓; Amplitude CC ↑; Weighted triplet C3 ↑ |
 
 Each tab plots available Superflip and SharpED candidates versus cycle. Reference-free map assessment is a map-character assessment and is not independent validation. The full diagnostic set, reflection/triplet counts, unavailable reasons, and candidate recommendation are written to `metrics.csv` and `map_quality_assessment.txt`.
+
+When **Map feedback → Intensity correction** is enabled, a 4th tab, **Map Feedback change (%)**, appears alongside the three profile metrics. It plots the average intensity change that cycle's map-based intensity correction applied to the reflections feeding the next cycle (one value per cycle, the same figure regardless of source, since the correction acts on reflection data shared by both Superflip and SharpED). Lower is better — it should shrink toward 0% as the map increasingly agrees with the observed data — and each point lags one cycle behind the correction that produced it. This is a diagnostic only: it is never part of the automatic recommendation, which always uses just the three profile metrics above.
 
 When enabled, the free set is selected once in complete symmetry/Friedel orbits before cycle 1. It remains excluded from Superflip input, SharpED feedback, missing-reflection completion, intensity correction, powder repartitioning, and later-cycle work data. Map feedback never changes the original measured validation basis.
 

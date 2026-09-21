@@ -155,7 +155,12 @@ def main():
     from PySide6.QtCore import Qt as _Qt
     check("Metrics tab bar never silently elides", win.metrics_tabs.tabBar().elideMode() == _Qt.TextElideMode.ElideNone)
     expected_metrics_tabs = {"Amplitude agreement R factor", "Amplitude CC", "Weighted triplet C3"}
-    actual_metrics_tabs = {win.metrics_tabs.tabText(i) for i in range(win.metrics_tabs.count())}
+    # A 4th tab (the restored Map Feedback change diagnostic) always exists
+    # but stays hidden until Map Feedback intensity correction is enabled --
+    # "shown" means visible, not merely present in the QTabWidget.
+    actual_metrics_tabs = {
+        win.metrics_tabs.tabText(i) for i in range(win.metrics_tabs.count()) if win.metrics_tabs.isTabVisible(i)
+    }
     check("Exactly 3 reference-free profile metric tabs are shown initially", actual_metrics_tabs == expected_metrics_tabs)
 
     # =========================================================================

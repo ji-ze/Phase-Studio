@@ -49,14 +49,23 @@ def main():
             superflip_quality=quality_sf, deblur_quality=quality_sharped,
         )
 
-    check("exactly three metric tabs exist", win.metrics_tabs.count() == 3)
-    check("the three internal metric keys are stable", win._metrics_tab_keys == ["quality_0", "quality_1", "quality_2"])
+    # A restored 4th tab (the historical Map Feedback change diagnostic) is
+    # always built alongside the 3 profile-aware tabs, but stays hidden
+    # until Map Feedback intensity correction is enabled -- see the
+    # dedicated visibility checks below.
+    check("exactly four metric tabs exist (3 profile-aware + 1 restored diagnostic)", win.metrics_tabs.count() == 4)
+    check(
+        "the four internal metric keys are stable",
+        win._metrics_tab_keys == ["quality_0", "quality_1", "quality_2", "map_feedback_change"],
+    )
+    check("the Map Feedback change tab starts hidden", not win.metrics_tabs.isTabVisible(3))
     for profile, definition in PROFILE_DEFINITIONS.items():
         win.results = [result(profile)]
         win._update_plot()
         expected = [metric.label for metric in definition.primary_metrics]
-        shown = [win.metrics_tabs.tabText(i) for i in range(win.metrics_tabs.count())]
+        shown = [win.metrics_tabs.tabText(i) for i in range(3)]
         check(f"{profile.value}: plotted metric set follows the authoritative profile", shown == expected)
+        check(f"{profile.value}: Map Feedback change tab remains hidden with intensity correction off", not win.metrics_tabs.isTabVisible(3))
         check(
             f"{profile.value}: assessment label follows the profile",
             win.assessment_label.text() == f"Assessment: {definition.assessment_label}",
@@ -70,6 +79,26 @@ def main():
             check(f"{profile.value}/{metric.key}: legend matches plotted sources", shown_labels == labels)
             direction = "Higher is better." if metric.higher_is_better else "Lower is better."
             check(f"{profile.value}/{metric.key}: direction tooltip is explicit", direction in win.metrics_tabs.tabToolTip(index))
+
+    # Enabling Map Feedback intensity correction shows the restored 4th tab
+    # with the cycle-level diagnostic; the 3 profile tabs and the
+    # recommendation-relevant data are untouched.
+    feedback_result = result(next(iter(PROFILE_DEFINITIONS)))
+    feedback_result.intensity_correction_avg_change_percent = -2.5
+    win.results = [feedback_result]
+    win.inputs["map_feedback_intensity_enabled"].setChecked(True)
+    win._update_plot()
+    check("Map Feedback change tab becomes visible once intensity correction is enabled", win.metrics_tabs.isTabVisible(3))
+    check("Map Feedback change tab title", win.metrics_tabs.tabText(3) == "Map Feedback change (%)")
+    feedback_hover = win._metrics_hover_series.get("map_feedback_change", [])
+    check(
+        "Map Feedback change tab plots the cycle-level diagnostic, not a Superflip/SharpED pair",
+        len(feedback_hover) == 1 and feedback_hover[0][0] == "Map Feedback change (%)"
+        and feedback_hover[0][2] == [-2.5],
+    )
+    win.inputs["map_feedback_intensity_enabled"].setChecked(False)
+    win._sync_map_feedback_widgets()
+    check("Map Feedback change tab hides again once intensity correction is disabled", not win.metrics_tabs.isTabVisible(3))
 
     win.results = []
     win._update_plot()

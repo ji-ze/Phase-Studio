@@ -5757,6 +5757,7 @@ def result_candidates_from_results(results: Sequence[CycleResult]) -> List[Resul
                 cycle=int(result.cycle), source=source,
                 map_path=str(map_path), structure_path=str(structure_path), metrics=quality,
                 usable_map=usable_map, usable_structure=usable_structure,
+                map_feedback_change_percent=result.intensity_correction_avg_change_percent,
             ))
     return candidates
 
@@ -5842,7 +5843,10 @@ def write_map_quality_report(
         direction = "higher is better" if metric.higher_is_better else "lower is better"
         lines.append(f"{index}. {metric.label} — {direction}")
     lines.extend(["", "Candidates:"])
+    show_feedback_column = any(c.map_feedback_change_percent is not None for c in candidates)
     header = ["Cycle", "Source"] + [metric.label for metric in definition.primary_metrics]
+    if show_feedback_column:
+        header.append("Map Feedback change (%)")
     lines.append(" | ".join(header))
     lines.append(" | ".join("---" for _ in header))
     for candidate in candidates:
@@ -5850,6 +5854,9 @@ def write_map_quality_report(
         for metric in definition.primary_metrics:
             value = candidate.metrics.value(metric.key)
             values.append("n/a" if value is None else f"{value:.6g}")
+        if show_feedback_column:
+            feedback_value = candidate.map_feedback_change_percent
+            values.append("—" if feedback_value is None else f"{feedback_value:+.1f}%")
         lines.append(" | ".join([str(candidate.cycle), result_source_title(candidate.source)] + values))
     lines.extend(["", "All computed metrics:"])
     for candidate in candidates:
@@ -7650,9 +7657,30 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._metrics_last_render_args: Dict[str, dict] = {}
         self._metrics_tab_keys: List[str] = []
         initial_definition = profile_definition(ValidationProfile.REFERENCE_FREE)
-        self._metrics_detail_supported_keys = {"quality_0", "quality_1", "quality_2"}
-        for index, metric in enumerate(initial_definition.primary_metrics):
-            key, title = f"quality_{index}", metric.label
+        self._metrics_detail_supported_keys = {"quality_0", "quality_1", "quality_2", "map_feedback_change"}
+        tab_specs = [
+            (
+                f"quality_{index}", metric.label,
+                f"{metric.label}. {'Higher is better.' if metric.higher_is_better else 'Lower is better.'}",
+            )
+            for index, metric in enumerate(initial_definition.primary_metrics)
+        ]
+        # Restored historical diagnostic (removed from display, never from
+        # computation, by the "exactly three metrics" standardization). Always
+        # built as a 4th tab -- like the other three -- so it can be shown or
+        # hidden live via setTabVisible() as the Map Feedback intensity
+        # correction checkbox is toggled, instead of being torn down and
+        # rebuilt. update_metrics_plot() hides it whenever that checkbox is
+        # off. It is diagnostic only: never a ranking/recommendation input.
+        tab_specs.append((
+            "map_feedback_change", "Map Feedback change (%)",
+            "Average intensity change caused by that cycle's map-based intensity correction, "
+            "relative to the observed reflection intensities before correction. Lower is better; "
+            "it should shrink toward 0% as the map increasingly agrees with the observed data. "
+            "Each cycle's point reflects the correction that fed its input, so it lags one cycle "
+            "behind the correction run itself.",
+        ))
+        for key, title, tooltip in tab_specs:
             # Each page is now JUST the canvas -- the interaction controls
             # (hint / Full range / Detail / Reset view) live once in the
             # QTabWidget's own corner, not a second per-tab toolbar row, so
@@ -7672,8 +7700,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             canvas.setFocusPolicy(Qt.ClickFocus)
             page_layout.addWidget(canvas, 1)
             tab_index = self.metrics_tabs.addTab(page, title)
-            direction = "Higher is better." if metric.higher_is_better else "Lower is better."
-            self.metrics_tabs.setTabToolTip(tab_index, f"{metric.label}. {direction}")
+            self.metrics_tabs.setTabToolTip(tab_index, tooltip)
             self._metrics_tab_keys.append(key)
             self.metrics_figures[key] = figure
             self.metrics_axes[key] = figure.add_subplot(111)
@@ -7687,6 +7714,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 on_state_changed=self._on_metrics_view_changed,
                 request_rerender=(lambda k=key: self._replay_metrics_tab(k)),
             )
+        self.metrics_tabs.setTabVisible(len(tab_specs) - 1, False)
         self.assessment_label = QLabel(f"Assessment: {initial_definition.assessment_label}")
         self.assessment_label.setObjectName("metricsAssessmentLabel")
         metrics_layout.addWidget(self.assessment_label)
@@ -8872,6 +8900,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     else:
                         tooltip = INPUT_TOOLTIPS.get(field_key, "")
                     widget.setToolTip(tooltip)  # type: ignore[attr-defined]
+        if hasattr(self, "metrics_tabs") and "map_feedback_change" in self._metrics_tab_keys:
+            feedback_index = self._metrics_tab_keys.index("map_feedback_change")
+            self.metrics_tabs.setTabVisible(feedback_index, self._check_value("map_feedback_intensity_enabled"))
 
     def _sync_input_source_mode_widgets(self) -> None:
         if self._configuration_locked:

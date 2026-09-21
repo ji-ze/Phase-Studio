@@ -402,3 +402,17 @@ def update_metrics_plot(self) -> None:
             ("SharpED", sharped_values, metric.higher_is_better, "#44b7ff", "^", "--"),
         ]
         self._render_metrics_tab(key, series, raw=True, raw_ylabel=metric.label)
+
+    feedback_key = "map_feedback_change"
+    feedback_index = self._metrics_tab_keys.index(feedback_key) if feedback_key in self._metrics_tab_keys else -1
+    if feedback_index >= 0:
+        feedback_enabled = bool(self._check_value("map_feedback_intensity_enabled"))
+        self.metrics_tabs.setTabVisible(feedback_index, feedback_enabled)
+        if feedback_enabled:
+            feedback_values = [result.intensity_correction_avg_change_percent for result in self.results]
+            self._render_metrics_tab(
+                feedback_key,
+                [("Map Feedback change (%)", feedback_values, False, "#001170", "o", "-")],
+                raw=True,
+                raw_ylabel="Mean intensity change (%)",
+            )

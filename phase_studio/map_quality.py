@@ -506,6 +506,11 @@ class ResultCandidate:
     metrics: MapQualityMetrics
     usable_map: bool = True
     usable_structure: bool = True
+    # Diagnostic only -- the average reflection-intensity change Map Feedback's
+    # intensity correction applied feeding INTO this cycle. Cycle-level, not
+    # source-specific (both this cycle's Superflip and SharpED candidates carry
+    # the same value); never read by recommend_best_result.
+    map_feedback_change_percent: Optional[float] = None
 
     @property
     def label(self) -> str:
