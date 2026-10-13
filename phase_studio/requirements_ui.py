@@ -1,0 +1,279 @@
+"""Shared Qt remediation UI for the pure checks in :mod:`requirements`."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Callable, Optional
+
+from PySide6.QtCore import Qt, QStandardPaths, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (
+    QApplication, QDialog, QFileDialog, QFormLayout, QHBoxLayout, QLabel,
+    QLineEdit, QMessageBox, QPushButton, QVBoxLayout, QWidget,
+)
+
+from phase_studio import requirements as reqs
+from phase_studio.error_reporting import sanitize_error_details
+from phase_studio.ui_branding import (
+    apply_safe_dialog_geometry,
+    create_phase_studio_context_banner,
+)
+
+
+def confirm_third_party_download(parent: QWidget, label: str) -> bool:
+    """Require an explicit license decision before downloading a tool."""
+    confirmation = QMessageBox(parent)
+    confirmation.setWindowTitle(f"Download {label}")
+    confirmation.setIcon(QMessageBox.Information)
+    confirmation.setText(f"{label} is third-party software supplied under its authors' license.")
+    confirmation.setInformativeText(
+        "Review and accept the third-party license terms before Phase Studio downloads it."
+    )
+    view_license = confirmation.addButton("View license information", QMessageBox.ActionRole)
+    agree = confirmation.addButton("Agree and download", QMessageBox.AcceptRole)
+    cancel = confirmation.addButton("Cancel", QMessageBox.RejectRole)
+    confirmation.setDefaultButton(agree)
+    confirmation.setEscapeButton(cancel)
+
+    while True:
+        confirmation.exec()
+        clicked = confirmation.clickedButton()
+        if clicked is agree:
+            return True
+        if clicked is view_license:
+            QDesktopServices.openUrl(QUrl(reqs.SUPERFLIP_LICENSE_URL))
+            continue
+        return False
+
+
+def show_requirement_remediation_dialog(
+    parent: Optional[QWidget],
+    status: reqs.RequirementStatus,
+    configured_value: str = "",
+    *,
+    download_dir: Optional[Path] = None,
+    download_opener: Optional[Callable[..., object]] = None,
+) -> Optional[str]:
+    """Return a repaired path/token, or ``None`` for *Skip for now*."""
+    kind = status.kind
+    dialog = QDialog(parent)
+    dialog.setObjectName("requirementRemediationDialog")
+    dialog.setWindowTitle(f"Phase Studio — {status.title}")
+    dialog.setModal(True)
+    root = QVBoxLayout(dialog)
+    root.setContentsMargins(0, 0, 0, 0)
+    root.setSpacing(0)
+    subtitle = {
+        reqs.RequirementKind.SUPERFLIP: "Locate or install the Superflip executable required by this workflow",
+        reqs.RequirementKind.EDMA: "Locate or install the EDMA executable required by this workflow",
+        reqs.RequirementKind.SHARPED: "Configure access before SharpED processing starts",
+    }[kind]
+    root.addWidget(create_phase_studio_context_banner(status.title.upper(), subtitle))
+
+    body = QWidget(dialog)
+    body_layout = QVBoxLayout(body)
+    body_layout.setContentsMargins(22, 18, 22, 18)
+    body_layout.setSpacing(10)
+    explanation = QLabel(status.message)
+    explanation.setObjectName("requirementMessage")
+    explanation.setWordWrap(True)
+    body_layout.addWidget(explanation)
+    feedback = QLabel("")
+    feedback.setObjectName("requirementFeedback")
+    feedback.setWordWrap(True)
+    feedback.setStyleSheet("color: #b94a48;")
+    feedback.setVisible(False)
+
+    selected: dict[str, Optional[str]] = {"value": None}
+    buttons = QVBoxLayout()
+    buttons.setSpacing(8)
+
+    def show_feedback(message: str) -> None:
+        feedback.setText(str(message))
+        feedback.setVisible(True)
+        dialog.adjustSize()
+
+    if kind is reqs.RequirementKind.SHARPED:
+        network_failure = status.state in {
+            reqs.RequirementState.SERVER_UNREACHABLE,
+            reqs.RequirementState.MALFORMED_RESPONSE,
+        }
+        account_text = QLabel(
+            "This is a network/server response problem. Changing the API token cannot resolve it. "
+            "Keep the configured token and retry after network access is restored."
+            if network_failure else
+            "SharpED processing requires an active Jana2020 or SharpED account and an API token."
+        )
+        account_text.setWordWrap(True)
+        body_layout.addWidget(account_text)
+        decision_actions = QHBoxLayout()
+        decision_actions.setSpacing(8)
+        decision_actions.addStretch(1)
+        if not network_failure:
+            token_row = QFormLayout()
+            token_edit = QLineEdit(str(configured_value or ""))
+            token_edit.setObjectName("requirementTokenEdit")
+            token_edit.setEchoMode(QLineEdit.Password)
+            token_edit.setPlaceholderText("Enter API token")
+            token_row.addRow("API token", token_edit)
+            body_layout.addLayout(token_row)
+            open_account = QPushButton("Open SharpED account")
+            open_account.setObjectName("requirementOpenAccountButton")
+            open_account.clicked.connect(
+                lambda _checked=False: QDesktopServices.openUrl(QUrl(reqs.SHARPED_ACCOUNT_URL))
+            )
+            set_token = QPushButton("Set token")
+            set_token.setObjectName("primaryButton")
+            set_token.setMinimumSize(set_token.sizeHint())
+
+            def accept_token() -> None:
+                token = token_edit.text().strip()
+                if not token:
+                    show_feedback("Enter an API token or choose Skip for now.")
+                    return
+                selected["value"] = token
+                dialog.accept()
+
+            set_token.clicked.connect(accept_token)
+            account_actions = QHBoxLayout()
+            account_actions.setSpacing(8)
+            account_actions.addWidget(open_account)
+            account_actions.addStretch(1)
+            buttons.addLayout(account_actions)
+            decision_actions.addWidget(set_token)
+    else:
+        license_text = QLabel(
+            'This third-party program is distributed by its authors. '
+            '<a href="https://superflip.fzu.cz/">Review license information</a> before downloading.'
+        )
+        license_text.setObjectName("requirementLicenseText")
+        license_text.setOpenExternalLinks(True)
+        license_text.setWordWrap(True)
+        body_layout.addWidget(license_text)
+        browse_button = QPushButton("Browse…")
+        browse_button.setObjectName("requirementBrowseButton")
+        open_download = QPushButton("Open download page")
+        open_download.setObjectName("requirementOpenDownloadButton")
+        download_button = QPushButton("Download automatically")
+        download_button.setObjectName("primaryButton")
+        download_button.setMinimumSize(download_button.sizeHint())
+        label = "Superflip" if kind is reqs.RequirementKind.SUPERFLIP else "EDMA"
+        download_url = (
+            reqs.SUPERFLIP_DOWNLOAD_URL
+            if kind is reqs.RequirementKind.SUPERFLIP else reqs.EDMA_DOWNLOAD_URL
+        )
+
+        def accept_path(path_text: str) -> bool:
+            path = reqs.resolve_executable(path_text)
+            if path is None or not reqs.is_expected_executable(kind, path):
+                show_feedback(f"The selected file is not a valid {kind.value} executable.")
+                return False
+            if kind is reqs.RequirementKind.SUPERFLIP and reqs.is_phase_studio_wrapper(path):
+                show_feedback("The selected file is the Phase Studio Jana2020 wrapper. Select the real Superflip executable.")
+                return False
+            selected["value"] = str(path)
+            dialog.accept()
+            return True
+
+        def browse() -> None:
+            path = QFileDialog.getOpenFileName(
+                dialog, f"Select {label} executable", str(configured_value or ""),
+                "Executables (*.exe);;All files (*)",
+            )[0]
+            if path:
+                accept_path(path)
+
+        def automatic_download() -> None:
+            if not confirm_third_party_download(dialog, label):
+                return
+            destination = download_dir
+            if destination is None:
+                base = QStandardPaths.writableLocation(QStandardPaths.AppLocalDataLocation)
+                destination = Path(base or str(Path.home() / ".phase_studio")) / "external_tools" / kind.value
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            try:
+                path = reqs.download_requirement_executable(
+                    kind, destination, opener=download_opener,
+                )
+            except Exception as exc:
+                show_feedback("Automatic download failed: " + sanitize_error_details(exc))
+            else:
+                accept_path(str(path))
+            finally:
+                QApplication.restoreOverrideCursor()
+
+        browse_button.clicked.connect(browse)
+        open_download.clicked.connect(
+            lambda _checked=False: QDesktopServices.openUrl(QUrl(download_url))
+        )
+        download_button.clicked.connect(automatic_download)
+        utility_actions = QHBoxLayout()
+        utility_actions.setSpacing(8)
+        utility_actions.addWidget(browse_button)
+        utility_actions.addWidget(open_download)
+        utility_actions.addStretch(1)
+        buttons.addLayout(utility_actions)
+        decision_actions = QHBoxLayout()
+        decision_actions.setSpacing(8)
+        decision_actions.addStretch(1)
+        decision_actions.addWidget(download_button)
+
+    body_layout.addWidget(feedback)
+    skip_button = QPushButton("Skip for now")
+    if kind is reqs.RequirementKind.SHARPED and status.state in {
+        reqs.RequirementState.SERVER_UNREACHABLE, reqs.RequirementState.MALFORMED_RESPONSE,
+    }:
+        skip_button.setText("Close")
+    skip_button.setObjectName("requirementSkipButton")
+    skip_button.clicked.connect(dialog.reject)
+    decision_actions.addWidget(skip_button)
+    buttons.addLayout(decision_actions)
+    body_layout.addLayout(buttons)
+    root.addWidget(body)
+    apply_safe_dialog_geometry(dialog, 680, 300)
+    if parent is not None and parent.isVisible():
+        # Keep remediation visually attached to the workflow that requested
+        # it, then clamp the complete native frame back into the usable screen.
+        frame = dialog.frameGeometry()
+        offset = parent.frameGeometry().center() - frame.center()
+        dialog.move(dialog.pos() + offset)
+        screen = dialog.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            frame = dialog.frameGeometry()
+            dx = max(available.left() - frame.left(), 0) - max(frame.right() - available.right(), 0)
+            dy = max(available.top() - frame.top(), 0) - max(frame.bottom() - available.bottom(), 0)
+            if dx or dy:
+                dialog.move(dialog.pos().x() + dx, dialog.pos().y() + dy)
+    dialog.exec()
+    return selected["value"]
+
+
+def run_remediation_loop(
+    parent: Optional[QWidget],
+    check: Callable[[], reqs.PreflightResult],
+    current_value: Callable[[reqs.RequirementKind], str],
+    persist: Callable[[reqs.RequirementKind, str, bool], None],
+    on_success: Optional[Callable[[reqs.PreflightResult], None]] = None,
+    *,
+    download_dir: Optional[Path] = None,
+    download_opener: Optional[Callable[..., object]] = None,
+) -> bool:
+    """Run check–repair–recheck while callers retain state ownership."""
+    while True:
+        result = check()
+        for repaired in result.repaired:
+            persist(repaired.kind, str(repaired.path), True)
+        if result.ok:
+            if on_success is not None:
+                on_success(result)
+            return True
+        status = result.first_failure
+        if status is None:
+            return True
+        value = show_requirement_remediation_dialog(
+            parent, status, current_value(status.kind),
+            download_dir=download_dir, download_opener=download_opener,
+        )
+        if value is None:
+            return False
+        persist(status.kind, value, False)

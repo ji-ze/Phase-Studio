@@ -54,6 +54,8 @@ FIXTURE_LINES = [
 def main():
     import gemmi
     import phase_studio.app as appmod
+    import phase_studio.inflip_io as inflip_io
+    import phase_studio.jana_superflip as jana_superflip
     import phase_studio.process_utils as process_utils
 
     tmpdir = Path(tempfile.mkdtemp())
@@ -120,6 +122,26 @@ def main():
     check("analyze_hkl_data: d_full_98 matches the pinned baseline (10.0 A for this cell/fixture)", close(analysis.d_full_98, 10.0))
     check("analyze_hkl_data: bin_count=4 produces exactly 4 bins", len(analysis.bins) == 4)
 
+    phase_hkl_path = tmpdir / "fixture_phase.hkl"
+    phase_hkl_path.write_text(
+        "0 0 0 0 0 1\n" + "\n".join(
+            " ".join([*line.split()[:4], "0", line.split()[4]]) for line in FIXTURE_LINES
+        ) + "\n",
+        encoding="utf-8",
+    )
+    phase_analysis = appmod.analyze_hkl_data(
+        phase_hkl_path, appmod.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
+        cell, sg, sg.hm, source_note="phase fixture", bin_count=4,
+    )
+    check("phase-bearing input retains its explicit 000 protocol record",
+          any((r.h, r.k, r.l) == (0, 0, 0) for r in phase_analysis.reflections_raw))
+    check("zero-valued populated phase fields count as supplied fields",
+          all(r.phase is not None for r in phase_analysis.reflections_raw))
+    check("000 does not alter physical d_min", close(phase_analysis.d_min, analysis.d_min))
+    check("000 does not alter d98", close(phase_analysis.d_full_98, analysis.d_full_98))
+    check("000 does not alter resolution-bin statistics",
+          phase_analysis.bins == analysis.bins)
+
     # =========================================================================
     # reflection_columns_for_mode() / normalize_reflection_data_mode():
     # mode-token normalization, pinned exactly.
@@ -147,12 +169,218 @@ def main():
     check("reflection_primary_snr_label: amplitude+FWHM -> 'F/FWHM'", appmod.reflection_primary_snr_label(appmod.REFLECTION_DATA_MODE_AMPLITUDE_FWHM) == "F/FWHM")
     check("reflection_primary_snr_label: intensity+FWHM -> 'I/FWHM'", appmod.reflection_primary_snr_label(appmod.REFLECTION_DATA_MODE_INTENSITY_FWHM) == "I/FWHM")
 
+    orbit_reflections = [
+        appmod.Reflection(sign * h, sign * k, sign * l, 10.0)
+        for h, k, l in ((1, 0, 0), (0, 1, 0), (1, 1, 0), (2, 1, 0), (1, 2, 0))
+        for sign in (-1, 1)
+    ]
+    holdout_a = appmod.select_orbit_safe_holdout(orbit_reflections, gemmi.SpaceGroup("P 1"), "123")
+    holdout_b = appmod.select_orbit_safe_holdout(orbit_reflections, gemmi.SpaceGroup("P 1"), "123")
+    check("holdout split is deterministic for a fixed seed", holdout_a == holdout_b)
+    check("holdout split selects complete measured Friedel pairs", all(tuple(-v for v in hkl) in holdout_a for hkl in holdout_a))
+
     # =========================================================================
     # process_utils: pure, dependency-free helpers used by both app.py and
     # jana_superflip.py.
     # =========================================================================
     check("process_utils.text_encoding() returns a non-empty string", bool(process_utils.text_encoding()))
     check("process_utils.allow_external_process_foreground(-1) is False for an invalid PID", process_utils.allow_external_process_foreground(-1) is False)
+
+    reference_path = tmpdir / "reference.cif"
+    model_path = tmpdir / "model.cif"
+    atoms = [
+        appmod.AtomSite("C1", "C", appmod.np.asarray((0.10, 0.20, 0.30))),
+        appmod.AtomSite("O1", "O", appmod.np.asarray((0.45, 0.55, 0.65))),
+    ]
+    appmod.write_structure_cif(reference_path, cell, sg, "P 1", atoms)
+    appmod.write_structure_cif(model_path, cell, sg, "P 1", atoms)
+    reference_context = appmod.load_reference_context(reference_path, tmpdir / "reference_work")
+    match_metrics = appmod.atom_reference_match_metrics(model_path, reference_context, 0.2)
+    check("reference matching reports true positives", match_metrics is not None and match_metrics[2] == 2)
+    check("reference matching reports false positives", match_metrics is not None and match_metrics[3] == 0)
+
+    # Frozen holdout indices are forbidden from missing-reflection completion.
+    # Stub only map prediction/candidate discovery; exercise the real feedback
+    # update and its unchanged intensity conversion path.
+    original_candidates = appmod.candidate_missing_hkls_from_bounds
+    original_predictions = appmod.xplor_fft_predictions
+    held_out = (3, 0, 0)
+    allowed = (4, 0, 0)
+    try:
+        appmod.candidate_missing_hkls_from_bounds = lambda *_args: [held_out, allowed]
+        appmod.xplor_fft_predictions = lambda _path, hkls: {tuple(hkl): (4.0, 0.0) for hkl in hkls}
+        updated, _change = appmod.apply_map_feedback_to_reflections(
+            unique,
+            appmod.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+            tmpdir / "stub.xplor",
+            cell,
+            0.0,
+            True,
+            100.0,
+            False,
+            0.0,
+            0.0,
+            lambda _message: None,
+            excluded_hkls=frozenset({held_out}),
+        )
+        updated_hkls = {(r.h, r.k, r.l) for r in updated}
+        check("map feedback: frozen holdout never enters missing-reflection completion", held_out not in updated_hkls)
+        check("map feedback: an allowed missing reflection can still be added", allowed in updated_hkls)
+    finally:
+        appmod.candidate_missing_hkls_from_bounds = original_candidates
+        appmod.xplor_fft_predictions = original_predictions
+
+    # Exact Superflip input baseline. A model-seeded calculation must force a
+    # single deterministic repeat and omit randomseed; an unseeded calculation
+    # must preserve both configured values.
+    superflip_hkl = tmpdir / "superflip_guard.hkl"
+    superflip_hkl.write_text("   1   0   0      12.5       0.8\n# ignored\n", encoding="utf-8")
+    superflip_context = appmod.ReferenceContext(
+        cif_path=tmpdir / "guard.cif",
+        work_ref_cif=tmpdir / "guard_work.cif",
+        cell=gemmi.UnitCell(10, 11, 12, 90, 90, 90),
+        spacegroup=gemmi.SpaceGroup("P 1"),
+        spacegroup_hm="P 1",
+        composition="C 2 O 1",
+        atoms=[],
+    )
+    writer_args = dict(
+        prefix="gold", ref_ctx=superflip_context, observed_hkl=superflip_hkl,
+        output_xplor="gold.xplor", reference_file=None, reference_format="cif",
+        perform_algorithm="CF", output_format="xplor", write_auxiliary_outputs=False,
+        export_superflip_xplor=True, export_superflip_ccp4=False,
+        export_superflip_jana=False, voxel="", bestdensities_count=3,
+        bestdensities_metric="contrast", bestdensities_symmetry=False, polish=True,
+        maxcycles=100, repeatmode=7, randomseed="12345", delta="AUTO",
+        weakratio="0.2", biso="0.0",
+        reflection_data_mode=appmod.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        normalize="none", nresshells=1, missing="", searchsymmetry="average",
+        derivesymmetry="yes", electrons="", dataitemwidths="4 14 14",
+        extra_superflip_keywords="", log=None,
+    )
+    common_body = """title gold
+perform CF
+outputfile gold.xplor
+outputformat xplor
+{model_line}dimension  3
+cell 10.000000 11.000000 12.000000 90.0000 90.0000 90.0000
+spacegroup P 1
+centro no
+centers
+  0.000000  0.000000  0.000000
+endcenters
+symmetry
+  x1 x2 x3
+endsymmetry
+composition C 2 O 1
+
+# Keywords for density modification
+repeatmode {repeatmode}
+bestdensities 3 rvalue
+maxcycles 100
+delta AUTO
+weakratio 0.2
+Biso 0.0
+polish yes
+{randomseed_line}searchsymmetry average
+derivesymmetry yes
+dataformat amplitude dummy
+fbegin
+   1   0   0      12.5       0.8
+endf
+"""
+    plain_input = tmpdir / "plain.inflip"
+    appmod.write_superflip_input(plain_input, model_file=None, **writer_args)
+    check(
+        "Superflip input: unseeded output matches the exact golden text",
+        plain_input.read_text(encoding="utf-8") == common_body.format(
+            model_line="", repeatmode=7, randomseed_line="randomseed 12345\n",
+        ),
+    )
+    seeded_input = tmpdir / "seeded.inflip"
+    appmod.write_superflip_input(
+        seeded_input, model_file=tmpdir / "seed.xplor", **writer_args,
+    )
+    check(
+        "Superflip input: model-seeded output forces repeatmode 1 and omits randomseed",
+        seeded_input.read_text(encoding="utf-8") == common_body.format(
+            model_line="modelfile seed.xplor\n", repeatmode=1, randomseed_line="",
+        ),
+    )
+
+    # The full GUI and Jana wrapper historically differ only in how comment
+    # markers inside quotes and outputfile comments are treated. Pin both
+    # policies while sharing the genuinely identical ordered M80 rewrite.
+    check(
+        ".inflip tokenizer: Jana preserves comment markers inside quoted paths",
+        inflip_io.split_inflip_line('referencefile "model#1.cif" # note')
+        == ["referencefile", "model#1.cif"],
+    )
+    check(
+        ".inflip tokenizer: full GUI keeps its established first-marker policy",
+        inflip_io.split_inflip_line_legacy('referencefile "model#1.cif" # note')
+        == ["referencefile", '"model'],
+    )
+    inflip_lines = [
+        "title sample",
+        "perform CF",
+        "outputfile original.map # existing output",
+        "randomseed 7",
+        "voxel AUTO",
+        "# Keywords for charge flipping",
+        "fbegin",
+        "1 0 0 12.5 0.8",
+        "endf",
+    ]
+    header = [
+        "title sample",
+        "perform CF",
+        "outputfile original.map # existing output",
+        "randomseed 7",
+        "voxel AUTO",
+    ]
+    check(
+        ".inflip header extraction stops before Jana's charge-flipping block byte-for-byte",
+        inflip_io.inflip_header_for_m80(inflip_lines) == header
+        and inflip_io.inflip_header_for_m80_legacy(inflip_lines) == header,
+    )
+    fixed_tail = [
+        "repeatmode 1",
+        'modelfile "selected.xplor"',
+        "polish no",
+        "maxcycles 0",
+        "searchsymmetry average",
+        "derivesymmetry yes",
+    ]
+    wrapper_m80 = [
+        "title sample",
+        "perform symmetry",
+        'outputfile original.map "sample-ready.xplor" # existing output',
+        *fixed_tail,
+    ]
+    legacy_m80 = [
+        "title sample",
+        "perform symmetry",
+        'outputfile original.map "sample-ready.xplor"',
+        *fixed_tail,
+    ]
+    check(
+        ".inflip M80 rewrite: Jana wrapper preserves exact ordering and inline comment",
+        inflip_io.define_m80_inflip(header, "sample", "selected.xplor") == wrapper_m80,
+    )
+    check(
+        ".inflip M80 rewrite: full GUI preserves its exact historical output text",
+        inflip_io.define_m80_inflip_legacy(header, "sample", "selected.xplor") == legacy_m80,
+    )
+    wrapper_bytes = tmpdir / "wrapper_m80.inflip"
+    legacy_bytes = tmpdir / "legacy_m80.inflip"
+    jana_superflip.write_text_lines(wrapper_bytes, wrapper_m80)
+    appmod.write_text_lines_platform(legacy_bytes, legacy_m80)
+    check(
+        ".inflip M80 files preserve the exact CRLF byte contract",
+        wrapper_bytes.read_bytes() == ("\r\n".join(wrapper_m80) + "\r\n").encode("ascii")
+        and legacy_bytes.read_bytes() == ("\r\n".join(legacy_m80) + "\r\n").encode("ascii"),
+    )
 
     import shutil
     shutil.rmtree(tmpdir, ignore_errors=True)

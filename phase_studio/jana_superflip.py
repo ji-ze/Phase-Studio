@@ -3,26 +3,35 @@
 """
 Jana2020-compatible Superflip launcher.
 
-This module is intended to be frozen as superflip.exe and placed where Jana
-normally finds the Superflip-for-Jana wrapper. The original Superflip binary is
-expected next to it as superflip_original.exe.
+This module is intended to be frozen as the Superflip-for-Jana launcher.  The
+scientific executable is resolved from the active Jana installation as
+``SUPERFLIP\\superflip.exe``.  ``superflip_original.exe`` is retained only for
+the verified legacy layout that replaced that file with a wrapper.
 """
 
 from __future__ import annotations
 
 import os
+import json
 import queue
 import re
-import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
+from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Sequence, Tuple
+from typing import Callable, List, Optional, Sequence, Tuple
+from phase_studio.jana_density import origin_preserving_conversion_lines
+
+try:
+    from phase_studio.edma_defaults import NORMAL_EDMA_THRESHOLD_SIGMA
+except Exception:
+    from edma_defaults import NORMAL_EDMA_THRESHOLD_SIGMA
 
 try:
     from phase_studio.version import VERSION as __version__
@@ -35,17 +44,27 @@ except Exception:
     from error_reporting import build_error_report, sanitize_error_details, show_phase_studio_error
 
 try:
-    from phase_studio.sharped_server_client import (
-        SharpEDServerClient, DEFAULT_SERVER_URL, MODEL_METADATA_REUSE_SECONDS,
-        normalize_server_url, current_model_catalog, apply_model_catalog,
-        model_selection, sync_model_catalog,
-    )
+    from phase_studio.sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL, reconcile_model_selection
 except Exception:
-    from sharped_server_client import (
-        SharpEDServerClient, DEFAULT_SERVER_URL, MODEL_METADATA_REUSE_SECONDS,
-        normalize_server_url, current_model_catalog, apply_model_catalog,
-        model_selection, sync_model_catalog,
-    )
+    from sharped_server_client import SharpEDServerClient, DEFAULT_SERVER_URL, reconcile_model_selection
+
+try:
+    from phase_studio.sharped_tiling import decide_sharped_submission, run_tiled_sharped_inference
+except Exception:
+    from sharped_tiling import decide_sharped_submission, run_tiled_sharped_inference  # type: ignore[no-redef]
+
+# This lightweight wrapper has no user-facing "max upload size" setting
+# (unlike the full GUI's sharped_max_upload_mb); 100 MB matches that
+# setting's own default and the current public SharpED server's known
+# limit, so an oversized map is still tiled rather than failing outright.
+DEFAULT_SHARPED_MAX_UPLOAD_MB = 100.0
+SHARPED_ONE_CYCLE_MODEL = "PEAK A (model prediction)"
+SHARPED_ITERATIVE_MODEL = "SEED (cyclic CF)"
+
+
+def sharped_model_for_cycles(cycles: int) -> str:
+    """Return Phase Studio's exact, server-independent workflow policy."""
+    return SHARPED_ONE_CYCLE_MODEL if int(cycles) == 1 else SHARPED_ITERATIVE_MODEL
 
 try:
     from phase_studio.ui_style import apply_phase_studio_style
@@ -67,10 +86,31 @@ except Exception:
         text_encoding,
     )
 
+try:
+    from phase_studio.inflip_io import (
+        COMMENT_MARKERS,
+        add_modelseed_modelfile,
+        apply_reference_override,
+        define_m80_inflip,
+        ensure_xplor_output,
+        first_token,
+        inflip_header_for_m80,
+        split_inflip_line,
+    )
+except Exception:
+    from inflip_io import (  # type: ignore[no-redef]
+        COMMENT_MARKERS,
+        add_modelseed_modelfile,
+        apply_reference_override,
+        define_m80_inflip,
+        ensure_xplor_output,
+        first_token,
+        inflip_header_for_m80,
+        split_inflip_line,
+    )
 
-COMMENT_MARKERS = ("#", "!", ";")
 INFLIP_SUFFIXES = {".inflip", ".inp"}
-DEFAULT_JANA_SUPERFLIP = Path(r"C:\Jana2020\SUPERFLIP\superflip_original.exe")
+DEFAULT_JANA_SUPERFLIP = Path(r"C:\Jana2020\SUPERFLIP\superflip.exe")
 DEFAULT_JANA_EDMA = Path(r"C:\Jana2020\SUPERFLIP\EDMA.exe")
 
 INPUT_MODE_INFLIP = "Jana2020 .inflip"
@@ -132,6 +172,9 @@ class JanaRunOptions:
     powder_wavelength: float = 0.0
     powder_separation_factor: float = 0.2
     powder_map_ratio_mix: float = 1.0
+    # 2.0.0 Autosolve: "A" (solve the phase problem) or "B" (predict the
+    # structure model); empty for every other action.
+    autosolve_option: str = ""
 
 
 @dataclass
@@ -200,12 +243,22 @@ def build_jana_handoff_import(
     handoff_run_sharped = options.next_cycle_modelfile != "none"
     handoff_modelfile_source = "none" if options.next_cycle_modelfile == "none" else "deblurred_xplor"
 
+    integration_dir = application_dir()
+    integration_superflip = resolve_active_jana_superflip(integration_dir)
+    jana_root = resolve_jana_installation_root(integration_dir)
+    integration_edma = jana_root / "SUPERFLIP" / "EDMA.exe"
     handoff_values = {
         "input_source_mode": app_input_label,
         "jana_inflip": str(inflip_path),
         "work_dir": str(base_dir / f"phase_studio_full_run_{inflip_path.stem}"),
-        "superflip_exe": str(DEFAULT_JANA_SUPERFLIP),
-        "edma_exe": str(DEFAULT_JANA_EDMA),
+        "superflip_exe": str(integration_superflip.resolve()),
+        "edma_exe": str(integration_edma.resolve()),
+        # Normal Jana workflows start from Phase Studio's own structure-
+        # extraction policy. Incoming .inflip plimit and persisted GUI values
+        # must not resurrect the former 0.30/0.50 defaults. Users can still
+        # edit either control after the handoff is loaded.
+        "plimit_superflip": str(NORMAL_EDMA_THRESHOLD_SIGMA),
+        "plimit_deblur": str(NORMAL_EDMA_THRESHOLD_SIGMA),
         "cycles": str(options.cycles),
         "run_sharped": "true" if handoff_run_sharped else "false",
         "sharped_base_url": options.server_url,
@@ -299,10 +352,19 @@ def jana_handoff_log_lines(handoff: JanaHandoffImport, inflip_path: Path, applie
 
 
 class JanaLogger:
+    """Append-only, timestamped log anchored to one resolved project path."""
+
     def __init__(self, log_path: Path) -> None:
-        self.log_path = log_path
+        self.log_path = Path(log_path).expanduser().resolve()
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._fh = self.log_path.open("w", encoding="utf-8", errors="replace")
+        self._fh = self.log_path.open("a", encoding="utf-8", errors="replace")
+        self._lock = threading.Lock()
+        started = datetime.now().astimezone()
+        self._fh.write("\n" + "=" * 60 + "\n")
+        self._fh.write(f"Phase Studio {__version__} session\n")
+        self._fh.write(f"Started: {started.isoformat(timespec='seconds')}\n")
+        self._fh.write("=" * 60 + "\n")
+        self._fh.flush()
 
     def close(self) -> None:
         try:
@@ -312,24 +374,63 @@ class JanaLogger:
 
     def __call__(self, message: str) -> None:
         text = sanitize_error_details(message)
-        # log.txt (below) is the authoritative, always-available copy of this
-        # message; the console mirror is a bonus for a development console
-        # window, not something later code depends on. This wrapper builds
-        # windowed (console=False, see superflip.spec) precisely so no black
-        # console window appears behind the Jana2020 Wizard -- stdout may
-        # therefore be absent entirely, which must never take down logging.
+        # The Jana project log is the authoritative, always-available copy of
+        # this message; the console mirror is a bonus for a development
+        # console window, not something later code depends on. This wrapper
+        # builds windowed (console=False, see superflip.spec) precisely so no
+        # black console window appears behind the Jana2020 Wizard -- stdout
+        # may therefore be absent entirely, which must never take down logging.
         try:
             print(text, flush=True)
         except Exception:
             pass
-        self._fh.write(text + "\n")
-        self._fh.flush()
+        timestamp = datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3]
+        with self._lock:
+            self._fh.write(f"{timestamp} {text}\n")
+            self._fh.flush()
 
 
 def application_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parents[1]
+
+
+def safe_wrapper_log_dir() -> Path:
+    """Writable fallback that is never derived from the wrapper executable."""
+    return (Path(tempfile.gettempdir()) / "PhaseStudio").resolve()
+
+
+def jana_project_log_path(
+    project_dir: Optional[Path] = None, *, inflip_path: Optional[Path] = None,
+) -> Path:
+    """Return a path fixed from the incoming Jana project, or safe temp.
+
+    CWD and the executable directory are deliberately not fallback authorities:
+    Jana commonly launches the wrapper with its installation directory as CWD.
+    """
+    if inflip_path is not None:
+        root = Path(inflip_path).expanduser().resolve().parent
+    elif project_dir is not None:
+        root = Path(project_dir).expanduser().resolve()
+    else:
+        root = safe_wrapper_log_dir()
+    return root / "log.txt"
+
+
+def create_jana_logger(inflip_path: Optional[Path]) -> JanaLogger:
+    """Open the authoritative project log, with a safe early-failure fallback."""
+    preferred = jana_project_log_path(inflip_path=inflip_path)
+    try:
+        return JanaLogger(preferred)
+    except OSError:
+        fallback = safe_wrapper_log_dir() / "log.txt"
+        logger = JanaLogger(fallback)
+        logger(
+            f"WARNING: project log {preferred} could not be opened; "
+            f"using writable fallback {fallback}."
+        )
+        return logger
 
 
 def read_text_lines(path: Path) -> List[str]:
@@ -389,148 +490,6 @@ def stage_external_file_for_superflip(source: Path, target_dir: Path, base_name:
     return dst
 
 
-def split_inline_comment(line: str) -> Tuple[str, str]:
-    quote = False
-    for i, ch in enumerate(line):
-        if ch == '"':
-            quote = not quote
-        elif not quote and ch in COMMENT_MARKERS:
-            return line[:i].rstrip(), line[i:]
-    return line.rstrip(), ""
-
-
-def split_inflip_line(line: str) -> List[str]:
-    """Split one Superflip/Jana keyword line while preserving quoted paths.
-
-    Inline comments beginning with #, ! or ; are removed only when they occur
-    outside double quotes. This keeps Windows paths and filenames containing
-    spaces intact.
-    """
-    body, _comment = split_inline_comment(str(line or ""))
-    text = body.strip()
-    if not text:
-        return []
-    try:
-        return shlex.split(text, posix=True)
-    except (ValueError, TypeError):
-        return text.split()
-
-
-def first_token(line: str) -> str:
-    parts = split_inflip_line(line)
-    if not parts:
-        return ""
-    return parts[0].lower()
-
-
-def line_has_xplor_output(line: str) -> bool:
-    body, _comment = split_inline_comment(line)
-    parts = body.split()
-    return any(Path(part.strip('"')).suffix.lower() == ".xplor" for part in parts[1:])
-
-
-def insert_before_fbegin(lines: Sequence[str], new_line: str) -> List[str]:
-    out: List[str] = []
-    inserted = False
-    for line in lines:
-        if not inserted and first_token(line) == "fbegin":
-            out.append(new_line)
-            inserted = True
-        out.append(line)
-    if not inserted:
-        out.append(new_line)
-    return out
-
-
-def ensure_xplor_output(lines: Sequence[str], base_name: str) -> List[str]:
-    out: List[str] = []
-    changed = False
-    found = False
-    xplor_name = f'{base_name}.xplor'
-    for line in lines:
-        if first_token(line) == "outputfile":
-            found = True
-            if line_has_xplor_output(line):
-                out.append(line)
-            else:
-                body, comment = split_inline_comment(line)
-                spacer = "" if not body or body.endswith((" ", "\t")) else " "
-                tail = (" " + comment) if comment else ""
-                out.append(f'{body}{spacer}"{xplor_name}"{tail}')
-                changed = True
-        else:
-            out.append(line)
-    if not found:
-        out = insert_before_fbegin(out, f'outputfile "{xplor_name}"')
-        changed = True
-    return out if changed else list(lines)
-
-
-def without_keywords(lines: Sequence[str], keywords: Iterable[str]) -> List[str]:
-    blocked = {k.lower() for k in keywords}
-    return [line for line in lines if first_token(line) not in blocked]
-
-
-def add_modelseed_modelfile(lines: Sequence[str], model_name: str, suffix: str = ".xplor") -> List[str]:
-    """Add a Superflip modelfile using the Phase Studio model-seeded policy.
-
-    A model-seeded Superflip run is deterministic. Therefore repeated attempts
-    are disabled and the randomseed keyword is omitted, matching the logic used
-    by the full Phase Studio pipeline. Phase Studio writes only modelfile and
-    lets Superflip infer the format from the file extension.
-    """
-    cleaned = without_keywords(
-        lines,
-        {"modelfile", "modelformat", "repeatmode", "randomseed"},
-    )
-    cleaned = insert_before_fbegin(cleaned, "repeatmode 1")
-    cleaned = insert_before_fbegin(cleaned, f"modelfile {model_name}")
-    return cleaned
-
-
-def apply_reference_override(lines: Sequence[str], reference_path: Path) -> List[str]:
-    """Replace the Superflip referencefile declaration with a CIF or XPLOR file.
-
-    Phase Studio writes only the referencefile keyword and lets Superflip infer
-    the reference format from the file extension.
-    """
-    suffix = reference_path.suffix.lower()
-    if suffix not in {".cif", ".xplor"}:
-        raise ValueError(
-            "Reference override must be a CIF structure or an XPLOR density map: "
-            f"{reference_path}"
-        )
-    cleaned = without_keywords(lines, {"referencefile", "referenceformat"})
-    cleaned = insert_before_fbegin(cleaned, f"referencefile {Path(reference_path).name}")
-    return cleaned
-
-
-def extract_embedded_hkl(inflip_path: Path) -> Optional[Path]:
-    """Export the Jana fbegin/endf reflection block for the full Phase Studio GUI."""
-    lines = read_text_lines(inflip_path)
-    reflections: List[str] = []
-    in_block = False
-    for line in lines:
-        key = first_token(line)
-        if key == "fbegin":
-            in_block = True
-            continue
-        if in_block and key == "endf":
-            break
-        if in_block and line.strip() and not line.lstrip().startswith(COMMENT_MARKERS):
-            reflections.append(line.rstrip())
-    if not reflections:
-        return None
-    output = inflip_path.parent / f"{inflip_path.stem}_embedded_reflections.hkl"
-    output.write_text(
-        "# Reflections exported from the Jana2020 .inflip fbegin/endf block.\n"
-        + "\n".join(reflections)
-        + "\n",
-        encoding="utf-8",
-    )
-    return output
-
-
 def inflip_keyword_path(inflip_path: Path, keyword: str) -> Optional[Path]:
     """Resolve a file path declared by a single-value keyword in the incoming Jana .inflip."""
     key = keyword.strip().lower()
@@ -544,70 +503,6 @@ def inflip_keyword_path(inflip_path: Path, keyword: str) -> Optional[Path]:
     return None
 
 
-def inflip_header_for_m80(lines: Sequence[str]) -> List[str]:
-    header: List[str] = []
-    marker = "# Keywords for charge flipping"
-    for line in lines:
-        if marker in line:
-            break
-        if first_token(line) == "fbegin":
-            break
-        header.append(line)
-    return header
-
-
-def define_m80_inflip(header_lines: Sequence[str], base_name: str, model_name: str) -> List[str]:
-    out: List[str] = []
-    saw_perform = False
-    saw_outputfile = False
-    # These keywords are explicitly controlled for the final model-seeded run.
-    # In particular, randomseed must not be present and repeatmode must be 1.
-    drop = {
-        "modelfile",
-        "modelformat",
-        "repeatmode",
-        "randomseed",
-        "polish",
-        "maxcycles",
-        "searchsymmetry",
-        "derivesymmetry",
-        "voxel",
-    }
-    for line in header_lines:
-        key = first_token(line)
-        if key in drop:
-            continue
-        if key == "perform" and not saw_perform:
-            out.append("perform symmetry")
-            saw_perform = True
-            continue
-        if key == "outputfile" and not saw_outputfile:
-            body, comment = split_inline_comment(line)
-            ready = f'{base_name}-ready.xplor'
-            if ready.lower() not in body.lower():
-                spacer = "" if body.endswith((" ", "\t")) else " "
-                body = f'{body}{spacer}"{ready}"'
-            out.append(body if not comment else f"{body} {comment}")
-            saw_outputfile = True
-            continue
-        out.append(line)
-    if not saw_perform:
-        out = insert_before_fbegin(out, "perform symmetry")
-    if not saw_outputfile:
-        out = insert_before_fbegin(out, f'outputfile "{base_name}-ready.xplor"')
-    out.extend(
-        [
-            "repeatmode 1",
-            f'modelfile "{model_name}"',
-            "polish no",
-            "maxcycles 0",
-            "searchsymmetry average",
-            "derivesymmetry yes",
-        ]
-    )
-    return out
-
-
 def find_inflip_arg(args: Sequence[str], cwd: Path) -> Optional[Tuple[int, Path]]:
     for i, arg in enumerate(args):
         p = Path(str(arg).strip('"'))
@@ -617,8 +512,8 @@ def find_inflip_arg(args: Sequence[str], cwd: Path) -> Optional[Tuple[int, Path]
 
 
 def resolve_original_superflip(exe_dir: Path) -> Path:
+    """Compatibility binary for the old in-place wrapper installation only."""
     candidates = [
-        DEFAULT_JANA_SUPERFLIP,
         exe_dir / "superflip_original.exe",
         exe_dir / "SuperFlip-orig.exe",
         exe_dir / "superflip-original.exe",
@@ -626,10 +521,92 @@ def resolve_original_superflip(exe_dir: Path) -> Path:
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    found = shutil.which("superflip_original.exe") or shutil.which("SuperFlip-orig.exe")
-    if found:
-        return Path(found)
-    return candidates[0]
+    # Never use PATH here: with two Jana2020 installations it can silently
+    # select a wrapper/helper belonging to a different integration root.
+    return exe_dir / "superflip_original.exe"
+
+
+def resolve_jana_installation_root(exe_dir: Path) -> Path:
+    """Return the Jana root for either supported integration location.
+
+    Current installations launch Phase Studio from ``<jana>\\SharpED`` while
+    older in-place wrappers run from ``<jana>\\SUPERFLIP``. In both cases the
+    scientific programs belong to the sibling ``SUPERFLIP`` directory.
+    """
+    integration_dir = Path(exe_dir).expanduser().resolve()
+    if integration_dir.name.casefold() in {"sharped", "superflip"}:
+        return integration_dir.parent
+    for parent in integration_dir.parents:
+        if parent.name.casefold() == "sharped":
+            return parent.parent
+    return integration_dir
+
+
+def resolve_active_jana_superflip(exe_dir: Path) -> Path:
+    """Resolve the scientific binary from the active Jana launcher root.
+
+    Jana normally launches Phase Studio from its installation root, while the
+    authoritative scientific executable remains in ``SUPERFLIP\\superflip.exe``.
+    An older Phase Studio integration replaced that exact file with its wrapper;
+    only a verified marker permits the narrowly-scoped original-name escape in
+    that legacy layout, preventing recursion without making it a default.
+    """
+    integration_dir = Path(exe_dir).expanduser().resolve()
+    jana_root = resolve_jana_installation_root(integration_dir)
+    authoritative = jana_root / "SUPERFLIP" / "superflip.exe"
+    if authoritative.is_file():
+        try:
+            from phase_studio.jana_integration import read_marker
+            marker, marker_error = read_marker(authoritative.parent)
+        except Exception:
+            marker, marker_error = None, ""
+        running_wrapper = (
+            authoritative.parent == integration_dir
+            and Path(sys.executable).resolve() == authoritative.resolve()
+            if getattr(sys, "frozen", False) else False
+        )
+        if not running_wrapper:
+            return authoritative
+        if marker is not None and not marker_error:
+            compatibility = resolve_original_superflip(integration_dir)
+            if compatibility.is_file():
+                return compatibility
+    raise FileNotFoundError(
+        "The active Jana2020 Superflip executable was not found or resolves to "
+        f"the Phase Studio launcher itself: {authoritative}. Repair the Jana2020 integration."
+    )
+
+
+def log_wrapper_runtime_identity(log: Callable[[str], None]) -> None:
+    """Record and validate the wrapper actually invoked by Jana2020."""
+    exe_dir = application_dir()
+    wrapper_path = Path(sys.executable).resolve() if getattr(sys, "frozen", False) else Path(__file__).resolve()
+    log(f"Phase Studio version: {__version__}")
+    log(f"Jana wrapper path: {wrapper_path}")
+    jana_root = resolve_jana_installation_root(exe_dir)
+    log(f"Jana installation root: {jana_root}")
+    log(f"Phase Studio integration root: {exe_dir}")
+    try:
+        log(f"Superflip executable: {resolve_active_jana_superflip(exe_dir).resolve()}")
+    except Exception as exc:
+        log(f"Superflip executable: unavailable ({exc})")
+    try:
+        from phase_studio.jana_integration import read_marker
+        marker, marker_error = read_marker(exe_dir)
+    except Exception as exc:
+        marker, marker_error = None, str(exc)
+    if marker_error:
+        log(f"Jana integration marker could not be read: {marker_error}")
+        return
+    if marker is None:
+        log("Jana integration marker: not present (development/manual installation)")
+        return
+    log(f"Jana integration payload version: {marker.version}")
+    if marker.version != __version__:
+        raise RuntimeError(
+            "The installed Phase Studio Jana2020 integration does not match this "
+            "Phase Studio version. Repair the Jana2020 integration before continuing."
+        )
 
 
 def run_process(cmd: Sequence[str], cwd: Path, log: Callable[[str], None]) -> int:
@@ -697,17 +674,39 @@ def deblur_with_sharped(
     server_url = options.server_url.strip() or DEFAULT_SERVER_URL
     model = options.model.strip() or "default"
     client = SharpEDServerClient(base_url=server_url, timeout=600.0)
-    client.execute(
-        file_path=input_map,
-        bearer_token=token,
-        out_path=output_map,
-        elements=options.elements.strip() or "C N O",
-        model=model,
-        outres=float(options.outres),
-        poll_seconds=2,
-        max_polls=-1,
-        log=log,
-    )
+    selected_model = model
+    if model.lower() in {"default", "server default", "sharped default"}:
+        models = client.get_models(log=log)
+        selected_model = models.default_model or "SharpED latest"
+        log(f"SharpED default model: {selected_model}")
+
+    tiled_submission = decide_sharped_submission(input_map, DEFAULT_SHARPED_MAX_UPLOAD_MB) == "tiled"
+
+    def _infer_one(request_map: Path, response_map: Path) -> None:
+        def request_log(line: str) -> None:
+            if tiled_submission and str(line).strip().casefold() == "[sharped] completed":
+                return
+            log(line)
+
+        client.execute(
+            file_path=request_map,
+            bearer_token=token,
+            out_path=response_map,
+            elements=options.elements.strip() or "C N O",
+            model=selected_model,
+            outres=float(options.outres),
+            poll_seconds=2,
+            max_polls=-1,
+            log=request_log,
+        )
+
+    # 2.0.0: the same shared, size-aware submission boundary the full GUI
+    # uses -- an oversized map is tiled instead of failing or being silently
+    # sent past the server's real limit.
+    if tiled_submission:
+        run_tiled_sharped_inference(input_map, output_map, DEFAULT_SHARPED_MAX_UPLOAD_MB, _infer_one, log)
+    else:
+        _infer_one(input_map, output_map)
     if not output_map.is_file() or output_map.stat().st_size == 0:
         raise RuntimeError(f"SharpED did not create output map: {output_map}")
 
@@ -715,7 +714,7 @@ def deblur_with_sharped(
 
 def run_final_jana_handoff(
     original: Path,
-    exe_dir: Path,
+    _exe_dir: Path,
     cwd: Path,
     original_lines: Sequence[str],
     base_name: str,
@@ -725,17 +724,28 @@ def run_final_jana_handoff(
     if not selected_map.is_file() or selected_map.stat().st_size == 0:
         raise RuntimeError(f"Selected handoff map does not exist or is empty: {selected_map}")
     header = inflip_header_for_m80(original_lines)
-    calc_m80 = exe_dir / "deblurrer" / "calc_m80.inflip"
-    write_text_lines(calc_m80, define_m80_inflip(header, base_name, selected_map.name))
+    # The integration directory is an application/binary location and may be
+    # read-only.  Generated protocol input belongs to the active Jana project.
+    calc_m80 = cwd / f".phase-studio-{os.getpid()}-calc_m80.inflip"
+    conversion_lines = origin_preserving_conversion_lines(
+        define_m80_inflip(header, base_name, selected_map.name), selected_map,
+    )
+    write_text_lines(calc_m80, conversion_lines)
     log(f"Final Jana inflip: {calc_m80}")
     log(f"Final Jana handoff model: {selected_map}")
-    return run_process([str(original), str(calc_m80)], cwd=cwd, log=log)
+    try:
+        return run_process([str(original), str(calc_m80)], cwd=cwd, log=log)
+    finally:
+        try:
+            calc_m80.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callable[[str], None]) -> int:
     """Run the "Superflip only" and "Superflip + SharpED" (single-pass) workflows.
 
-    Both workflows call superflip_original with Jana2020's own .inflip essentially
+    Both workflows call the active Jana scientific Superflip with Jana2020's own .inflip essentially
     unmodified (only reference/model overrides and, for the SharpED workflow, the
     XPLOR output keyword are injected in place, under the exact same file name Jana
     supplied) so Superflip's own output-file naming is never disturbed. Phase
@@ -744,11 +754,10 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
     """
     cwd = Path.cwd()
     exe_dir = application_dir()
-    original = resolve_original_superflip(exe_dir)
+    original = resolve_active_jana_superflip(exe_dir)
     if not original.is_file():
         raise FileNotFoundError(
-            f"Original Superflip was not found: {original}. "
-            "Place it next to superflip.exe as superflip_original.exe."
+            f"Active Jana2020 Superflip was not found: {original}. Repair the Jana2020 integration."
         )
 
     inflip_arg = find_inflip_arg(args, cwd)
@@ -957,32 +966,45 @@ def _qt_imports():
     }
 
 
-def _show_missing_token_warning(parent: object, qt: dict[str, object]) -> None:
-    report = build_error_report(
-        RuntimeError("Missing SharpED API token."),
-        subsystem="SharpED",
-        operation="Validate Jana2020 launcher settings",
-        severity="warning",
-    )
-    show_phase_studio_error(parent, report)
-
+# Shared Jana Wizard action-tile geometry (2.0.0). Every _ActionTile uses
+# exactly these, so paired tiles have identical internal geometry, and page
+# elements that must line up with a tile's text column (the Autosolve
+# warning) can do so by constant rather than by measured pixels.
+TILE_PADDING_H = 16
+TILE_PADDING_V = 5
+TILE_TEXT_SPACING = 2
+TILE_CHEVRON_GAP = 12
+TILE_CHEVRON_WIDTH = 24  # minimum; widened to the glyph's real advance
+TILE_ICON_SIZE = 24
+TILE_ICON_GAP = 14
+# QFrame#actionTile's QSS border (1px) + margin (1px), see ui_style.py.
+TILE_FRAME_INSET = 2
+TILE_TEXT_INSET = TILE_FRAME_INSET + TILE_PADDING_H + TILE_ICON_SIZE + TILE_ICON_GAP
+# Gap between a tile and a note that belongs to it (vs 8px between tiles).
+TILE_ATTACHED_GAP = 4
 
 WORKFLOW_SUPERFLIP_ONLY = "superflip_only"
 WORKFLOW_SUPERFLIP_SHARPED = "superflip_sharped"
 WORKFLOW_PHASE_RECYCLING = "phase_recycling"
+WORKFLOW_AUTOSOLVE = "autosolve"
 WORKFLOW_LABELS = {
     WORKFLOW_SUPERFLIP_ONLY: "Superflip only",
     WORKFLOW_SUPERFLIP_SHARPED: "Superflip + SharpED",
     WORKFLOW_PHASE_RECYCLING: "Phase recycling with Superflip + SharpED",
+    WORKFLOW_AUTOSOLVE: "SharpED Autosolve",
 }
 WORKFLOW_DESCRIPTIONS = {
-    WORKFLOW_SUPERFLIP_ONLY: "Run one Superflip reconstruction and return the result to Jana2020.",
+    WORKFLOW_SUPERFLIP_ONLY: "Original charge-flipping workflow (fast)",
     WORKFLOW_SUPERFLIP_SHARPED: (
-        "Run Superflip once, process the resulting map with SharpED, and return it to Jana2020."
+        "Improved charge-flipping workflow boosted by the SharpED neural network (slower)"
     ),
     WORKFLOW_PHASE_RECYCLING: (
-        "Iterate Superflip and SharpED over multiple cycles, using each selected map to "
-        "initialize the next cycle."
+        "Iterate Superflip and SharpED over multiple cycles while keeping user control over "
+        "the initial model, Map Feedback and the map passed to Jana2020."
+    ),
+    WORKFLOW_AUTOSOLVE: (
+        "Experimental SharpED-assisted iterative charge flipping "
+        "(very slow — typically around 15 min)"
     ),
 }
 
@@ -1003,6 +1025,69 @@ class _JanaWorkflowWizard:
         legacy_value = str(self.settings.value(legacy_key, "") or "").strip()
         return legacy_value or fallback
 
+    def _ensure_workflow_requirements(self, *, needs_sharped: bool) -> bool:
+        """Run the shared preflight before a lightweight Wizard workflow exits."""
+        from phase_studio import requirements as reqs
+        from phase_studio.requirements_ui import run_remediation_loop
+
+        saved_superflip = str(self.shared_settings.value("inputs/superflip_exe", "") or "").strip()
+        try:
+            active_superflip = resolve_active_jana_superflip(application_dir())
+        except FileNotFoundError:
+            active_superflip = Path()
+        superflip_path = saved_superflip or (str(active_superflip) if active_superflip.is_file() else "")
+        token = self.api_token.text().strip() or os.environ.get("SHARPED_API_TOKEN", "").strip()
+        required = reqs.requirements_for_workflow(
+            needs_superflip=True, needs_edma=False, needs_sharped=needs_sharped,
+        )
+
+        def persist(kind: object, value: str, _detected: bool) -> None:
+            nonlocal superflip_path, token
+            if kind is reqs.RequirementKind.SUPERFLIP:
+                superflip_path = value
+                self.shared_settings.setValue("inputs/superflip_exe", value)
+            elif kind is reqs.RequirementKind.SHARPED:
+                token = value
+                self.api_token.setText(value)
+                self.shared_settings.setValue("inputs/sharped_api_token", value)
+            self.shared_settings.sync()
+
+        def check() -> object:
+            return reqs.run_preflight(
+                required,
+                superflip_path=superflip_path,
+                sharped_base_url=DEFAULT_SERVER_URL,
+                sharped_token=token,
+                jana_dir=getattr(self, "_preflight_jana_dir", reqs.DEFAULT_JANA_SUPERFLIP_DIR),
+                client_factory=getattr(self, "_preflight_client_factory", None),
+                accept_suggestion=lambda _status: True,
+            )
+
+        def on_success(result: object) -> None:
+            # A wrapper-local original may have entered as the configured
+            # value rather than as a suggestion; synchronize it too.
+            for checked in result.statuses:
+                if (checked.kind is reqs.RequirementKind.SUPERFLIP
+                        and checked.ok and checked.path is not None
+                        and str(checked.path) != saved_superflip):
+                    persist(checked.kind, str(checked.path), True)
+                if (
+                    checked.kind is reqs.RequirementKind.SHARPED
+                    and checked.ok
+                    and checked.sharped_default_model
+                ):
+                    self._preflight_sharped_default_model = checked.sharped_default_model
+
+        return run_remediation_loop(
+            self.dialog,
+            check,
+            lambda kind: superflip_path if kind is reqs.RequirementKind.SUPERFLIP else token,
+            persist,
+            on_success,
+            download_dir=getattr(self, "_preflight_download_dir", None),
+            download_opener=getattr(self, "_preflight_download_opener", None),
+        )
+
     # --- Wizard window width policy ---------------------------------------
     # The Wizard used to take whatever width self.content.sizeHint() happened
     # to report, which on a normal desktop settled around the 640 px minimum:
@@ -1015,9 +1100,10 @@ class _JanaWorkflowWizard:
     # Nothing here is a fixed pixel geometry: the preferred width is clamped
     # to the screen that is actually available, so 1366x768 and smaller stay
     # usable.
-    WIZARD_MIN_WIDTH = 680
-    WIZARD_PREFERRED_WIDTH = 720
-    WIZARD_MAX_WIDTH = 820
+    WIZARD_MIN_WIDTH = 720
+    WIZARD_PREFERRED_WIDTH = 821
+    WIZARD_MAX_WIDTH = 900
+    WIZARD_PREFERRED_HEIGHT = 780
     WIZARD_MAX_SCREEN_FRACTION = 0.92
 
     def _available_screen_width(self) -> int:
@@ -1028,6 +1114,18 @@ class _JanaWorkflowWizard:
             screen = self.dialog.screen() or QGuiApplication.primaryScreen()
             if screen is not None:
                 return int(screen.availableGeometry().width())
+        except Exception:
+            pass
+        return 0
+
+    def _available_screen_height(self) -> int:
+        """Usable height of the screen this dialog is on (taskbar excluded)."""
+        try:
+            from PySide6.QtGui import QGuiApplication
+
+            screen = self.dialog.screen() or QGuiApplication.primaryScreen()
+            if screen is not None:
+                return int(screen.availableGeometry().height())
         except Exception:
             pass
         return 0
@@ -1043,6 +1141,14 @@ class _JanaWorkflowWizard:
             # A narrow display wins over the preferred width every time; the
             # body scrolls and the fixed footer stays visible (see the footer
             # note in run(): it lives on outer_root, outside the scroll area).
+            target = min(target, max(1, int(available * self.WIZARD_MAX_SCREEN_FRACTION)))
+        return int(target)
+
+    def _preferred_dialog_height(self) -> int:
+        """One stable Wizard height, clamped for the active display."""
+        target = self.WIZARD_PREFERRED_HEIGHT
+        available = self._available_screen_height()
+        if available > 0:
             target = min(target, max(1, int(available * self.WIZARD_MAX_SCREEN_FRACTION)))
         return int(target)
 
@@ -1082,7 +1188,7 @@ class _JanaWorkflowWizard:
             if not group.objectName():
                 group.setObjectName("wizardSection")
         for page in (getattr(self, "page1", None), getattr(self, "page2", None),
-                     getattr(self, "page3", None)):
+                     getattr(self, "page3", None), getattr(self, "page_advanced", None)):
             if page is None or page.layout() is None:
                 continue
             page.layout().setSpacing(spacing["section_gap"])
@@ -1151,10 +1257,78 @@ class _JanaWorkflowWizard:
         wanted.
         """
         page = self.stack.currentWidget()
+        self._watch_page_growth(page)
         needed = self._page_height_for_width(page, self._content_inner_width(width))
+        # Never pin below the page's own minimum: a height-for-width answer
+        # computed before late content (e.g. the deferred .inflip input
+        # summary) arrived is smaller than what the page now needs, and a
+        # fixed height below the minimum forces Qt to squeeze compressible
+        # children (the action tiles), cropping their text.
+        if page is not None:
+            needed = max(needed, int(page.minimumSizeHint().height()))
         if needed > 0:
             self.stack.setFixedHeight(needed)
         return needed
+
+    def _watch_page_growth(self, page) -> None:
+        """Re-fit whenever a pinned page's own content grows later.
+
+        The stack is pinned to the current page's height, but pages keep
+        changing after they are shown -- the deferred .inflip input summary,
+        "From .inflip" notes, validation text, disclosures. Any of those makes
+        the page's minimum taller than the pinned height, and Qt then squeezes
+        the compressible action tiles and crops their text. Instead of
+        patching each source, every page is watched for Qt's own
+        LayoutRequest (posted whenever a descendant's size hint changes) and
+        the dialog re-fits, debounced to one event-loop turn, as soon as the
+        page needs more than it was given."""
+        if page is None or page.property("phaseStudioGrowthWatched"):
+            return
+        from PySide6.QtCore import QEvent, QObject, QTimer
+
+        wizard = self
+
+        class _PageGrowthWatcher(QObject):
+            def __init__(self, parent) -> None:
+                super().__init__(parent)
+                self._pending = False
+
+            def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+                if event.type() == QEvent.LayoutRequest and watched is wizard.stack.currentWidget():
+                    # Synchronously, before anything is painted: settle the
+                    # page's own layout and re-pin the stack if the page now
+                    # needs more -- so not even one frame shows squeezed
+                    # tiles. The full dialog re-fit follows one turn later.
+                    layout = watched.layout()
+                    if layout is not None:
+                        layout.activate()
+                    needed = int(watched.minimumSizeHint().height())
+                    if needed > wizard.stack.height():
+                        wizard.stack.setFixedHeight(needed)
+                    if not self._pending:
+                        self._pending = True
+                        QTimer.singleShot(0, self._refit)
+                return False
+
+            def _refit(self) -> None:
+                self._pending = False
+                from shiboken6 import isValid
+                if not isValid(wizard.stack):
+                    return
+                current = wizard.stack.currentWidget()
+                if current is None:
+                    return
+                needed = max(
+                    wizard._page_height_for_width(current, wizard._content_inner_width(wizard._preferred_dialog_width())),
+                    int(current.minimumSizeHint().height()),
+                )
+                if needed > wizard.stack.height():
+                    wizard._adjust_dialog_size()
+
+        watcher = _PageGrowthWatcher(page)
+        page.installEventFilter(watcher)
+        page.setProperty("phaseStudioGrowthWatched", True)
+        self._page_growth_watchers = getattr(self, "_page_growth_watchers", []) + [watcher]
 
     def _content_height_for_width(self, width: int) -> int:
         """Height the scrollable content column needs at *width*.
@@ -1187,59 +1361,20 @@ class _JanaWorkflowWizard:
 
     def _adjust_dialog_size(self) -> None:
         from phase_studio.app import apply_safe_dialog_geometry
-        # dialog.adjustSize() alone under-sizes the window here: QScrollArea's
-        # own sizeHint() does not reliably grow to match its contained page's
-        # actual sizeHint (Qt quirk), so relying on it can leave the dialog
-        # shorter than the current page truly needs -- forcing an unwanted
-        # vertical scrollbar even though the page would otherwise fit
-        # entirely. Compute the target size explicitly instead, from the
-        # fixed chrome (brand header + context banner + footer) plus the
-        # scrollable content's own required height, then let
-        # apply_safe_dialog_geometry cap BOTH size and position to
-        # availableGeometry() (excludes the taskbar) and re-center within it,
-        # so the title bar can never end up unreachable as content grows.
-        # Only the scrollable central content area (never this top-level
-        # window) may still exceed the screen's usable height, for a page
-        # taller than the whole screen can show at once.
-        # Deliberately NOT max()'d against dialog.width()/height(): the
-        # dialog must be able to shrink back down again too (e.g. going from
-        # the taller page2 back to page1, or collapsing an expanded SharpED
-        # disclosure) -- always resize from a fresh measurement of what the
-        # CURRENT page actually needs, not whatever the dialog happened to be
-        # sized to from an earlier call.
+        # The outer Wizard geometry is independent of the current page. Only
+        # the central QScrollArea adapts when a page needs more room, so
+        # Next/Back and expanding SharpED settings never make the window jump.
         target_width = self._preferred_dialog_width()
-        # Pin the stack to the current page BEFORE anything is measured, so the
-        # scroll area is told the real content height rather than the tallest
-        # page's.
         self._size_stack_to_current_page(target_width)
-        self.dialog.adjustSize()
-        footer_widget = self.chrome_holder["footer"]
-        chrome_height = (
-            self.brand_header.sizeHint().height()
-            + self.context_banner.sizeHint().height()
-            + (footer_widget.sizeHint().height() if footer_widget is not None else 0)
+        apply_safe_dialog_geometry(
+            self.dialog, target_width, self._preferred_dialog_height()
         )
-        # content.sizeHint() alone is unreliable here: it is computed at some
-        # narrower candidate width, so word-wrapped labels (workflow card
-        # descriptions, the Cell row, etc.) end up wrapping to more lines
-        # than they actually will at target_width, overstating the needed
-        # height by 100+ px. heightForWidth(target_width) asks for the real
-        # answer at the width the dialog will actually use.
-        content_height = self._content_height_for_width(target_width)
-        target_height = chrome_height + content_height + 8
-        apply_safe_dialog_geometry(self.dialog, target_width, target_height)
+        # Once this geometry is laid out, re-check the current page at the
+        # width it really got (a vertical scrollbar on a short screen makes it
+        # narrower than measured above); only ever grows.
+        from PySide6.QtCore import QTimer
 
-        # Second pass: the first measurement is taken while the page is still
-        # at its previous size, and Qt caches a widget item's heightForWidth
-        # per width, so a page that grew or shrank on this transition can
-        # report a stale height. Re-measuring once the new geometry is applied
-        # converges on the real requirement -- without it a tall page could be
-        # left in a window too short for it, scrolling content that would
-        # otherwise have fitted.
-        settled_height = chrome_height + self._content_height_for_width(target_width) + 8
-        if abs(settled_height - target_height) > 2:
-            self._size_stack_to_current_page(target_width)
-            apply_safe_dialog_geometry(self.dialog, target_width, settled_height)
+        QTimer.singleShot(0, self.stack._grow_to_current_page)
 
     def _get_backing_window(self):
         win = self.backing_window_holder.get("win")
@@ -1322,6 +1457,15 @@ class _JanaWorkflowWizard:
         self._adjust_dialog_size()
 
     def _check_page3_validity(self) -> Optional[str]:
+        if getattr(self, "model_policy_error", ""):
+            return str(self.model_policy_error)
+        if (
+            self._current_workflow() != WORKFLOW_SUPERFLIP_ONLY
+            and not getattr(self, "model_cache", {}).get("loaded", False)
+        ):
+            return "Wait for the live SharpED model catalogue, or use Refresh models to retry."
+        if self._current_workflow() != WORKFLOW_SUPERFLIP_ONLY and not self.model.currentText().strip():
+            return "Select an available SharpED model before running."
         # Map feedback only affects SUBSEQUENT cycles -- an enabled method
         # whose "Start after cycle" leaves no later cycle to apply to would
         # silently do nothing; block Run rather than accept a setting that
@@ -1345,20 +1489,22 @@ class _JanaWorkflowWizard:
         return self.workflow_state["key"]
 
     def _apply_workflow_cycle_default(self, key: str) -> None:
-        # "Superflip + SharpED" is always a single Superflip call followed by one
-        # SharpED pass; only "Phase recycling" repeats that pair over several cycles.
-        self.cycles.setEnabled(key == WORKFLOW_PHASE_RECYCLING)
-        recompute_default = not (self.cycles_user_edited["value"] and key == WORKFLOW_PHASE_RECYCLING)
+        # The recommended workflow is the established ordinary multi-cycle
+        # Superflip -> EDMA -> SharpED -> EDMA loop. Five cycles are the
+        # recommended balance between solution quality and calculation time.
+        configurable = key in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
+        self.cycles.setEnabled(configurable)
+        recompute_default = not (self.cycles_user_edited["value"] and configurable)
         self.cycles.blockSignals(True)
         try:
             # A single cycle never feeds a map back into a next cycle, so it
             # isn't actually "recycling" -- the spinbox's own minimum (not
             # just its default value) is raised to 2 for this workflow so the
             # control itself can't be turned down to a non-recycling value.
-            self.cycles.setMinimum(2 if key == WORKFLOW_PHASE_RECYCLING else 1)
+            self.cycles.setMinimum(1)
             if recompute_default:
-                if key == WORKFLOW_PHASE_RECYCLING:
-                    self.cycles.setValue(max(int(self.settings.value("cycles", 5)) or 5, 2))
+                if configurable:
+                    self.cycles.setValue(max(int(self.settings.value("cycles", 5)) or 5, 1))
                 else:
                     self.cycles.setValue(1)
         finally:
@@ -1373,6 +1519,9 @@ class _JanaWorkflowWizard:
             self.primary_button.setToolTip(
                 "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper."
             )
+        elif self._current_workflow() == WORKFLOW_AUTOSOLVE:
+            self.primary_button.setText("Start Autosolve")
+            self.primary_button.setToolTip("Start the guided SharpED Autosolve workflow.")
         else:
             self.primary_button.setText("Next ›")
             self.primary_button.setToolTip("Continue to the SharpED and cycle settings.")
@@ -1381,11 +1530,13 @@ class _JanaWorkflowWizard:
         key = self._current_workflow()
         for card_key, card in self.workflow_cards.items():
             card.set_selected(card_key == key)
-        cycles_visible = key == WORKFLOW_PHASE_RECYCLING
+        cycles_visible = key in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
         self.cycles.setVisible(cycles_visible)
         if self.cycles_label is not None:
             self.cycles_label.setVisible(cycles_visible)
-        if key != WORKFLOW_SUPERFLIP_ONLY:
+        # Autosolve and Superflip only do not visit the configurable ordinary
+        # workflow pages.
+        if key in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING):
             self._apply_workflow_cycle_default(key)
             self.map_group.setTitle(
                 "Map used for phase recycling and Jana2020 handoff"
@@ -1397,7 +1548,7 @@ class _JanaWorkflowWizard:
             # (see effective_next_cycle_mode()), so offering it as a live
             # choice there would be misleading. Force the radio to match
             # before hiding it, so it reflects the truth if ever shown again.
-            self.map_group.setVisible(key == WORKFLOW_PHASE_RECYCLING)
+            self.map_group.setVisible(False)
             if key == WORKFLOW_SUPERFLIP_SHARPED:
                 self.sharped_map_radio.setChecked(True)
                 self._sync_map_choice()
@@ -1559,6 +1710,27 @@ class _JanaWorkflowWizard:
                     return page.heightForWidth(width)
                 return super().heightForWidth(width)
 
+            def resizeEvent(self, event):  # noqa: N802 - Qt override
+                super().resizeEvent(event)
+                # The pinned height is measured at the dialog's content width.
+                # When the window is capped to a short screen, the body
+                # scrolls and the vertical scrollbar narrows this stack, so
+                # word-wrapped text (e.g. the Autosolve warning at 150%) needs
+                # another line. Re-check at the real width; only ever grow.
+                if event.size().width() != event.oldSize().width():
+                    QTimer.singleShot(0, self._grow_to_current_page)
+
+            def _grow_to_current_page(self):
+                try:
+                    page = self.currentWidget()
+                except RuntimeError:
+                    return  # the Wizard closed before this deferred check ran
+                if page is None or not page.hasHeightForWidth() or self.width() <= 1:
+                    return
+                needed = int(page.heightForWidth(self.width()))
+                if needed > self.height():
+                    self.setFixedHeight(needed)
+
         self.stack = _CurrentPageStack()
         # Re-ask the layout for a size whenever the visible page changes.
         self.stack.currentChanged.connect(lambda _index=0: self.stack.updateGeometry())
@@ -1577,6 +1749,10 @@ class _JanaWorkflowWizard:
             supported_model_filters,
             supported_wrapper_reference_filters,
         )
+        # Icons come ONLY from Phase Studio's established icon inventory
+        # (ui_branding.ESTABLISHED_ICON_INVENTORY); actions with no
+        # established icon stay text-only rather than adding a new family.
+        from phase_studio.ui_branding import apply_established_icon
 
         qt = self.qt
         QFileDialog = qt["QFileDialog"]
@@ -1658,11 +1834,18 @@ class _JanaWorkflowWizard:
         self.input_summary_body.addLayout(self.input_summary_outer)
 
         self.input_summary_fields = QWidget()
-        self.input_summary_layout = QFormLayout(self.input_summary_fields)
-        self.input_summary_layout.setContentsMargins(0, 0, 0, 0)
-        self.input_summary_layout.setVerticalSpacing(3)
-        self.input_summary_layout.setHorizontalSpacing(10)
-        self.input_summary_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.input_summary_columns = QHBoxLayout(self.input_summary_fields)
+        self.input_summary_columns.setContentsMargins(0, 0, 0, 0)
+        self.input_summary_columns.setSpacing(18)
+        left_summary = QWidget()
+        right_summary = QWidget()
+        self.input_summary_layout = QFormLayout(left_summary)
+        self.input_summary_right_layout = QFormLayout(right_summary)
+        for summary_layout in (self.input_summary_layout, self.input_summary_right_layout):
+            summary_layout.setContentsMargins(0, 0, 0, 0)
+            summary_layout.setVerticalSpacing(3)
+            summary_layout.setHorizontalSpacing(10)
+            summary_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.reflections_value = QLabel("Not available")
         self.format_value = QLabel("Not available")
         self.cell_value = QLabel("Not available")
@@ -1672,9 +1855,13 @@ class _JanaWorkflowWizard:
             summary_label.setWordWrap(True)
         self.input_summary_layout.addRow("Reflections", self.reflections_value)
         self.input_summary_layout.addRow("Format", self.format_value)
-        self.input_summary_layout.addRow("Cell", self.cell_value)
-        self.input_summary_layout.addRow("Space group", self.spacegroup_value)
-        self.input_summary_layout.addRow("Composition", self.composition_value)
+        self.input_summary_right_layout.addRow("Cell", self.cell_value)
+        self.input_summary_right_layout.addRow("Space group", self.spacegroup_value)
+        self.input_summary_right_layout.addRow(
+            "Superflip input composition", self.composition_value,
+        )
+        self.input_summary_columns.addWidget(left_summary, 1)
+        self.input_summary_columns.addWidget(right_summary, 2)
         self.input_summary_outer.addWidget(self.input_summary_fields, 1)
 
         self.hkl_buttons_column = QVBoxLayout()
@@ -1770,7 +1957,60 @@ class _JanaWorkflowWizard:
         # Deferred so the wizard's first page paints immediately; the summary
         # (and the one-time backing-window construction it triggers) fills in
         # right after, once the dialog's event loop actually starts.
-        QTimer.singleShot(0, refresh_input_summary)
+        summary_labels = (self.reflections_value, self.format_value, self.cell_value, self.spacegroup_value, self.composition_value)
+
+        def pin_wrapped_summary_heights() -> None:
+            # QFormLayout mis-distributes height between word-wrapped rows
+            # (a two-line Cell value was given one line and cropped, while a
+            # one-line row got the spare). Each wrapped value's minimum height
+            # is its own heightForWidth at the width it actually has.
+            for label in summary_labels:
+                width = label.width() if label.width() > 1 else self.input_summary_fields.width()
+                if width > 1:
+                    label.setMinimumHeight(max(label.fontMetrics().height(), label.heightForWidth(width)))
+
+        from PySide6.QtCore import QEvent as _QEvent, QObject as _QObject
+
+        class _SummaryResizeWatcher(_QObject):
+            def eventFilter(self, watched, event) -> bool:  # noqa: N802 - Qt override
+                if event.type() == _QEvent.Resize:
+                    pin_wrapped_summary_heights()
+                return False
+
+        self._summary_resize_watcher = _SummaryResizeWatcher(self.input_summary_fields)
+        self.input_summary_fields.installEventFilter(self._summary_resize_watcher)
+
+        def refresh_input_summary_and_refit() -> None:
+            from shiboken6 import isValid
+            if not isValid(self.stack):
+                return
+            refresh_input_summary()
+            pin_wrapped_summary_heights()
+            # Before control returns to the event loop (so before anything is
+            # painted): deliver the layout requests the new texts just posted,
+            # so page 1's minimum is current, and re-pin the stack to it.
+            if self.stack.currentWidget() is self.page1:
+                from PySide6.QtCore import QCoreApplication, QEvent
+
+                QCoreApplication.sendPostedEvents(None, QEvent.LayoutRequest)
+                self._size_stack_to_current_page(self._preferred_dialog_width())
+            # The populated summary is taller than the placeholder page the
+            # dialog was first fitted to (two-line cell, reflection counts,
+            # composition, "From .inflip" notes) -- re-fit, or the stack
+            # stays pinned to the stale, shorter height.
+            def refit() -> None:
+                from shiboken6 import isValid
+                if not isValid(self.stack):
+                    return
+                if self.stack.currentWidget() is self.page1:
+                    self.page1_layout.activate()
+                    self._adjust_dialog_size()
+
+            # Next event-loop turn: the new label texts' size hints are only
+            # propagated once Qt has processed the posted LayoutRequest.
+            QTimer.singleShot(0, refit)
+
+        QTimer.singleShot(0, refresh_input_summary_and_refit)
 
         self.files_section, self.files_body = build_page1_section("Reference and initial model")
         self.files_form_widget = QWidget()
@@ -1848,6 +2088,45 @@ class _JanaWorkflowWizard:
             "No first-cycle model",
             _inflip_keyword_default("modelfile"),
         )
+        # These overrides are useful but optional for nearly every Jana run.
+        # Keep their availability obvious while leaving enough vertical room
+        # for all four workflows on the opening page at Full HD / 125%.
+        # Expanding changes only the scroll area's contents; the Wizard's
+        # stable outer geometry remains fixed.
+        self.files_toggle = QPushButton("Show optional reference and initial model  ›")
+        self.files_toggle.setObjectName("compactDisclosureButton")
+        self.files_toggle.setCheckable(True)
+        self.files_toggle.setChecked(False)
+        self.files_toggle.setCursor(Qt.PointingHandCursor)
+        self.files_toggle.setToolTip("Show or hide the optional reference and first-cycle model files.")
+        self.files_toggle.setStyleSheet(
+            "QPushButton#compactDisclosureButton { text-align:left; background:transparent; "
+            "border:1px solid transparent; border-radius:4px; padding:5px 7px; color:#29456f; }"
+            "QPushButton#compactDisclosureButton:hover { background:#f1f5fb; border-color:#d7e1ef; }"
+            "QPushButton#compactDisclosureButton:checked { background:#edf3fb; border-color:#c7d6e9; }"
+        )
+        self.files_body.insertWidget(0, self.files_toggle)
+        self.files_form_widget.setVisible(False)
+        # In collapsed form the disclosure itself is the section heading.
+        # Avoid spending another heading line and rule on the same words.
+        for label in self.files_section.findChildren(QLabel):
+            if label.text() == "REFERENCE AND INITIAL MODEL":
+                label.setVisible(False)
+        for separator in self.files_section.findChildren(QFrame):
+            if separator.parentWidget() is self.files_section:
+                separator.setVisible(False)
+        files_body_widget = self.files_toggle.parentWidget()
+        if files_body_widget is not None and files_body_widget.layout() is not None:
+            files_body_widget.layout().setContentsMargins(0, 0, 0, 0)
+
+        def toggle_optional_files(expanded: bool) -> None:
+            self.files_form_widget.setVisible(expanded)
+            self.files_toggle.setText(
+                "Hide optional reference and initial model  ⌄"
+                if expanded else "Show optional reference and initial model  ›"
+            )
+
+        self.files_toggle.toggled.connect(toggle_optional_files)
         self.page1_layout.addWidget(self.files_section)
 
         class _WorkflowCard(QFrame):
@@ -1893,23 +2172,217 @@ class _JanaWorkflowWizard:
                 self.style().unpolish(self)
                 self.style().polish(self)
 
+        class _ActionTile(QFrame):
+            """A large, fully-clickable primary action tile (2.0.0): unlike
+            _WorkflowCard, there is no separate select-then-confirm step --
+            the entire tile IS the button. Clicking it (mouse press+release
+            inside the tile), or giving it keyboard focus and pressing
+            Enter/Return/Space, immediately performs the action. Hover and
+            focus rely on Qt's own native :hover/:focus QSS pseudo-states
+            (WA_Hover is enabled below, exactly like the existing
+            _WorkflowCard); "pressed" has no native QFrame pseudo-state, so
+            it is tracked as an explicit property the same way _WorkflowCard
+            already tracks "selected"."""
+
+            def __init__(
+                self, title: str, subtitle: str, on_click, *, secondary: str = "",
+                chevron: bool = True, icon_source: str = "", tier: str = "primary",
+            ) -> None:
+                super().__init__()
+                self._on_click = on_click
+                self.setObjectName("actionTile")
+                self.setFrameShape(QFrame.NoFrame)
+                self.setCursor(Qt.PointingHandCursor)
+                self.setAttribute(Qt.WA_Hover, True)
+                self.setFocusPolicy(Qt.StrongFocus)
+                self.setProperty("pressed", False)
+                self.setProperty("workflowTier", tier)
+                # Compact established icon, strong title, one explanatory
+                # line, optional result line, right chevron. Every tile uses
+                # the same TILE_* geometry, so tiles on one page line up
+                # exactly. Heights come only from the labels' own font
+                # metrics/size hints -- no fixed text heights anywhere.
+                outer = QHBoxLayout(self)
+                outer.setContentsMargins(TILE_PADDING_H, TILE_PADDING_V, TILE_PADDING_H, TILE_PADDING_V)
+                outer.setSpacing(TILE_CHEVRON_GAP)
+                self.icon_label = None
+                if icon_source:
+                    self.icon_label = QLabel()
+                    self.icon_label.setObjectName("actionTileIcon")
+                    apply_established_icon(self.icon_label, icon_source, size=TILE_ICON_SIZE)
+                    self.icon_label.setFixedSize(TILE_ICON_SIZE, TILE_ICON_SIZE)
+                    outer.addWidget(self.icon_label, 0, Qt.AlignVCenter)
+                    outer.addSpacing(TILE_ICON_GAP - TILE_CHEVRON_GAP)
+                text_layout = QVBoxLayout()
+                text_layout.setContentsMargins(0, 0, 0, 0)
+                text_layout.setSpacing(TILE_TEXT_SPACING)
+                self.title_label = QLabel(title)
+                self.title_label.setObjectName("actionTileTitle")
+                # Single-line labels, deliberately NOT word-wrapped: the
+                # Wizard's QScrollArea does not honor height-for-width, so a
+                # wrapping label gets a heuristic multi-line height and two
+                # tiles with equally short text end up different heights.
+                self.subtitle_label = QLabel(subtitle)
+                self.subtitle_label.setObjectName("actionTileSubtitle")
+                self.subtitle_label.setWordWrap(True)
+                self.secondary_label = QLabel(secondary or " ")
+                self.secondary_label.setObjectName("actionTileSecondary")
+                self.secondary_label.setWordWrap(False)
+                self.secondary_label.setProperty("placeholder", not bool(secondary))
+                text_layout.addWidget(self.title_label)
+                # Keep the recommendation/experimental status near the title,
+                # above long descriptions in a scrolled, footer-bounded page.
+                text_layout.addWidget(self.secondary_label)
+                text_layout.addWidget(self.subtitle_label)
+                # Any surplus row height belongs below the text. Keeping it
+                # out of QLabel geometry preserves common title/subtitle
+                # baselines when paired cards contain different copy lengths.
+                text_layout.addStretch(1)
+                outer.addLayout(text_layout, 1)
+                self.chevron_label = None
+                if chevron:
+                    self.chevron_label = QLabel("›")
+                    self.chevron_label.setObjectName("actionTileChevron")
+                    self.chevron_label.setAlignment(Qt.AlignCenter)
+                    self.chevron_label.ensurePolished()
+                    self.chevron_label.setFixedWidth(
+                        max(TILE_CHEVRON_WIDTH, self.chevron_label.fontMetrics().horizontalAdvance("›") + 2)
+                    )
+                    outer.addWidget(self.chevron_label, 0, Qt.AlignVCenter)
+
+            def _trigger(self) -> None:
+                self._on_click()
+
+            def click(self) -> None:
+                """QPushButton-compatible programmatic activation."""
+                self._trigger()
+
+            def _set_pressed(self, pressed: bool) -> None:
+                self.setProperty("pressed", bool(pressed))
+                self.style().unpolish(self)
+                self.style().polish(self)
+
+            def mousePressEvent(self, event) -> None:  # noqa: N802 - Qt override
+                super().mousePressEvent(event)
+                self._set_pressed(True)
+
+            def mouseReleaseEvent(self, event) -> None:  # noqa: N802 - Qt override
+                super().mouseReleaseEvent(event)
+                was_pressed = bool(self.property("pressed"))
+                self._set_pressed(False)
+                if was_pressed and self.rect().contains(event.pos()):
+                    self._trigger()
+
+            def leaveEvent(self, event) -> None:  # noqa: N802 - Qt override
+                super().leaveEvent(event)
+                self._set_pressed(False)
+
+            def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt override
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+                    self._trigger()
+                    return
+                super().keyPressEvent(event)
+
+        # 2.0.0: exposed so the Autosolve decision page (built by a separate
+        # method, after this one) can reuse the exact same tile class instead
+        # of a second definition.
+        self._ActionTile = _ActionTile
+
         def workflow_card_clicked(key: str) -> None:
             self.workflow_state["key"] = key
             self._workflow_changed()
 
+        # 2.0.0: exposed so the Advanced page (built by a separate method,
+        # after this one) can reuse the exact same card class/visual language
+        # instead of a second definition. Page1's own two dominant actions no
+        # longer use _WorkflowCard at all -- see _ActionTile above.
+        self._WorkflowCard = _WorkflowCard
+        self._workflow_card_clicked = workflow_card_clicked
+
+        def original_superflip_tile_clicked() -> None:
+            self.workflow_state["key"] = WORKFLOW_SUPERFLIP_ONLY
+            self._workflow_changed()
+            self._attempt_run()
+
+        def autosolve_tile_clicked() -> None:
+            self.workflow_state["key"] = WORKFLOW_AUTOSOLVE
+            self._workflow_changed()
+            self._attempt_run()
+
+        def recommended_tile_clicked() -> None:
+            self.workflow_state["key"] = WORKFLOW_SUPERFLIP_SHARPED
+            self._workflow_changed()
+            self._attempt_run()
+
         # Workflow is the single most important choice on this page (it decides
         # the whole execution path) and must not blend in as one more same-weight
         # section -- it gets the same lightweight sectionLabel heading as Input
-        # summary / Reference and initial model above, plus the explicit
-        # "Choose one of three workflows." helper text called for in the spec.
-        self.workflow_section, self.workflow_body = build_page1_section("Workflow", "Choose one of three workflows.")
-        self.workflow_body.setSpacing(5)
+        # summary / Reference and initial model above. Two dominant, fully
+        # clickable primary workflow tiles. Professional mode remains a
+        # visually subordinate expert action below them.
+        self.workflow_section, self.workflow_body = build_page1_section("Workflow")
+        self.workflow_body.setSpacing(8)
+        self.primary_workflows_label = QLabel("PRIMARY WORKFLOWS")
+        self.primary_workflows_label.setObjectName("workflowGroupLabel")
+        self.workflow_body.addWidget(self.primary_workflows_label)
+        self.original_superflip_tile = _ActionTile(
+            WORKFLOW_LABELS[WORKFLOW_SUPERFLIP_ONLY],
+            WORKFLOW_DESCRIPTIONS[WORKFLOW_SUPERFLIP_ONLY],
+            original_superflip_tile_clicked,
+            icon_source="qt_media_play",
+        )
+        self.superflip_sharped_tile = _ActionTile(
+            WORKFLOW_LABELS[WORKFLOW_SUPERFLIP_SHARPED],
+            WORKFLOW_DESCRIPTIONS[WORKFLOW_SUPERFLIP_SHARPED],
+            recommended_tile_clicked,
+            secondary="Recommended",
+            icon_source="qt_file_dialog_detailed_view",
+        )
+        primary_subtitles = (self.original_superflip_tile.subtitle_label, self.superflip_sharped_tile.subtitle_label)
+        for label in primary_subtitles:
+            label.ensurePolished()
+        primary_height = max(label.fontMetrics().lineSpacing() for label in primary_subtitles) * 2
+        for label in primary_subtitles:
+            label.setMinimumHeight(primary_height)
+        self.autosolve_tile = _ActionTile(
+            WORKFLOW_LABELS[WORKFLOW_AUTOSOLVE],
+            WORKFLOW_DESCRIPTIONS[WORKFLOW_AUTOSOLVE],
+            autosolve_tile_clicked,
+            secondary="Experimental",
+            icon_source="qt_media_seek_forward",
+            tier="secondary",
+        )
+        self.workflow_body.addWidget(self.original_superflip_tile)
+        self.workflow_body.addWidget(self.superflip_sharped_tile)
+        # Primary tiles act immediately or navigate to their dedicated setup.
         self.workflow_cards: dict[str, "_WorkflowCard"] = {}
-        for key in (WORKFLOW_SUPERFLIP_ONLY, WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING):
-            card = _WorkflowCard(key, WORKFLOW_LABELS[key], WORKFLOW_DESCRIPTIONS[key], workflow_card_clicked)
-            card.setToolTip("Select this workflow, then use Run phasing / Next below to proceed.")
-            self.workflow_body.addWidget(card)
-            self.workflow_cards[key] = card
+
+        self.secondary_workflows_label = QLabel("SECONDARY WORKFLOWS")
+        self.secondary_workflows_label.setObjectName("workflowGroupLabel")
+        self.workflow_body.addWidget(self.secondary_workflows_label)
+        secondary_actions_row = QHBoxLayout()
+        # One trailing logical pixel makes the two equal-stretch columns
+        # divide exactly even when the available page width is odd.
+        secondary_actions_row.setContentsMargins(0, 0, 1, 0)
+        secondary_actions_row.setSpacing(8)
+        self.professional_mode_button = _ActionTile(
+            "Professional mode",
+            "Full control over Superflip, SharpED, and EDMA structure-search settings",
+            lambda: self._attempt_edit(),
+            icon_source="phase_studio_mark",
+            tier="secondary",
+        )
+        self.professional_mode_tile = self.professional_mode_button
+        # The horizontal layout already gives the pair equal height. Let each
+        # wrapped subtitle report its natural size rather than reserving four
+        # lines even when three are enough at the target width.
+        self.professional_mode_tile.setToolTip(
+            "Open the complete Phase Studio application with parameters imported from the "
+            "Jana2020 .inflip file. Configure settings and press Run manually."
+        )
+        secondary_actions_row.addWidget(self.autosolve_tile, 1)
+        secondary_actions_row.addWidget(self.professional_mode_tile, 1)
+        self.workflow_body.addLayout(secondary_actions_row)
 
         self.page1_layout.addWidget(self.workflow_section)
         self.page1_layout.addStretch(1)
@@ -1941,7 +2414,7 @@ class _JanaWorkflowWizard:
         self.page2 = QWidget()
         self.page2_layout = QVBoxLayout(self.page2)
         self.page2_layout.setContentsMargins(0, 0, 0, 0)
-        self.page2_layout.setSpacing(10)
+        self.page2_layout.setSpacing(5)
 
         self.map_group = QGroupBox("Map used for Jana2020 handoff")
         self.map_group_layout = QVBoxLayout(self.map_group)
@@ -1949,10 +2422,12 @@ class _JanaWorkflowWizard:
         self.sharped_map_radio = QRadioButton("SharpED map")
         self.superflip_map_radio = QRadioButton("Superflip map")
         self.sharped_map_radio.setToolTip(
-            "Use the SharpED map for the next phase-recycling cycle and for the Jana2020 handoff."
+            "Open Result Selection on the SharpED results for the Jana2020 handoff. "
+            "Each next cycle is initialized from the SharpED map."
         )
         self.superflip_map_radio.setToolTip(
-            "Use the Superflip map for the next phase-recycling cycle and for the Jana2020 handoff."
+            "Open Result Selection on the Superflip results for the Jana2020 handoff. "
+            "Each next cycle is still initialized from the SharpED map."
         )
         self.map_buttons.addButton(self.sharped_map_radio)
         self.map_buttons.addButton(self.superflip_map_radio)
@@ -1967,13 +2442,27 @@ class _JanaWorkflowWizard:
 
         self.processing_form = QFormLayout()
         self.processing_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.processing_form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        self.processing_form.setVerticalSpacing(4)
 
         self.cycles = QSpinBox()
         self.cycles.setRange(1, 999)
-        self.cycles.setValue(int(self.settings.value("cycles", 1)) or 1)
-        self.cycles.setToolTip("Number of Superflip/SharpED phase-recycling cycles.")
-        self.processing_form.addRow("Recycling cycles", self.cycles)
+        self.cycles.setMinimumWidth(140)
+        self.cycles.setMaximumWidth(220)
+        self.cycles.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        self.cycles.setValue(int(self.settings.value("cycles", 5)) or 5)
+        self.cycles.setToolTip("Number of ordinary Superflip + SharpED workflow cycles.")
+        self.processing_form.addRow("Number of cycles", self.cycles)
         self.cycles_label = self.processing_form.labelForField(self.cycles)
+
+        self.cycles_recommendation = QLabel(
+            "1 cycle is fast and suitable for easier cases.\n"
+            "5 cycles are recommended for more difficult cases.\n"
+            "Each additional cycle increases the total runtime."
+        )
+        self.cycles_recommendation.setObjectName("recommendationReason")
+        self.cycles_recommendation.setWordWrap(True)
+        self.processing_form.addRow("", self.cycles_recommendation)
 
         self.cycles_user_edited = {"value": False}
 
@@ -1983,30 +2472,57 @@ class _JanaWorkflowWizard:
         self.cycles.valueChanged.connect(mark_cycles_user_edited)
 
         self.model = QComboBox()
-        self.model.setEditable(True)
-        saved_model = model_selection(self.settings.value("model", "default"))
-        self.model.addItem(saved_model)
-        if saved_model != "default":
-            self.model.insertItem(0, "default")
-        self.model.setCurrentText(saved_model)
+        self.model.setEditable(False)
+        self.model.setMaxVisibleItems(8)
+        self.model.setMinimumWidth(380)
+        self.model.setMaximumWidth(550)
+        self.model.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+        saved_model = str(self.settings.value("model", "default")).strip() or "default"
+        saved_mode = str(self.settings.value("model_selection_mode", "")).strip().casefold()
+        # Restore only an explicitly saved manual preference. The live
+        # catalogue below verifies it; legacy model strings are not overrides.
+        automatic_initially = saved_mode != "manual" or not saved_model
+        initial_model = sharped_model_for_cycles(self.cycles.value()) if automatic_initially else saved_model
+        self.model.addItem(initial_model)
+        self.model.setCurrentText(initial_model)
         self.model.setToolTip(
-            "SharpED inference model. Select a model returned by the server or enter an "
-            "explicit model identifier. The value 'default' requests the server default."
+            "SharpED inference model. Select an exact model returned by the live server catalog. "
+            "Automatic selection follows the Phase Studio cycle policy."
         )
+        self.model_user_picked = {"value": not automatic_initially}
         self.processing_form.addRow("Model", self.model)
+        self.manual_model_row = QWidget()
+        manual_model_layout = QHBoxLayout(self.manual_model_row)
+        manual_model_layout.setContentsMargins(0, 0, 0, 0)
+        self.manual_model_indicator = QLabel("Manually selected")
+        self.manual_model_indicator.setObjectName("modelRecommendation")
+        self.restore_automatic_model_button = QPushButton("Restore automatic selection")
+        self.restore_automatic_model_button.setFlat(True)
+        self.restore_automatic_model_button.setToolTip(
+            "Use PEAK A (model prediction) for one cycle and SEED (cyclic CF) for two or more cycles."
+        )
+        manual_model_layout.addWidget(self.manual_model_indicator)
+        manual_model_layout.addWidget(self.restore_automatic_model_button)
+        manual_model_layout.addStretch()
+        self.processing_form.addRow("", self.manual_model_row)
+        self.model_recommendation = QLabel("")
+        self.model_recommendation.setObjectName("modelRecommendation")
+        self.model_recommendation.setWordWrap(True)
+        self.processing_form.addRow("", self.model_recommendation)
         self.page2_layout.addLayout(self.processing_form)
 
         self.refresh_row = QWidget()
         self.refresh_layout = QHBoxLayout(self.refresh_row)
         self.refresh_layout.setContentsMargins(0, 0, 0, 0)
+        self.refresh_layout.setSpacing(3)
         self.refresh_models_button = QPushButton("Refresh models")
         self.refresh_models_button.setToolTip("Query the SharpED server for its currently available models.")
         self.model_status = QLabel("Loading models…")
         self.model_status.setWordWrap(True)
         self.model_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.refresh_layout.addWidget(self.refresh_models_button)
-        self.refresh_layout.addWidget(self.model_status, 1)
-        self.page2_layout.addWidget(self.refresh_row)
+        self.refresh_layout.addWidget(self.refresh_models_button, 0, Qt.AlignTop)
+        self.refresh_layout.addWidget(self.model_status, 1, Qt.AlignVCenter)
+        self.processing_form.addRow("", self.refresh_row)
 
         self.sharped_group = QGroupBox()
         self.sharped_outer = QVBoxLayout(self.sharped_group)
@@ -2024,19 +2540,20 @@ class _JanaWorkflowWizard:
         self.sharped_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.sharped_form.setContentsMargins(18, 4, 0, 0)
 
-        self.server_url = QLineEdit(normalize_server_url(self._shared_or_legacy_value("sharped_base_url", "server_url", DEFAULT_SERVER_URL)))
+        # Normal Wizard workflows use the one authoritative SharpED service.
+        # The hidden object preserves compatibility with code that reads the
+        # value, without exposing an endpoint editor to normal users.
+        self.server_url = QLineEdit(DEFAULT_SERVER_URL)
         self.server_url.setPlaceholderText(DEFAULT_SERVER_URL)
-        self.server_url.setToolTip(
-            "Base URL of the SharpED service used for model discovery and map processing. "
-            "Shared with the full Phase Studio application's own Advanced → Setup value."
-        )
-        self.sharped_form.addRow("Server URL", self.server_url)
+        self.server_url.setReadOnly(True)
+        self.server_url.setVisible(False)
 
         self.api_token = QLineEdit(
             self._shared_or_legacy_value("sharped_api_token", "api_token", os.environ.get("SHARPED_API_TOKEN", ""))
         )
         self.api_token.setEchoMode(QLineEdit.Password)
         self.api_token.setPlaceholderText("Enter API token")
+        self.api_token.setMaximumWidth(550)
         self.api_token.setToolTip(
             "Bearer token used to authorize SharpED processing. The token is masked in "
             "the interface, may alternatively be supplied through SHARPED_API_TOKEN, and "
@@ -2059,20 +2576,53 @@ class _JanaWorkflowWizard:
             self._adjust_dialog_size()
 
         self.sharped_toggle.toggled.connect(sync_sharped_disclosure)
-        self.page2_layout.addWidget(self.sharped_group)
+        self.processing_form.addRow("", self.sharped_group)
 
         self.refresh_results: "queue.Queue[tuple[str, object]]" = queue.Queue()
         self.refresh_timer = QTimer(self.dialog)
         self.refresh_timer.setInterval(100)
-        # Request scheduling only; metadata belongs to the shared client catalog.
-        # Back/Next reuses that catalog. Public discovery is independent of tokens.
+        # One successful list is reused for the Wizard session.
         self.model_cache = {"loaded": False, "inflight": False, "key": None}
 
-        def model_request_key() -> str:
-            return normalize_server_url(self.server_url.text())
+        self.model_catalog = {"values": tuple()}
+        self.model_policy_error = ""
+
+        def update_model_recommendation(_value: int = 0) -> None:
+            self.manual_model_row.setVisible(self.model_user_picked["value"])
+            one_cycle = self.cycles.value() == 1
+            recommended = sharped_model_for_cycles(self.cycles.value())
+            self.model_recommendation.setText(
+                f"Recommended for 1 cycle: {recommended}"
+                if one_cycle else f"Recommended for iterative charge flipping: {recommended}"
+            )
+            self.model_policy_error = ""
+            if not self.model_user_picked["value"]:
+                index = self.model.findText(recommended)
+                if index >= 0:
+                    self.model.setCurrentIndex(index)
+                elif self.model_cache["loaded"]:
+                    self.model.setCurrentIndex(-1)
+                    self.model_policy_error = f"Required automatic model is unavailable: {recommended}."
+                    self.model_status.setText(self.model_policy_error)
+
+        def restore_automatic_model() -> None:
+            self.model_user_picked["value"] = False
+            update_model_recommendation()
+
+        def mark_model_user_picked(_index: int = 0) -> None:
+            self.model_user_picked["value"] = True
+            update_model_recommendation()
+
+        self.cycles.valueChanged.connect(update_model_recommendation)
+        self.model.activated.connect(mark_model_user_picked)
+        self.restore_automatic_model_button.clicked.connect(restore_automatic_model)
+        update_model_recommendation()
+
+        def model_request_key() -> tuple:
+            return (DEFAULT_SERVER_URL, self.api_token.text().strip())
 
         def refresh_available_models(manual: bool = True) -> None:
-            base_url = self.server_url.text().strip() or DEFAULT_SERVER_URL
+            base_url = DEFAULT_SERVER_URL
             if self.model_cache["inflight"]:
                 return
             self.model_cache["inflight"] = True
@@ -2083,10 +2633,10 @@ class _JanaWorkflowWizard:
             def worker() -> None:
                 try:
                     client = SharpEDServerClient(base_url=base_url, timeout=30.0)
-                    models_result = client.get_models(max_age=0 if manual else MODEL_METADATA_REUSE_SECONDS)
-                    self.refresh_results.put(("ok", (normalize_server_url(base_url), models_result)))
+                    models_result = client.get_models()
+                    self.refresh_results.put(("ok", models_result))
                 except Exception as exc:
-                    self.refresh_results.put(("error", (normalize_server_url(base_url), sanitize_error_details(exc))))
+                    self.refresh_results.put(("error", str(exc)))
 
             threading.Thread(target=worker, daemon=True).start()
             if not self.refresh_timer.isActive():
@@ -2101,38 +2651,50 @@ class _JanaWorkflowWizard:
             self.refresh_timer.stop()
             self.refresh_models_button.setEnabled(True)
             self.model_cache["inflight"] = False
-            source, payload = payload
-            if source != normalize_server_url(self.server_url.text()):
-                self.model_cache["loaded"] = False
-                refresh_available_models()
-                return
             if state == "error":
-                # Manual retry stays available; a model identifier can still be
-                # typed by hand, so this is a degraded state, not a dead end.
-                self.model_status.setText("Model list unavailable · use Refresh models to retry.")
+                report = build_error_report(
+                    payload, subsystem="SharpED", operation="Load model catalog",
+                )
+                self.model_policy_error = "The live SharpED model catalogue is unavailable. Use Refresh models to retry."
+                self.model_status.setText(f"{report.title} · use Refresh models to retry.")
                 self.model_status.setToolTip(
-                    "Model discovery failed. Verify the server URL and network connection; "
-                    "a model identifier may still be entered manually.\n\n"
-                    + sanitize_error_details(payload)
+                    f"{report.summary}\n\n{report.guidance}\n\n{report.technical_details}"
                 )
                 return
 
-            catalog = current_model_catalog(source) or payload
-            self.model_status.setText(apply_model_catalog(self.model, catalog))
-            self._fit_model_popup_width()
+            models_result = payload
+            current = self.model.currentText().strip()
+            default_model = str(getattr(models_result, "default_model", "") or "").strip()
+            values = []
+            for candidate in list(getattr(models_result, "models", []) or []):
+                exact = str(candidate or "").strip()
+                if exact and exact not in values:
+                    values.append(exact)
+            manual_was_removed = self.model_user_picked["value"] and current not in values
+            if manual_was_removed:
+                self.model_user_picked["value"] = False
+            self.model.blockSignals(True)
+            self.model.clear()
+            self.model.addItems(values)
+            if current in values and not manual_was_removed:
+                self.model.setCurrentText(current)
+            self.model.blockSignals(False)
+            self.model_catalog["values"] = tuple(values)
+            self._sharped_server_default = default_model
             self.model_cache["loaded"] = True
-
-        def sync_shared_catalog() -> None:
-            status = sync_model_catalog(self.model, self.server_url.text())
-            if status is not None:
-                self.model_status.setText(status)
-                self._fit_model_popup_width()
-
-        self.catalog_timer = QTimer(self.dialog)
-        self.catalog_timer.setInterval(200)
-        self.catalog_timer.timeout.connect(sync_shared_catalog)
-        self.catalog_timer.start()
-        sync_shared_catalog()
+            update_model_recommendation()
+            self._fit_model_popup_width()
+            model_count = len(values)
+            noun = "model" if model_count == 1 else "models"
+            if self.model_policy_error:
+                self.model_status.setText(self.model_policy_error)
+            elif manual_was_removed:
+                self.model_status.setText(
+                    f"The selected model is no longer available; automatic selection restored. "
+                    f"{model_count} {noun} available."
+                )
+            else:
+                self.model_status.setText(f"{model_count} {noun} available")
 
         self.refresh_models_button.clicked.connect(lambda _checked=False: refresh_available_models(manual=True))
         self.refresh_timer.timeout.connect(poll_model_refresh)
@@ -2158,6 +2720,8 @@ class _JanaWorkflowWizard:
 
         self.validation_group = QGroupBox("Scientific validation")
         self.validation_layout = QHBoxLayout(self.validation_group)
+        self.validation_layout.setContentsMargins(10, 7, 10, 7)
+        self.validation_layout.setSpacing(8)
         self.warning_icon = QLabel()
         self.warning_icon.setPixmap(self.dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
         self.warning_icon.setAlignment(Qt.AlignTop)
@@ -2178,18 +2742,17 @@ class _JanaWorkflowWizard:
         self.cross_validation_layout = QVBoxLayout(self.cross_validation_group)
         self.omit_checkbox = QCheckBox("Compute OMIT validation maps")
         self.omit_checkbox.setToolTip(
-            "Each cycle, additionally run Superflip (and SharpED, if enabled) on a fixed "
-            "random 5% holdout of reflections excluded from the input, for cross-validation. "
-            "Feeds the phase-recycling result selector's Selection score, helping identify the "
-            "most suitable map among the recycling cycles. Roughly doubles Superflip/SharpED "
+            "Freeze a symmetry/Friedel-orbit-safe 5% reflection holdout before the workflow "
+            "and exclude it from every work-data and feedback step. Enables cross-validation "
+            "metrics and profile-aware result recommendation. Roughly doubles Superflip/SharpED "
             "time per cycle."
         )
         self.rfree_checkbox = QCheckBox("Calculate R_free")
         self.rfree_checkbox.setToolTip(
-            "Compute R_free (the crystallographic R-factor between the excluded holdout "
+            "Calculated automatically with the holdout: the crystallographic R-factor between the excluded "
             "reflections' observed |F| and |F| calculated by FFT from the omit map) for each "
-            "cycle. Feeds the phase-recycling result selector's Selection score alongside OMIT "
-            "correlation, helping rank cycles and choose the most suitable map. Requires "
+            "cycle. The result selector uses the active profile's explicit lexicographic "
+            "criteria, without a combined numeric score. Requires "
             "'Compute OMIT validation maps'."
         )
         self.cross_validation_layout.addWidget(self.omit_checkbox)
@@ -2210,9 +2773,8 @@ class _JanaWorkflowWizard:
 
         def sync_rfree_dependency(_checked: bool = False) -> None:
             omit_enabled = self.omit_checkbox.isChecked()
-            self.rfree_checkbox.setEnabled(omit_enabled)
-            if not omit_enabled and self.rfree_checkbox.isChecked():
-                self.rfree_checkbox.setChecked(False)
+            self.rfree_checkbox.setChecked(omit_enabled)
+            self.rfree_checkbox.setEnabled(False)
 
         self.omit_checkbox.toggled.connect(sync_rfree_dependency)
         sync_rfree_dependency()
@@ -2246,7 +2808,7 @@ class _JanaWorkflowWizard:
         self.page3 = QWidget()
         self.page3_layout = QVBoxLayout(self.page3)
         self.page3_layout.setContentsMargins(0, 0, 0, 0)
-        self.page3_layout.setSpacing(10)
+        self.page3_layout.setSpacing(5)
 
         self.reflection_data_group = QGroupBox("Reflection data")
         self.reflection_data_form = QFormLayout(self.reflection_data_group)
@@ -2261,6 +2823,13 @@ class _JanaWorkflowWizard:
         self.page3_description.setWordWrap(True)
         self.page3_description.setStyleSheet("color: #52658b;")
         self.page3_layout.addWidget(self.page3_description)
+        self.feedback_applicability_note = QLabel(
+            "Map Feedback requires at least two cycles because it modifies data for a subsequent cycle."
+        )
+        self.feedback_applicability_note.setObjectName("recommendationReason")
+        self.feedback_applicability_note.setWordWrap(True)
+        self.feedback_applicability_note.setVisible(False)
+        self.page3_layout.addWidget(self.feedback_applicability_note)
 
         # Same "Warning" message and icon+text presentation as the "Scientific
         # validation" box above (and Basic -> Map feedback's settings_callout in
@@ -2268,6 +2837,8 @@ class _JanaWorkflowWizard:
         # any option below is enabled.
         self.map_feedback_warning_group = QGroupBox()
         self.map_feedback_warning_layout = QHBoxLayout(self.map_feedback_warning_group)
+        self.map_feedback_warning_layout.setContentsMargins(10, 7, 10, 7)
+        self.map_feedback_warning_layout.setSpacing(8)
         self.map_feedback_warning_icon = QLabel()
         self.map_feedback_warning_icon.setPixmap(self.dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
         self.map_feedback_warning_icon.setAlignment(Qt.AlignTop)
@@ -2287,10 +2858,12 @@ class _JanaWorkflowWizard:
         # ranges/tooltips. ---
         self.missing_group = QGroupBox("Missing-reflection completion")
         self.missing_outer = QVBoxLayout(self.missing_group)
+        self.missing_outer.setSpacing(4)
         self.missing_enabled_checkbox = QCheckBox("Enable missing-reflection completion")
         self.missing_outer.addWidget(self.missing_enabled_checkbox)
         self.missing_form = QFormLayout()
-        self.missing_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.missing_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        self.missing_form.setVerticalSpacing(3)
         self.missing_start_cycle_spin = QSpinBox()
         self.missing_start_cycle_spin.setRange(1, 999)
         self.missing_start_cycle_spin.setValue(1)
@@ -2313,10 +2886,12 @@ class _JanaWorkflowWizard:
 
         self.intensity_group = QGroupBox("Intensity correction")
         self.intensity_outer = QVBoxLayout(self.intensity_group)
+        self.intensity_outer.setSpacing(4)
         self.intensity_enabled_checkbox = QCheckBox("Enable intensity correction")
         self.intensity_outer.addWidget(self.intensity_enabled_checkbox)
         self.intensity_form = QFormLayout()
-        self.intensity_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.intensity_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        self.intensity_form.setVerticalSpacing(3)
         self.intensity_start_cycle_spin = QSpinBox()
         self.intensity_start_cycle_spin.setRange(1, 999)
         self.intensity_start_cycle_spin.setValue(1)
@@ -2356,10 +2931,12 @@ class _JanaWorkflowWizard:
         # Map feedback's own controls/defaults/ranges/tooltips. ---
         self.powder_group = QGroupBox("Powder overlap repartitioning")
         self.powder_outer = QVBoxLayout(self.powder_group)
+        self.powder_outer.setSpacing(4)
         self.powder_enabled_checkbox = QCheckBox("Enable powder overlap repartitioning (FWHM data)")
         self.powder_outer.addWidget(self.powder_enabled_checkbox)
         self.powder_form = QFormLayout()
-        self.powder_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.powder_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
+        self.powder_form.setVerticalSpacing(3)
         self.powder_start_cycle_spin = QSpinBox()
         self.powder_start_cycle_spin.setRange(1, 999)
         self.powder_start_cycle_spin.setValue(1)
@@ -2406,6 +2983,15 @@ class _JanaWorkflowWizard:
         self.powder_outer.addWidget(self.powder_note)
         self.page3_layout.addWidget(self.powder_group)
 
+        for editor in (
+            self.missing_start_cycle_spin, self.missing_percent_spin,
+            self.intensity_start_cycle_spin, self.intensity_damping_spin,
+            self.intensity_sigma_spin, self.powder_start_cycle_spin,
+            self.powder_wavelength_spin, self.powder_separation_spin,
+            self.powder_mix_spin,
+        ):
+            editor.setMaximumWidth(180)
+
         self.page3_validation_label = QLabel("")
         self.page3_validation_label.setWordWrap(True)
         self.page3_validation_label.setObjectName("wizardValidationMessage")
@@ -2413,6 +2999,9 @@ class _JanaWorkflowWizard:
         self.page3_validation_label.setVisible(False)
         self.page3_layout.addWidget(self.page3_validation_label)
 
+        # Keep the final scientific field visibly separated from the fixed
+        # Wizard footer; the page's existing scroll area handles short screens.
+        self.page3_layout.addSpacing(4)
         self.page3_layout.addStretch(1)
         self.stack.addWidget(self.page3)
 
@@ -2424,7 +3013,7 @@ class _JanaWorkflowWizard:
         # settings.value(...) read is ever wired to these controls.
 
         def sync_missing_dependency(_checked: bool = False) -> None:
-            enabled = self.missing_enabled_checkbox.isChecked()
+            enabled = self.cycles.value() > 1 and self.missing_enabled_checkbox.isChecked()
             self.missing_start_cycle_spin.setEnabled(enabled)
             self.missing_percent_spin.setEnabled(enabled)
 
@@ -2432,7 +3021,7 @@ class _JanaWorkflowWizard:
         sync_missing_dependency()
 
         def sync_intensity_dependency(_checked: bool = False) -> None:
-            enabled = self.intensity_enabled_checkbox.isChecked()
+            enabled = self.cycles.value() > 1 and self.intensity_enabled_checkbox.isChecked()
             self.intensity_start_cycle_spin.setEnabled(enabled)
             self.intensity_damping_spin.setEnabled(enabled)
             self.intensity_sigma_spin.setEnabled(enabled)
@@ -2441,7 +3030,7 @@ class _JanaWorkflowWizard:
         sync_intensity_dependency()
 
         def sync_powder_dependency(_checked: bool = False) -> None:
-            enabled = self.powder_enabled_checkbox.isChecked()
+            enabled = self.cycles.value() > 1 and self.powder_enabled_checkbox.isChecked()
             self.powder_start_cycle_spin.setEnabled(enabled)
             self.powder_wavelength_spin.setEnabled(enabled)
             self.powder_separation_spin.setEnabled(enabled)
@@ -2449,6 +3038,40 @@ class _JanaWorkflowWizard:
 
         self.powder_enabled_checkbox.toggled.connect(sync_powder_dependency)
         sync_powder_dependency()
+
+        def sync_feedback_applicability(_value: int = 0) -> None:
+            applicable = self.cycles.value() > 1
+            self.feedback_applicability_note.setVisible(not applicable)
+            for checkbox in (
+                self.missing_enabled_checkbox,
+                self.intensity_enabled_checkbox,
+                self.powder_enabled_checkbox,
+            ):
+                checkbox.setEnabled(applicable)
+            if applicable:
+                maximum = self.cycles.value() - 1
+                for spin in (
+                    self.missing_start_cycle_spin,
+                    self.intensity_start_cycle_spin,
+                    self.powder_start_cycle_spin,
+                ):
+                    spin.setMaximum(maximum)
+            else:
+                # Retain the configured value while the one-cycle workflow
+                # makes feedback inapplicable; it is restored if cycles rise.
+                for spin in (
+                    self.missing_start_cycle_spin,
+                    self.intensity_start_cycle_spin,
+                    self.powder_start_cycle_spin,
+                ):
+                    spin.setMaximum(999)
+            sync_missing_dependency()
+            sync_intensity_dependency()
+            sync_powder_dependency()
+
+        self._sync_feedback_applicability = sync_feedback_applicability
+        self.cycles.valueChanged.connect(sync_feedback_applicability)
+        sync_feedback_applicability()
 
         # One consistent rhythm for every Wizard section (shared constants in
         # ui_style.PHASE_STUDIO_SPACING), instead of each page carrying its own
@@ -2488,11 +3111,15 @@ class _JanaWorkflowWizard:
         QWidget = qt["QWidget"]
 
         # ----- Fixed action footer: added to outer_root (NOT the scrollable
-        # `root`/content_layout), so Back/Cancel/Open config/Run phasing always
-        # stay visible above the taskbar regardless of how tall the scrollable
+        # `root`/content_layout), so Back/Cancel/Run phasing always stay
+        # visible above the taskbar regardless of how tall the scrollable
         # page content above them gets (spec: "WIZARD WINDOW SIZING" sections
-        # 5/8). A prominent "Run" action on page 2 plus the less prominent
-        # Back / Cancel / Open full Phase Studio actions. -----
+        # 5/8). 2.0.0: "Open full configuration" is removed -- it duplicated
+        # "Professional mode" on page1, which is now the one authoritative
+        # entry to the full Phase Studio GUI. The primary button is hidden
+        # entirely on page1 and the Autosolve decision page, since their
+        # actions are tile-click-driven (no Next/Run confirmation step);
+        # Advanced's own page2/page3 flow keeps it. -----
         self.footer = QWidget()
         self.footer.setObjectName("wizardFooter")
         self.button_row = QHBoxLayout(self.footer)
@@ -2501,19 +3128,12 @@ class _JanaWorkflowWizard:
         self.back_button.setToolTip("Return to the workflow selection.")
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.setToolTip("Close the launcher without starting or modifying the Jana2020 job.")
-        self.edit_button = QPushButton("Open full configuration")
-        self.edit_button.setToolTip(
-            "Open the complete Phase Studio workspace with parameters imported from the "
-            "Jana2020 .inflip file. Embedded reflections are exported to a working HKL file "
-            "unless an external HKL override is selected there."
-        )
         self.primary_button = QPushButton("Run phasing")
         self.primary_button.setObjectName("primaryButton")
         self.primary_button.setDefault(True)
         self.button_row.addWidget(self.back_button)
         self.button_row.addStretch(1)
         self.button_row.addWidget(self.cancel_button)
-        self.button_row.addWidget(self.edit_button)
         self.button_row.addWidget(self.primary_button)
         self.outer_root.addWidget(self.footer)
         self.chrome_holder["footer"] = self.footer
@@ -2527,44 +3147,50 @@ class _JanaWorkflowWizard:
         self.PAGE2_BANNER_TEXT = {
             WORKFLOW_SUPERFLIP_SHARPED: (
                 "SUPERFLIP + SHARPED",
-                "Configure SharpED processing before returning the result to Jana2020",
+                "Configure the Superflip + SharpED workflow before running",
             ),
-            WORKFLOW_PHASE_RECYCLING: ("PHASE RECYCLING", "Configure iterative reconstruction and validation"),
+            WORKFLOW_PHASE_RECYCLING: ("PHASE RECYCLING", "Configure phase recycling and validation"),
         }
 
+        def scroll_to_page_top() -> None:
+            # Each step begins at its own top. Carrying the previous page's
+            # offset through Next/Back can hide the heading and look like a
+            # geometry jump even though the outer window is stable.
+            self.scroll_area.verticalScrollBar().setValue(0)
+
         def go_to_page1() -> None:
+            if self._current_workflow() not in (
+                WORKFLOW_SUPERFLIP_ONLY, WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_AUTOSOLVE,
+            ):
+                self.workflow_state["key"] = WORKFLOW_SUPERFLIP_ONLY
+                self._workflow_changed()
             self.stack.setCurrentWidget(self.page1)
             self.back_button.setVisible(False)
-            self._sync_primary_button_for_page1()
+            # Both dominant actions are tile-click-driven -- no Next/Run
+            # confirmation step, so the primary button has nothing to do here.
+            self.primary_button.setVisible(False)
             self.context_title_label.setText("JANA2020 WORKFLOW")
             self.context_subtitle_label.setText("Review the incoming crystallographic data and choose a workflow")
+            scroll_to_page_top()
             self._adjust_dialog_size()
 
         def go_to_page2() -> None:
             self.stack.setCurrentWidget(self.page2)
             self.back_button.setVisible(True)
+            self.primary_button.setVisible(True)
             # Page 2 is where a SharpED model is chosen, so the list is fetched
             # on arrival instead of leaving the user on "Model list not loaded."
             # until they find the Refresh button. No-op for Superflip only, and
             # cached for the rest of the session.
             self._ensure_models_loaded()
-            if self._current_workflow() == WORKFLOW_PHASE_RECYCLING:
-                # Phase recycling alone continues to a third page (Map feedback)
-                # before anything runs; Superflip + SharpED has no such page and
-                # keeps running directly from here.
-                self.primary_button.setText("Next ›")
-                self.primary_button.setToolTip("Continue to the Map feedback settings.")
-            else:
-                self.primary_button.setText("Run phasing")
-                self.primary_button.setToolTip(
-                    "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
-                    "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
-                )
+            self.primary_button.setText("Next ›")
+            self.primary_button.setToolTip("Continue to Map Feedback.")
             banner_title, banner_subtitle = self.PAGE2_BANNER_TEXT.get(
                 self._current_workflow(), ("JANA2020 WORKFLOW", "")
             )
             self.context_title_label.setText(banner_title)
             self.context_subtitle_label.setText(banner_subtitle)
+            scroll_to_page_top()
             self._adjust_dialog_size()
 
         def go_to_page3() -> None:
@@ -2572,22 +3198,28 @@ class _JanaWorkflowWizard:
             self._refresh_page3_validation_message()
             self.stack.setCurrentWidget(self.page3)
             self.back_button.setVisible(True)
+            self.primary_button.setVisible(True)
             self.primary_button.setText("Run phasing")
             self.primary_button.setToolTip(
                 "Execute the Jana2020 Superflip job through the Phase Studio cycle wrapper. "
                 "For every model-seeded cycle, repeatmode 1 is enforced and randomseed is omitted."
             )
-            self.context_title_label.setText("PHASE RECYCLING · MAP FEEDBACK")
-            self.context_subtitle_label.setText("Optionally update reflection data between recycling cycles")
+            self.context_title_label.setText("SUPERFLIP + SHARPED · MAP FEEDBACK")
+            self.context_subtitle_label.setText("Optionally update reflection data between cycles")
+            scroll_to_page_top()
             self._adjust_dialog_size()
 
         def go_back() -> None:
-            if self.stack.currentWidget() is self.page3:
+            current = self.stack.currentWidget()
+            if current is self.page3:
                 go_to_page2()
+            elif current is self.page2:
+                go_to_page1()
             else:
                 go_to_page1()
 
         self.back_button.clicked.connect(go_back)
+        self._go_to_map_feedback = go_to_page3
         go_to_page1()
 
         self.result = {"action": "cancel"}
@@ -2627,9 +3259,7 @@ class _JanaWorkflowWizard:
             return effective_compute_omit_maps() and self.rfree_checkbox.isChecked()
 
         def effective_map_feedback_enabled() -> bool:
-            # PAGE 3 is Phase-recycling-only; its controls must never leak
-            # through for either single-pass workflow even if somehow toggled.
-            return self._current_workflow() == WORKFLOW_PHASE_RECYCLING
+            return self._current_workflow() in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
 
         def save_values() -> None:
             next_cycle_mode = effective_next_cycle_mode()
@@ -2637,14 +3267,15 @@ class _JanaWorkflowWizard:
             self.settings.setValue("cycles", effective_cycles())
             self.settings.setValue("next_cycle_modelfile", next_cycle_mode)
             self.settings.setValue("use_deblurred_map", next_cycle_mode == "deblurred_xplor")
-            # SharpED server URL / API token are the shared credentials also used by
-            # the full Phase Studio application; write them there, not to a second,
-            # independent copy under this wrapper's own settings (see shared_settings
-            # above for why: two copies drift and silently overwrite one another).
-            self.shared_settings.setValue("inputs/sharped_base_url", self.server_url.text())
+            # The URL is fixed for normal Wizard workflows; the API token is
+            # shared with the full application.
+            self.shared_settings.setValue("inputs/sharped_base_url", DEFAULT_SERVER_URL)
             self.shared_settings.setValue("inputs/sharped_api_token", self.api_token.text())
             self.shared_settings.sync()
             self.settings.setValue("model", self.model.currentText())
+            self.settings.setValue(
+                "model_selection_mode", "manual" if self.model_user_picked["value"] else "automatic"
+            )
             # Elements and Output resolution have no control of their own here
             # any more -- they come from the shared full-application settings (see
             # effective_elements()/effective_outres()) and are not re-persisted.
@@ -2655,14 +3286,22 @@ class _JanaWorkflowWizard:
 
         def build_options(action: str) -> JanaRunOptions:
             next_cycle_mode = effective_next_cycle_mode()
+            run_model = self.model.currentText().strip()
             return JanaRunOptions(
                 action=action,
                 cycles=effective_cycles(),
-                use_deblurred_map=next_cycle_mode == "deblurred_xplor",
+                # The recommended workflow always retains both completed
+                # result families. Its initial Result Selection source is the
+                # measured-data Charge-flipping solution result; the SharpED result is
+                # available beside it without a hidden pre-run objective.
+                use_deblurred_map=(
+                    False if self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED
+                    else next_cycle_mode == "deblurred_xplor"
+                ),
                 next_cycle_modelfile=next_cycle_mode,
                 api_token=self.api_token.text().strip(),
-                server_url=self.server_url.text().strip() or DEFAULT_SERVER_URL,
-                model=self.model.currentText().strip() or "default",
+                server_url=DEFAULT_SERVER_URL,
+                model=run_model,
                 elements=effective_elements(),
                 outres=effective_outres(),
                 input_mode=INPUT_MODE_INFLIP,
@@ -2684,31 +3323,41 @@ class _JanaWorkflowWizard:
                 powder_wavelength=self.powder_wavelength_spin.value(),
                 powder_separation_factor=self.powder_separation_spin.value(),
                 powder_map_ratio_mix=self.powder_mix_spin.value(),
+                # Kept only for the adaptive Autosolve backend's compatibility
+                # contract. The ordinary Superflip + SharpED route has no
+                # objective state; users choose the exact family/cycle later.
+                autosolve_option="A" if action == "autosolve" else "",
             )
 
         def attempt_run() -> None:
-            if self.stack.currentWidget() is self.page1 and self._current_workflow() != WORKFLOW_SUPERFLIP_ONLY:
+            self._preflight_sharped_default_model = ""
+            if self.stack.currentWidget() is self.page1 and self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED:
                 go_to_page2()
+                return
+            if self.stack.currentWidget() is self.page1 and self._current_workflow() == WORKFLOW_AUTOSOLVE:
+                if not self._ensure_workflow_requirements(needs_sharped=True):
+                    return
+                save_values()
+                self.result["action"] = "autosolve"
+                self.dialog.accept()
                 return
             if self.stack.currentWidget() is self.page3:
                 validation_message = self._check_page3_validity()
                 if validation_message:
                     self._refresh_page3_validation_message()
                     return
+                if not self._ensure_workflow_requirements(needs_sharped=True):
+                    return
                 save_values()
                 self.result["action"] = "recycle"
                 self.dialog.accept()
                 return
-            token = self.api_token.text().strip() or os.environ.get("SHARPED_API_TOKEN", "").strip()
-            if effective_next_cycle_mode() == "deblurred_xplor" and not token:
-                if self.stack.currentWidget() is not self.page2:
-                    go_to_page2()
-                self.sharped_toggle.setChecked(True)
-                self.api_token.setFocus()
-                _show_missing_token_warning(self.dialog, qt)
-                return
-            if self.stack.currentWidget() is self.page2 and self._current_workflow() == WORKFLOW_PHASE_RECYCLING:
+            if self.stack.currentWidget() is self.page2 and self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED:
                 go_to_page3()
+                return
+            if not self._ensure_workflow_requirements(
+                needs_sharped=effective_next_cycle_mode() == "deblurred_xplor"
+            ):
                 return
             save_values()
             # Only Phase recycling opens the full Phase Studio main window (via
@@ -2724,8 +3373,17 @@ class _JanaWorkflowWizard:
             self.result["action"] = "edit"
             self.dialog.accept()
 
+        # Exposed so page1's own tile-click
+        # handlers (built by earlier methods) can trigger exactly the same
+        # dispatch a visible "Run phasing"/"Next"/"Start Autosolve" button
+        # used to -- not a second, parallel dispatch implementation.
+        self._attempt_run = attempt_run
+        self._attempt_edit = edit_clicked
+
         self.primary_button.clicked.connect(attempt_run)
-        self.edit_button.clicked.connect(edit_clicked)
+        # "Professional mode" is the one authoritative entry to the full
+        # Phase Studio GUI (2.0.0: the old "Open full configuration" footer
+        # button duplicated it and has been removed).
         self.cancel_button.clicked.connect(self.dialog.reject)
 
         # Word-wrapped labels' heightForWidth() is not fully trustworthy until
@@ -2748,7 +3406,8 @@ def show_jana_dialog(args: Sequence[str], inflip_path: Optional[Path]) -> JanaRu
 
 
 def launch_phase_studio_from_jana(
-    inflip_path: Optional[Path], options: JanaRunOptions, auto_start: bool = False
+    inflip_path: Optional[Path], options: JanaRunOptions, auto_start: bool = False,
+    diagnostic_log: Optional[Callable[[str], None]] = None,
 ) -> int:
     # Load PySide6 before importing app.py, which initializes Matplotlib QtAgg.
     qt = _qt_imports()
@@ -2796,7 +3455,10 @@ def launch_phase_studio_from_jana(
             # path -- see effective_next_cycle_mode() in show_jana_dialog()).
             win.jana_wizard_context.launch_mode = "phase_recycling"
             win.jana_wizard_context.wizard_map_source = (
-                "superflip" if options.next_cycle_modelfile == "superflip_xplor" else "deblurred"
+                "deblurred" if options.use_deblurred_map else "superflip"
+            )
+            win.jana_wizard_context.autosolve_option = options.autosolve_option or (
+                "B" if options.use_deblurred_map else "A"
             )
             # Fill every EDMA/Superflip setting the dialog and the .inflip don't
             # cover with Phase Studio's own "recommended" preset first, so the
@@ -2804,8 +3466,8 @@ def launch_phase_studio_from_jana(
             win._apply_workflow_preset("recommended")
         else:
             # "Open full configuration": the user drives the whole workflow
-            # manually and explicitly clicks Send to Jana2020 once a run
-            # completes -- no auto-selected map source, no auto-start.
+            # manually; no map source is pre-locked and the workflow does not
+            # auto-start. Completed runs use the shared result selector.
             win.jana_wizard_context.launch_mode = "full_configuration"
         # The third primary button and window title default to standalone's
         # "Install to Jana2020" / "Phase Studio <version>" at construction;
@@ -2832,6 +3494,13 @@ def launch_phase_studio_from_jana(
             win._sync_workflow_widgets()
             for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
                 win._append_execution_log(line, subsystem="Jana2020")
+            win._append_execution_log(
+                f"[Jana2020] Integration · Phase Studio {__version__} · "
+                f"launcher {(Path(sys.executable).resolve() if getattr(sys, 'frozen', False) else Path(__file__).resolve())} · "
+                f"Superflip {resolve_active_jana_superflip(application_dir()).resolve()}",
+                level="DETAIL",
+                subsystem="Jana2020",
+            )
             if auto_start:
                 win._append_execution_log(
                     "[Jana2020] Phase recycling requested · calculation will start automatically",
@@ -2840,49 +3509,306 @@ def launch_phase_studio_from_jana(
                 )
             else:
                 win._append_execution_log(
-                    "After the full pipeline finishes, use the 'Send to Jana2020' button to choose the cycle and map source for the final Jana2020 handoff.",
+                    "After the full workflow finishes, the result selector opens with the recommended cycle and map source preselected; use 'Pass to Jana2020' to complete the handoff.",
                     level="DETAIL",
                     subsystem="Jana2020",
                 )
         win.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
         return win
 
-    win = initialize_main_window(app, splash, build_window)
-    if win is None:
-        return 1
     if auto_start:
-        win.start_run()
+        # The full window supplies the established scientific backend, but a
+        # Wizard-selected automatic workflow must never display or activate
+        # Professional mode. Construct it directly and show only Execution.
+        try:
+            splash.set_status("Loading Jana2020 workflow…")
+            app.processEvents()
+            win = build_window()
+            from phase_studio.autosolve_window import AutosolveWindow
+
+            execution = AutosolveWindow(
+                win,
+                options.autosolve_option or ("B" if options.use_deblurred_map else "A"),
+                inflip_path=inflip_path,
+                workflow_name="Superflip + SharpED",
+            )
+            from phase_studio.ui_branding import fit_dialog_to_available_screen
+            from PySide6.QtCore import QSize
+            fit_dialog_to_available_screen(
+                execution, QSize(1420, 860), width_fraction=0.92, height_fraction=0.90,
+            )
+            from phase_studio.ui_branding import transfer_user_foreground
+            transfer_user_foreground(
+                splash, execution, windows_foreground=True, diagnostic_log=diagnostic_log,
+            )
+            win.autosolve_dialog_parent = execution
+            splash.set_status("Ready")
+            win.start_run()
+        except Exception as exc:
+            splash.close()
+            app.processEvents()
+            report = build_error_report(
+                exc, subsystem="Startup", operation="Initialize Jana2020 workflow",
+                extra_details=traceback.format_exc(),
+            )
+            show_phase_studio_error(None, report)
+            return 1
+    else:
+        win = initialize_main_window(app, splash, build_window)
+        if win is None:
+            return 1
+        from phase_studio.ui_branding import activate_user_launched_window
+        activate_user_launched_window(
+            win, windows_foreground=True, diagnostic_log=diagnostic_log,
+        )
+    return int(app.exec())
+
+
+def launch_autosolve_from_jana(
+    inflip_path: Optional[Path], options: JanaRunOptions,
+    diagnostic_log: Optional[Callable[[str], None]] = None,
+) -> int:
+    """Autosolve entry point (2.0.0). Drives the exact same ordinary-cycle
+    mechanism the Wizard's "Phase recycling" card already uses
+    (reconstruction_mode stays "superflip", Superflip runs every cycle seeded
+    by the previous cycle's SharpED-deblurred map, undamped), but the cycle
+    budget, any Map Feedback stage transition, and the final Jana2020 handoff
+    are all fully automatic -- see IterativeSuperflipPipelineQtGUI's
+    _autosolve_on_run_done()/_autosolve_begin_prediction()/
+    _autosolve_handoff() in app.py, hooked into the existing "done" queue
+    event alongside the manual Wizard/standalone completion paths.
+
+    The full IterativeSuperflipPipelineQtGUI window is constructed here as
+    the scientific *backend* only -- it is never shown. The user-visible
+    window is the dedicated, simplified AutosolveWindow (autosolve_window.py),
+    which borrows its structure-rendering/camera-sync methods and reparents
+    its Execution Log and progress-bar widgets from the backend, exactly the
+    way create_result_preview_host() already borrows the same methods for
+    the Jana2020 result selector -- not a second implementation, and not the
+    full multi-tab configuration GUI."""
+    if inflip_path is None:
+        raise ValueError("Autosolve requires a Jana2020 .inflip file.")
+    qt = _qt_imports()
+    QApplication = qt["QApplication"]
+
+    from phase_studio.app import (
+        AdaptiveCyclePolicy,
+        IterativeSuperflipPipelineQtGUI,
+        apply_phase_studio_app_icon,
+        create_startup_splash,
+        parse_inflip_settings,
+    )
+    from phase_studio.autosolve_window import AutosolveWindow
+
+    inflip_path = Path(inflip_path)
+    if not inflip_path.is_file():
+        raise FileNotFoundError(f"Jana2020 .inflip file not found: {inflip_path}")
+    parsed = parse_inflip_settings(inflip_path)
+    handoff_import = build_jana_handoff_import(inflip_path, options, parsed)
+
+    autosolve_option = options.autosolve_option or "A"
+    # Autosolve's configuration is not user-editable, so these override both
+    # the .inflip and whatever the Wizard's own leftover settings happen to
+    # hold -- see the plan's mechanism section for why each value is exactly
+    # this (undamped feed-forward of the latest SharpED map, EDMA every
+    # cycle for both sources, an initial five-cycle fixed budget).
+    # Both historical goals share one phase search -- Superflip + SharpED
+    # "koala phase boost 2", feeding the SharpED map's EDMA STRUCTURE forward
+    # as the next Superflip model (the existing deblurred_edma_cif mode),
+    # EDMA at 1.0 sigma on BOTH sides (Superflip / Charge-flipping solution and the
+    # SharpED structure fed forward). See phase_studio/autosolve_review.py.
+    from phase_studio.autosolve_review import (
+        OBSERVED_THRESHOLD_SIGMA, PHASE_SEARCH_MODEL, PREDICTED_THRESHOLD_SIGMA,
+    )
+
+    autosolve_overrides = {
+        "cycles": "5",
+        "run_sharped": "true",
+        "sharped_model": PHASE_SEARCH_MODEL,
+        "modelfile_source": "deblurred_edma_cif",
+        "damping_factor": "1.0",
+        "run_edma_superflip": "true",
+        "run_edma_deblurred": "true",
+        "plimit_superflip": f"{OBSERVED_THRESHOLD_SIGMA:.2f}",
+        "plimit_deblur": f"{PREDICTED_THRESHOLD_SIGMA:.2f}",
+        "map_export_format": "jana",
+    }
+    values = dict(handoff_import.values)
+    values.update(autosolve_overrides)
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    apply_phase_studio_style(app)
+    apply_phase_studio_app_icon(app)
+    splash = create_startup_splash()
+    splash.show()
+    app.processEvents()
+
+    def build_backend() -> IterativeSuperflipPipelineQtGUI:
+        # The full GUI class, used purely as the scientific engine (RunConfig/
+        # PipelineState/_run_pipeline_cycles/EDMA/SharpED/ranking/handoff) --
+        # never shown. Constructing it fully (rather than a stripped-down
+        # subset) is what makes reusing its existing widgets/methods for
+        # AutosolveWindow safe: nothing in this class assumes it is visible
+        # (confirmed: no isVisible()/screen()/showEvent() usage anywhere),
+        # and its own internal 50ms QTimer already drives _poll_queue
+        # regardless of .show() ever being called -- the same pattern
+        # _get_backing_window() already uses for "Advanced" pages.
+        win = IterativeSuperflipPipelineQtGUI()
+        win.jana_wizard_context.launched_from_jana_wizard = True
+        win.jana_wizard_context.launch_mode = "autosolve"
+        win.jana_wizard_context.autosolve_option = autosolve_option
+        win.jana_wizard_context.wizard_map_source = "superflip" if autosolve_option == "A" else "deblurred"
+        win._apply_workflow_preset("recommended")
+        # 2.0.0: EDMA threshold mode for BOTH sources from one central
+        # constant (phase_studio/edma_threshold.py). "manual" uses the
+        # plimit_* overrides below; "auto" calibrates per map and uses them
+        # only as the fallback. See AUTOSOLVE_EDMA_THRESHOLD_MODE for why
+        # 2.0.0 ships manual.
+        from phase_studio.edma_threshold import AUTOSOLVE_EDMA_THRESHOLD_MODE, EDMA_THRESHOLD_MODE_AUTO
+
+        win.edma_threshold_mode = AUTOSOLVE_EDMA_THRESHOLD_MODE
+        applied_keys: list[str] = []
+        for key, value in values.items():
+            widget = win.inputs.get(key)
+            if widget is not None:
+                win._set_widget_value_from_string(widget, value)
+                applied_keys.append(key)
+        win._input_mode_user_changed()
+        win._sync_input_source_mode_widgets()
+        win._sync_workflow_widgets()
+        for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
+            win._append_execution_log(line, subsystem="Jana2020")
+        win._append_execution_log(
+            f"[Jana2020] SharpED Autosolve requested -- the shared phase search "
+            f"(Superflip + SharpED '{PHASE_SEARCH_MODEL}') starts "
+            "automatically. When it converges, a Model prediction is generated from the best "
+            "Charge-flipping solution map and Review opens: tune the EDMA thresholds, recalculate, or pass "
+            "the result you choose to Jana2020.",
+            level="DETAIL",
+            subsystem="Jana2020",
+        )
+        if win.edma_threshold_mode == EDMA_THRESHOLD_MODE_AUTO:
+            threshold_text = (
+                "Auto, calibrated per map "
+                f"(fallback {float(autosolve_overrides['plimit_superflip']):g} σ after Superflip, "
+                f"{float(autosolve_overrides['plimit_deblur']):g} σ after SharpED)"
+            )
+        else:
+            threshold_text = (
+                f"{float(autosolve_overrides['plimit_superflip']):g} σ after Superflip, "
+                f"{float(autosolve_overrides['plimit_deblur']):g} σ after SharpED"
+            )
+        win._append_execution_log(
+            f"[Autosolve] EDMA threshold: {threshold_text}",
+            level="DETAIL",
+            subsystem="Autosolve",
+        )
+        return win
+
+    try:
+        splash.set_status("Loading Jana2020 workflow…")
+        app.processEvents()
+        backend = build_backend()
+        splash.set_status("Finalizing workspace…")
+        app.processEvents()
+        autosolve_win = AutosolveWindow(backend, autosolve_option, inflip_path=inflip_path)
+        from phase_studio.ui_branding import fit_dialog_to_available_screen
+        from PySide6.QtCore import QSize
+        fit_dialog_to_available_screen(
+            autosolve_win, QSize(1420, 860), width_fraction=0.92, height_fraction=0.90,
+        )
+        from phase_studio.ui_branding import activate_user_launched_window
+        activate_user_launched_window(
+            autosolve_win, windows_foreground=True, diagnostic_log=diagnostic_log,
+        )
+        app.processEvents()
+        splash.set_status("Ready")
+        splash.finish(autosolve_win)
+    except Exception as exc:
+        splash.close()
+        app.processEvents()
+        report = build_error_report(
+            exc,
+            subsystem="Startup",
+            operation="Initialize Autosolve",
+            extra_details=traceback.format_exc(),
+        )
+        show_phase_studio_error(None, report)
+        return 1
+
+    backend._autosolve_stage = "search"
+    backend._autosolve_policy = AdaptiveCyclePolicy(
+        backend._active_validation_profile(), initial=5, block_size=3,
+    )
+    backend.start_run()
     return int(app.exec())
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     args = argv[1:]
+    if "--version" in args:
+        print(__version__)
+        return 0
+    if "--brand-font-check" in args:
+        index = args.index("--brand-font-check")
+        if index + 1 >= len(args):
+            raise ValueError("--brand-font-check requires an output JSON path")
+        from PySide6.QtWidgets import QApplication
+        from phase_studio.ui_branding import phase_studio_brand_runtime_report
+        app = QApplication.instance() or QApplication([sys.argv[0]])
+        apply_phase_studio_style(app)
+        output = Path(args[index + 1]).expanduser().resolve()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(
+            json.dumps(phase_studio_brand_runtime_report("jana-wrapper"), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        return 0
     exe_dir = application_dir()
-    logger = JanaLogger(exe_dir / "log.txt")
+    initial_cwd = Path.cwd().resolve()
+    inflip_info = find_inflip_arg(args, initial_cwd)
+    inflip_path = inflip_info[1].expanduser().resolve() if inflip_info else None
+    logger = create_jana_logger(inflip_path)
     try:
         logger("Phase Studio Jana Superflip wrapper started")
+        logger(f"Jana project: {inflip_path.parent if inflip_path is not None else 'unavailable; using safe temporary log'}")
+        logger(f"Input: {inflip_path if inflip_path is not None else 'not supplied'}")
+        logger(f"Project log: {logger.log_path}")
+        log_wrapper_runtime_identity(logger)
         logger(f"Executable dir: {exe_dir}")
-        logger(f"Current working dir: {Path.cwd()}")
+        logger(f"Initial working dir (diagnostic only): {initial_cwd}")
         logger(f"Received arguments count: {len(args)}")
         for i, arg in enumerate(args, 1):
             logger(f"arg[{i}] = {arg}")
         if not args:
             logger("No arguments; opening Phase Studio GUI.")
-            return launch_phase_studio_from_jana(None, JanaRunOptions(action="edit"))
+            return launch_phase_studio_from_jana(
+                None, JanaRunOptions(action="edit"), diagnostic_log=logger,
+            )
 
-        inflip_info = find_inflip_arg(args, Path.cwd())
-        inflip_path = inflip_info[1] if inflip_info else None
         options = show_jana_dialog(args, inflip_path)
         if options.action == "cancel":
             logger("Cancelled by user.")
             return 1
         if options.action == "edit":
             logger("Opening full Phase Studio GUI.")
-            return launch_phase_studio_from_jana(inflip_path, options)
+            return launch_phase_studio_from_jana(
+                inflip_path, options, diagnostic_log=logger,
+            )
         if options.action == "recycle":
-            logger("Phase recycling requested; running it through the full Phase Studio pipeline.")
-            return launch_phase_studio_from_jana(inflip_path, options, auto_start=True)
+            logger("Phase recycling requested; running it through the full Phase Studio workflow.")
+            return launch_phase_studio_from_jana(
+                inflip_path, options, auto_start=True, diagnostic_log=logger,
+            )
+        if options.action == "autosolve":
+            logger(f"Autosolve requested (option {options.autosolve_option!r}); starting the adaptive search.")
+            # The dedicated Autosolve window presents the shared backend's
+            # adaptive cycle budget, Map Feedback transition, and Jana2020
+            # handoff without exposing the full configuration window.
+            return launch_autosolve_from_jana(
+                inflip_path, options, diagnostic_log=logger,
+            )
         # Both single-pass workflows ("run": Superflip only and Superflip +
         # SharpED) use the original lightweight console/wrapper path -- no main
         # window. Only Phase recycling (above) opens the full Phase Studio GUI.
@@ -2903,7 +3829,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             QApplication = qt["QApplication"]
             app = QApplication.instance() or QApplication([sys.argv[0]])
             apply_phase_studio_style(app)
-            show_phase_studio_error(None, report)
+            if report.category == "sharped_authentication":
+                from phase_studio import requirements as reqs
+                from phase_studio.requirements_ui import show_requirement_remediation_dialog
+
+                shared = qt["QSettings"]("PhaseStudio", "PhaseStudio")
+                current = str(shared.value("inputs/sharped_api_token", "") or "")
+                status = reqs.RequirementStatus(
+                    kind=reqs.RequirementKind.SHARPED,
+                    state=reqs.RequirementState.TOKEN_REJECTED,
+                )
+                token = show_requirement_remediation_dialog(None, status, current)
+                if token is not None:
+                    shared.setValue("inputs/sharped_api_token", token)
+                    shared.sync()
+            else:
+                show_phase_studio_error(None, report)
         except Exception:
             pass
         return 1

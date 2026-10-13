@@ -11,9 +11,9 @@ explanation all wrapped far more than necessary, which made the Phase Recycling
 page tall enough to need scrolling while leaving wide empty bands below the
 content -- a desktop dialog that read like a narrow mobile form.
 
-The width is now a deliberate policy (preferred ~720 px, floor 680, ceiling
-820) clamped to the screen that is actually available, so the extra horizontal
-space removes wrapping instead of the page growing taller.
+The width and height now follow a deliberate stable geometry policy, clamped
+to the screen that is actually available. Page content may scroll, while the
+outer window, header and footer stay fixed through Next/Back transitions.
 
 Nothing here asserts a fixed window position or a fixed pixel layout: the
 checks are about the policy and its clamping behaviour.
@@ -83,8 +83,8 @@ def main():
         wizard_cls.WIZARD_PREFERRED_WIDTH >= OLD_NARROW_WIDTH + 60,
     )
     check(
-        "preferred width is in the intended 680-760 px desktop band",
-        680 <= wizard_cls.WIZARD_PREFERRED_WIDTH <= 760,
+        "preferred width is in the intended 800-860 px desktop band",
+        800 <= wizard_cls.WIZARD_PREFERRED_WIDTH <= 860,
     )
     check(
         "minimum practical width is wider than the old narrow layout",
@@ -198,7 +198,7 @@ def main():
         )
 
     # =====================================================================
-    # Height tracks the page on screen, not the tallest page in the stack
+    # Page content tracks the active page, while outer geometry stays stable
     # =====================================================================
     width = wizard_cls.WIZARD_PREFERRED_WIDTH
 
@@ -236,16 +236,16 @@ def main():
                 measured < max(taller) + page_height(page),
             )
 
-    # No large dead band: the shortest page must measure clearly shorter than
-    # the tallest one, which is exactly what the empty area under page 1 was.
-    wizard.stack.setCurrentWidget(pages[heights.index(min(heights))])
-    shortest = wizard._content_height_for_width(width)
-    wizard.stack.setCurrentWidget(pages[heights.index(max(heights))])
-    tallest = wizard._content_height_for_width(width)
-    check(
-        "the shortest page sizes the window clearly smaller than the tallest page",
-        shortest < tallest,
-    )
+    stable_sizes = []
+    for page in pages:
+        wizard.stack.setCurrentWidget(page)
+        wizard._adjust_dialog_size()
+        app.processEvents()
+        stable_sizes.append(wizard.dialog.size())
+    check("all main pages keep one stable outer Wizard size",
+          len({(size.width(), size.height()) for size in stable_sizes}) == 1)
+    check("stable height uses the declared preferred policy when the screen permits",
+          wizard.dialog.height() <= wizard_cls.WIZARD_PREFERRED_HEIGHT)
 
     # =====================================================================
     # Disabled controls must stay readable (Map feedback shows real values in
@@ -390,9 +390,13 @@ def main():
                 wizard.stack.height() >= needed - 2
                 and scroll_area.verticalScrollBarPolicy() == Qt.ScrollBarAsNeeded,
             )
+        # Pinned to THIS page's requirement at the width it really gets (a
+        # vertical scrollbar narrows it, so wrapped text may need a line
+        # more than at the scrollbar-free width).
+        needed_real = wizard._page_height_for_width(page, wizard.stack.width())
         check(
             "%s: the stack is pinned to this page, not the tallest one" % label,
-            abs(wizard.stack.height() - needed) <= 2,
+            abs(wizard.stack.height() - needed_real) <= 2,
         )
 
     # Expanded SharpED settings must not break the sizing either.
@@ -404,15 +408,18 @@ def main():
         needed = wizard._page_height_for_width(
             wizard.page2, wizard._content_inner_width(wizard.dialog.width())
         )
+        needed_real = wizard._page_height_for_width(wizard.page2, wizard.stack.width())
         check(
             "expanded SharpED settings: the stack still follows the page",
-            abs(wizard.stack.height() - needed) <= 2,
+            abs(wizard.stack.height() - needed_real) <= 2 and needed_real >= needed - 2,
         )
         wizard.sharped_toggle.setChecked(False)
         wizard._adjust_dialog_size()
         app.processEvents()
 
     # The footer must never be overlapped by, or scroll with, page content.
+    wizard.dialog.show()
+    app.processEvents()
     footer_widget = wizard.chrome_holder.get("footer")
     if footer_widget is not None:
         check(

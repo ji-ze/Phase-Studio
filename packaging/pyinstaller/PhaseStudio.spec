@@ -1,8 +1,11 @@
-# Shared portable ONEDIR spec; the installer entry spec selects only its UI.
+# Shared Windows spec. Direct downloads are ONEFILE; the Store profile remains
+# ONEDIR because MSIX owns the outer installation layout.
 import sys
+import os
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+from PyInstaller.building.splash import Splash
 
 
 # SPECPATH (supplied by PyInstaller) is the directory CONTAINING this spec
@@ -14,7 +17,15 @@ from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 project_dir = Path(SPECPATH).resolve().parent.parent
 
 installer_build = globals().get("installer_build", False)
-target_name = "PhaseStudioJanaInstaller" if installer_build else "PhaseStudio"
+store_build = globals().get("store_build", False)
+if installer_build and store_build:
+    raise ValueError("Installer and Store build profiles are mutually exclusive.")
+if installer_build:
+    target_name = "PhaseStudio-Jana2020-Installer-2.0.2-x64"
+elif store_build:
+    target_name = "PhaseStudio"
+else:
+    target_name = "PhaseStudio-2.0.2-x64"
 entry_point = project_dir / "phase_studio" / ("jana_installer.py" if installer_build else "standalone.py")
 if not entry_point.is_file():
     raise FileNotFoundError(
@@ -28,6 +39,7 @@ if not entry_point.is_file():
 spec_dir = Path(SPECPATH).resolve()
 sys.path.insert(0, str(spec_dir))
 import portable_runtime  # noqa: E402
+from release_legal import exclude_unused_qt_plugins, legal_datas
 from windows_version import version_resource
 
 # Fail before doing any work if the build environment cannot produce a
@@ -40,6 +52,7 @@ hiddenimports = [
     "phase_studio.app",
     "phase_studio.jana_superflip",
     "phase_studio.sharped_server_client",
+    "truststore",
     "phase_studio.ui_style",
     "matplotlib.backends.backend_qtagg",
     "PySide6.QtCore",
@@ -58,6 +71,23 @@ except Exception:
 
 datas = []
 datas += [(str(project_dir / "phase_studio" / "assets"), "phase_studio/assets")]
+datas += legal_datas(project_dir)
+if installer_build:
+    wrapper_payload = Path(os.environ.get("PHASE_STUDIO_WRAPPER_PAYLOAD", project_dir / "dist" / "superflip"))
+    if not (wrapper_payload / "superflip.exe").is_file() or not (wrapper_payload / "_internal").is_dir():
+        raise FileNotFoundError(
+            "The Jana installer requires the complete authoritative dist/superflip payload. "
+            "Build superflip.spec first."
+        )
+    payload_bundle = project_dir / "build" / "jana-payload"
+    payload_archive = payload_bundle / "jana-wrapper.zip"
+    payload_manifest = payload_bundle / "jana-wrapper-manifest.json"
+    if not payload_archive.is_file() or not payload_manifest.is_file():
+        raise FileNotFoundError("Run package_jana_payload.py before building the installer.")
+    datas += [
+        (str(payload_archive), "JanaIntegrationPayload"),
+        (str(payload_manifest), "JanaIntegrationPayload"),
+    ]
 try:
     datas += collect_data_files("qtvscodestyle")
 except Exception:
@@ -87,9 +117,8 @@ a = Analysis(
         "PyQt5",
         "PyQt6",
         "PySide2",
-        "tkinter",
         "matplotlib.backends.backend_tkagg",
-    ],
+    ] + (["tkinter"] if store_build else []),
     noarchive=False,
     optimize=0,
 )
@@ -102,6 +131,7 @@ a = Analysis(
 #    the UCRT is a component of Windows 10/11, and a private older copy is a
 #    portability hazard rather than a fix.
 a.binaries, removed_ucrt = portable_runtime.strip_app_local_ucrt(a.binaries)
+a.binaries = exclude_unused_qt_plugins(a.binaries)
 
 # 2. Bundle exactly one copy of each required VC++ runtime DLL at the
 #    _internal root, discovered from the collected binaries' import tables and
@@ -119,32 +149,56 @@ portable_runtime.write_portable_manifest(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    [],
-    exclude_binaries=True,
-    name=target_name,
-    version=version_resource(target_name, project_dir),
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=False,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=[str(project_dir / "phase_studio" / "assets" / "phase_studio.ico")],
-)
+# PyInstaller's optional bootloader splash depends on Tcl/Tk.  The released
+# application also has its own Qt startup splash, so a minimal/portable build
+# Python without tkinter can still produce the identical application profile;
+# it merely omits the extraction-time splash instead of failing the build.
+try:
+    import tkinter
+    _tcl_probe = tkinter.Tcl()
+    _tcl_probe.eval("info patchlevel")
+    bootloader_splash_available = True
+except Exception:
+    bootloader_splash_available = False
 
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=False,
-    upx_exclude=[],
-    name=target_name,
-)
+if store_build:
+    exe = EXE(
+        pyz, a.scripts, [], exclude_binaries=True, name=target_name,
+        version=version_resource(target_name, project_dir), debug=False,
+        bootloader_ignore_signals=False, strip=False, upx=False, console=False,
+        disable_windowed_traceback=False, argv_emulation=False, target_arch=None,
+        codesign_identity=None, entitlements_file=None,
+        icon=[str(project_dir / "phase_studio" / "assets" / "phase_studio.ico")],
+    )
+    coll = COLLECT(exe, a.binaries, a.datas, strip=False, upx=False,
+                   upx_exclude=[], name=target_name)
+elif bootloader_splash_available:
+    splash = Splash(
+        str(project_dir / "phase_studio" / "assets" / "phase_studio_splash.png"),
+        binaries=a.binaries,
+        datas=a.datas,
+        text_pos=(32, 218),
+        text_size=10,
+        text_font="Segoe UI",
+        text_color="#52658b",
+        text_default="Starting Phase Studio…",
+        always_on_top=True,
+    )
+    exe = EXE(
+        pyz, a.scripts, splash, splash.binaries, a.binaries, a.datas, [], exclude_binaries=False,
+        name=target_name, version=version_resource(target_name, project_dir),
+        debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
+        console=False, disable_windowed_traceback=False, argv_emulation=False,
+        target_arch=None, codesign_identity=None, entitlements_file=None,
+        icon=[str(project_dir / "phase_studio" / "assets" / "phase_studio.ico")],
+    )
+else:
+    print("[packaging] tkinter unavailable; using the built-in Qt startup splash only")
+    exe = EXE(
+        pyz, a.scripts, a.binaries, a.datas, [], exclude_binaries=False,
+        name=target_name, version=version_resource(target_name, project_dir),
+        debug=False, bootloader_ignore_signals=False, strip=False, upx=False,
+        console=False, disable_windowed_traceback=False, argv_emulation=False,
+        target_arch=None, codesign_identity=None, entitlements_file=None,
+        icon=[str(project_dir / "phase_studio" / "assets" / "phase_studio.ico")],
+    )

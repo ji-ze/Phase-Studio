@@ -70,7 +70,8 @@ New-Item -ItemType Directory -Force -Path $layoutDir | Out-Null
 New-Item -ItemType Directory -Force -Path $storeDistDir | Out-Null
 
 Write-Step "Building standalone PhaseStudio"
-& (Join-Path $PSScriptRoot "build_windows.ps1") -Target Standalone
+& python -m PyInstaller --clean --noconfirm (Join-Path $PSScriptRoot "pyinstaller\PhaseStudioStore.spec")
+if ($LASTEXITCODE -ne 0) { throw "Store ONEDIR build failed." }
 $builtPhaseStudioDir = Join-Path $RepoRoot "dist\PhaseStudio"
 Assert-PathExists (Join-Path $builtPhaseStudioDir "PhaseStudio.exe") "Built standalone"
 if (Test-Path (Join-Path $builtPhaseStudioDir "JanaIntegration")) {
@@ -78,7 +79,7 @@ if (Test-Path (Join-Path $builtPhaseStudioDir "JanaIntegration")) {
 }
 Copy-Item -LiteralPath $builtPhaseStudioDir -Destination (Join-Path $layoutDir "PhaseStudio") -Recurse -Force
 Assert-PathExists (Join-Path $layoutDir "PhaseStudio\PhaseStudio.exe") "Staged standalone"
-& python (Join-Path $PSScriptRoot "tools\check_distribution.py") (Join-Path $layoutDir "PhaseStudio") --profile standalone
+& python (Join-Path $PSScriptRoot "tools\check_distribution.py") (Join-Path $layoutDir "PhaseStudio") --profile store
 if ($LASTEXITCODE -ne 0) { throw "Store layout failed standalone boundary checks." }
 
 # ---------------------------------------------------------------------------

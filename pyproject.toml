@@ -7,11 +7,14 @@ name = "phase-studio"
 dynamic = ["version"]
 description = "Qt application for iterative Superflip, SharpED server deblurring and EDMA crystallographic reconstruction."
 readme = "README.md"
+license = { file = "LICENSE" }
+authors = [{ name = "Jiří Zelenka", email = "zelenka@fzu.cz" }]
 requires-python = ">=3.10"
 dependencies = [
   "numpy",
   "matplotlib",
   "gemmi",
+  "truststore>=0.10.4; platform_system == 'Windows'",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +33,9 @@ dev = [
   "PySide6",
   "qtvscodestyle",
   "pyinstaller",
+  "pytest",
+  "PyYAML",
+  "jsonschema",
 ]
 
 [project.scripts]
@@ -40,7 +46,7 @@ phase-studio-jana-installer = "phase_studio.jana_installer:main"
 packages = ["phase_studio"]
 
 [tool.setuptools.package-data]
-phase_studio = ["assets/*.svg", "assets/*.xpm", "assets/*.ico"]
+phase_studio = ["assets/*.svg", "assets/*.xpm", "assets/*.ico", "assets/fonts/*.ttf", "assets/fonts/*.txt"]
 
 [tool.setuptools.dynamic]
 # Single source of truth for the package version: phase_studio/version.py

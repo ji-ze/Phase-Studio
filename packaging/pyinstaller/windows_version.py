@@ -16,5 +16,8 @@ def version_resource(product, project_dir):
         kids=[StringFileInfo([StringTable("040904b0", [
             StringStruct("FileDescription", product), StringStruct("ProductName", "Phase Studio"),
             StringStruct("FileVersion", version), StringStruct("ProductVersion", version),
+            StringStruct("CompanyName", "Institute of Physics of the Czech Academy of Sciences"),
+            StringStruct("LegalCopyright", "Copyright (c) 2026 Fyzikální ústav AV ČR, v. v. i."),
+            StringStruct("Comments", "Author and lead developer: Jiří Zelenka; Phase Studio source licensed under MIT."),
         ])]), VarFileInfo([VarStruct("Translation", [1033, 1200])])],
     )

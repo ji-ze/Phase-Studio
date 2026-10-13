@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import mimetypes
+import os
+import socket
 import ssl
-import threading
 import time
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 from urllib.error import HTTPError, URLError
@@ -18,23 +19,26 @@ try:
 except Exception:
     from error_reporting import sanitize_error_details
 
+try:
+    from phase_studio.performance import profile_stage
+except Exception:
+    from performance import profile_stage
+
 
 ProgressLog = Optional[Callable[[str], None]]
-DEFAULT_SERVER_URL = "https://sharped.fzu.cz"
-MODEL_METADATA_REUSE_SECONDS = 15.0
+DEFAULT_SERVER_URL = "https://jana.fzu.cz/"
 
 
-def normalize_server_url(value: str) -> str:
-    """Migrate the former bundled host, including persisted configurations."""
-    value = str(value or "").strip().rstrip("/")
-    if not value or value.lower() in {"https://jana.fzu.cz", "http://jana.fzu.cz"}:
-        return DEFAULT_SERVER_URL
-    return value
+def polling_delay_seconds(completed_polls: int, configured_seconds: int) -> float:
+    """Return the bounded wait before the next SharpED status request.
 
-
-def model_selection(value: str) -> str:
-    value = str(value or "").strip()
-    return "default" if value.lower() in {"", "default", "server default", "sharped default"} else value
+    The first two waits are capped at one second. Long-running jobs then use
+    the configured interval unchanged, adding at most one early status/probe
+    pair for the default two-second setting while reducing short-job detection
+    latency without sustained extra server load.
+    """
+    configured = float(max(1, int(configured_seconds)))
+    return min(configured, 1.0) if int(completed_polls) <= 2 else configured
 
 
 def redact_server_diagnostic(value: object) -> str:
@@ -70,75 +74,34 @@ class StatusResult:
         return str(self.status or "").strip().lower() in {"failed", "failure", "error", "errored", "cancelled", "canceled"}
 
 
-@dataclass(frozen=True)
+@dataclass
 class ModelsResult:
     default_model: str
-    models: tuple[str, ...]
+    models: list[str]
     raw_json: str
-    fetched_at: float = 0.0
-    source: str = ""
-    status: str = "server"
 
 
-_catalogs: dict[str, ModelsResult] = {}
-_catalog_lock = threading.RLock()
-
-
-def current_model_catalog(base_url: str) -> Optional[ModelsResult]:
-    return _catalogs.get(normalize_server_url(base_url))
-
-
-def model_catalog_status(catalog: ModelsResult) -> str:
-    origin = "from server" if catalog.status == "server" else "using cached model information"
-    return f"{len(catalog.models)} models available · server default: {catalog.default_model} · {origin}"
-
-
-def apply_model_catalog(combo: object, catalog: ModelsResult) -> str:
-    """Replace selector data while retaining only available selection intent."""
-    selected = model_selection(combo.currentText())
-    blocked = combo.blockSignals(True)
-    try:
-        combo.clear()
-        combo.addItems(["default", *catalog.models])
-        combo.setCurrentText(selected if selected in catalog.models else "default")
-        combo._sharped_catalog = catalog
-    finally:
-        combo.blockSignals(blocked)
-    return model_catalog_status(catalog)
-
-
-def sync_model_catalog(combo: object, base_url: str) -> Optional[str]:
-    """Update a view only when the shared snapshot or server changes."""
-    catalog = current_model_catalog(base_url)
-    previous = getattr(combo, "_sharped_catalog", None)
-    if catalog is not None:
-        return apply_model_catalog(combo, catalog) if previous is not catalog else None
-    if previous is not None:
-        # A different custom server must not display the former server's catalog.
-        selected = model_selection(combo.currentText())
-        blocked = combo.blockSignals(True)
-        try:
-            combo.clear()
-            combo.addItem("default")
-            combo.setCurrentText(selected)
-            combo._sharped_catalog = None
-        finally:
-            combo.blockSignals(blocked)
-        return "Model information not loaded for this server."
-    return None
-
-
-def resolve_effective_model(selection: str, catalog: Optional[ModelsResult]) -> str:
-    selected = model_selection(selection)
-    if selected != "default":
-        return selected
-    if catalog is None:
-        raise SharpEDServerError("Current SharpED server default is unavailable.")
-    return catalog.default_model
+def reconcile_model_selection(
+    previous: str, models: list[str], server_default: str,
+) -> tuple[list[str], str]:
+    """Resolve one stable selector view without network or widget behavior."""
+    default_model = str(server_default or "").strip()
+    values = ["default"]
+    for candidate in [default_model, *list(models or [])]:
+        value = str(candidate or "").strip()
+        if value and value not in values:
+            values.append(value)
+    requested = str(previous or "").strip() or "default"
+    displayed = requested if requested in values else "default"
+    return values, displayed
 
 
 class SharpEDServerError(RuntimeError):
-    pass
+    """A classified, sanitized SharpED transport or protocol failure."""
+
+    def __init__(self, message: str, *, category: str = "server") -> None:
+        super().__init__(sanitize_error_details(message))
+        self.category = category
 
 
 class SharpEDServerClient:
@@ -148,103 +111,57 @@ class SharpEDServerClient:
         user_agent: str = "PhaseStudio-SharpED/1.0",
         timeout: float = 600.0,
     ) -> None:
-        self.base_url = normalize_server_url(base_url)
+        self.base_url = base_url.rstrip("/")
         self.user_agent = user_agent
         self.timeout = timeout
         self.ssl_context, self.tls_fallback_message = self._create_ssl_context()
         self._tls_fallback_logged = False
+        self.performance_profiler = None
 
     @staticmethod
     def _create_ssl_context() -> tuple[ssl.SSLContext, str]:
-        """Create a verified TLS context even if one Windows certificate is malformed."""
-        try:
-            return ssl.create_default_context(), ""
-        except ssl.SSLError as default_error:
-            if not hasattr(ssl, "enum_certificates"):
-                raise SharpEDServerError(
-                    f"Cannot load the operating-system TLS certificates: {default_error}"
-                ) from default_error
+        """Create a verified TLS context using the platform trust authority.
 
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            context.check_hostname = True
-            context.verify_mode = ssl.CERT_REQUIRED
-            server_auth_oid = "1.3.6.1.5.5.7.3.1"
-            loaded = 0
-            skipped = 0
-            for store_name in ("ROOT", "CA"):
-                try:
-                    certificates = ssl.enum_certificates(store_name)
-                except Exception:
-                    continue
-                for certificate, encoding, trust in certificates:
-                    if encoding != "x509_asn":
-                        continue
-                    if trust is not True and server_auth_oid not in trust:
-                        continue
-                    try:
-                        pem = ssl.DER_cert_to_PEM_cert(certificate)
-                        context.load_verify_locations(cadata=pem)
-                        loaded += 1
-                    except (ssl.SSLError, ValueError):
-                        skipped += 1
-            if loaded == 0:
+        CPython's OpenSSL build does not use the Windows certificate store by
+        default.  The frozen Windows application therefore uses truststore's
+        SSLContext, which delegates chain building to Windows while keeping
+        CERT_REQUIRED and hostname verification enabled.  Other platforms
+        retain Python's normal verified context.
+        """
+        if os.name == "nt":
+            try:
+                import truststore
+            except ImportError as exc:
                 raise SharpEDServerError(
-                    "Cannot create a verified TLS context: the Windows ROOT/CA stores "
-                    f"did not contain a readable server-authentication certificate. Original error: {default_error}"
-                ) from default_error
-            message = (
-                "TLS certificate fallback active: the default Windows certificate bundle could not be parsed "
-                f"({default_error}); loaded {loaded} valid certificate(s) individually and skipped {skipped} malformed certificate(s)."
-            )
-            return context, message
+                    "Windows system TLS trust is unavailable because the truststore package is missing.",
+                    category="tls_configuration",
+                ) from exc
+            context = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.verify_mode = ssl.CERT_REQUIRED
+            context.check_hostname = True
+            return context, "Windows system certificate store (truststore)"
+        context = ssl.create_default_context()
+        context.verify_mode = ssl.CERT_REQUIRED
+        context.check_hostname = True
+        return context, "Platform default verified certificate store"
 
     def _log_tls_fallback(self, log: ProgressLog) -> None:
         if log and self.tls_fallback_message and not self._tls_fallback_logged:
-            log("[SharpED] Using fallback certificate validation.")
-            log(f"TLS fallback detail: {self.tls_fallback_message}")
+            log(f"[SharpED] TLS trust: {self.tls_fallback_message}")
             self._tls_fallback_logged = True
 
-    def get_models(self, log: ProgressLog = None, *, max_age: float = 0.0) -> ModelsResult:
-        """Refresh by default; adjacent setup/preflight consumers may reuse briefly.
-
-        Explicit Refresh and DEFAULT submission always use max_age=0, so neither
-        can bind a new job to an earlier server default merely to save a request.
-        """
+    def get_models(self, log: ProgressLog = None) -> ModelsResult:
         self._log_tls_fallback(log)
-        # Serialize refreshes so an older response cannot overwrite a newer one.
-        # Publish catalog and default as one immutable snapshot. No disk cache.
-        with _catalog_lock:
-            previous = _catalogs.get(self.base_url)
-            if (max_age > 0 and previous is not None and previous.status == "server"
-                    and 0 <= time.time() - previous.fetched_at < max_age):
-                if log:
-                    log(f"[SharpED] Using recent model metadata · {len(previous.models)} available · default: {previous.default_model}")
-                return previous
-            try:
-                if log:
-                    log("SharpED server: fetching available models")
-                source = self._url("/sharp-ed/models")
-                body = self._request_text("GET", source, headers={"Accept": "application/json", "Cache-Control": "no-cache"})
-                result = self._parse_models(body, source)
-                _catalogs[self.base_url] = result
-            except Exception:
-                if previous is not None:
-                    _catalogs[self.base_url] = replace(previous, status="cached")
-                if log:
-                    log("[SharpED] Model refresh failed · keeping previous catalog if available")
-                raise
         if log:
-            log(f"[SharpED] Models refreshed from server · {len(result.models)} available · default: {result.default_model}")
-        return result
-
-    def _parse_models(self, body: str, source: str) -> ModelsResult:
+            log("SharpED server: fetching available models")
+        with profile_stage(self.performance_profiler, "SharpED model discovery", "external"):
+            body = self._request_text("GET", self._url("/sharp-ed/models"))
         data = self._loads_json(body, "Models")
-        models, default = data.get("models"), data.get("default")
-        if (not isinstance(models, list) or not models
-                or any(not isinstance(item, str) or not item.strip() or model_selection(item) == "default" for item in models)
-                or not isinstance(default, str) or default not in models):
-            raise SharpEDServerError("Models JSON schema invalid: expected model names and a default present in models.")
-        return ModelsResult(default, tuple(dict.fromkeys(models)), body, time.time(), source)
+        return ModelsResult(
+            default_model=str(data.get("default") or ""),
+            models=[str(item) for item in data.get("models", []) if isinstance(item, str)],
+            raw_json=body,
+        )
 
     def execute(
         self,
@@ -252,7 +169,7 @@ class SharpEDServerClient:
         bearer_token: str,
         out_path: Path,
         elements: str,
-        model: str = "default",
+        model: str = "SharpED latest",
         outres: float = 0.2,
         poll_seconds: int = 2,
         max_polls: int = -1,
@@ -261,15 +178,16 @@ class SharpEDServerClient:
     ) -> Path:
         self._raise_if_stopped(stop_event)
         upload = self.upload(file_path, bearer_token, elements, model, outres, log=log)
-        status = self.wait_for_completion(
-            upload.status_url,
-            upload.token,
-            bearer_token,
-            poll_seconds=poll_seconds,
-            max_polls=max_polls,
-            log=log,
-            stop_event=stop_event,
-        )
+        with profile_stage(self.performance_profiler, "SharpED server processing and polling", "external"):
+            status = self.wait_for_completion(
+                upload.status_url,
+                upload.token,
+                bearer_token,
+                poll_seconds=poll_seconds,
+                max_polls=max_polls,
+                log=log,
+                stop_event=stop_event,
+            )
         if not status.download_url:
             status.download_url = self._url(f"/api/user/sharp-ed/download/{upload.token}")
         self._raise_if_stopped(stop_event)
@@ -279,6 +197,9 @@ class SharpEDServerClient:
             self._write_download_body(status.download_bytes, out_path)
         else:
             self.download(status.download_url, out_path, primary_token=upload.token, fallback_token=bearer_token, log=log)
+        # A blocking transfer is an atomic network/file operation. Observe a
+        # cancellation raised during it before any caller starts postprocessing.
+        self._raise_if_stopped(stop_event)
         return out_path
 
     def upload(
@@ -296,12 +217,6 @@ class SharpEDServerClient:
         if not file_path.is_file():
             raise SharpEDServerError(f"Input map not found: {file_path}")
 
-        model = model_selection(model)
-        catalog = self.get_models(log=log) if model == "default" else None
-        model = resolve_effective_model(model, catalog)
-        if log:
-            log(f"[SharpED] Effective model: {model}")
-
         content_type = mimetypes.guess_type(file_path.name)[0] or "application/octet-stream"
         fields = {
             "elements": elements,
@@ -310,6 +225,7 @@ class SharpEDServerClient:
         }
         body, boundary = self._multipart_body(file_path, content_type, fields)
         if log:
+            log(f"[SharpED] Model ID: {model} · displayed name: {model}")
             log(f"[SharpED] Uploading {file_path.name} · {len(body) / (1024 * 1024):.1f} MiB")
 
         headers = {
@@ -317,7 +233,8 @@ class SharpEDServerClient:
             "Content-Type": f"multipart/form-data; boundary={boundary}",
             "Content-Length": str(len(body)),
         }
-        text = self._request_text("POST", self._url("/api/user/sharp-ed/upload"), data=body, headers=headers)
+        with profile_stage(self.performance_profiler, "SharpED upload transfer", "external"):
+            text = self._request_text("POST", self._url("/api/user/sharp-ed/upload"), data=body, headers=headers)
         data = self._loads_json(text, "Upload")
         if not data.get("success", False):
             raise SharpEDServerError(f"SharpED upload failed: {redact_server_diagnostic(text)}")
@@ -350,7 +267,8 @@ class SharpEDServerClient:
         last_logged_status = ""
         while max_polls < 0 or polls < max_polls:
             self._raise_if_stopped(stop_event)
-            status = self.get_status(status_url, job_token, bearer_token)
+            with profile_stage(self.performance_profiler, "SharpED status request", "external"):
+                status = self.get_status(status_url, job_token, bearer_token)
             normalized_status = str(status.status or "<empty>").strip().lower()
             if log and normalized_status != last_logged_status:
                 if normalized_status in {"processing", "running", "queued", "pending"}:
@@ -364,7 +282,8 @@ class SharpEDServerClient:
                 return status
             if status.failed:
                 raise SharpEDServerError(f"SharpED processing failed: {status.error_message}")
-            probe = self._probe_download(job_token, bearer_token)
+            with profile_stage(self.performance_profiler, "SharpED compatibility download probe", "external"):
+                probe = self._probe_download(job_token, bearer_token)
             if probe is not None:
                 if log:
                     log("[SharpED] Result available · downloading…")
@@ -381,10 +300,11 @@ class SharpEDServerClient:
                     download_bytes=probe,
                 )
             polls += 1
-            deadline = time.monotonic() + max(1, int(poll_seconds))
-            while time.monotonic() < deadline:
-                self._raise_if_stopped(stop_event)
-                time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+            deadline = time.monotonic() + polling_delay_seconds(polls, poll_seconds)
+            with profile_stage(self.performance_profiler, "SharpED polling interval wait", "external"):
+                while time.monotonic() < deadline:
+                    self._raise_if_stopped(stop_event)
+                    time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
         raise SharpEDServerError("SharpED processing did not finish within the polling limit.")
 
     def get_status(self, status_url: str, job_token: str, bearer_token: str) -> StatusResult:
@@ -415,7 +335,8 @@ class SharpEDServerClient:
     ) -> None:
         if log:
             log(f"[SharpED] Downloading result to {out_path}")
-        body = self._request_bytes_with_auth_candidates(download_url, [primary_token, fallback_token])
+        with profile_stage(self.performance_profiler, "SharpED download transfer", "external"):
+            body = self._request_bytes_with_auth_candidates(download_url, [primary_token, fallback_token])
         self._write_download_body(body, out_path)
 
     def _write_download_body(self, body: bytes, out_path: Path) -> None:
@@ -493,14 +414,45 @@ class SharpEDServerClient:
                 return resp.read()
         except HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
+            category = "authentication" if exc.code in (401, 403) else ("server" if exc.code >= 500 else "http")
             raise SharpEDServerError(
                 f"SharpED HTTP error {exc.code} for {redact_server_diagnostic(url)}. "
-                f"Body: {redact_server_diagnostic(body)}"
+                f"Body: {redact_server_diagnostic(body)}",
+                category=category,
             ) from exc
         except URLError as exc:
-            raise SharpEDServerError(f"SharpED request failed for {redact_server_diagnostic(url)}: {exc}") from exc
+            reason = exc.reason
+            if isinstance(reason, ssl.SSLCertVerificationError) or "certificate_verify_failed" in str(reason).lower():
+                raise SharpEDServerError(
+                    "SharpED secure connection failed. Phase Studio reached sharped.fzu.cz, but could not verify "
+                    "the server's TLS certificate chain. Check Windows updates and system date/time. If the "
+                    f"problem persists, Phase Studio may not be using the Windows trusted certificate store. Technical detail: {reason}",
+                    category="tls_certificate",
+                ) from exc
+            if isinstance(reason, socket.gaierror):
+                category = "dns"
+            elif isinstance(reason, (TimeoutError, socket.timeout)):
+                category = "timeout"
+            else:
+                category = "unreachable"
+            raise SharpEDServerError(
+                f"SharpED request failed for {redact_server_diagnostic(url)}: {reason}", category=category,
+            ) from exc
+        except ssl.SSLCertVerificationError as exc:
+            raise SharpEDServerError(
+                "SharpED secure connection failed. Phase Studio reached sharped.fzu.cz, but could not verify "
+                "the server's TLS certificate chain. Check Windows updates and system date/time. If the problem "
+                f"persists, Phase Studio may not be using the Windows trusted certificate store. Technical detail: {exc}",
+                category="tls_certificate",
+            ) from exc
         except ssl.SSLError as exc:
-            raise SharpEDServerError(f"SharpED TLS error for {redact_server_diagnostic(url)}: {exc}") from exc
+            raise SharpEDServerError(
+                f"SharpED secure connection failed for {redact_server_diagnostic(url)}: {exc}", category="tls",
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise SharpEDServerError(
+                f"SharpED connection timed out for {redact_server_diagnostic(url)}: {exc}", category="timeout",
+            ) from exc
 
     def _request_text_with_auth_candidates(self, url: str, tokens: list[str]) -> str:
         return self._request_bytes_with_auth_candidates(url, tokens).decode("utf-8", errors="replace")
@@ -528,9 +480,12 @@ class SharpEDServerClient:
         try:
             data = json.loads(body)
         except json.JSONDecodeError as exc:
-            raise SharpEDServerError(f"{label} JSON parse failed: {exc}") from exc
+            raise SharpEDServerError(f"{label} JSON parse failed: {exc}", category="malformed_catalog") from exc
         if not isinstance(data, dict):
-            raise SharpEDServerError(f"{label} response is not a JSON object: {redact_server_diagnostic(body)}")
+            raise SharpEDServerError(
+                f"{label} response is not a JSON object: {redact_server_diagnostic(body)}",
+                category="malformed_catalog",
+            )
         return data
 
     def _multipart_body(self, file_path: Path, content_type: str, fields: dict[str, str]) -> tuple[bytes, str]:
