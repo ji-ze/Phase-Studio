@@ -241,7 +241,7 @@ def main():
         table = dialog._views[dialog.active_source].table
         headers = [table.horizontalHeaderItem(i).text() for i in range(table.columnCount())]
         columns = result_selection_metric_columns(definition)
-        expected = ["Recommended", "Cycle"] + [column[0] for column in columns]
+        expected = ["★", "Cycle"] + [column[0] for column in columns]
         check(f"{profile.value}: selector columns follow profile", headers == expected)
         check(f"{profile.value}: selector has no Source column", "Source" not in headers)
         check(
@@ -385,7 +385,7 @@ def main():
     # live dialog reflecting the same text for its active source.
     check("split: no warning for plain Superflip with Map Feedback off", result_warning_callout_text("superflip", False) is None)
     sharped_only_warning = result_warning_callout_text("deblurred", False)
-    check("split: SharpED always warns", sharped_only_warning is not None and "neural-network" in sharped_only_warning)
+    check("split: SharpED always warns", sharped_only_warning is not None and "original measured diffraction data" in sharped_only_warning and "independent crystallographic refinement" in sharped_only_warning)
     superflip_mf_warning = result_warning_callout_text("superflip", True)
     check("split: Superflip warns when Map Feedback is on", superflip_mf_warning is not None and "Map Feedback" in superflip_mf_warning)
     combined_warning = result_warning_callout_text("deblurred", True)
@@ -651,7 +651,7 @@ def main():
           ).resolve() == canonical_m50.resolve())
     (alternate_integration / "EDMA.exe").write_bytes(b"alternate edma")
     (alternate_root / "phase_studio_integration.json").write_text(
-        '{"product":"Phase Studio","version":"2.0.2","wrapper":"superflip.exe",'
+        '{"product":"Phase Studio","version":"2.0.3","wrapper":"superflip.exe",'
         '"original_superflip":"superflip_original.exe","payload_hash":"test"}',
         encoding="utf-8",
     )
@@ -669,7 +669,7 @@ def main():
         identity_log = []
         jana_superflip.log_wrapper_runtime_identity(identity_log.append)
         check("wrapper diagnostics record version, integration root and original executable",
-              any("Phase Studio version: 2.0.2" in line for line in identity_log)
+              any("Phase Studio version: 2.0.3" in line for line in identity_log)
               and any(str(alternate_root) in line for line in identity_log)
               and any(str(alternate_superflip.resolve()) in line for line in identity_log))
         (alternate_root / "phase_studio_integration.json").write_text(
@@ -818,7 +818,7 @@ def main():
               "project-local wrapper log" in project_log_path.read_text(encoding="utf-8")
               and not (wrapper_bin / "log.txt").exists())
         check("wrapper log has a session separator and millisecond timestamp",
-              "Phase Studio 2.0.2 session" in project_log_path.read_text(encoding="utf-8")
+              "Phase Studio 2.0.3 session" in project_log_path.read_text(encoding="utf-8")
               and "============================================================" in project_log_path.read_text(encoding="utf-8"))
         unicode_project = wrapper_dir / "Test User" / "Jana projekt Žluťoučký"
         unicode_inflip = unicode_project / "job with spaces.inflip"

@@ -6,6 +6,76 @@ import math
 from typing import Callable, Iterable, Optional
 
 import numpy as np
+
+
+def set_structure_viewport_clip(axis) -> None:
+    """Clip to this panel rectangle rather than Axes3D's artificial square."""
+    viewport = axis.get_position(original=True).transformed(axis.figure.transFigure)
+    for artist in (*axis.collections, *axis.lines):
+        artist.set_clip_path(None)
+        artist.set_clip_box(viewport)
+        artist.set_clip_on(True)
+
+
+def fit_projected_structure(axis, coordinates, *, fill: float = 0.78) -> bool:
+    """Frame displayed Cartesian geometry in the laid-out panel, without editing it.
+
+    Orthographic projection makes scale linear. Use the actual subplot rectangle
+    (Axes3D's drawing box is square even on a rectangular canvas), then centre
+    the projected bounding box by changing camera limits only. Call after layout.
+    """
+    from mpl_toolkits.mplot3d import proj3d
+
+    points = np.asarray(coordinates, dtype=np.float64)
+    if points.ndim != 2 or points.shape[1] != 3 or not len(points) or not np.isfinite(points).all():
+        return False
+    axis.apply_aspect()  # Axes3D otherwise keeps its old square until draw().
+    viewport = axis.get_position(original=True).transformed(axis.figure.transFigure)
+    if viewport.width <= 1 or viewport.height <= 1:
+        return False
+    center = (points.min(axis=0) + points.max(axis=0)) / 2
+    radius = max(float(np.max(np.linalg.norm(points - center, axis=1))), 1e-3)
+    axis.set_proj_type("ortho")
+
+    def limits(focus):
+        axis.set_xlim3d(focus[0] - radius, focus[0] + radius, auto=False)
+        axis.set_ylim3d(focus[1] - radius, focus[1] + radius, auto=False)
+        axis.set_zlim3d(focus[2] - radius, focus[2] + radius, auto=False)
+
+    def project():
+        x, y, _ = proj3d.proj_transform(*points.T, axis.get_proj())
+        return axis.transData.transform(np.column_stack((x, y)))
+
+    limits(center)
+    zoom = 1.0
+    axis.set_box_aspect((1, 1, 1), zoom=zoom)
+    projected = project()
+    span = np.ptp(projected, axis=0)
+    occupied = max(span[0] / viewport.width, span[1] / viewport.height)
+    if occupied <= 1e-8:
+        return False  # A single coincident site has no molecular extent to fit.
+    zoom *= float(fill) / occupied
+    axis.set_box_aspect((1, 1, 1), zoom=zoom)
+    projected = project()
+    target = np.asarray([viewport.x0 + viewport.width / 2, viewport.y0 + viewport.height / 2])
+    midpoint = (projected.min(axis=0) + projected.max(axis=0)) / 2
+    # Measure the projection's camera-translation Jacobian. This also respects
+    # the actual cell geometry and arbitrary viewing orientation.
+    derivatives = []
+    step = max(radius * .01, 1e-5)
+    for index in range(3):
+        shifted = center.copy()
+        shifted[index] += step
+        limits(shifted)
+        pixels = project()
+        derivatives.append(((pixels.min(axis=0) + pixels.max(axis=0)) / 2 - midpoint) / step)
+    delta = np.linalg.lstsq(np.asarray(derivatives).T, target - midpoint, rcond=None)[0]
+    limits(center + delta)
+    axis._phase_fit_zoom = zoom
+    # Artists can extend outside Axes3D's artificial square. Their projected
+    # geometry remains within this panel's rectangular viewport and margins.
+    set_structure_viewport_clip(axis)
+    return True
 from PySide6.QtCore import Qt
 
 
@@ -37,6 +107,7 @@ class StructureCameraController:
         self._interaction = interaction or (lambda _kind: None)
         self._toggle_auto_rotate = toggle_auto_rotate
         self._drag = None
+        self.active_axis = None
         self._fit_spans = {}
         canvas.mpl_connect("button_press_event", self._press)
         canvas.mpl_connect("motion_notify_event", self._motion)
@@ -64,6 +135,7 @@ class StructureCameraController:
         axis = getattr(event, "inaxes", None)
         if not self._valid_axis(axis):
             return
+        self.active_axis = axis
         self.refresh_axes()
         if bool(getattr(event, "dblclick", False)) and getattr(event, "button", None) == 1:
             self._fit()
@@ -135,6 +207,7 @@ class StructureCameraController:
         axis = getattr(event, "inaxes", None)
         if not self._valid_axis(axis):
             return
+        self.active_axis = axis
         step = float(getattr(event, "step", 1.0 if getattr(event, "button", "up") == "up" else -1.0))
         factor = math.pow(0.88, step)
         factor = max(0.45, min(2.2, factor))
@@ -160,6 +233,8 @@ class StructureCameraController:
         self.canvas.draw_idle()
 
     def _key(self, event) -> None:
+        if self._valid_axis(getattr(event, "inaxes", None)):
+            self.active_axis = event.inaxes
         key = str(getattr(event, "key", "") or "").lower()
         if key == "f":
             self._fit()

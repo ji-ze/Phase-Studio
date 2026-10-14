@@ -1,0 +1,7 @@
+{
+  "source": "Authenticated Chrome window supplied by user",
+  "url": "https://sharped.fzu.cz/sharp-ed",
+  "capture_date": "2026-10-14",
+  "redaction": "Cropped out browser chrome, bookmarks, signed-in identity and existing token table; no token created or copied.",
+  "state": "Actual Show, New token name and Create token controls; name field empty."
+}

@@ -5,8 +5,7 @@ crystallographic structure solution. It integrates external Superflip charge
 flipping and EDMA peak extraction, optional SharpED map prediction, and
 candidate-specific map/model transfer to Jana2020.
 
-**2.0.2 is the first public 2.x release.** 2.0.0 and 2.0.1 were internal builds.
-[Release notes](RELEASE_NOTES_2_0_2.md) cover the progression from public 1.0.10.
+**Current release: 2.0.3.** [Release notes](RELEASE_NOTES_2_0_3.md) show the updated Wizard, execution, result review and setup interfaces. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
 
 ## Features and workflows
 
@@ -20,15 +19,15 @@ candidate-specific map/model transfer to Jana2020.
 - HKL validation/completeness, optional Map Feedback, and reproducible
   project-local inputs, scientific outputs and diagnostics.
 
-![Jana2020 Wizard](docs/screenshots/2.0.2-wizard/01-workflow.png)
+![Jana2020 Wizard](docs/tutorials/screenshots/jana2020/wizard-input.png)
 
 This is a reproducible offscreen UI preview, not scientific workstation acceptance.
 
 ## Standalone Windows installation
 
-Download **PhaseStudio-2.0.2-x64.exe** from
+Download **PhaseStudio-2.0.3-x64.exe** from
 [GitHub Releases](https://github.com/ji-ze/Phase-Studio/releases), verify it
-against `SHA256SUMS.txt`, and launch it. The Windows x64 ONEFILE download
+against the SHA-256 shown in the release notes, and launch it. The 2.0.3 release attaches only this EXE; notes and screenshots are in the release body. The Windows x64 ONEFILE download
 includes the Python/Qt runtime; no separate Python installation is required.
 Use Windows 10 1903 or newer, or Windows 11, on x64 hardware.
 
@@ -39,8 +38,8 @@ do not require Jana2020.
 
 ## Jana2020 integration
 
-Jana developers receive **PhaseStudio-Jana2020-2.0.2.zip**, containing
-`PhaseStudio-Jana2020-2.0.2/Phase_studio.exe` and the complete `_internal` runtime.
+Jana developers can build the complete ONEDIR integration from source, containing
+`PhaseStudio-Jana2020-2.0.3/Phase_studio.exe` and the complete `_internal` runtime. The 2.0.3 public release provides only the standalone EXE, without a Jana ZIP.
 Keep them together. This release has no separate Jana installer and does not
 replace the scientific Superflip executable.
 
@@ -48,17 +47,21 @@ See [developer integration](docs/JANA_DEVELOPER_INTEGRATION.md) for placement,
 invocation, output protocol and acceptance checks. Jana2020 retains its own
 software-license requirements.
 
-## SharpED account, token and entitlement
+## Jana2020 account, SharpED access key and entitlement
 
 **Free Phase Studio software does not provide a SharpED subscription or free
 inference entitlement.** SharpED is a separate hosted machine-learning service;
 its server code, architecture and model weights are not distributed here.
 
-1. Create or sign into a [SharpED account](https://sharped.fzu.cz/).
+1. Open the [SharpED token page](https://sharped.fzu.cz/sharp-ed) and sign in with
+   your existing Jana2020 account if prompted. No separate SharpED account is required.
 2. Accept the current SharpED service terms.
 3. Obtain any subscription or access entitlement required by current policy.
-4. Generate your personal API token in the account interface.
-5. Enter it in Phase Studio's masked **API token** field.
+4. Expand **API tokens for desktop application** using **Show**. Enter a
+   **New token name** and click **Create token**.
+5. Paste the access key into Phase Studio's masked **SharpED access key** field
+   and choose **Connect to SharpED**. Access is session-only unless you choose
+   secure device storage in Windows Credential Manager; keys are not saved in QSettings.
 
 The documented Public API is **https://jana.fzu.cz/**. The client uses that
 single host for model discovery, authenticated upload, status and download.
@@ -105,14 +108,14 @@ Scientific publications reporting work performed with Phase Studio should cite
 the software. This is the project's scientific-attribution policy, separate
 from the standard MIT license; it adds no license restriction.
 
-> Zelenka, Jiří. *Phase Studio*, version 2.0.2. Institute of Physics of the
+> Zelenka, Jiří. *Phase Studio*, version 2.0.3. Institute of Physics of the
 > Czech Academy of Sciences. https://github.com/ji-ze/Phase-Studio
 
 ```bibtex
-@software{zelenka_phase_studio_202,
+@software{zelenka_phase_studio_203,
   author  = {Zelenka, Jiří},
   title   = {Phase Studio},
-  version = {2.0.2},
+  version = {2.0.3},
   url     = {https://github.com/ji-ze/Phase-Studio}
 }
 ```

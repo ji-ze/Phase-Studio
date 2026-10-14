@@ -971,7 +971,7 @@ class RunConfig:
     compute_omit_maps: bool
     compute_omit_rfree: bool
     sharped_base_url: str
-    sharped_api_token: str
+    sharped_api_token: str = field(repr=False)
     sharped_model: str
     sharped_elements: str
     sharped_outres: float
@@ -3710,6 +3710,13 @@ def apply_map_feedback_to_reflections(
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     if not current:
         return current, None
+    damping = max(0.0, min(1.0, float(intensity_damping or 0.0)))
+    max_i_over_sigma = max(0.0, float(intensity_max_i_over_sigma or 0.0))
+    if correct_intensities and damping > 0 and max_i_over_sigma > 0:
+        if reflection_mode_has_fwhm(mode):
+            raise ValueError("FWHM is a peak width, not an intensity uncertainty. Use threshold 0 for uncertainty-independent map correction.")
+        if not any(r.sigma is not None and r.sigma > 0 and math.isfinite(float(r.sigma)) and math.isfinite(r.value) for r in current):
+            raise ValueError("Significance filtering requires finite positive measured uncertainties. Use threshold 0 for uncertainty-independent map correction.")
     existing_keys = [(int(r.h), int(r.k), int(r.l)) for r in current]
     predictions = xplor_fft_predictions(feedback_map, existing_keys)
     ratios: List[float] = []
@@ -3720,8 +3727,6 @@ def apply_map_feedback_to_reflections(
             ratios.append(obs_i / raw_i)
     scale = float(np.median(np.asarray(ratios, dtype=np.float64))) if ratios else 1.0
     corrected = 0
-    damping = max(0.0, min(1.0, float(intensity_damping or 0.0)))
-    max_i_over_sigma = max(0.0, float(intensity_max_i_over_sigma or 0.0))
     change_percentages: List[float] = []
     if correct_intensities and damping > 0:
         corrected_reflections: List[Reflection] = []
@@ -3729,7 +3734,7 @@ def apply_map_feedback_to_reflections(
             key = (int(r.h), int(r.k), int(r.l))
             raw_i, map_phase = predictions.get(key, (0.0, 0.0))
             if max_i_over_sigma > 0:
-                if r.value <= 0 or r.sigma is None or r.sigma <= 0 or (float(r.value) / float(r.sigma)) >= max_i_over_sigma:
+                if r.value <= 0 or not math.isfinite(float(r.value)) or r.sigma is None or r.sigma <= 0 or not math.isfinite(float(r.sigma)) or (float(r.value) / float(r.sigma)) >= max_i_over_sigma:
                     corrected_reflections.append(r)
                     continue
             if raw_i > 0:
@@ -7684,6 +7689,7 @@ from phase_studio.ui_branding import (
     install_screen_geometry_guard, close_bootloader_splash,
     create_callout_label, phase_studio_brand_font,
 )
+from phase_studio.credentials import credential_store
 from phase_studio.requirements_ui import (
     run_remediation_loop,
     show_requirement_remediation_dialog,
@@ -8198,6 +8204,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_after_cycle = threading.Event()
         self.stop_now = threading.Event()
         self.results: List[CycleResult] = []
+        self._operation_states: dict = {}
         self.result_recommendation: Optional[ResultRecommendation] = None
         self.current_validation_profile = ValidationProfile.REFERENCE_FREE
         self.last_run_config: Optional[RunConfig] = None
@@ -8815,14 +8822,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         sharped_api_form = self._add_form_group(setup_tab, "SharpED connection")
         self._add_text(sharped_api_form, "sharped_base_url", "Server URL", DEFAULT_SERVER_URL)
-        self._add_text(sharped_api_form, "sharped_api_token", "API token", os.environ.get("SHARPED_API_TOKEN", ""))
+        self._add_text(sharped_api_form, "sharped_api_token", "SharpED access key", os.environ.get("SHARPED_API_TOKEN", ""))
         try:
             self.inputs["sharped_api_token"].setEchoMode(QLineEdit.Password)  # type: ignore[attr-defined]
         except Exception:
             pass
         token_link_row = QHBoxLayout()
-        token_link_row.addWidget(QLabel("Get SharpED token"))
-        token_link_row.addWidget(self._external_link_icon("https://sharped.fzu.cz/", "Open the SharpED project and API-token page"))
+        self.sharped_account_button = QPushButton("Account access…")
+        self.sharped_account_button.clicked.connect(self._manage_sharped_access)
+        token_link_row.addWidget(self.sharped_account_button)
         token_link_row.addStretch(1)
         sharped_api_form.addRow("", token_link_row)
 
@@ -10917,9 +10925,25 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             # Ignore stale/incompatible saved values.
             pass
 
+    def _manage_sharped_access(self) -> None:
+        from phase_studio import requirements as reqs
+        base_url = self._line_value("sharped_base_url") or DEFAULT_SERVER_URL
+        previous = credential_store.get(base_url)
+        value = show_requirement_remediation_dialog(
+            self, reqs.RequirementStatus(reqs.RequirementKind.SHARPED, reqs.RequirementState.OK),
+            self._line_value("sharped_api_token"), sharped_base_url=base_url,
+            sharped_probe=lambda key: reqs.check_sharped_api(
+                base_url, key, client_factory=getattr(self, "_preflight_client_factory", None)),
+        )
+        if value is not None or (previous and not credential_store.get(base_url)):
+            self._set_widget_value_from_string(self.inputs["sharped_api_token"], value or "")
+            self.save_settings()
+
     def load_settings(self) -> None:
         saved_metadata_source = self.settings.value("inputs/metadata_source", None)
         for key, widget in self.inputs.items():
+            if key == "sharped_api_token":
+                continue
             value = self.settings.value(f"inputs/{key}", None)
             if value is not None:
                 if key == "reflection_data_mode":
@@ -10932,6 +10956,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     # and the saved HKL format selection is silently lost.
                     value = format_reflection_data_mode(normalize_reflection_data_mode(str(value)))
                 self._set_widget_value_from_string(widget, str(value))
+
+        base_url = self._line_value("sharped_base_url") or DEFAULT_SERVER_URL
+        saved_key = credential_store.load_settings(self.settings, base_url=base_url)
+        if saved_key:
+            self._set_widget_value_from_string(self.inputs["sharped_api_token"], saved_key)
 
         # Migrate legacy generic executable names to the Jana2020 installation
         # defaults while preserving any explicit custom absolute path.
@@ -12063,7 +12092,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def save_settings(self) -> None:
         for key, widget in self.inputs.items():
+            if key == "sharped_api_token":
+                continue
             self.settings.setValue(f"inputs/{key}", self._widget_value_as_string(widget))
+        self.settings.remove("inputs/sharped_api_token")
+        try:
+            credential_store.save_input(self._line_value("sharped_api_token"),
+                                        self._line_value("sharped_base_url") or DEFAULT_SERVER_URL)
+        except (OSError, ValueError):
+            # The current widget retains session access; never fall back to a
+            # plaintext persistent setting when secure saving fails.
+            pass
         self.settings.setValue("window/geometry", self.saveGeometry())
         self.settings.setValue("window/maximized", bool(self.isMaximized()))
         if hasattr(self, "main_splitter"):
@@ -12172,6 +12211,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._last_log_record = None
         self.results.clear()
         self._structure_jobs.clear()
+        self._operation_states.clear()
         self._live_structures.clear()
         self._handoff_pending = False
         self._handoff_candidate_snapshot = None
@@ -12270,6 +12310,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._active_run_id = run_id
         self.results.clear()
         self._structure_jobs.clear()
+        self._operation_states.clear()
         self._live_structures.clear()
         self.result_recommendation = None
         self._resume_state = None
@@ -12437,6 +12478,37 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             else getattr(self._run_event_context, "run_id", self._active_run_id)
         )
         self.msg_queue.put((kind, RunScopedPayload(owner, payload) if owner else payload))
+
+    def _run_display_operation(self, state: PipelineState, cycle: int, name: str, call):
+        """Publish real job lifetime; scientific call and return value are unchanged."""
+        # Branch-executor threads do not inherit the parent's threading.local.
+        # Bind progress/log callbacks to this job rather than whichever run is
+        # globally active by the time a late callback arrives.
+        self._run_event_context.run_id = str(state.run_id)
+        with self._structure_job_lock:
+            self._structure_job_generation += 1
+            job_id = f"operation:{self._structure_job_generation}"
+        self._queue_run_event("operation_state", (job_id, name, cycle, "running"), state.run_id)
+        try:
+            return call()
+        finally:
+            self._queue_run_event("operation_state", (job_id, name, cycle, "finished"), state.run_id)
+
+    def active_workflow_operations(self) -> List[str]:
+        """GUI-thread lifecycle state, including independent EDMA branches."""
+        if str(getattr(self, "_run_status", "")).upper() not in {"RUNNING", "REVIEW"}:
+            return []
+        labels = [f"{name} · Cycle {cycle} · {'Processing' if name == 'SharpED' else 'Running'}"
+                  for name, cycle, status in self._operation_states.values() if status == "running"]
+        for update in self._structure_jobs.values():
+            if update.status in {"queued", "running"}:
+                family = "Charge-flipping solution" if update.source == "superflip" else "Model prediction"
+                labels.append(f"EDMA · {family} · Cycle {update.cycle} · "
+                              f"{'Queued' if update.status == 'queued' else 'Running'}")
+        for role, panel in self.autosolve_panels.items():
+            if panel.busy:
+                labels.append(f"EDMA · {panel.title} · Cycle {panel.cycle} · Running")
+        return list(dict.fromkeys(labels))
 
     def _new_structure_job(
         self, state: PipelineState, source: str, cycle: int, map_path: Path, threshold: float,
@@ -13049,7 +13121,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             row = self.inputs.get("work_dir")
             return [ErrorAction("Choose folder…", row.browse, True)] if isinstance(row, PathRow) else []
         if category == "sharped_authentication":
-            return [ErrorAction("Update API token", lambda: self._open_configuration_page("Setup", advanced=True), True)]
+            return [ErrorAction("Account access…", self._manage_sharped_access, True)]
         if category.startswith("sharped_"):
             return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED", advanced=True), True)]
         if category == "input_validation":
@@ -13066,7 +13138,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 row = self.inputs.get(key)
                 if token in summary and isinstance(row, PathRow):
                     actions.append(ErrorAction(label, row.browse, not actions))
-            if "sharped api token" in summary or "sharped model" in summary:
+            if "sharped api token" in summary or "sharped access key" in summary or "sharped model" in summary:
                 actions.append(ErrorAction(
                     "Open SharpED settings",
                     lambda: self._open_configuration_page("Setup", advanced=True),
@@ -13093,7 +13165,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 state=reqs.RequirementState.TOKEN_REJECTED,
             )
             current = self._line_value("sharped_api_token") if "sharped_api_token" in self.inputs else ""
-            token = show_requirement_remediation_dialog(self, status, current)
+            classified = reqs._classify_sharped_error(RuntimeError(report.technical_details))
+            if classified.state in {reqs.RequirementState.TOKEN_REJECTED, reqs.RequirementState.ACCESS_DENIED}:
+                status = classified
+            base_url = self._line_value("sharped_base_url") or DEFAULT_SERVER_URL
+            token = show_requirement_remediation_dialog(
+                self, status, current, sharped_base_url=base_url,
+                sharped_probe=lambda key: reqs.check_sharped_api(
+                    base_url, key, client_factory=getattr(self, "_preflight_client_factory", None)),
+            )
             if token is not None:
                 widget = self.inputs.get("sharped_api_token")
                 if widget is not None:
@@ -13150,7 +13230,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         if hkl_task_id in self._completed_hkl_task_ids:
                             continue
                         self._completed_hkl_task_ids.add(hkl_task_id)
-                if kind == "log":
+                if kind == "operation_state":
+                    job_id, name, cycle, status = payload
+                    previous = self._operation_states.get(job_id)
+                    if previous is None or previous[2] != "finished":
+                        self._operation_states[job_id] = (name, cycle, status)
+                elif kind == "log":
                     self._append_execution_log(payload)
                     actions_dirty = True
                 elif kind == "result":
@@ -13191,6 +13276,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     previous = self._structure_jobs.get(key)
                     if previous is not None and update.generation < previous.generation:
                         continue
+                    if previous is not None and update.generation == previous.generation and previous.status in {"complete", "failed", "cancelled"}:
+                        if update.status in {"queued", "running"}:
+                            continue
                     # A map file reused under the same name is still a
                     # different scientific request. Reject the old hash.
                     if update.map_path.is_file() and update.map_sha256:
@@ -14546,6 +14634,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if request.run_id and request.run_id != str(self._active_run_id):
                 return
             if outcome.error is not None:
+                if live_job is not None:
+                    self._structure_job_status(live_job, "failed")
                 report = build_error_report(
                     outcome.error, subsystem="EDMA",
                     operation="Adjust selected result threshold",
@@ -15646,7 +15736,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if widget is not None:
             self._set_widget_value_from_string(widget, value)
         setattr(cfg, key, value)
-        self.settings.setValue(f"inputs/{key}", value)
+        if kind is reqs.RequirementKind.SHARPED:
+            self.settings.remove("inputs/sharped_api_token")
+        else:
+            self.settings.setValue(f"inputs/{key}", value)
         self.settings.sync()
         try:
             self.save_settings()
@@ -15674,6 +15767,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             needs_sharped=bool(cfg.run_sharped or is_recycling),
         )
 
+        active_jana_tools_directory = None
+        if self.jana_wizard_context.launched_from_jana_wizard:
+            from phase_studio.jana_superflip import application_dir, resolve_jana_installation_root
+            active_jana_tools_directory = resolve_jana_installation_root(application_dir()) / "SUPERFLIP"
+
         def check() -> object:
             if not required.kinds():
                 return reqs.PreflightResult()
@@ -15683,7 +15781,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 edma_path=cfg.edma_exe,
                 sharped_base_url=cfg.sharped_base_url,
                 sharped_token=cfg.sharped_api_token,
-                jana_dir=getattr(self, "_preflight_jana_dir", reqs.DEFAULT_JANA_SUPERFLIP_DIR),
+                jana_dir=getattr(self, "_preflight_jana_dir", active_jana_tools_directory),
                 client_factory=getattr(self, "_preflight_client_factory", None),
                 accept_suggestion=lambda _status: True,
             )
@@ -15718,6 +15816,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             on_success,
             download_dir=getattr(self, "_preflight_download_dir", None),
             download_opener=getattr(self, "_preflight_download_opener", None),
+            sharped_base_url=cfg.sharped_base_url,
+            sharped_probe=lambda key: reqs.check_sharped_api(
+                cfg.sharped_base_url, key,
+                client_factory=getattr(self, "_preflight_client_factory", None),
+            ),
         )
 
     def start_run(self) -> None:
@@ -16288,6 +16391,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         `model` overrides cfg.sharped_model for one call (2.0.1's dedicated
         Predicted-structure inference); cycles pass nothing."""
         cfg = state.cfg
+        self._run_event_context.run_id = str(state.run_id)
         self._emit_cycle_progress(
             cycle, cfg.cycles, progress_stages, "SharpED",
             detail=detail_prefix + "preparing upload", busy=True,
@@ -16309,7 +16413,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "[SharpED] Input map · " + describe_xplor_artifact(input_map),
             level="DETAIL", subsystem="SharpED",
         )
-        result = run_sharped_deblur(
+        result = self._run_display_operation(state, cycle, "SharpED", lambda: run_sharped_deblur(
             input_map, output_map, cfg.sharped_base_url, cfg.sharped_api_token, effective_model,
             state.sharped_elements, cfg.sharped_outres, cfg.sharped_max_upload_mb,
             cfg.sharped_timeout_seconds, cfg.sharped_poll_seconds, cfg.sharped_max_polls,
@@ -16320,7 +16424,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ),
             map_value_exponent=cfg.sharped_map_value_exponent,
             profiler=state.performance_profiler,
-        )
+        ))
         self.log(
             "[SharpED] Output map · " + describe_xplor_artifact(result),
             level="DETAIL", subsystem="SharpED",
@@ -16337,6 +16441,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         `map_label` names the map in the log (e.g. the Model prediction
         map); `explicit_threshold` (guided Autosolve's user-chosen value)
         always uses `plimit` exactly, never the automatic selection."""
+        self._run_event_context.run_id = str(state.run_id)
         cfg = state.cfg
         if not explicit_threshold and str(getattr(cfg, "edma_threshold_mode", "manual")).lower() == "auto":
             return self._run_auto_threshold_edma_stage(state, input_map, output_dir, prefix)
@@ -16750,7 +16855,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             else:
                 checkpoint.invalidate_from("superflip")
                 self.log("Superflip started", level="INFO", subsystem="Superflip")
-                sf_map = run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=sf_progress_relay, profiler=state.performance_profiler)
+                sf_map = self._run_display_operation(state, cyc, "Superflip", lambda: run_superflip_cycle(cycle_dir, sf_prefix, ref_ctx, observed_hkl_for_cycle, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", sf_export_jana, True, sf_export_ccp4, sf_export_jana, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=sf_progress_relay, profiler=state.performance_profiler))
                 checkpoint.values["superflip_map"] = sf_map
                 checkpoint.superflip_completed = True
                 self.log("Superflip complete", level="SUCCESS", subsystem="Superflip")
@@ -16783,7 +16888,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     omit_sf_map = saved_omit_sf_map
                     omit_progress_relay = None
                 else:
-                    omit_sf_map = run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay, profiler=state.performance_profiler)
+                    omit_sf_map = self._run_display_operation(state, cyc, "Superflip", lambda: run_superflip_cycle(cycle_dir, omit_prefix, ref_ctx, omit_hkl, model_for_sf, reference_file_for_cycle, reference_format_for_cycle, cfg.superflip_exe, cfg.perform_algorithm, "xplor", False, True, False, False, sf_voxel, cfg.bestdensities_count, cfg.bestdensities_metric, cfg.bestdensities_symmetry, cfg.polish, cfg.maxcycles, cfg.repeatmode, cfg.randomseed, cfg.delta, cfg.weakratio, cfg.biso, configured_data_mode, cfg.normalize, cfg.nresshells, cfg.missing, cfg.searchsymmetry, cfg.derivesymmetry, cfg.electrons, cfg.dataitemwidths, sf_extra_superflip_keywords, superflip_log, self.stop_now, on_output_line=omit_progress_relay, profiler=state.performance_profiler))
                     checkpoint.values["omit_superflip_map"] = omit_sf_map
                 self.log(f"Omit Superflip map ({len(state.omit_test_hkls)} reflections excluded): {omit_sf_map}")
                 omit_sf_correlation = xplor_map_correlation(sf_map, omit_sf_map)
@@ -17182,9 +17287,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength <= 0:
                     self.log("Overlap repartitioning enabled but Wavelength is 0; skipping for this cycle.", level="WARNING")
                 if add_missing or correct_intensities or redistribute:
+                    feedback_reflections = state.current_reflections
+                    intensity_change = None
+                    powder_change = None
                     if add_missing or correct_intensities:
-                        state.current_reflections, state.pending_intensity_correction_change_percent = apply_map_feedback_to_reflections(
-                            state.current_reflections,
+                        feedback_reflections, intensity_change = apply_map_feedback_to_reflections(
+                            feedback_reflections,
                             configured_data_mode,
                             deblur_map,
                             ref_ctx.cell,
@@ -17198,8 +17306,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                             excluded_hkls=state.omit_test_hkls,
                         )
                     if redistribute:
-                        state.current_reflections, state.pending_powder_repartition_change_percent = redistribute_overlap_reflections(
-                            state.current_reflections,
+                        feedback_reflections, powder_change = redistribute_overlap_reflections(
+                            feedback_reflections,
                             configured_data_mode,
                             deblur_map,
                             ref_ctx.cell,
@@ -17212,13 +17320,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
                     n_feedback = write_observed_reflections(
                         feedback_hkl,
-                        state.current_reflections,
+                        feedback_reflections,
                         cfg.i_over_sigma_min,
                         data_mode=configured_data_mode,
                         cell=ref_ctx.cell,
                         resolution_d_min=cfg.resolution_d_min,
                     )
                     observed_hkls[configured_data_mode] = feedback_hkl
+                    state.current_reflections = feedback_reflections
+                    state.pending_intensity_correction_change_percent = intensity_change
+                    state.pending_powder_repartition_change_percent = powder_change
                     self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
             checkpoint.feedback_completed = True
             if not checkpoint.continuation_completed and use_xplor_modelfile:

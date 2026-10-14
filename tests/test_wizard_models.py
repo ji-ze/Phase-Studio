@@ -109,11 +109,11 @@ def main():
     check("SharpED configuration form uses the available page width",
           wizard.model.width() >= int(wizard.page2.width() * 0.50))
     check("SharpED model selector has a readable responsive maximum width",
-          380 <= wizard.model.minimumWidth() <= wizard.model.maximumWidth() <= 550)
+          450 <= wizard.model.minimumWidth() <= wizard.model.maximumWidth() <= 550)
     check("cycle control has a practical responsive width",
-          wizard.cycles.width() >= 220)
-    check("cycle control stays in the compact 140-220 px band",
-          wizard.cycles.minimumWidth() == 140 and wizard.cycles.maximumWidth() == 220)
+          110 <= wizard.cycles.width() <= 140)
+    check("cycle control stays in the compact 110-140 px band",
+          wizard.cycles.minimumWidth() == 110 and wizard.cycles.maximumWidth() == 140)
     wizard._ensure_models_loaded()
     pump(app, wizard)
     check("Superflip + SharpED: models are fetched automatically", calls["n"] == 1)
@@ -141,15 +141,15 @@ def main():
     wizard.cycles.setValue(1)
     check("one cycle auto-selects the canonical one-cycle recommendation",
           wizard.model.currentText() == "PEAK A (model prediction)")
-    check("one-cycle helper text names the exact catalog model",
+    check("one-cycle helper describes automatic selection without duplicating the model",
           wizard.model_recommendation.text() ==
-          "Recommended for 1 cycle: PEAK A (model prediction)")
+          "Automatically selected · Recommended for 1 cycle")
     wizard.cycles.setValue(5)
     check("returning to multiple cycles restores its recommendation while unlocked",
           wizard.model.currentText() == "SEED (cyclic CF)")
-    check("multi-cycle helper text names the exact catalog model",
+    check("multi-cycle helper describes automatic selection without duplicating the model",
           wizard.model_recommendation.text() ==
-          "Recommended for iterative charge flipping: SEED (cyclic CF)")
+          "Automatically selected · Recommended for 5 cycles")
     check(
         "Refresh models stays available as an explicit manual control",
         wizard.refresh_models_button.isEnabled(),

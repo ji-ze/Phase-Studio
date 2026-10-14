@@ -95,7 +95,7 @@ if warning.width() > aw.review_columns["predicted"]["column"].width():
     problems.append("Predicted-structure SharpED warning overflows its own panel width")
 if warning.height() < need_height(warning):
     problems.append(f"Predicted-structure SharpED warning clipped: height {warning.height()} < {need_height(warning)}")
-if "SharpED" not in warning.text() or "neural-network" not in warning.text():
+if "SharpED" not in warning.text() or "original measured diffraction data" not in warning.text() or "independent crystallographic refinement" not in warning.text():
     problems.append(f"Predicted-structure SharpED warning text unexpected: {warning.text()!r}")
 
 observed_warning = aw.review_columns["observed"]["warning"]

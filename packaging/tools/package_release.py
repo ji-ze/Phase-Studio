@@ -5,6 +5,10 @@ import hashlib
 import shutil
 import tempfile
 import zipfile
+import runpy
+
+REPO = Path(__file__).resolve().parents[2]
+VERSION = runpy.run_path(str(REPO / "phase_studio/version.py"))["VERSION"]
 
 
 def digest(path):
@@ -14,12 +18,12 @@ def digest(path):
 
 def package_release(developer: Path, release: Path):
     developer, release = developer.resolve(), release.resolve()
-    if developer.name != "PhaseStudio-Jana2020-2.0.2":
+    if developer.name != f"PhaseStudio-Jana2020-{VERSION}":
         raise ValueError("Wrong developer package root")
     if not (developer / "Phase_studio.exe").is_file() or not (developer / "_internal").is_dir():
         raise ValueError("Complete ONEDIR runtime required")
     release.mkdir(parents=True, exist_ok=True)
-    archive_path = release / "PhaseStudio-Jana2020-2.0.2.zip"
+    archive_path = release / f"PhaseStudio-Jana2020-{VERSION}.zip"
     paths = sorted(path for path in developer.rglob("*") if path.is_file())
     expected = {f"{developer.name}/{p.relative_to(developer).as_posix()}": p for p in paths}
     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
@@ -37,8 +41,9 @@ def package_release(developer: Path, release: Path):
             if digest(root / relative) != digest(path):
                 raise ValueError(f"Extracted runtime differs: {relative}")
     repo = Path(__file__).resolve().parents[2]
-    shutil.copyfile(repo / "RELEASE_NOTES_2_0_2.md", release / "RELEASE_NOTES_2_0_2.md")
-    artifacts = [release / "PhaseStudio-2.0.2-x64.exe", archive_path]
+    notes = f"RELEASE_NOTES_{VERSION.replace('.', '_')}.md"
+    shutil.copyfile(repo / notes, release / notes)
+    artifacts = [release / f"PhaseStudio-{VERSION}-x64.exe", archive_path]
     available = [path for path in artifacts if path.is_file()]
     (release / "SHA256SUMS.txt").write_text(
         "".join(f"{digest(path)}  {path.name}\n" for path in available), encoding="ascii",

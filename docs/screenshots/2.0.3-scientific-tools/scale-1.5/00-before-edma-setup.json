@@ -1,0 +1,10 @@
+{
+  "source_runtime": true,
+  "scale": 1.5,
+  "logical_size": [
+    504,
+    300
+  ],
+  "device_pixel_ratio": 1.5,
+  "layout_baseline": true
+}

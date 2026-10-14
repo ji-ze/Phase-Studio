@@ -75,7 +75,7 @@ def main():
       and wizard.autosolve_tile.height() == wizard.professional_mode_tile.height())
     check("Professional mode explains its full expert scope",
           wizard.professional_mode_tile.subtitle_label.text() ==
-          "Full control over Superflip, SharpED, and EDMA structure-search settings")
+          "Advanced control of Superflip, SharpED and EDMA")
     check("Advanced entry is absent", not hasattr(wizard, "advanced_button"))
     check("Open full configuration is absent", not any(
         button.text() == "Open full configuration" for button in wizard.dialog.findChildren(QPushButton)
@@ -94,13 +94,13 @@ def main():
     wizard.superflip_sharped_tile._on_click()
     check("recommended workflow opens its configuration", wizard.stack.currentWidget() is wizard.page2)
     check("recommended workflow defaults to five cycles", wizard.cycles.value() == 5)
-    check("cycle guidance explains fast, difficult, and runtime tradeoffs", all(
-        text in wizard.cycles_recommendation.text()
-        for text in ("1 cycle is fast", "5 cycles are recommended", "increases the total runtime")
-    ))
-    check("multi-cycle model guidance uses the canonical model",
+    check("cycle guidance describes the selected count's runtime tradeoff",
+          wizard.cycles_recommendation.text() == "Extended iterative processing · Longer runtime")
+    check("multi-cycle automatic guidance retains the canonical effective model",
           wizard.model_recommendation.text() ==
-          "Recommended for iterative charge flipping: SEED (cyclic CF)")
+          "Automatically selected · Recommended for 5 cycles"
+          and wizard.model.currentText() == "SEED (cyclic CF)"
+          and not wizard.model_user_picked["value"])
     check("SharpED model choice is a non-editable catalog selector", not wizard.model.isEditable())
     wizard.primary_button.click()
     check("recommended workflow advances directly to Map Feedback", wizard.stack.currentWidget() is wizard.page3)

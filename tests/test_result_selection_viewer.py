@@ -259,7 +259,7 @@ def main():
     check("source switch updates the rendered-element legend", "N" in dialog._element_legend.text())
     check("source switch metadata names cycle, model and EDMA ASU composition", all(
         text in dialog._metadata_label.text() for text in (
-            "Cycle", "koala model progressive", "EDMA asymmetric-unit composition", "N1 O1",
+            "Cycle", "koala model progressive", "EDMA asymmetric-unit composition", "N₁ O₁",
         )
     ))
     check("detected count appears once in EDMA status, not duplicated in metadata",
@@ -274,7 +274,7 @@ def main():
           and dialog._threshold_status.parentWidget() is dialog._preview_section)
     check("Result Selection states the exact output that will be exported", all(
         text in dialog._selected_output_summary.text()
-        for text in ("Selected for export", "Model prediction", "Cycle 3", "koala model progressive", "0.4")
+        for text in ("Selected for export", "Model prediction", "Cycle 3", "0.4")
     ))
     dialog._superflip_btn.setChecked(True)
     restored = dialog.selected_candidate

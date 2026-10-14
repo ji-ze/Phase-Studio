@@ -18,8 +18,11 @@ PEAK A as server default. No credential, upload or inference was used for this
 catalogue audit. Authenticated inference on the documented host still requires
 real-account acceptance.
 
-Sign into a SharpED account, accept its current terms, obtain any required
-entitlement and generate a personal token. Shared Jana account infrastructure
+Sign into the [SharpED token page](https://sharped.fzu.cz/sharp-ed) with your
+existing Jana2020 account; no separate SharpED account is required. Expand
+**API tokens for desktop application** using **Show**, enter a **New token name**,
+and click **Create token**. Accept current service terms and obtain any required
+entitlement. Shared Jana account infrastructure
 does not make acceptance of Jana software terms equivalent to SharpED acceptance.
 The client uses bearer credentials and job tokens; keep them out of public
 code, screenshots and diagnostic reports. Missing, expired or revoked tokens,

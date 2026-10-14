@@ -10,9 +10,10 @@ import zipfile
 from PyInstaller.archive.readers import CArchiveReader
 
 
+VERSION = runpy.run_path(str(Path(__file__).resolve().parents[2] / "phase_studio/version.py"))["VERSION"]
 NAMES = {
-    "standalone": "PhaseStudio-2.0.2-x64.exe",
-    "installer": "PhaseStudio-Jana2020-Installer-2.0.2-x64.exe",
+    "standalone": f"PhaseStudio-{VERSION}-x64.exe",
+    "installer": f"PhaseStudio-Jana2020-Installer-{VERSION}-x64.exe",
     "wrapper": "superflip.exe",
     "developer": "Phase_studio.exe",
     "store": "PhaseStudio.exe",

@@ -1,5 +1,19 @@
 # Public 2.0.2 release packaging
 
+The historical release below remains 2.0.2. Build scripts now derive output
+names and Windows version resources from `phase_studio/version.py`. To build
+the current 2.0.3 preview without overwriting the released packages, activate
+the existing build environment and use:
+
+```powershell
+packaging/build_windows.ps1 -Target All -DistRoot dist/2.0.3-preview
+```
+
+This produces `dist/2.0.3-preview/release/PhaseStudio-2.0.3-x64.exe` and
+`PhaseStudio-Jana2020-2.0.3.zip`, plus checksums and current preview notes.
+The extracted Jana runtime stays in `dist/2.0.3-preview/PhaseStudio-Jana2020-2.0.3/`.
+Building does not publish, install into Jana or establish native GUI acceptance.
+
 Use the existing Windows build environment and specifications. Tests must pass
 before packaging. No scientific Superflip/EDMA binaries or SharpED weights are
 bundled. Public release output contains:

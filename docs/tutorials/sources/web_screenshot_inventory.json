@@ -1,0 +1,38 @@
+[
+  {
+    "id": "github-release",
+    "path": "screenshots/web/github-release.png",
+    "url": "https://github.com/ji-ze/Phase-Studio/releases/tag/v2.0.2",
+    "captured": true,
+    "authenticated": false,
+    "source_window": "Edge headless / fresh isolated browser profile",
+    "redaction": "Fresh isolated browser profile; no credentials supplied"
+  },
+  {
+    "id": "github-assets",
+    "path": "screenshots/web/github-assets.png",
+    "url": "https://github.com/ji-ze/Phase-Studio/releases/tag/v2.0.2",
+    "captured": true,
+    "authenticated": false,
+    "source_window": "Edge headless / fresh isolated browser profile",
+    "redaction": "Fresh isolated browser profile; no credentials supplied"
+  },
+  {
+    "id": "jana-login",
+    "path": "screenshots/web/jana-login.png",
+    "url": "https://jana.fzu.cz/login",
+    "captured": true,
+    "authenticated": false,
+    "source_window": "Edge headless / fresh isolated browser profile",
+    "redaction": "Fresh isolated browser profile; no credentials supplied"
+  },
+  {
+    "id": "sharped-token-controls",
+    "path": "screenshots/web/sharped-token-controls.png",
+    "url": "https://sharped.fzu.cz/sharp-ed",
+    "captured": true,
+    "authenticated": true,
+    "source_window": "Chrome / user-identified SharpED page",
+    "redaction": "Crop excludes browser, account identity and existing-token table; no token created/copied"
+  }
+]

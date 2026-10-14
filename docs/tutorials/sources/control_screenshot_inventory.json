@@ -1,0 +1,609 @@
+[
+  {
+    "key": "superflip_exe",
+    "captured": true,
+    "path": "screenshots/workflow/controls/superflip_exe.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Setup"
+  },
+  {
+    "key": "edma_exe",
+    "captured": true,
+    "path": "screenshots/workflow/controls/edma_exe.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Setup"
+  },
+  {
+    "key": "sharped_base_url",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_base_url.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Setup"
+  },
+  {
+    "key": "sharped_api_token",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_api_token.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Setup"
+  },
+  {
+    "key": "show_beta_features",
+    "captured": true,
+    "path": "screenshots/workflow/controls/show_beta_features.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Setup"
+  },
+  {
+    "key": "perform_algorithm",
+    "captured": true,
+    "path": "screenshots/workflow/controls/perform_algorithm.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "maxcycles",
+    "captured": true,
+    "path": "screenshots/workflow/controls/maxcycles.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "repeatmode",
+    "captured": true,
+    "path": "screenshots/workflow/controls/repeatmode.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "randomseed",
+    "captured": true,
+    "path": "screenshots/workflow/controls/randomseed.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "delta",
+    "captured": true,
+    "path": "screenshots/workflow/controls/delta.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "weakratio",
+    "captured": true,
+    "path": "screenshots/workflow/controls/weakratio.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "biso",
+    "captured": true,
+    "path": "screenshots/workflow/controls/biso.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "polish",
+    "captured": true,
+    "path": "screenshots/workflow/controls/polish.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "voxel",
+    "captured": true,
+    "path": "screenshots/workflow/controls/voxel.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "bestdensities_count",
+    "captured": true,
+    "path": "screenshots/workflow/controls/bestdensities_count.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "bestdensities_metric",
+    "captured": true,
+    "path": "screenshots/workflow/controls/bestdensities_metric.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "searchsymmetry",
+    "captured": true,
+    "path": "screenshots/workflow/controls/searchsymmetry.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "derivesymmetry",
+    "captured": true,
+    "path": "screenshots/workflow/controls/derivesymmetry.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "i_over_sigma_min",
+    "captured": true,
+    "path": "screenshots/workflow/controls/i_over_sigma_min.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "resolution_d_min",
+    "captured": true,
+    "path": "screenshots/workflow/controls/resolution_d_min.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "normalize",
+    "captured": true,
+    "path": "screenshots/workflow/controls/normalize.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "nresshells",
+    "captured": true,
+    "path": "screenshots/workflow/controls/nresshells.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "missing",
+    "captured": true,
+    "path": "screenshots/workflow/controls/missing.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "electrons",
+    "captured": true,
+    "path": "screenshots/workflow/controls/electrons.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "plimit_superflip",
+    "captured": true,
+    "path": "screenshots/workflow/controls/plimit_superflip.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "plimit_deblur",
+    "captured": true,
+    "path": "screenshots/workflow/controls/plimit_deblur.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "edma_maxima",
+    "captured": true,
+    "path": "screenshots/workflow/controls/edma_maxima.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "edma_numberofatoms",
+    "captured": true,
+    "path": "screenshots/workflow/controls/edma_numberofatoms.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "merge_distance",
+    "captured": true,
+    "path": "screenshots/workflow/controls/merge_distance.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "edma_fullcell",
+    "captured": true,
+    "path": "screenshots/workflow/controls/edma_fullcell.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "edma_centerofcharge",
+    "captured": true,
+    "path": "screenshots/workflow/controls/edma_centerofcharge.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "edma_chlimit",
+    "captured": true,
+    "path": "screenshots/workflow/controls/edma_chlimit.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "edma_chlimlist",
+    "captured": true,
+    "path": "screenshots/workflow/controls/edma_chlimlist.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  },
+  {
+    "key": "sharped_elements",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_elements.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "SharpED"
+  },
+  {
+    "key": "sharped_outres",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_outres.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "SharpED"
+  },
+  {
+    "key": "sharped_map_value_exponent",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_map_value_exponent.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "SharpED"
+  },
+  {
+    "key": "sharped_max_upload_mb",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_max_upload_mb.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "SharpED"
+  },
+  {
+    "key": "sharped_timeout_seconds",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_timeout_seconds.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "SharpED"
+  },
+  {
+    "key": "sharped_poll_seconds",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_poll_seconds.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "SharpED"
+  },
+  {
+    "key": "sharped_max_polls",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_max_polls.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "SharpED"
+  },
+  {
+    "key": "input_source_mode",
+    "captured": true,
+    "path": "screenshots/workflow/controls/input_source_mode.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "jana_inflip",
+    "captured": true,
+    "path": "screenshots/workflow/controls/jana_inflip.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "hkl",
+    "captured": true,
+    "path": "screenshots/workflow/controls/hkl.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "reflection_data_mode",
+    "captured": true,
+    "path": "screenshots/workflow/controls/reflection_data_mode.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "metadata_source",
+    "captured": true,
+    "path": "screenshots/workflow/controls/metadata_source.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "reference_cif",
+    "captured": true,
+    "path": "screenshots/workflow/controls/reference_cif.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "first_cycle_modelfile",
+    "captured": true,
+    "path": "screenshots/workflow/controls/first_cycle_modelfile.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "workflow_preset",
+    "captured": true,
+    "path": "screenshots/workflow/controls/workflow_preset.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "cycles",
+    "captured": true,
+    "path": "screenshots/workflow/controls/cycles.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "reconstruction_mode",
+    "captured": true,
+    "path": "screenshots/workflow/controls/reconstruction_mode.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "damping_factor",
+    "captured": true,
+    "path": "screenshots/workflow/controls/damping_factor.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "exclude_atoms",
+    "captured": true,
+    "path": "screenshots/workflow/controls/exclude_atoms.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "sharped_model",
+    "captured": true,
+    "path": "screenshots/workflow/controls/sharped_model.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "run_edma_superflip",
+    "captured": true,
+    "path": "screenshots/workflow/controls/run_edma_superflip.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "run_sharped",
+    "captured": true,
+    "path": "screenshots/workflow/controls/run_sharped.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "symmetrize_deblurred_map",
+    "captured": false,
+    "reason": "Unavailable/hidden in the selected documented context"
+  },
+  {
+    "key": "run_edma_deblurred",
+    "captured": true,
+    "path": "screenshots/workflow/controls/run_edma_deblurred.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "compute_omit_maps",
+    "captured": true,
+    "path": "screenshots/workflow/controls/compute_omit_maps.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "compute_omit_rfree",
+    "captured": true,
+    "path": "screenshots/workflow/controls/compute_omit_rfree.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "run_edma_recycle_final",
+    "captured": true,
+    "path": "screenshots/workflow/controls/run_edma_recycle_final.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "work_dir",
+    "captured": true,
+    "path": "screenshots/workflow/controls/work_dir.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Output"
+  },
+  {
+    "key": "map_export_format",
+    "captured": true,
+    "path": "screenshots/workflow/controls/map_export_format.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Output"
+  },
+  {
+    "key": "structure_export_format",
+    "captured": true,
+    "path": "screenshots/workflow/controls/structure_export_format.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Output"
+  },
+  {
+    "key": "map_feedback_missing_enabled",
+    "captured": true,
+    "path": "screenshots/workflow/controls/map_feedback_missing_enabled.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "map_feedback_missing_from_cycle",
+    "captured": true,
+    "path": "screenshots/workflow/controls/map_feedback_missing_from_cycle.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "map_feedback_missing_percent_limit",
+    "captured": true,
+    "path": "screenshots/workflow/controls/map_feedback_missing_percent_limit.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "map_feedback_intensity_enabled",
+    "captured": true,
+    "path": "screenshots/workflow/controls/map_feedback_intensity_enabled.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "map_feedback_intensity_from_cycle",
+    "captured": true,
+    "path": "screenshots/workflow/controls/map_feedback_intensity_from_cycle.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "map_feedback_intensity_damping",
+    "captured": true,
+    "path": "screenshots/workflow/controls/map_feedback_intensity_damping.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "map_feedback_intensity_max_i_over_sigma",
+    "captured": true,
+    "path": "screenshots/workflow/controls/map_feedback_intensity_max_i_over_sigma.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "redistribute_overlaps",
+    "captured": true,
+    "path": "screenshots/workflow/controls/redistribute_overlaps.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "powder_redistribution_from_cycle",
+    "captured": true,
+    "path": "screenshots/workflow/controls/powder_redistribution_from_cycle.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "powder_wavelength",
+    "captured": true,
+    "path": "screenshots/workflow/controls/powder_wavelength.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "powder_separation_factor",
+    "captured": true,
+    "path": "screenshots/workflow/controls/powder_separation_factor.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "powder_redistribution_mix",
+    "captured": true,
+    "path": "screenshots/workflow/controls/powder_redistribution_mix.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Map feedback"
+  },
+  {
+    "key": "manual_cell_a",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_cell_a.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "manual_cell_alpha",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_cell_alpha.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "manual_cell_b",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_cell_b.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "manual_cell_beta",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_cell_beta.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "manual_cell_c",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_cell_c.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "manual_cell_gamma",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_cell_gamma.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "manual_spacegroup_number",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_spacegroup_number.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "manual_spacegroup_symbol",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_spacegroup_symbol.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "manual_composition",
+    "captured": true,
+    "path": "screenshots/workflow/controls/manual_composition.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Input"
+  },
+  {
+    "key": "modelfile_source",
+    "captured": true,
+    "path": "screenshots/workflow/controls/modelfile_source.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Workflow"
+  },
+  {
+    "key": "extra_superflip_keywords",
+    "captured": true,
+    "path": "screenshots/workflow/controls/extra_superflip_keywords.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "Superflip"
+  },
+  {
+    "key": "extra_edma_keywords",
+    "captured": true,
+    "path": "screenshots/workflow/controls/extra_edma_keywords.png",
+    "source_window": "Actual Qt rendered control row",
+    "context": "EDMA"
+  }
+]

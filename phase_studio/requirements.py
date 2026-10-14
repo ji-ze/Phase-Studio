@@ -21,9 +21,7 @@ headlessly and the Jana2020 wrapper can use it without pulling in the GUI.
 from __future__ import annotations
 
 import hashlib
-import io
 import shutil
-import zipfile
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -39,7 +37,8 @@ EDMA_EXE_NAME = "EDMA.exe"
 # Official third-party sources. Phase Studio never bundles or mirrors these.
 SUPERFLIP_DOWNLOAD_URL = "https://superflip.fzu.cz/download/superflip_win.zip"
 EDMA_DOWNLOAD_URL = "https://superflip.fzu.cz/download/EDMA_win.zip"
-SUPERFLIP_LICENSE_URL = "https://superflip.fzu.cz/"
+SUPERFLIP_LICENSE_URL = "https://superflip.fzu.cz/download/license_superflip.txt"
+EDMA_LICENSE_URL = "https://superflip.fzu.cz/download/license_EDMA.txt"
 SHARPED_ACCOUNT_URL = "https://sharped.fzu.cz/sharp-ed"
 
 
@@ -62,9 +61,14 @@ class RequirementState(str, Enum):
     NOT_FOUND = "not_found"
     NOT_A_FILE = "not_a_file"
     WRONG_EXECUTABLE = "wrong_executable"
+    INCOMPATIBLE = "incompatible"
+    MISSING_RUNTIME = "missing_runtime"
+    CANNOT_LAUNCH = "cannot_launch"
     IS_PHASE_STUDIO_WRAPPER = "is_phase_studio_wrapper"
     TOKEN_MISSING = "token_missing"
     TOKEN_REJECTED = "token_rejected"
+    ACCESS_DENIED = "access_denied"
+    SERVER_UNAVAILABLE = "server_unavailable"
     SERVER_UNREACHABLE = "server_unreachable"
     MALFORMED_RESPONSE = "malformed_response"
 
@@ -95,9 +99,9 @@ class RequirementStatus:
     @property
     def title(self) -> str:
         return {
-            RequirementKind.SUPERFLIP: "Superflip setup required",
-            RequirementKind.EDMA: "EDMA setup required",
-            RequirementKind.SHARPED: "SharpED access required",
+            RequirementKind.SUPERFLIP: "Set up Superflip",
+            RequirementKind.EDMA: "Set up EDMA",
+            RequirementKind.SHARPED: "Connect to SharpED",
         }[self.kind]
 
     @property
@@ -108,10 +112,13 @@ class RequirementStatus:
         if self.kind is RequirementKind.SHARPED:
             return {
                 RequirementState.TOKEN_MISSING:
-                    "No SharpED API token is configured.",
+                    "Enter your SharpED access key to continue.",
                 RequirementState.TOKEN_REJECTED:
-                    "The SharpED API token was not accepted. Sign in to SharpED "
-                    'and create a new token using "Create token".',
+                    "This access key was not accepted. Check the key associated with your Jana2020 account.",
+                RequirementState.ACCESS_DENIED:
+                    "Your Jana2020 account does not currently have permission to use SharpED processing. Check your SharpED account access.",
+                RequirementState.SERVER_UNAVAILABLE:
+                    "SharpED is temporarily unavailable. Please try again later.",
                 RequirementState.SERVER_UNREACHABLE:
                     "Phase Studio could not reach the SharpED server. Check the "
                     "internet connection and try again.",
@@ -119,6 +126,12 @@ class RequirementStatus:
                     "The SharpED server returned an unexpected response.",
             }.get(self.state, "SharpED access could not be verified.")
         label = "Superflip" if self.kind is RequirementKind.SUPERFLIP else "EDMA"
+        if self.state is RequirementState.INCOMPATIBLE:
+            return f"This installation of {label} is not compatible with this computer. Choose another installation."
+        if self.state is RequirementState.MISSING_RUNTIME:
+            return f"{label} was found, but a required supporting file is missing. Repair the installation or choose another file."
+        if self.state is RequirementState.CANNOT_LAUNCH:
+            return f"{label} was found but could not be started safely. Choose another installation or use the official download page."
         if self.state is RequirementState.IS_PHASE_STUDIO_WRAPPER:
             return (
                 f"The configured {label} executable is the Phase Studio Jana2020 "
@@ -128,9 +141,14 @@ class RequirementStatus:
             )
         if self.state is RequirementState.WRONG_EXECUTABLE:
             return (
-                f"The selected file does not look like the {label} executable. "
-                f"Select the executable supplied by the {label} authors."
+                f"The selected file could not be verified as a compatible {label} installation. "
+                f"Choose another file or use the official download page."
             )
+        if self.state is RequirementState.NOT_A_FILE:
+            return f"The selected {label} location is a folder, not a program. Choose the program inside the installation."
+        if self.state in (RequirementState.NOT_FOUND, RequirementState.NOT_CONFIGURED):
+            purpose = "identify atomic positions" if self.kind is RequirementKind.EDMA else "solve structures using charge flipping"
+            return f"{label} was not found on this computer. Phase Studio needs it to {purpose}."
         return (
             f"Phase Studio could not find a working {label} executable. Select an "
             f"existing installation or install {label} before starting this workflow."
@@ -207,26 +225,11 @@ def is_phase_studio_wrapper(exe: Path) -> bool:
 
 
 def is_expected_executable(kind: RequirementKind, exe: Path) -> bool:
-    """Apply a conservative identity check before accepting an executable.
-
-    Phase Studio cannot safely launch an arbitrary ``.exe`` merely because it
-    exists.  The official Windows archives use a small, stable set of names and
-    PE executables start with the ``MZ`` signature.  Wrapper ownership remains a
-    separate marker-based decision in :func:`is_phase_studio_wrapper`.
-    """
-    path = Path(exe)
-    name = path.name.casefold()
-    expected_names = (
-        {"superflip.exe", "superflip_original.exe", "superflip-original.exe", "superflip-orig.exe"}
-        if kind is RequirementKind.SUPERFLIP else {"edma.exe"}
-    )
-    if name not in expected_names:
+    """Verify format, identity, runtime and a bounded non-calculating launch."""
+    from phase_studio.scientific_tools import validate_program
+    if kind is RequirementKind.SUPERFLIP and is_phase_studio_wrapper(exe):
         return False
-    try:
-        with path.open("rb") as stream:
-            return stream.read(2) == b"MZ"
-    except OSError:
-        return False
+    return validate_program(kind, exe).ok
 
 
 def _check_executable(
@@ -235,26 +238,31 @@ def _check_executable(
     candidates: Sequence[Path],
 ) -> RequirementStatus:
     """Shared Superflip/EDMA logic: validate, else look in known locations."""
-    resolved = resolve_executable(configured)
     configured_failure: Optional[RequirementStatus] = None
     search_candidates = list(candidates)
+    raw_value = str(configured or "").strip().strip('"')
+    raw_path = Path(raw_value).expanduser()
+    # Bare legacy defaults ("superflip.exe" / "EDMA.exe") are PATH searches,
+    # not an explicit installed path that can outrank the active Jana program.
+    resolved = raw_path.resolve() if raw_value and raw_path.is_file() else None
+    if resolved is None and raw_value:
+        found = shutil.which(raw_value)
+        if found:
+            search_candidates.append(Path(found))
+    if str(configured or "").strip() and raw_path.is_dir():
+        configured_failure = RequirementStatus(kind, RequirementState.NOT_A_FILE, path=raw_path)
 
     if resolved is not None and resolved.is_file():
-        if not is_expected_executable(kind, resolved):
-            configured_failure = RequirementStatus(
-                kind=kind,
-                state=RequirementState.WRONG_EXECUTABLE,
-                path=resolved,
-                detail=str(resolved),
-            )
-        elif kind is RequirementKind.SUPERFLIP and is_phase_studio_wrapper(resolved):
-            # Configured path points at our own launcher: look for the real one
-            # next to it before giving up.
+        if kind is RequirementKind.SUPERFLIP and is_phase_studio_wrapper(resolved):
             sibling = resolved.parent / ORIGINAL_EXE_NAME
             search_candidates.insert(0, sibling)
+            configured_failure = RequirementStatus(kind, RequirementState.IS_PHASE_STUDIO_WRAPPER, path=resolved)
+        elif not is_expected_executable(kind, resolved):
+            from phase_studio.scientific_tools import validate_program
+            validation = validate_program(kind, resolved)
             configured_failure = RequirementStatus(
                 kind=kind,
-                state=RequirementState.IS_PHASE_STUDIO_WRAPPER,
+                state=RequirementState(validation.state),
                 path=resolved,
                 detail=str(resolved),
             )
@@ -266,9 +274,13 @@ def _check_executable(
         candidate = Path(candidate)
         if not candidate.is_file():
             continue
-        if not is_expected_executable(kind, candidate):
-            continue
         if kind is RequirementKind.SUPERFLIP and is_phase_studio_wrapper(candidate):
+            continue
+        if not is_expected_executable(kind, candidate):
+            if configured_failure is None:
+                from phase_studio.scientific_tools import validate_program
+                validation = validate_program(kind, candidate)
+                configured_failure = RequirementStatus(kind, RequirementState(validation.state), path=candidate)
             continue
         return RequirementStatus(
             kind=kind,
@@ -290,7 +302,7 @@ def _check_executable(
 
 
 def check_superflip(configured: object,
-                    jana_dir: Path = DEFAULT_JANA_SUPERFLIP_DIR) -> RequirementStatus:
+                    jana_dir: Optional[Path] = None) -> RequirementStatus:
     """Validate the configured Superflip, else look in the Jana2020 directory.
 
     Candidate priority follows Jana's supported scientific location,
@@ -298,24 +310,42 @@ def check_superflip(configured: object,
     detectable only as a remediation candidate for an old verified wrapper
     installation; it is never the normal default.
 
-    Never searches beyond the configured path and this one known directory.
+    The active Jana directory precedes managed tools, supported locations and
+    PATH. Standalone callers omit jana_dir so managed tools take precedence.
     """
-    jana_dir = Path(jana_dir)
+    candidates = [Path(jana_dir) / WRAPPER_EXE_NAME] if jana_dir is not None else []
+    if candidates and is_phase_studio_wrapper(candidates[0]):
+        candidates.append(Path(jana_dir) / ORIGINAL_EXE_NAME)
+    candidates.extend(_standalone_candidates(RequirementKind.SUPERFLIP))
     return _check_executable(
         RequirementKind.SUPERFLIP,
         configured,
-        [jana_dir / WRAPPER_EXE_NAME, jana_dir / ORIGINAL_EXE_NAME],
+        candidates,
     )
 
 
 def check_edma(configured: object,
-               jana_dir: Path = DEFAULT_JANA_SUPERFLIP_DIR) -> RequirementStatus:
+               jana_dir: Optional[Path] = None) -> RequirementStatus:
     """Validate the configured EDMA, else look in the Jana2020 directory.
 
     Detection never modifies Jana2020's own EDMA; it only records where it is.
     """
-    jana_dir = Path(jana_dir)
-    return _check_executable(RequirementKind.EDMA, configured, [jana_dir / EDMA_EXE_NAME])
+    candidates = [Path(jana_dir) / EDMA_EXE_NAME] if jana_dir is not None else []
+    return _check_executable(RequirementKind.EDMA, configured,
+                             [*candidates, *_standalone_candidates(RequirementKind.EDMA)])
+
+
+def _standalone_candidates(kind):
+    from phase_studio.scientific_tools import managed_tools_directory
+    name = WRAPPER_EXE_NAME if kind is RequirementKind.SUPERFLIP else EDMA_EXE_NAME
+    managed = managed_tools_directory() / kind.value
+    candidates = sorted(managed.rglob(name)) if managed.is_dir() else []
+    # Known supported location follows the active Jana installation / managed tools.
+    candidates.append(DEFAULT_JANA_SUPERFLIP_DIR / name)
+    found = shutil.which(name)
+    if found:
+        candidates.append(Path(found))
+    return candidates
 
 
 def download_requirement_executable(
@@ -324,48 +354,16 @@ def download_requirement_executable(
     *,
     opener: Optional[Callable[..., BinaryIO]] = None,
 ) -> Path:
-    """Download one official archive and install only its expected executable.
+    """Install only a release-reviewed distribution with independent integrity.
 
     The caller owns the license-acknowledgement UI.  Archive paths are never
     extracted directly, which avoids path traversal and leaves Jana2020 files
     untouched.  The destination is a Phase Studio-owned user-data directory.
     """
     if kind is RequirementKind.SHARPED:
-        raise ValueError("SharpED is an account requirement, not a downloadable executable.")
-    if opener is None:
-        from urllib.request import urlopen
-
-        opener = urlopen
-    url = SUPERFLIP_DOWNLOAD_URL if kind is RequirementKind.SUPERFLIP else EDMA_DOWNLOAD_URL
-    target_name = WRAPPER_EXE_NAME if kind is RequirementKind.SUPERFLIP else EDMA_EXE_NAME
-    response = opener(url, timeout=60.0)
-    try:
-        payload = response.read()
-    finally:
-        close = getattr(response, "close", None)
-        if callable(close):
-            close()
-    with zipfile.ZipFile(io.BytesIO(payload), "r") as archive:
-        members = [
-            name for name in archive.namelist()
-            if not name.endswith("/") and Path(name).name.casefold() == target_name.casefold()
-        ]
-        if not members:
-            raise RuntimeError(f"The downloaded archive did not contain {target_name}.")
-        member = min(members, key=lambda value: (len(Path(value).parts), len(value), value.casefold()))
-        executable = archive.read(member)
-    if not executable.startswith(b"MZ"):
-        raise RuntimeError(f"The downloaded {target_name} is not a Windows executable.")
-
-    destination = Path(destination_dir).expanduser().resolve()
-    destination.mkdir(parents=True, exist_ok=True)
-    target = destination / target_name
-    temporary = destination / (target_name + ".download")
-    temporary.write_bytes(executable)
-    temporary.replace(target)
-    if not is_expected_executable(kind, target):
-        raise RuntimeError(f"The installed {target_name} did not pass executable validation.")
-    return target.resolve()
+        raise ValueError("SharpED is an account requirement, not a local tool.")
+    from phase_studio.scientific_tools import install_distribution
+    return install_distribution(kind, destination_dir, opener=opener)
 
 
 # ---------------------------------------------------------------------------
@@ -433,8 +431,14 @@ def _classify_sharped_error(exc: BaseException) -> RequirementStatus:
     status_code = getattr(exc, "code", None) or getattr(exc, "status", None)
     text = f"{type(exc).__name__}: {exc}".lower()
 
-    if status_code in (401, 403) or "unauthor" in text or "forbidden" in text:
+    if status_code == 403 or "http error 403" in text or "forbidden" in text:
+        state = RequirementState.ACCESS_DENIED
+    elif status_code == 401 or "http error 401" in text or "unauthor" in text:
         state = RequirementState.TOKEN_REJECTED
+    elif (isinstance(status_code, int) and 500 <= status_code < 600) or any(
+        f"http error {code}" in text for code in range(500, 600)
+    ):
+        state = RequirementState.SERVER_UNAVAILABLE
     elif isinstance(exc, (TimeoutError, ConnectionError)) or any(
         marker in text
         for marker in ("urlerror", "timed out", "timeout", "connection",
@@ -443,8 +447,6 @@ def _classify_sharped_error(exc: BaseException) -> RequirementStatus:
         state = RequirementState.SERVER_UNREACHABLE
     elif "json" in text or "decode" in text or "expecting value" in text:
         state = RequirementState.MALFORMED_RESPONSE
-    elif isinstance(status_code, int) and 500 <= status_code < 600:
-        state = RequirementState.SERVER_UNREACHABLE
     else:
         # Only explicit HTTP authentication evidence may reject a token.
         # Public catalog/protocol failures do not establish token validity.
@@ -490,7 +492,7 @@ def run_preflight(
     edma_path: object = "",
     sharped_base_url: str = "",
     sharped_token: str = "",
-    jana_dir: Path = DEFAULT_JANA_SUPERFLIP_DIR,
+    jana_dir: Optional[Path] = None,
     client_factory: Optional[Callable[..., object]] = None,
     accept_suggestion: Optional[Callable[[RequirementStatus], bool]] = None,
 ) -> PreflightResult:

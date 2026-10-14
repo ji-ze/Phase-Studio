@@ -734,6 +734,14 @@ QFrame#actionTile:hover {
     background-color: #edf3fa;
     border: 1px solid #2264b8;
 }
+QFrame#actionTile[recommended="true"] {
+    background-color: #f3f8ff;
+    border-color: #8fb6da;
+}
+QFrame#actionTile[recommended="true"]:hover {
+    background-color: #edf3fa;
+    border-color: #2264b8;
+}
 QFrame#actionTile:focus {
     border: 2px solid #2264b8;
     margin: 0px;
@@ -938,6 +946,34 @@ QLabel#pageHeading {
     font-size: 12pt;
     font-weight: 700;
     background-color: #ffffff;
+}
+QPushButton#restoreAutomaticLink {
+    color: #001170;
+    border: none;
+    background: transparent;
+    padding: 3px 5px;
+    min-height: 20px;
+}
+QPushButton#restoreAutomaticLink:hover {
+    color: #1fa5ff;
+    text-decoration: underline;
+}
+QPushButton#restoreAutomaticLink:focus {
+    border: 1px solid #1fa5ff;
+}
+QFrame#configurationValidation {
+    background: #f3f6fb;
+    border: 1px solid #dce5f2;
+    border-radius: 4px;
+}
+QFrame#configurationValidation QLabel {
+    background: transparent;
+    border: none;
+    color: #52658b;
+}
+QLabel#configurationValidationHeading {
+    color: #001170;
+    font-weight: 600;
 }
 QFrame#pageHeadingRule {
     background-color: #2264b8;

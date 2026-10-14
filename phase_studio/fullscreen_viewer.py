@@ -16,7 +16,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
-from phase_studio.structure_camera import StructureCameraController
+from phase_studio.structure_camera import StructureCameraController, fit_projected_structure
 
 
 class DetachedViewerWindow(QDialog):
@@ -162,8 +162,8 @@ class SingleStructureViewerWindow(QDialog):
         self._rotation_timer.timeout.connect(self._rotate_camera)
         self._fit_timer = QTimer(self)
         self._fit_timer.setSingleShot(True)
-        self._fit_timer.setInterval(80)
-        self._fit_timer.timeout.connect(self.fit)
+        self._fit_timer.setInterval(0)
+        self._fit_timer.timeout.connect(self._apply_initial_fit)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(8, 8, 8, 8)
@@ -266,13 +266,22 @@ class SingleStructureViewerWindow(QDialog):
 
     def render(self) -> None:
         data = self._presentation() or {}
+        previous_limits = None
+        previous_zoom = None
         if self.figure.axes:
+            old_axis = self.figure.axes[0]
+            previous_limits = (old_axis.get_xlim3d(), old_axis.get_ylim3d(), old_axis.get_zlim3d())
+            previous_zoom = getattr(old_axis, "_phase_fit_zoom", None)
             self._elev = float(self.figure.axes[0].elev)
             self._azim = float(self.figure.axes[0].azim)
         self.figure.clear()
         axis = self.figure.add_subplot(1, 1, 1, projection="3d")
         atoms = list(data.get("atoms", ()))
         coords = np.asarray(data.get("coords", ()), dtype=np.float64).reshape(-1, 3)
+        signature = (coords.tobytes(), str(data.get("metadata", "")), str(data.get("title", "")),
+                     tuple((getattr(atom, "label", ""), getattr(atom, "element", "")) for atom in atoms))
+        preserve_camera = signature == getattr(self, "_presentation_signature", None) and previous_limits is not None
+        self._presentation_signature = signature
         if len(atoms) and len(coords):
             axis.set_proj_type("ortho")
             axis.view_init(elev=self._elev, azim=self._azim)
@@ -290,6 +299,7 @@ class SingleStructureViewerWindow(QDialog):
                     colors="#5d6b86", linewidths=max(0.28, 1.25 * count_scale),
                 ))
             segments = list(data.get("cell_segments", ()))
+            self._fit_coordinates = np.vstack((coords, np.asarray(segments).reshape(-1, 3))) if segments else coords
             if segments:
                 axis.add_collection3d(Line3DCollection(
                     segments, colors="#44b7ff", linewidths=0.75, alpha=0.75,
@@ -300,9 +310,10 @@ class SingleStructureViewerWindow(QDialog):
                 radius = max(1.0e-3, float(np.max(np.linalg.norm(coords - center, axis=1))))
                 fit = (center, radius)
             self._fit = fit
-            self._user_camera_interacted = False
+            if not preserve_camera:
+                self._user_camera_interacted = False
         else:
-            axis.text2D(0.5, 0.5, "Structure unavailable", ha="center", va="center", transform=axis.transAxes)
+            axis.text2D(0.5, 0.5, "Structure unavailable", ha="center", va="center", transform=axis.transAxes, fontfamily="Segoe UI")
             self._fit = None
         axis.set_axis_off()
         title = str(data.get("title", "")).strip()
@@ -322,8 +333,19 @@ class SingleStructureViewerWindow(QDialog):
         self.canvas.draw_idle()
         # The first fit must see the native canvas size.  The queued fit runs
         # after layout; the short timer coalesces any ensuing resize burst.
-        QTimer.singleShot(0, self.fit)
-        self._fit_timer.start()
+        if preserve_camera and self._user_camera_interacted:
+            axis.set_xlim3d(*previous_limits[0], auto=False)
+            axis.set_ylim3d(*previous_limits[1], auto=False)
+            axis.set_zlim3d(*previous_limits[2], auto=False)
+            if previous_zoom is not None:
+                axis.set_box_aspect((1,1,1), zoom=previous_zoom)
+                axis._phase_fit_zoom = previous_zoom
+        else:
+            self._fit_timer.start()
+
+    def _apply_initial_fit(self) -> None:
+        if not self._user_camera_interacted:
+            self.fit()
 
     def _orientation_changed(self, elev: float, azim: float, axis) -> None:
         self._elev, self._azim = float(elev), float(azim)
@@ -341,13 +363,8 @@ class SingleStructureViewerWindow(QDialog):
     def fit(self) -> None:
         if self._fit is None or not self.figure.axes:
             return
-        center, radius = self._fit
-        extent = max(float(radius), 1.0e-3)
         axis = self.figure.axes[0]
-        axis.set_box_aspect((1.0, 1.0, 1.0), zoom=0.82 / 0.5947)
-        axis.set_xlim3d(float(center[0] - extent), float(center[0] + extent), auto=False)
-        axis.set_ylim3d(float(center[1] - extent), float(center[1] + extent), auto=False)
-        axis.set_zlim3d(float(center[2] - extent), float(center[2] + extent), auto=False)
+        fit_projected_structure(axis, self._fit_coordinates)
         self.canvas.draw_idle()
 
     def reset_view(self) -> None:

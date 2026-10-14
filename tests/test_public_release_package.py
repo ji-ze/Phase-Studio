@@ -11,6 +11,7 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+from phase_studio.version import VERSION
 spec = importlib.util.spec_from_file_location("release_archive", ROOT / "packaging/tools/package_release.py")
 archive_module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(archive_module)
@@ -24,7 +25,7 @@ class PublicReleaseTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
-        self.developer = self.root / "PhaseStudio-Jana2020-2.0.2"
+        self.developer = self.root / f"PhaseStudio-Jana2020-{VERSION}"
         (self.developer / "_internal").mkdir(parents=True)
         (self.developer / "Phase_studio.exe").write_bytes(b"test executable fixture")
         (self.developer / "_internal/runtime.dll").write_bytes(b"test runtime fixture")
@@ -32,11 +33,11 @@ class PublicReleaseTests(unittest.TestCase):
 
     def test_complete_runtime_archive_and_hashes(self):
         self.release.mkdir()
-        exe = self.release / "PhaseStudio-2.0.2-x64.exe"
+        exe = self.release / f"PhaseStudio-{VERSION}-x64.exe"
         exe.write_bytes(b"standalone fixture")
         output = archive_module.package_release(self.developer, self.release)
         with zipfile.ZipFile(output) as archive:
-            self.assertEqual(archive.read("PhaseStudio-Jana2020-2.0.2/_internal/runtime.dll"), b"test runtime fixture")
+            self.assertEqual(archive.read(f"PhaseStudio-Jana2020-{VERSION}/_internal/runtime.dll"), b"test runtime fixture")
             self.assertNotIn("superflip.exe", archive.namelist())
         checksums = (self.release / "SHA256SUMS.txt").read_text()
         self.assertIn(archive_module.digest(exe), checksums)
@@ -70,7 +71,8 @@ class PublicReleaseTests(unittest.TestCase):
         output = io.StringIO()
         with patch.object(jana_superflip, "_qt_imports", side_effect=AssertionError("Unexpected GUI")), redirect_stdout(output):
             self.assertEqual(jana_superflip.main(["Phase_studio.exe", "--version"]), 0)
-        self.assertEqual(output.getvalue().strip(), "2.0.2")
+        from phase_studio.version import VERSION
+        self.assertEqual(output.getvalue().strip(), VERSION)
 
 
 if __name__ == "__main__":

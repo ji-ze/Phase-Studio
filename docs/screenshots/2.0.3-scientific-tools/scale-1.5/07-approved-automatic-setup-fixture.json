@@ -1,0 +1,13 @@
+{
+  "source_runtime": true,
+  "scale": 1.5,
+  "logical_size": [
+    504,
+    515
+  ],
+  "device_pixel_ratio": 1.5,
+  "mocked": true,
+  "not_a_production_source": true,
+  "scroll_maximum": 257,
+  "production_automatic_setup_available": false
+}

@@ -1,10 +1,9 @@
 """Regression tests for the Jana Wizard / Autosolve icon family and action
 affordances (Phase Studio 2.0.0 visual-consistency pass).
 
-Icons: Phase Studio's visual language is textual/scientific, and the only
-established icon sources are ui_branding.ESTABLISHED_ICON_INVENTORY (the
-Phase Studio mark, the external-link chain glyph, and Qt's standard
-warning/information icons). These checks FAIL if:
+Icons: the 2.0.3 Wizard uses four coordinated navy line drawings from
+ui_branding.ESTABLISHED_ICON_INVENTORY. Existing application, link and
+Qt icons remain available on other surfaces. These checks FAIL if:
 
 - any Wizard/Autosolve action carries an icon that is not pixel-identical
   to its declared inventory source (or declares no source at all);
@@ -30,9 +29,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 ROOT = Path(__file__).resolve().parent.parent
 results_log = []
 
-# The approved, pre-existing icon inventory -- pinned here independently of
-# the module, so widening the inventory itself is a deliberate test change.
+# The approved inventory, including the explicitly requested 2.0.3 vector
+# workflow family, pinned independently of the production module.
 APPROVED_ICON_SOURCES = {
+    "workflow_superflip", "workflow_sharped", "workflow_autosolve", "workflow_settings",
     "phase_studio_mark", "external_link", "qt_warning", "qt_information",
     # Qt standard (platform-shipped) monochrome glyphs for the four primary
     # Wizard tiles -- approved explicitly; never custom artwork.
@@ -119,10 +119,12 @@ def main():
     for module in sorted((ROOT / "phase_studio").glob("*.py")):
         for node in ast.walk(ast.parse(module.read_text(encoding="utf-8"))):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and ICON_FUNCTION_PATTERN.search(node.name):
-                if node.name not in APPROVED_ICON_FUNCTIONS:
+                if node.name not in APPROVED_ICON_FUNCTIONS and (
+                    module.name, node.name
+                ) != ("sharped_access.py", "_account_icon"):
                     new_icon_functions.append(f"{module.name}:{node.name}")
     check(
-        "no new icon/glyph-drawing functions exist in the package (found: %s)" % (new_icon_functions or "none"),
+        "only approved product/workflow artwork and the requested onboarding account icon exist (found: %s)" % (new_icon_functions or "none"),
         new_icon_functions == [],
     )
 
@@ -135,10 +137,10 @@ def main():
     wizard.primary_button.click()
     app.processEvents()
     actions = [
-        ("Superflip only tile", wizard.original_superflip_tile.icon_label, "qt_media_play"),
-        ("Superflip + SharpED tile", wizard.superflip_sharped_tile.icon_label, "qt_file_dialog_detailed_view"),
-        ("Autosolve tile", wizard.autosolve_tile.icon_label, "qt_media_seek_forward"),
-        ("Professional mode", wizard.professional_mode_tile.icon_label, "phase_studio_mark"),
+        ("Superflip only tile", wizard.original_superflip_tile.icon_label, "workflow_superflip"),
+        ("Superflip + SharpED tile", wizard.superflip_sharped_tile.icon_label, "workflow_sharped"),
+        ("Autosolve tile", wizard.autosolve_tile.icon_label, "workflow_autosolve"),
+        ("Professional mode", wizard.professional_mode_tile.icon_label, "workflow_settings"),
     ]
 
     import phase_studio.app as appmod

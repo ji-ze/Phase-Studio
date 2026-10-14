@@ -112,10 +112,12 @@ def main():
               "Superflip only", "Superflip + SharpED", "SharpED Autosolve", "Professional mode",
           )))
     all_texts = " ".join(visible_texts(wizard.dialog))
-    check("no visible Advanced entry remains", "Advanced" not in all_texts)
+    # The requested Professional description now begins "Advanced control";
+    # the removed navigation entry itself must still remain absent.
+    check("no visible Advanced entry remains", "Advanced" not in [text.strip() for text in visible_texts(wizard.dialog)])
     check("Professional mode is a complete secondary expert tile",
           wizard.professional_mode_tile.title_label.text() == "Professional mode"
-          and "Superflip, SharpED, and EDMA" in wizard.professional_mode_tile.subtitle_label.text())
+          and wizard.professional_mode_tile.subtitle_label.text() == "Advanced control of Superflip, SharpED and EDMA")
 
     # Handoff-map radios: tooltips describe what the choice really does.
     for radio in (wizard.sharped_map_radio, wizard.superflip_map_radio):

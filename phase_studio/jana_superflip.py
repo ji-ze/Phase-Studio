@@ -23,7 +23,8 @@ import threading
 import time
 import traceback
 from datetime import datetime
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from phase_studio.credentials import credential_store
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 from phase_studio.jana_density import origin_preserving_conversion_lines
@@ -138,7 +139,7 @@ class JanaRunOptions:
     cycles: int = 1
     use_deblurred_map: bool = True
     next_cycle_modelfile: str = "deblurred_xplor"
-    api_token: str = ""
+    api_token: str = field(default="", repr=False)
     server_url: str = DEFAULT_SERVER_URL
     model: str = "default"
     elements: str = "C N O"
@@ -994,17 +995,16 @@ WORKFLOW_LABELS = {
     WORKFLOW_AUTOSOLVE: "SharpED Autosolve",
 }
 WORKFLOW_DESCRIPTIONS = {
-    WORKFLOW_SUPERFLIP_ONLY: "Original charge-flipping workflow (fast)",
+    WORKFLOW_SUPERFLIP_ONLY: "Conventional charge-flipping structure solution",
     WORKFLOW_SUPERFLIP_SHARPED: (
-        "Improved charge-flipping workflow boosted by the SharpED neural network (slower)"
+        "Charge flipping with neural-network map processing"
     ),
     WORKFLOW_PHASE_RECYCLING: (
         "Iterate Superflip and SharpED over multiple cycles while keeping user control over "
         "the initial model, Map Feedback and the map passed to Jana2020."
     ),
     WORKFLOW_AUTOSOLVE: (
-        "Experimental SharpED-assisted iterative charge flipping "
-        "(very slow — typically around 15 min)"
+        "Automated iterative structure solution assisted by SharpED"
     ),
 }
 
@@ -1019,6 +1019,8 @@ class _JanaWorkflowWizard:
     """
 
     def _shared_or_legacy_value(self, shared_key: str, legacy_key: str, fallback: str) -> str:
+        if shared_key == "sharped_api_token":
+            return credential_store.load_settings(self.shared_settings, self.settings) or fallback
         shared_value = str(self.shared_settings.value(f"inputs/{shared_key}", "") or "").strip()
         if shared_value:
             return shared_value
@@ -1049,7 +1051,7 @@ class _JanaWorkflowWizard:
             elif kind is reqs.RequirementKind.SHARPED:
                 token = value
                 self.api_token.setText(value)
-                self.shared_settings.setValue("inputs/sharped_api_token", value)
+                self.shared_settings.remove("inputs/sharped_api_token")
             self.shared_settings.sync()
 
         def check() -> object:
@@ -1058,7 +1060,7 @@ class _JanaWorkflowWizard:
                 superflip_path=superflip_path,
                 sharped_base_url=DEFAULT_SERVER_URL,
                 sharped_token=token,
-                jana_dir=getattr(self, "_preflight_jana_dir", reqs.DEFAULT_JANA_SUPERFLIP_DIR),
+                jana_dir=getattr(self, "_preflight_jana_dir", resolve_jana_installation_root(application_dir()) / "SUPERFLIP"),
                 client_factory=getattr(self, "_preflight_client_factory", None),
                 accept_suggestion=lambda _status: True,
             )
@@ -1086,7 +1088,25 @@ class _JanaWorkflowWizard:
             on_success,
             download_dir=getattr(self, "_preflight_download_dir", None),
             download_opener=getattr(self, "_preflight_download_opener", None),
+            sharped_base_url=DEFAULT_SERVER_URL,
+            sharped_probe=lambda key: reqs.check_sharped_api(
+                DEFAULT_SERVER_URL, key,
+                client_factory=getattr(self, "_preflight_client_factory", None),
+            ),
         )
+
+    def _manage_sharped_access(self) -> None:
+        from phase_studio import requirements as reqs
+        from phase_studio.requirements_ui import show_requirement_remediation_dialog
+        previous = credential_store.get()
+        value = show_requirement_remediation_dialog(
+            self.dialog, reqs.RequirementStatus(reqs.RequirementKind.SHARPED, reqs.RequirementState.OK),
+            self.api_token.text(), sharped_base_url=DEFAULT_SERVER_URL,
+            sharped_probe=lambda key: reqs.check_sharped_api(
+                DEFAULT_SERVER_URL, key, client_factory=getattr(self, "_preflight_client_factory", None)),
+        )
+        if value is not None or (previous and not credential_store.get()):
+            self.api_token.setText(value or "")
 
     # --- Wizard window width policy ---------------------------------------
     # The Wizard used to take whatever width self.content.sizeHint() happened
@@ -1157,7 +1177,7 @@ class _JanaWorkflowWizard:
     # reads as an input error rather than a number. Capped to a comfortable
     # editor width, with the spare width becoming flexible space so the labels
     # stay aligned. Still well within the usable area at 1366x768.
-    MAP_FEEDBACK_EDITOR_WIDTH = 230
+    MAP_FEEDBACK_EDITOR_WIDTH = 180
 
     def _constrain_numeric_editors(self, *editors) -> None:
         """Give short numeric editors a sensible preferred width."""
@@ -1318,6 +1338,11 @@ class _JanaWorkflowWizard:
                 current = wizard.stack.currentWidget()
                 if current is None:
                     return
+                if current in (wizard.page1, wizard.page3):
+                    # Reflow the landing/feedback body, including after a
+                    # disclosure collapses; do not resize the outer window.
+                    wizard._size_stack_to_current_page(wizard.dialog.width())
+                    return
                 needed = max(
                     wizard._page_height_for_width(current, wizard._content_inner_width(wizard._preferred_dialog_width())),
                     int(current.minimumSizeHint().height()),
@@ -1427,34 +1452,50 @@ class _JanaWorkflowWizard:
         from phase_studio.app import (
             format_reflection_data_mode,
             reflection_mode_has_fwhm,
-            resolve_powder_wavelength,
+            reflection_mode_is_amplitude,
         )
+        import math
         mode = self._detect_reflection_data_mode()
         is_powder = reflection_mode_has_fwhm(mode)
+        self.feedback_is_powder = is_powder
         self.reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal")
         self.reflection_format_value.setText(format_reflection_data_mode(mode) if mode else "Not yet determined")
+        self.feedback_has_uncertainty = not is_powder and any(
+            r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma > 0
+            and math.isfinite(float(r.value))
+            for r in getattr(self, "input_reflections", ())
+        )
         self.page3_description.setText(
-            "FWHM data detected. Powder overlap repartitioning is available."
-            if is_powder
-            else "Available feedback methods for single-crystal reflection data."
+            "FWHM available · σ(I) unavailable. Combined order: intensity correction → powder repartitioning → next cycle."
+            if is_powder else
+            ("Measured uncertainties available." if self.feedback_has_uncertainty else
+             "Valid measured uncertainties unavailable." if hasattr(self, "input_reflections") else
+             "Uncertainty availability has not been verified; validate the incoming HKL data.")
         )
         self.missing_group.setVisible(not is_powder)
-        self.intensity_group.setVisible(not is_powder)
+        self.intensity_group.setVisible(True)
         self.powder_group.setVisible(is_powder)
-        if is_powder and self.powder_wavelength_spin.value() <= 0:
-            # Display default only (mirrors the main GUI's own
-            # resolve_powder_wavelength() called again at actual run time) --
-            # still fully editable, and 0 keeps its existing "auto" meaning
-            # for the underlying algorithm if left untouched.
-            try:
-                ref_text = self.reference_file.text().strip()
-                ref_path = Path(ref_text).expanduser() if ref_text else None
-                detected_wavelength, _source = resolve_powder_wavelength(0.0, self.inflip_path, ref_path)
-            except Exception:
-                detected_wavelength = 0.0
-            if detected_wavelength > 0:
-                self.powder_wavelength_spin.setValue(detected_wavelength)
+        ratio = "F/σ(F)" if reflection_mode_is_amplitude(mode) else "I/σ(I)"
+        self.intensity_form.labelForField(self.intensity_sigma_spin).setText(f"{ratio} limit")
+        self.intensity_note.setText(
+            f"Positive limits use measured {ratio}; 0 applies to all map-supported reflections."
+            if self.feedback_has_uncertainty else
+            ("Experimental intensity uncertainties are not supplied. " if is_powder else
+             "Valid measured uncertainties are unavailable. " if hasattr(self, "input_reflections") else
+             "Measured uncertainties have not been verified. ") + "Significance filtering is unavailable. "
+            "Correction uses the existing threshold-0 mode: all reflections with a positive map prediction, without σ."
+        )
+        self._sync_feedback_applicability()
         self._adjust_dialog_size()
+
+    def _map_feedback_wavelength(self) -> tuple[float, str]:
+        from phase_studio.app import resolve_powder_wavelength, resolve_jana_m90_path
+        reference = self.reference_file.text().strip()
+        return resolve_powder_wavelength(
+            self.powder_wavelength_spin.value(), self.inflip_path,
+            Path(reference).expanduser() if reference else None,
+            jana_m90_path=resolve_jana_m90_path(self.inflip_path),
+        )
 
     def _check_page3_validity(self) -> Optional[str]:
         if getattr(self, "model_policy_error", ""):
@@ -1476,8 +1517,13 @@ class _JanaWorkflowWizard:
             (self.intensity_enabled_checkbox, self.intensity_start_cycle_spin),
             (self.powder_enabled_checkbox, self.powder_start_cycle_spin),
         ):
-            if checkbox.isVisible() and checkbox.isChecked() and spin.value() >= total_cycles:
+            if total_cycles > 1 and checkbox.isVisible() and checkbox.isChecked() and spin.value() >= total_cycles:
                 return "A subsequent cycle is required for map feedback."
+        if total_cycles > 1 and self.powder_group.isVisible() and self.powder_enabled_checkbox.isChecked():
+            wavelength, _source = self._map_feedback_wavelength()
+            import math
+            if wavelength <= 0 or not math.isfinite(wavelength):
+                return "Enter a positive wavelength (Å) for powder repartitioning; automatic detection found none."
         return None
 
     def _refresh_page3_validation_message(self) -> None:
@@ -1646,6 +1692,10 @@ class _JanaWorkflowWizard:
         self.outer_root.setSpacing(0)
 
         self.brand_header = create_phase_studio_brand_header()
+        self.brand_header.layout().setContentsMargins(12, 5, 12, 5)
+        for label in self.brand_header.findChildren(QLabel):
+            if label.objectName() == "versionBadge":
+                label.setStyleSheet("color: #7183a6; background: transparent; font-size: 8pt; padding: 2px 4px;")
         self.outer_root.addWidget(self.brand_header)
 
         self.context_banner = create_phase_studio_context_banner(
@@ -1673,7 +1723,18 @@ class _JanaWorkflowWizard:
         self.outer_root.addWidget(self.scroll_area, 1)
         self.root = self.content_layout
 
-        self.inflip_info = QLabel(
+        class _InputIdentification(QLabel):
+            def __init__(self, text: str) -> None:
+                super().__init__(text)
+                self.full_text = text
+                self.setAccessibleName(text)
+                self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+            def resizeEvent(self, event) -> None:
+                self.setText(self.fontMetrics().elidedText(self.full_text, Qt.ElideMiddle, self.width()))
+                super().resizeEvent(event)
+
+        self.inflip_info = _InputIdentification(
             f"Jana2020 input: {inflip_path.name}" if inflip_path else "No .inflip argument was detected."
         )
         self.inflip_info.setToolTip(str(inflip_path) if inflip_path else "")
@@ -1735,6 +1796,10 @@ class _JanaWorkflowWizard:
         # Re-ask the layout for a size whenever the visible page changes.
         self.stack.currentChanged.connect(lambda _index=0: self.stack.updateGeometry())
         self.root.addWidget(self.stack, 1)
+        # The pinned stack cannot absorb surplus height. Keep the incoming
+        # filename and scientific forms at their natural height, with unused
+        # window space below the content instead of between these blocks.
+        self.root.addStretch(1)
 
         self._build_page1()
         self._build_page2()
@@ -1772,7 +1837,7 @@ class _JanaWorkflowWizard:
         self.page1 = QWidget()
         self.page1_layout = QVBoxLayout(self.page1)
         self.page1_layout.setContentsMargins(0, 0, 0, 0)
-        self.page1_layout.setSpacing(8)
+        self.page1_layout.setSpacing(6)
 
         # A hidden, never-shown full Phase Studio window used purely as a dialog
         # factory: it reuses the exact same HKL parsing/validation/completeness
@@ -1833,10 +1898,23 @@ class _JanaWorkflowWizard:
         self.input_summary_outer.setSpacing(14)
         self.input_summary_body.addLayout(self.input_summary_outer)
 
-        self.input_summary_fields = QWidget()
+        wizard = self
+
+        class _SummaryFields(QWidget):
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                wizard.input_summary_outer.setDirection(
+                    QHBoxLayout.TopToBottom if wizard.dialog.width() < 800 else QHBoxLayout.LeftToRight
+                )
+                narrow = event.size().width() < 500
+                wizard.input_summary_columns.setDirection(
+                    QHBoxLayout.TopToBottom if narrow else QHBoxLayout.LeftToRight
+                )
+
+        self.input_summary_fields = _SummaryFields()
         self.input_summary_columns = QHBoxLayout(self.input_summary_fields)
         self.input_summary_columns.setContentsMargins(0, 0, 0, 0)
-        self.input_summary_columns.setSpacing(18)
+        self.input_summary_columns.setSpacing(12)
         left_summary = QWidget()
         right_summary = QWidget()
         self.input_summary_layout = QFormLayout(left_summary)
@@ -1853,15 +1931,22 @@ class _JanaWorkflowWizard:
         self.composition_value = QLabel("Not available")
         for summary_label in (self.reflections_value, self.format_value, self.cell_value, self.spacegroup_value, self.composition_value):
             summary_label.setWordWrap(True)
+        self.reflections_value.setWordWrap(False)
         self.input_summary_layout.addRow("Reflections", self.reflections_value)
         self.input_summary_layout.addRow("Format", self.format_value)
         self.input_summary_right_layout.addRow("Cell", self.cell_value)
         self.input_summary_right_layout.addRow("Space group", self.spacegroup_value)
-        self.input_summary_right_layout.addRow(
-            "Superflip input composition", self.composition_value,
-        )
-        self.input_summary_columns.addWidget(left_summary, 1)
-        self.input_summary_columns.addWidget(right_summary, 2)
+        for title, summary, stretch in (("Reflection data", left_summary, 1), ("Crystal data", right_summary, 1)):
+            group = QWidget()
+            group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(0, 0, 0, 0)
+            group_layout.setSpacing(4)
+            heading = QLabel(title)
+            heading.setStyleSheet("color: #33456e; font-weight: 600;")
+            group_layout.addWidget(heading)
+            group_layout.addWidget(summary)
+            group_layout.addStretch(1)
+            self.input_summary_columns.addWidget(group, stretch)
         self.input_summary_outer.addWidget(self.input_summary_fields, 1)
 
         self.hkl_buttons_column = QVBoxLayout()
@@ -1872,6 +1957,11 @@ class _JanaWorkflowWizard:
         self.hkl_buttons_column.addWidget(self.analyze_completeness_button)
         self.hkl_buttons_column.addStretch(1)
         self.input_summary_outer.addLayout(self.hkl_buttons_column)
+        composition_row = QHBoxLayout()
+        composition_row.setSpacing(10)
+        composition_row.addWidget(QLabel("Superflip input composition"))
+        composition_row.addWidget(self.composition_value, 1)
+        self.input_summary_body.addLayout(composition_row)
         self.page1_layout.addWidget(self.input_summary_section)
 
         def refresh_input_summary() -> None:
@@ -1916,6 +2006,9 @@ class _JanaWorkflowWizard:
                 # cannot be analyzed.
                 return
             self.reflections_value.setText(f"{len(result.reflections):,} parsed · {len(result.unique_reflections):,} unique")
+            self.input_reflections = result.reflections
+            if hasattr(self, "intensity_group"):
+                self._sync_page3_for_data_type()
             self.format_value.setText(format_reflection_data_mode(result.data_mode))
             rcell = result.cell
             self.cell_value.setText(
@@ -1924,7 +2017,8 @@ class _JanaWorkflowWizard:
             )
             self.spacegroup_value.setText(f"{compact_spacegroup_symbol(result.spacegroup)} (#{result.spacegroup.number})")
             metadata = request.metadata
-            self.composition_value.setText(metadata.composition if metadata is not None and metadata.composition else "—")
+            composition = metadata.composition if metadata is not None and metadata.composition else "—"
+            self.composition_value.setText(composition.translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")))
             self.validate_hkl_button.setEnabled(True)
             self.analyze_completeness_button.setEnabled(True)
             self.validate_hkl_button.setToolTip(
@@ -2125,6 +2219,7 @@ class _JanaWorkflowWizard:
                 "Hide optional reference and initial model  ⌄"
                 if expanded else "Show optional reference and initial model  ›"
             )
+            QTimer.singleShot(0, lambda: self._size_stack_to_current_page(self.dialog.width()))
 
         self.files_toggle.toggled.connect(toggle_optional_files)
         self.page1_layout.addWidget(self.files_section)
@@ -2186,7 +2281,7 @@ class _JanaWorkflowWizard:
 
             def __init__(
                 self, title: str, subtitle: str, on_click, *, secondary: str = "",
-                chevron: bool = True, icon_source: str = "", tier: str = "primary",
+                chevron: bool = True, icon_source: str = "", tier: str = "primary", runtime: str = "",
             ) -> None:
                 super().__init__()
                 self._on_click = on_click
@@ -2197,6 +2292,9 @@ class _JanaWorkflowWizard:
                 self.setFocusPolicy(Qt.StrongFocus)
                 self.setProperty("pressed", False)
                 self.setProperty("workflowTier", tier)
+                self.setProperty("recommended", secondary == "Recommended")
+                if icon_source.startswith("workflow_"):
+                    self.setMinimumHeight(96 if tier == "primary" else 110)
                 # Compact established icon, strong title, one explanatory
                 # line, optional result line, right chevron. Every tile uses
                 # the same TILE_* geometry, so tiles on one page line up
@@ -2218,22 +2316,37 @@ class _JanaWorkflowWizard:
                 text_layout.setSpacing(TILE_TEXT_SPACING)
                 self.title_label = QLabel(title)
                 self.title_label.setObjectName("actionTileTitle")
-                # Single-line labels, deliberately NOT word-wrapped: the
-                # Wizard's QScrollArea does not honor height-for-width, so a
-                # wrapping label gets a heuristic multi-line height and two
-                # tiles with equally short text end up different heights.
+                self.title_label.setWordWrap(True)
+                # Titles can wrap on narrow displays. Paired secondary cards
+                # reserve a common title band below to preserve baselines.
                 self.subtitle_label = QLabel(subtitle)
                 self.subtitle_label.setObjectName("actionTileSubtitle")
                 self.subtitle_label.setWordWrap(True)
-                self.secondary_label = QLabel(secondary or " ")
+                self.secondary_label = QLabel(secondary)
                 self.secondary_label.setObjectName("actionTileSecondary")
                 self.secondary_label.setWordWrap(False)
                 self.secondary_label.setProperty("placeholder", not bool(secondary))
-                text_layout.addWidget(self.title_label)
-                # Keep the recommendation/experimental status near the title,
-                # above long descriptions in a scrolled, footer-bounded page.
-                text_layout.addWidget(self.secondary_label)
+                self.title_row_widget = QWidget()
+                self.title_row_widget.setStyleSheet("background: transparent;")
+                title_row = QHBoxLayout(self.title_row_widget)
+                self.title_row_layout = title_row
+                title_row.setContentsMargins(0, 0, 0, 0)
+                title_row.setSpacing(8)
+                title_row.addWidget(self.title_label, 0, Qt.AlignTop)
+                if secondary:
+                    title_row.addWidget(self.secondary_label, 0, Qt.AlignTop)
+                else:
+                    self.secondary_label.hide()
+                title_row.addStretch(1)
+                text_layout.addWidget(self.title_row_widget)
                 text_layout.addWidget(self.subtitle_label)
+                self.runtime_label = QLabel(runtime)
+                self.runtime_label.setObjectName("actionTileSecondary")
+                self.runtime_label.setWordWrap(True)
+                if runtime:
+                    text_layout.addWidget(self.runtime_label)
+                else:
+                    self.runtime_label.hide()
                 # Any surplus row height belongs below the text. Keeping it
                 # out of QLabel geometry preserves common title/subtitle
                 # baselines when paired cards contain different copy lengths.
@@ -2251,7 +2364,19 @@ class _JanaWorkflowWizard:
                     outer.addWidget(self.chevron_label, 0, Qt.AlignVCenter)
 
             def _trigger(self) -> None:
-                self._on_click()
+                if self.isEnabled():
+                    self._on_click()
+
+            def resizeEvent(self, event) -> None:
+                super().resizeEvent(event)
+                if self.property("workflowTier") == "secondary":
+                    # Both columns reserve the same title band when their
+                    # adjacent status forces wrapping on a narrow display.
+                    column_width = (self.parentWidget().width() - 9) // 2
+                    compact = column_width < 300
+                    self.title_row_layout.setDirection(QHBoxLayout.TopToBottom if compact else QHBoxLayout.LeftToRight)
+                    lines = 3 if compact else (2 if column_width < 360 else 1)
+                    self.title_row_widget.setMinimumHeight(lines * self.title_label.fontMetrics().lineSpacing() + (8 if compact else 0))
 
             def click(self) -> None:
                 """QPushButton-compatible programmatic activation."""
@@ -2329,19 +2454,19 @@ class _JanaWorkflowWizard:
             WORKFLOW_LABELS[WORKFLOW_SUPERFLIP_ONLY],
             WORKFLOW_DESCRIPTIONS[WORKFLOW_SUPERFLIP_ONLY],
             original_superflip_tile_clicked,
-            icon_source="qt_media_play",
+            icon_source="workflow_superflip",
         )
         self.superflip_sharped_tile = _ActionTile(
             WORKFLOW_LABELS[WORKFLOW_SUPERFLIP_SHARPED],
             WORKFLOW_DESCRIPTIONS[WORKFLOW_SUPERFLIP_SHARPED],
             recommended_tile_clicked,
             secondary="Recommended",
-            icon_source="qt_file_dialog_detailed_view",
+            icon_source="workflow_sharped",
         )
         primary_subtitles = (self.original_superflip_tile.subtitle_label, self.superflip_sharped_tile.subtitle_label)
         for label in primary_subtitles:
             label.ensurePolished()
-        primary_height = max(label.fontMetrics().lineSpacing() for label in primary_subtitles) * 2
+        primary_height = max(label.fontMetrics().lineSpacing() for label in primary_subtitles)
         for label in primary_subtitles:
             label.setMinimumHeight(primary_height)
         self.autosolve_tile = _ActionTile(
@@ -2349,8 +2474,9 @@ class _JanaWorkflowWizard:
             WORKFLOW_DESCRIPTIONS[WORKFLOW_AUTOSOLVE],
             autosolve_tile_clicked,
             secondary="Experimental",
-            icon_source="qt_media_seek_forward",
+            icon_source="workflow_autosolve",
             tier="secondary",
+            runtime="Typically around 15 min",
         )
         self.workflow_body.addWidget(self.original_superflip_tile)
         self.workflow_body.addWidget(self.superflip_sharped_tile)
@@ -2367,9 +2493,9 @@ class _JanaWorkflowWizard:
         secondary_actions_row.setSpacing(8)
         self.professional_mode_button = _ActionTile(
             "Professional mode",
-            "Full control over Superflip, SharpED, and EDMA structure-search settings",
+            "Advanced control of Superflip, SharpED and EDMA",
             lambda: self._attempt_edit(),
-            icon_source="phase_studio_mark",
+            icon_source="workflow_settings",
             tier="secondary",
         )
         self.professional_mode_tile = self.professional_mode_button
@@ -2447,22 +2573,33 @@ class _JanaWorkflowWizard:
 
         self.cycles = QSpinBox()
         self.cycles.setRange(1, 999)
-        self.cycles.setMinimumWidth(140)
-        self.cycles.setMaximumWidth(220)
+        self.cycles.setMinimumWidth(110)
+        self.cycles.setMaximumWidth(140)
         self.cycles.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.cycles.setValue(int(self.settings.value("cycles", 5)) or 5)
         self.cycles.setToolTip("Number of ordinary Superflip + SharpED workflow cycles.")
-        self.processing_form.addRow("Number of cycles", self.cycles)
-        self.cycles_label = self.processing_form.labelForField(self.cycles)
-
-        self.cycles_recommendation = QLabel(
-            "1 cycle is fast and suitable for easier cases.\n"
-            "5 cycles are recommended for more difficult cases.\n"
-            "Each additional cycle increases the total runtime."
-        )
+        self.cycles_row = QWidget()
+        cycles_layout = QHBoxLayout(self.cycles_row)
+        cycles_layout.setContentsMargins(0, 0, 0, 0)
+        cycles_layout.setSpacing(12)
+        self.cycles_recommendation = QLabel()
         self.cycles_recommendation.setObjectName("recommendationReason")
+        self.cycles_recommendation.setStyleSheet("color: #52658b;")
         self.cycles_recommendation.setWordWrap(True)
-        self.processing_form.addRow("", self.cycles_recommendation)
+        cycles_layout.addWidget(self.cycles)
+        cycles_layout.addWidget(self.cycles_recommendation, 1)
+        self.processing_form.addRow("Number of cycles", self.cycles_row)
+        self.cycles_label = self.processing_form.labelForField(self.cycles_row)
+
+        def update_cycle_guidance(value: int) -> None:
+            self.cycles_recommendation.setText(
+                "Single pass · Fastest option" if value == 1 else
+                "Iterative processing · Balanced runtime" if value <= 3 else
+                "Extended iterative processing · Longer runtime"
+            )
+
+        self.cycles.valueChanged.connect(update_cycle_guidance)
+        update_cycle_guidance(self.cycles.value())
 
         self.cycles_user_edited = {"value": False}
 
@@ -2474,7 +2611,7 @@ class _JanaWorkflowWizard:
         self.model = QComboBox()
         self.model.setEditable(False)
         self.model.setMaxVisibleItems(8)
-        self.model.setMinimumWidth(380)
+        self.model.setMinimumWidth(450)
         self.model.setMaximumWidth(550)
         self.model.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         saved_model = str(self.settings.value("model", "default")).strip() or "default"
@@ -2490,14 +2627,23 @@ class _JanaWorkflowWizard:
             "Automatic selection follows the Phase Studio cycle policy."
         )
         self.model_user_picked = {"value": not automatic_initially}
-        self.processing_form.addRow("Model", self.model)
+        self.model_row = QWidget()
+        self.model_row_layout = QHBoxLayout(self.model_row)
+        self.model_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.model_row_layout.setSpacing(8)
+        self.model_row_layout.addWidget(self.model)
+        self.processing_form.addRow("Model", self.model_row)
         self.manual_model_row = QWidget()
         manual_model_layout = QHBoxLayout(self.manual_model_row)
         manual_model_layout.setContentsMargins(0, 0, 0, 0)
         self.manual_model_indicator = QLabel("Manually selected")
         self.manual_model_indicator.setObjectName("modelRecommendation")
-        self.restore_automatic_model_button = QPushButton("Restore automatic selection")
+        self.manual_model_indicator.setStyleSheet("color: #52658b;")
+        self.restore_automatic_model_button = QPushButton("Restore automatic")
         self.restore_automatic_model_button.setFlat(True)
+        self.restore_automatic_model_button.setObjectName("restoreAutomaticLink")
+        self.restore_automatic_model_button.setFocusPolicy(Qt.StrongFocus)
+        self.restore_automatic_model_button.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
         self.restore_automatic_model_button.setToolTip(
             "Use PEAK A (model prediction) for one cycle and SEED (cyclic CF) for two or more cycles."
         )
@@ -2507,6 +2653,7 @@ class _JanaWorkflowWizard:
         self.processing_form.addRow("", self.manual_model_row)
         self.model_recommendation = QLabel("")
         self.model_recommendation.setObjectName("modelRecommendation")
+        self.model_recommendation.setStyleSheet("color: #52658b;")
         self.model_recommendation.setWordWrap(True)
         self.processing_form.addRow("", self.model_recommendation)
         self.page2_layout.addLayout(self.processing_form)
@@ -2515,20 +2662,26 @@ class _JanaWorkflowWizard:
         self.refresh_layout = QHBoxLayout(self.refresh_row)
         self.refresh_layout.setContentsMargins(0, 0, 0, 0)
         self.refresh_layout.setSpacing(3)
-        self.refresh_models_button = QPushButton("Refresh models")
+        self.refresh_models_button = QPushButton("Refresh")
+        self.refresh_models_button.setAccessibleName("Refresh models")
         self.refresh_models_button.setToolTip("Query the SharpED server for its currently available models.")
         self.model_status = QLabel("Loading models…")
+        self.model_status.setObjectName("recommendationReason")
+        self.model_status.setStyleSheet("color: #52658b;")
         self.model_status.setWordWrap(True)
         self.model_status.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.refresh_layout.addWidget(self.refresh_models_button, 0, Qt.AlignTop)
+        self.model_row_layout.addWidget(self.refresh_models_button)
+        self.model_row_layout.addStretch(1)
         self.refresh_layout.addWidget(self.model_status, 1, Qt.AlignVCenter)
         self.processing_form.addRow("", self.refresh_row)
 
-        self.sharped_group = QGroupBox()
+        self.sharped_group = QWidget()
         self.sharped_outer = QVBoxLayout(self.sharped_group)
+        self.sharped_outer.setContentsMargins(0, 0, 0, 0)
+        self.sharped_outer.setSpacing(4)
         self.sharped_toggle = QToolButton()
         self.sharped_toggle.setObjectName("disclosureToggle")
-        self.sharped_toggle.setText("SharpED settings")
+        self.sharped_toggle.setText("Advanced SharpED settings")
         self.sharped_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         self.sharped_toggle.setArrowType(Qt.RightArrow)
         self.sharped_toggle.setCheckable(True)
@@ -2552,15 +2705,16 @@ class _JanaWorkflowWizard:
             self._shared_or_legacy_value("sharped_api_token", "api_token", os.environ.get("SHARPED_API_TOKEN", ""))
         )
         self.api_token.setEchoMode(QLineEdit.Password)
-        self.api_token.setPlaceholderText("Enter API token")
+        self.api_token.setPlaceholderText("Paste your access key here")
         self.api_token.setMaximumWidth(550)
         self.api_token.setToolTip(
-            "Bearer token used to authorize SharpED processing. The token is masked in "
-            "the interface, may alternatively be supplied through SHARPED_API_TOKEN, and "
-            "is shared with the full Phase Studio application's own API token -- saving it "
-            "here also updates that copy, and vice versa."
+            "Private access key for your Jana2020 account. It is masked and shared with "
+            "Phase Studio for this session. Remember access saves it in Windows Credential Manager."
         )
-        self.sharped_form.addRow("API token", self.api_token)
+        self.sharped_form.addRow("SharpED access key", self.api_token)
+        self.sharped_account_button = QPushButton("Account access…")
+        self.sharped_account_button.clicked.connect(self._manage_sharped_access)
+        self.sharped_form.addRow("", self.sharped_account_button)
 
         # Elements and Output resolution are deliberately not exposed here: they
         # are shared with the full Phase Studio application's own Advanced ->
@@ -2573,7 +2727,7 @@ class _JanaWorkflowWizard:
         def sync_sharped_disclosure(opened: bool) -> None:
             self.sharped_body.setVisible(bool(opened))
             self.sharped_toggle.setArrowType(Qt.DownArrow if opened else Qt.RightArrow)
-            self._adjust_dialog_size()
+            self._size_stack_to_current_page(self.dialog.width())
 
         self.sharped_toggle.toggled.connect(sync_sharped_disclosure)
         self.processing_form.addRow("", self.sharped_group)
@@ -2591,9 +2745,15 @@ class _JanaWorkflowWizard:
             self.manual_model_row.setVisible(self.model_user_picked["value"])
             one_cycle = self.cycles.value() == 1
             recommended = sharped_model_for_cycles(self.cycles.value())
+            manual = self.model_user_picked["value"]
+            self.model_recommendation.setVisible(not manual)
+            self.manual_model_indicator.setText(
+                "Manually selected · Matches recommended model"
+                if manual and self.model.currentText() == recommended else "Manually selected"
+            )
             self.model_recommendation.setText(
-                f"Recommended for 1 cycle: {recommended}"
-                if one_cycle else f"Recommended for iterative charge flipping: {recommended}"
+                f"Automatically selected · Recommended for {self.cycles.value()} "
+                f"{'cycle' if one_cycle else 'cycles'}"
             )
             self.model_policy_error = ""
             if not self.model_user_picked["value"]:
@@ -2718,21 +2878,27 @@ class _JanaWorkflowWizard:
 
         self._ensure_models_loaded = ensure_models_loaded
 
-        self.validation_group = QGroupBox("Scientific validation")
+        self.validation_group = qt["QFrame"]()
+        self.validation_group.setObjectName("configurationValidation")
         self.validation_layout = QHBoxLayout(self.validation_group)
         self.validation_layout.setContentsMargins(10, 7, 10, 7)
         self.validation_layout.setSpacing(8)
         self.warning_icon = QLabel()
-        self.warning_icon.setPixmap(self.dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
+        self.warning_icon.setPixmap(self.dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(20, 20))
         self.warning_icon.setAlignment(Qt.AlignTop)
         self.validation_layout.addWidget(self.warning_icon, 0, Qt.AlignTop)
+        validation_body = QVBoxLayout()
+        validation_body.setSpacing(4)
+        self.validation_heading = QLabel("Scientific validation")
+        self.validation_heading.setObjectName("configurationValidationHeading")
+        validation_body.addWidget(self.validation_heading)
         self.warning_text = QLabel(
-            "SharpED uses a neural-network model for electron-density map processing. "
-            "Its output may contain artifacts and should be validated against the "
-            "measured diffraction data and an independent crystallographic refinement."
+            "SharpED predictions may contain artifacts. Validate the selected result against "
+            "original measured diffraction data and independent crystallographic refinement."
         )
         self.warning_text.setWordWrap(True)
-        self.validation_layout.addWidget(self.warning_text, 1)
+        validation_body.addWidget(self.warning_text)
+        self.validation_layout.addLayout(validation_body, 1)
         self.page2_layout.addWidget(self.validation_group)
 
         # Phase recycling only: maps directly onto the existing full-pipeline
@@ -2810,13 +2976,15 @@ class _JanaWorkflowWizard:
         self.page3_layout.setContentsMargins(0, 0, 0, 0)
         self.page3_layout.setSpacing(5)
 
-        self.reflection_data_group = QGroupBox("Reflection data")
+        self.reflection_data_group = QWidget()
         self.reflection_data_form = QFormLayout(self.reflection_data_group)
+        self.reflection_data_form.setContentsMargins(0, 0, 0, 0)
+        self.reflection_data_form.setVerticalSpacing(2)
         self.reflection_data_form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         self.reflection_type_value = QLabel("")
         self.reflection_format_value = QLabel("")
-        self.reflection_data_form.addRow("Type", self.reflection_type_value)
-        self.reflection_data_form.addRow("Format", self.reflection_format_value)
+        self.reflection_data_form.addRow("Reflection type", self.reflection_type_value)
+        self.reflection_data_form.addRow("Input format", self.reflection_format_value)
         self.page3_layout.addWidget(self.reflection_data_group)
 
         self.page3_description = QLabel("")
@@ -2835,18 +3003,20 @@ class _JanaWorkflowWizard:
         # validation" box above (and Basic -> Map feedback's settings_callout in
         # the main GUI) -- always visible on this page, regardless of whether
         # any option below is enabled.
-        self.map_feedback_warning_group = QGroupBox()
+        self.map_feedback_warning_group = qt["QFrame"]()
+        self.map_feedback_warning_group.setObjectName("mapFeedbackWarning")
+        self.map_feedback_warning_group.setStyleSheet("QFrame#mapFeedbackWarning { margin: 0; padding: 0; border: 1px solid #dce5f2; }")
         self.map_feedback_warning_layout = QHBoxLayout(self.map_feedback_warning_group)
         self.map_feedback_warning_layout.setContentsMargins(10, 7, 10, 7)
         self.map_feedback_warning_layout.setSpacing(8)
         self.map_feedback_warning_icon = QLabel()
-        self.map_feedback_warning_icon.setPixmap(self.dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(28, 28))
+        self.map_feedback_warning_icon.setPixmap(self.dialog.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(20, 20))
         self.map_feedback_warning_icon.setAlignment(Qt.AlignTop)
         self.map_feedback_warning_layout.addWidget(self.map_feedback_warning_icon, 0, Qt.AlignTop)
         self.map_feedback_warning_text = QLabel(
-            "<b>Warning</b><br>"
-            "The operations on this page modify the reflection data supplied to subsequent cycles. "
-            "Results from these cycles should therefore be validated against the original measured data."
+            "<b>Scientific warning</b><br>"
+            "Map Feedback modifies reflection data supplied to subsequent cycles. "
+            "Validate results against the original measured data."
         )
         self.map_feedback_warning_text.setTextFormat(Qt.RichText)
         self.map_feedback_warning_text.setWordWrap(True)
@@ -2884,10 +3054,10 @@ class _JanaWorkflowWizard:
         self.missing_outer.addLayout(self.missing_form)
         self.page3_layout.addWidget(self.missing_group)
 
-        self.intensity_group = QGroupBox("Intensity correction")
+        self.intensity_group = QGroupBox("Weak-reflection intensity correction")
         self.intensity_outer = QVBoxLayout(self.intensity_group)
         self.intensity_outer.setSpacing(4)
-        self.intensity_enabled_checkbox = QCheckBox("Enable intensity correction")
+        self.intensity_enabled_checkbox = QCheckBox("Enable weak-reflection intensity correction")
         self.intensity_outer.addWidget(self.intensity_enabled_checkbox)
         self.intensity_form = QFormLayout()
         self.intensity_form.setFieldGrowthPolicy(QFormLayout.FieldsStayAtSizeHint)
@@ -2914,18 +3084,23 @@ class _JanaWorkflowWizard:
         self.intensity_sigma_spin.setSingleStep(0.5)
         self.intensity_sigma_spin.setDecimals(3)
         self.intensity_sigma_spin.setValue(0.0)
+        self.intensity_sigma_spin.setSpecialValueText("All map-supported")
         self.intensity_sigma_spin.setToolTip(
-            "Apply map-based intensity correction only to non-zero reflections with value/sigma "
-            "below this limit. Use 0 to correct all non-zero reflections -- including reflection "
-            "formats with no sigma column, since the value/sigma gate is then simply not applied."
+            "Positive limits filter using the supplied value uncertainty. Threshold 0 bypasses "
+            "that filter and corrects every reflection with a positive map prediction; σ is not required."
         )
-        self.intensity_form.addRow("Apply when value/σ <", self.intensity_sigma_spin)
-        self.intensity_outer.addLayout(self.intensity_form)
-        self.intensity_note = QLabel("Value/σ = 0 applies correction to all non-zero reflections.")
+        self.intensity_form.addRow("Significance limit", self.intensity_sigma_spin)
+        self.intensity_parameters = QWidget()
+        self.intensity_parameters.setLayout(self.intensity_form)
+        self.intensity_outer.addWidget(self.intensity_parameters)
+        self.intensity_note = QLabel("Threshold 0 applies to all map-supported reflections without uncertainty filtering.")
         self.intensity_note.setWordWrap(True)
         self.intensity_note.setStyleSheet("color: #52658b;")
         self.intensity_outer.addWidget(self.intensity_note)
-        self.page3_layout.addWidget(self.intensity_group)
+        self.intensity_effective_note = QLabel("")
+        self.intensity_effective_note.setWordWrap(True)
+        self.intensity_effective_note.setStyleSheet("color: #52658b;")
+        self.intensity_outer.addWidget(self.intensity_effective_note)
 
         # --- Powder/FWHM branch: Powder overlap repartitioning, exactly Basic ->
         # Map feedback's own controls/defaults/ranges/tooltips. ---
@@ -2949,9 +3124,10 @@ class _JanaWorkflowWizard:
         self.powder_wavelength_spin.setSingleStep(0.01)
         self.powder_wavelength_spin.setDecimals(5)
         self.powder_wavelength_spin.setValue(0.0)
+        self.powder_wavelength_spin.setSpecialValueText("Automatic")
         self.powder_wavelength_spin.setToolTip(
-            "Required to compute 2θ. Auto-detected -- when left at 0 -- from the Jana2020 .inflip "
-            "file, then the reference file; enter it manually if neither source has it."
+            "Required to compute 2θ. Zero requests automatic detection from this project's matching "
+            "Jana2020 .m90, then .inflip, then reference CIF. Enter a positive value if none is available."
         )
         self.powder_form.addRow("Wavelength (Å)", self.powder_wavelength_spin)
         self.powder_separation_spin = QDoubleSpinBox()
@@ -2974,14 +3150,34 @@ class _JanaWorkflowWizard:
             "map-derived split fully. The group total is always conserved."
         )
         self.powder_form.addRow("Map ratio mix", self.powder_mix_spin)
-        self.powder_outer.addLayout(self.powder_form)
+        self.powder_parameters = QWidget()
+        self.powder_parameters.setLayout(self.powder_form)
+        self.powder_outer.addWidget(self.powder_parameters)
+        self.powder_wavelength_status = QLabel("")
+        self.powder_wavelength_status.setWordWrap(True)
+        self.powder_wavelength_status.setStyleSheet("color: #52658b;")
+        self.powder_outer.addWidget(self.powder_wavelength_status)
         self.powder_note = QLabel(
-            "Only applies to reflections with an FWHM value (hkl I/F fwhm data)."
+            "FWHM describes peak width, not intensity uncertainty. Wavelength 0 requests automatic detection; "
+            "a positive resolved wavelength is required before running."
         )
         self.powder_note.setWordWrap(True)
         self.powder_note.setStyleSheet("color: #52658b;")
         self.powder_outer.addWidget(self.powder_note)
-        self.page3_layout.addWidget(self.powder_group)
+        class _FeedbackPanels(QWidget):
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self.layout().setDirection(QHBoxLayout.TopToBottom if event.size().width() < 820 else QHBoxLayout.LeftToRight)
+
+        self.feedback_panels = _FeedbackPanels()
+        self.feedback_panels_layout = QHBoxLayout(self.feedback_panels)
+        self.feedback_panels_layout.setContentsMargins(0, 0, 0, 0)
+        self.feedback_panels_layout.setSpacing(8)
+        self.feedback_panels_layout.addWidget(self.powder_group, 1)
+        self.feedback_panels_layout.addWidget(self.intensity_group, 1)
+        self.intensity_outer.addStretch(1)
+        self.powder_outer.addStretch(1)
+        self.page3_layout.addWidget(self.feedback_panels)
 
         for editor in (
             self.missing_start_cycle_spin, self.missing_percent_spin,
@@ -3022,21 +3218,40 @@ class _JanaWorkflowWizard:
 
         def sync_intensity_dependency(_checked: bool = False) -> None:
             enabled = self.cycles.value() > 1 and self.intensity_enabled_checkbox.isChecked()
+            self.intensity_parameters.setVisible(enabled)
             self.intensity_start_cycle_spin.setEnabled(enabled)
             self.intensity_damping_spin.setEnabled(enabled)
-            self.intensity_sigma_spin.setEnabled(enabled)
+            has_sigma = getattr(self, "feedback_has_uncertainty", False)
+            self.intensity_sigma_spin.setEnabled(enabled and has_sigma)
+            self.intensity_sigma_spin.setVisible(has_sigma)
+            self.intensity_form.labelForField(self.intensity_sigma_spin).setVisible(has_sigma)
+            inactive = enabled and self.intensity_damping_spin.value() == 0
+            self.intensity_effective_note.setText("Correction damping 0 keeps observed values; no intensity update is applied." if inactive else "")
+            self.intensity_effective_note.setVisible(inactive)
 
         self.intensity_enabled_checkbox.toggled.connect(sync_intensity_dependency)
+        self.intensity_damping_spin.valueChanged.connect(sync_intensity_dependency)
         sync_intensity_dependency()
 
         def sync_powder_dependency(_checked: bool = False) -> None:
             enabled = self.cycles.value() > 1 and self.powder_enabled_checkbox.isChecked()
+            self.powder_parameters.setVisible(enabled)
             self.powder_start_cycle_spin.setEnabled(enabled)
             self.powder_wavelength_spin.setEnabled(enabled)
             self.powder_separation_spin.setEnabled(enabled)
             self.powder_mix_spin.setEnabled(enabled)
+            if enabled and self.powder_wavelength_spin.value() == 0:
+                wavelength, source = self._map_feedback_wavelength()
+                self.powder_wavelength_status.setText(
+                    f"Automatic wavelength: {wavelength:.10g} Å · {source}"
+                    if wavelength > 0 else "No automatic wavelength was found. Enter a positive measured wavelength."
+                )
+                self.powder_wavelength_status.setVisible(True)
+            else:
+                self.powder_wavelength_status.setVisible(False)
 
         self.powder_enabled_checkbox.toggled.connect(sync_powder_dependency)
+        self.powder_wavelength_spin.valueChanged.connect(sync_powder_dependency)
         sync_powder_dependency()
 
         def sync_feedback_applicability(_value: int = 0) -> None:
@@ -3099,6 +3314,7 @@ class _JanaWorkflowWizard:
 
         for _spin in (self.missing_start_cycle_spin, self.intensity_start_cycle_spin, self.powder_start_cycle_spin):
             _spin.valueChanged.connect(lambda _value=0: self._refresh_page3_validation_message())
+        self.powder_wavelength_spin.valueChanged.connect(lambda _value=0: self._refresh_page3_validation_message())
         for _checkbox in (self.missing_enabled_checkbox, self.intensity_enabled_checkbox, self.powder_enabled_checkbox):
             _checkbox.toggled.connect(lambda _checked=False: self._refresh_page3_validation_message())
         self.cycles.valueChanged.connect(lambda _value=0: self._refresh_page3_validation_message())
@@ -3159,6 +3375,7 @@ class _JanaWorkflowWizard:
             self.scroll_area.verticalScrollBar().setValue(0)
 
         def go_to_page1() -> None:
+            self.content_layout.setContentsMargins(14, 10, 14, 10)
             if self._current_workflow() not in (
                 WORKFLOW_SUPERFLIP_ONLY, WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_AUTOSOLVE,
             ):
@@ -3175,6 +3392,7 @@ class _JanaWorkflowWizard:
             self._adjust_dialog_size()
 
         def go_to_page2() -> None:
+            self.content_layout.setContentsMargins(14, 16, 14, 10)
             self.stack.setCurrentWidget(self.page2)
             self.back_button.setVisible(True)
             self.primary_button.setVisible(True)
@@ -3194,6 +3412,7 @@ class _JanaWorkflowWizard:
             self._adjust_dialog_size()
 
         def go_to_page3() -> None:
+            self.content_layout.setContentsMargins(14, 10, 14, 10)
             self._sync_page3_for_data_type()
             self._refresh_page3_validation_message()
             self.stack.setCurrentWidget(self.page3)
@@ -3259,7 +3478,7 @@ class _JanaWorkflowWizard:
             return effective_compute_omit_maps() and self.rfree_checkbox.isChecked()
 
         def effective_map_feedback_enabled() -> bool:
-            return self._current_workflow() in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
+            return effective_cycles() > 1 and self._current_workflow() in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
 
         def save_values() -> None:
             next_cycle_mode = effective_next_cycle_mode()
@@ -3270,7 +3489,14 @@ class _JanaWorkflowWizard:
             # The URL is fixed for normal Wizard workflows; the API token is
             # shared with the full application.
             self.shared_settings.setValue("inputs/sharped_base_url", DEFAULT_SERVER_URL)
-            self.shared_settings.setValue("inputs/sharped_api_token", self.api_token.text())
+            try:
+                credential_store.save_input(self.api_token.text())
+            except (OSError, ValueError):
+                # Retain the configured key in memory; never write plaintext
+                # when device storage is unavailable.
+                pass
+            self.shared_settings.remove("inputs/sharped_api_token")
+            self.settings.remove("api_token")
             self.shared_settings.sync()
             self.settings.setValue("model", self.model.currentText())
             self.settings.setValue(
@@ -3311,16 +3537,16 @@ class _JanaWorkflowWizard:
                 first_cycle_modelfile=self.model_file.text().strip(),
                 compute_omit_maps=effective_compute_omit_maps(),
                 compute_omit_rfree=effective_compute_omit_rfree(),
-                enable_missing_completion=effective_map_feedback_enabled() and self.missing_enabled_checkbox.isChecked(),
+                enable_missing_completion=effective_map_feedback_enabled() and not getattr(self, "feedback_is_powder", False) and self.missing_enabled_checkbox.isChecked(),
                 missing_start_cycle=self.missing_start_cycle_spin.value(),
                 missing_max_added_percent=self.missing_percent_spin.value(),
                 enable_intensity_correction=effective_map_feedback_enabled() and self.intensity_enabled_checkbox.isChecked(),
                 intensity_start_cycle=self.intensity_start_cycle_spin.value(),
                 intensity_damping=self.intensity_damping_spin.value(),
-                intensity_sigma_threshold=self.intensity_sigma_spin.value(),
-                enable_powder_repartition=effective_map_feedback_enabled() and self.powder_enabled_checkbox.isChecked(),
+                intensity_sigma_threshold=self.intensity_sigma_spin.value() if getattr(self, "feedback_has_uncertainty", False) else 0.0,
+                enable_powder_repartition=effective_map_feedback_enabled() and getattr(self, "feedback_is_powder", False) and self.powder_enabled_checkbox.isChecked(),
                 powder_start_cycle=self.powder_start_cycle_spin.value(),
-                powder_wavelength=self.powder_wavelength_spin.value(),
+                powder_wavelength=self._map_feedback_wavelength()[0] if effective_map_feedback_enabled() and self.powder_enabled_checkbox.isChecked() else self.powder_wavelength_spin.value(),
                 powder_separation_factor=self.powder_separation_spin.value(),
                 powder_map_ratio_mix=self.powder_mix_spin.value(),
                 # Kept only for the adaptive Autosolve backend's compatibility
@@ -3834,14 +4060,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 from phase_studio.requirements_ui import show_requirement_remediation_dialog
 
                 shared = qt["QSettings"]("PhaseStudio", "PhaseStudio")
-                current = str(shared.value("inputs/sharped_api_token", "") or "")
+                current = credential_store.load_settings(shared)
                 status = reqs.RequirementStatus(
                     kind=reqs.RequirementKind.SHARPED,
                     state=reqs.RequirementState.TOKEN_REJECTED,
                 )
+                classified = reqs._classify_sharped_error(RuntimeError(report.technical_details))
+                if classified.state in {reqs.RequirementState.TOKEN_REJECTED, reqs.RequirementState.ACCESS_DENIED}:
+                    status = classified
                 token = show_requirement_remediation_dialog(None, status, current)
                 if token is not None:
-                    shared.setValue("inputs/sharped_api_token", token)
+                    shared.remove("inputs/sharped_api_token")
                     shared.sync()
             else:
                 show_phase_studio_error(None, report)

@@ -35,6 +35,16 @@ def inspect(dialog):
     if not screen.contains(frame):
         problems.append("dialog frame leaves available screen")
     for button in dialog.findChildren(QPushButton):
+        scroll = getattr(dialog, "_scroll", None)
+        if scroll is not None and scroll.widget().isAncestorOf(button):
+            scroll.ensureWidgetVisible(button)
+            app.processEvents()
+            position = button.mapTo(scroll.viewport(), QPoint(0, 0))
+            viewport = scroll.viewport().rect()
+            if (position.x() < viewport.left() or position.y() < viewport.top()
+                    or position.x() + button.width() > viewport.right() + 1
+                    or position.y() + button.height() > viewport.bottom() + 1):
+                problems.append(f"{button.text()} is not reachable inside the body viewport")
         top_left = button.mapTo(dialog, QPoint(0, 0))
         if top_left.x() < 0 or top_left.y() < 0:
             problems.append(f"{button.text()} starts outside client")

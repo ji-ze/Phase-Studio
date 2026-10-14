@@ -1,12 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import sys
+import runpy
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 project_dir = Path(SPECPATH).resolve()
+release_version = runpy.run_path(str(project_dir / "phase_studio/version.py"))["VERSION"]
 
 # Shared portable-runtime staging, identical to the one the main application
 # uses (see packaging/pyinstaller/portable_runtime.py). It matters especially
@@ -127,5 +129,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="PhaseStudio-Jana2020-2.0.2" if globals().get("developer_build", False) else "superflip",
+    name=f"PhaseStudio-Jana2020-{release_version}" if globals().get("developer_build", False) else "superflip",
 )

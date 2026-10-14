@@ -9,6 +9,8 @@ from types import SimpleNamespace
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scientific_tool_fixtures import program_bytes, isolate_discovery
+
 results_log = []
 
 
@@ -21,7 +23,7 @@ def check(name, condition):
 def make_exe(directory, name):
     path = Path(directory) / name
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"MZ synthetic executable")
+    path.write_bytes(program_bytes(name))
     return path
 
 
@@ -108,7 +110,9 @@ def main():
             jana_inflip=None,
         )
 
-    def click_run_with_dialog(window, cfg, expected_title, action_text="Skip for now"):
+    def click_run_with_dialog(window, cfg, expected_title, action_text="Back"):
+        if expected_title == "Connect to SharpED" and action_text == "Skip for now":
+            action_text = "Back"
         observed = {"title": "", "buttons": []}
         window.get_config = lambda: cfg
         window._validate_run_config = lambda _cfg: ([], "")
@@ -139,28 +143,28 @@ def main():
     check("opening Phase Studio does not run preflight",
           QApplication.activeModalWidget() is None and window.worker is None)
 
-    observed = click_run_with_dialog(window, config(), "Superflip setup required")
+    observed = click_run_with_dialog(window, config(), "Set up Superflip")
     check("Superflip remediation has all four requested actions",
           all(label in observed["buttons"] for label in (
-              "Browse…", "Open download page", "Download automatically", "Skip for now"
+              "Locate existing Superflip", "Official download page", "View licence information", "Back"
           )))
     check("skipping missing Superflip does not start the worker", window.worker is None)
 
     observed = click_run_with_dialog(
-        window, config(sf=superflip, edma_stage=True), "EDMA setup required"
+        window, config(sf=superflip, edma_stage=True), "Set up EDMA"
     )
     check("EDMA remediation has all four requested actions",
           all(label in observed["buttons"] for label in (
-              "Browse…", "Open download page", "Download automatically", "Skip for now"
+              "Locate existing EDMA", "Official download page", "View licence information", "Back"
           )))
     check("skipping missing EDMA does not start the worker", window.worker is None)
 
     observed = click_run_with_dialog(
-        window, config(sf=superflip, sharped=True), "SharpED access required"
+        window, config(sf=superflip, sharped=True), "Connect to SharpED"
     )
     check("SharpED remediation has the requested account/token actions",
           all(label in observed["buttons"] for label in (
-              "Open SharpED account", "Set token", "Skip for now"
+              "Open SharpED token page", "Connect to SharpED", "Back"
           )))
     check("skipping a missing SharpED token does not start the worker", window.worker is None)
 
@@ -176,7 +180,7 @@ def main():
             return
         network_dialog["buttons"] = [button.text() for button in dialog.findChildren(QPushButton)]
         network_dialog["text"] = " ".join(label.text() for label in dialog.findChildren(appmod.QLabel))
-        close = next((button for button in dialog.findChildren(QPushButton) if button.text() == "Close"), None)
+        close = next((button for button in dialog.findChildren(QPushButton) if button.text() == "Back"), None)
         if close is not None:
             close.click()
 
@@ -190,17 +194,17 @@ def main():
         "configured-token",
     )
     check("SharpED network remediation does not offer a token as the fix",
-          "Set token" not in network_dialog["buttons"]
-          and "Open SharpED account" not in network_dialog["buttons"])
+          "Connect to SharpED" in network_dialog["buttons"]
+          and "Back" in network_dialog["buttons"])
     check("SharpED network remediation names the network problem and offers Close",
-          "Close" in network_dialog["buttons"]
-          and "network/server response problem" in network_dialog["text"])
+          "Back" in network_dialog["buttons"]
+          and "internet connection" in network_dialog["text"])
 
     original_picker = QFileDialog.getOpenFileName
     QFileDialog.getOpenFileName = lambda *_args, **_kwargs: (str(superflip), "")
     before = len(started_threads)
     repaired_cfg = config()
-    click_run_with_dialog(window, repaired_cfg, "Superflip setup required", "Browse…")
+    click_run_with_dialog(window, repaired_cfg, "Set up Superflip", "Locate existing Superflip")
     QFileDialog.getOpenFileName = original_picker
     check("a successful Browse repair returns to execution",
           len(started_threads) == before + 1 and started_threads[-1].started)
@@ -253,7 +257,7 @@ def main():
         if token_edit is not None:
             token_edit.setText("configured-token")
         button = next(
-            (item for item in dialog.findChildren(QPushButton) if item.text() == "Set token"), None,
+            (item for item in dialog.findChildren(QPushButton) if item.text() == "Connect to SharpED"), None,
         )
         if button is not None:
             button.click()
@@ -267,8 +271,9 @@ def main():
     check("Set token updates the current configuration and Setup field",
           token_cfg.sharped_api_token == "configured-token"
           and window3.inputs["sharped_api_token"].text() == "configured-token")
-    check("Set token persists through the existing settings store",
-          window3.settings.value("inputs/sharped_api_token") == "configured-token")
+    check("Access key is session-only and absent from plaintext settings",
+          window3.settings.value("inputs/sharped_api_token") is None
+          and appmod.credential_store.get() == "configured-token")
     window3.close()
 
     # Build Wizard widgets without entering its top-level blocking event loop.
@@ -300,7 +305,7 @@ def main():
             observed["title"] = dialog.windowTitle()
             skip = next(
                 (button for button in dialog.findChildren(QPushButton)
-                 if button.text() == "Skip for now"), None,
+                 if button.text() in {"Skip for now", "Back"}), None,
             )
             if skip is not None:
                 skip.click()
@@ -313,7 +318,7 @@ def main():
     wizard = build_wizard(jana.WORKFLOW_SUPERFLIP_ONLY)
     title = capture_wizard_dialog(wizard, wizard.primary_button.click)
     check("Superflip-only Wizard button reaches preflight before execution",
-          "Superflip setup required" in title and wizard.result["action"] == "cancel")
+          "Set up Superflip" in title and wizard.result["action"] == "cancel")
     wizard.refresh_timer.stop()
     wizard.dialog.deleteLater()
 
@@ -323,7 +328,7 @@ def main():
     wizard.primary_button.click()  # SharpED settings -> Map Feedback
     title = capture_wizard_dialog(wizard, wizard.primary_button.click)
     check("Superflip + SharpED Wizard button reaches preflight before execution",
-          "Superflip setup required" in title and wizard.result["action"] == "cancel")
+          "Set up Superflip" in title and wizard.result["action"] == "cancel")
     wizard.refresh_timer.stop()
     wizard.dialog.deleteLater()
 
@@ -336,7 +341,7 @@ def main():
     wizard.primary_button.setText("Run phasing")
     title = capture_wizard_dialog(wizard, wizard.primary_button.click)
     check("Phase recycling Wizard button reaches preflight before auto-start",
-          "SharpED access required" in title and wizard.result["action"] == "cancel")
+          "Connect to SharpED" in title and wizard.result["action"] == "cancel")
     wizard.refresh_timer.stop()
     wizard.dialog.deleteLater()
 
@@ -393,4 +398,5 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    with isolate_discovery():
+        raise SystemExit(main())

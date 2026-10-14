@@ -2,6 +2,7 @@
 # ONEDIR because MSIX owns the outer installation layout.
 import sys
 import os
+import runpy
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
@@ -15,17 +16,18 @@ from PyInstaller.building.splash import Splash
 # first real Windows build (it resolved one directory above the repo root).
 # Verified with an assertion below rather than trusting the arithmetic alone.
 project_dir = Path(SPECPATH).resolve().parent.parent
+release_version = runpy.run_path(str(project_dir / "phase_studio/version.py"))["VERSION"]
 
 installer_build = globals().get("installer_build", False)
 store_build = globals().get("store_build", False)
 if installer_build and store_build:
     raise ValueError("Installer and Store build profiles are mutually exclusive.")
 if installer_build:
-    target_name = "PhaseStudio-Jana2020-Installer-2.0.2-x64"
+    target_name = f"PhaseStudio-Jana2020-Installer-{release_version}-x64"
 elif store_build:
     target_name = "PhaseStudio"
 else:
-    target_name = "PhaseStudio-2.0.2-x64"
+    target_name = f"PhaseStudio-{release_version}-x64"
 entry_point = project_dir / "phase_studio" / ("jana_installer.py" if installer_build else "standalone.py")
 if not entry_point.is_file():
     raise FileNotFoundError(

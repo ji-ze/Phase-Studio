@@ -211,6 +211,8 @@ class SharpEDServerClient:
         outres: float,
         log: ProgressLog = None,
     ) -> UploadResult:
+        from phase_studio.error_reporting import register_private_value
+        register_private_value(bearer_token)
         self._log_tls_fallback(log)
         if not bearer_token:
             raise SharpEDServerError("Missing SharpED API token.")

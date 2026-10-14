@@ -145,7 +145,7 @@ def main() -> int:
           [action.label for action in win._error_actions(edma)] == ["Set up EDMA"])
     sharped = build_validation_report(["A SharpED API token is required for the selected workflow."])
     check("SharpED preflight routes directly to the API token",
-          [action.label for action in win._error_actions(sharped)] == ["Update API token"])
+          [action.label for action in win._error_actions(sharped)] == ["Account access…"])
     unavailable = build_error_report(
         RuntimeError("connection refused"), subsystem="SharpED", operation="Upload map"
     )

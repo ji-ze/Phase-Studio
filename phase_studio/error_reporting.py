@@ -22,10 +22,20 @@ _TOKEN_QUERY_RE = re.compile(
     r"(?i)([?&](?:token|access_token|api_token|job_token|download_token)=)[^&#\s]+"
 )
 
+_PRIVATE_VALUES: set[str] = set()
+
+
+def register_private_value(value: str) -> None:
+    """Redact a configured credential even if a server echoes it without a label."""
+    if str(value or "").strip():
+        _PRIVATE_VALUES.add(str(value).strip())
+
 
 def sanitize_error_details(value: object) -> str:
     """Remove credentials from any user-visible or copyable diagnostic text."""
     text = str(value or "")
+    for private in sorted(tuple(_PRIVATE_VALUES), key=len, reverse=True):
+        text = text.replace(private, "[REDACTED]")
     text = _BEARER_RE.sub(r"\1[REDACTED]", text)
     text = _SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", text)
     text = _TOKEN_URL_RE.sub(r"\1[REDACTED]", text)
@@ -114,9 +124,9 @@ def build_error_report(
         resolved_subsystem = "SharpED"
         if any(token in lower for token in ("missing sharped api token", "api token is required", "http error 401", "http error 403", "authentication", "unauthorized", "forbidden")):
             category = "sharped_authentication"
-            title = "SharpED authentication failed"
-            summary = "The SharpED API token is missing or was rejected."
-            guidance = "Enter a valid API token in SharpED setup before trying again."
+            title = "SharpED account access"
+            summary = "The SharpED access key is missing or was not accepted."
+            guidance = "Connect using your existing Jana2020 account and check its SharpED access key."
         elif any(token in lower for token in ("certificate_verify_failed", "certificate verify failed", "could not verify", "tls certificate chain")):
             category = "sharped_tls_certificate"
             title = "SharpED secure connection failed"
@@ -334,9 +344,9 @@ def build_validation_report(issues: Sequence[str], *, technical_details: str = "
             )
         if "sharped api token" in lowered:
             return ErrorReport(
-                category="sharped_authentication", subsystem="SharpED", title="SharpED access required",
-                summary="A SharpED API token is required for the selected workflow.",
-                guidance="Enter a valid API token in SharpED setup before starting this workflow.",
+                category="sharped_authentication", subsystem="SharpED", title="Connect to SharpED",
+                summary="A SharpED access key is required for the selected workflow.",
+                guidance="Connect using your existing Jana2020 account before starting this workflow.",
                 technical_details=sanitize_error_details(technical_details or issue),
                 operation="Pre-run validation", severity="error",
             )

@@ -1,0 +1,22 @@
+[
+  {
+    "id": "local-run-active",
+    "path": "screenshots/standalone/local-run-active.png",
+    "captured": true,
+    "source_window": "IterativeSuperflipPipelineQtGUI",
+    "synthetic": true,
+    "fixture": "Actual local Superflip / EDMA calculation on public synthetic reflections",
+    "redaction": [],
+    "targets": []
+  },
+  {
+    "id": "local-run-completed",
+    "path": "screenshots/standalone/local-run-completed.png",
+    "captured": true,
+    "source_window": "IterativeSuperflipPipelineQtGUI",
+    "synthetic": true,
+    "fixture": "Actual local Superflip / EDMA calculation on public synthetic reflections",
+    "redaction": [],
+    "targets": []
+  }
+]

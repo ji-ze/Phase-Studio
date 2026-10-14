@@ -2,6 +2,7 @@
 from pathlib import Path
 from importlib import metadata
 import sys
+import runpy
 
 EXCLUDED_QT_BINARIES = {
     "qt6virtualkeyboard.dll", "qtvirtualkeyboardplugin.dll", "qt6pdf.dll", "qpdf.dll",
@@ -15,6 +16,10 @@ def exclude_unused_qt_plugins(binaries):
 
 def legal_datas(project_dir):
     resources = []
+    version = runpy.run_path(str(project_dir / "phase_studio/version.py"))["VERSION"]
+    current_notes = project_dir / f"RELEASE_NOTES_{version.replace('.', '_')}.md"
+    if current_notes.is_file() and current_notes.name != "RELEASE_NOTES_2_0_2.md":
+        resources.append((str(current_notes), "PhaseStudioLegal"))
     for name in ("LICENSE", "CITATION.cff", "AUTHORS.md", "THIRD_PARTY_NOTICES.md",
                  "RELEASE_NOTES_2_0_2.md", "docs/JANA_DEVELOPER_INTEGRATION.md"):
         path = project_dir / name

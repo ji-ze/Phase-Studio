@@ -1,0 +1,13 @@
+{
+  "mocked": true,
+  "backend": "in-memory fixture",
+  "scale": 1.25,
+  "logical_size": [
+    630,
+    650
+  ],
+  "device_pixel_ratio": 1.25,
+  "key_hidden": true,
+  "connecting": false,
+  "scroll_maximum": 40
+}

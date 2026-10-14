@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 
 import html
+import json
 import gemmi
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -37,7 +38,9 @@ from phase_studio.ui_branding import (
     create_phase_studio_brand_header, create_phase_studio_context_banner,
 )
 from phase_studio.fullscreen_viewer import show_detached_viewer
-from phase_studio.structure_camera import StructureCameraController
+from phase_studio.structure_camera import (
+    StructureCameraController, fit_projected_structure, set_structure_viewport_clip,
+)
 
 
 _COMPACT_METRIC_COLUMNS = {
@@ -47,8 +50,8 @@ _COMPACT_METRIC_COLUMNS = {
     "r_free": ("R_free ↓", "R_free"),
     "cc_free": ("CC_free ↑", "CC_free"),
     "omit_map_correlation": ("OMIT CC ↑", "OMIT map correlation"),
-    "amplitude_rf": ("R factor ↓", "Amplitude agreement R factor"),
-    "amplitude_cc": ("Amplitude CC ↑", "Amplitude CC"),
+    "amplitude_rf": ("R factor ↓", "Amplitude consistency with original measured reflections; not independent refinement R. Scale is fitted to map FFT amplitudes."),
+    "amplitude_cc": ("Amplitude CC ↑", "Pearson correlation of original measured amplitudes and map FFT amplitudes; imposed input amplitudes can give unity without validating phases."),
     "triplet_c3": ("C3 ↑", "Weighted triplet C3"),
 }
 
@@ -116,6 +119,24 @@ def format_result_metric(value: Optional[float]) -> str:
     return "n/a" if value is None else f"{float(value):.3f}"
 
 
+def recorded_edma_site_lineage(candidate: ResultCandidate) -> dict:
+    """Read only the matching completed export's diagnostic sidecar.
+
+    Counts from another threshold or a different retained CIF are not evidence
+    for this candidate. The Jana count remains the sealed m40 authority.
+    """
+    path = Path(candidate.structure_path)
+    try:
+        data = json.loads(path.with_name(path.stem + "_site_counts.json").read_text(encoding="utf-8"))
+        if (float(data["threshold_sigma"]) != candidate.edma_sigma
+                or int(data["cif_sites"]) != candidate.detected_atom_count):
+            return {}
+        counts = {key: int(data[key]) for key in ("raw_edma_sites", "cif_sites", "independent_asu_sites")}
+        return counts if all(value >= 0 for value in counts.values()) else {}
+    except (OSError, ValueError, TypeError, KeyError):
+        return {}
+
+
 def format_map_feedback_change_column(value: Optional[float]) -> str:
     """Format the restored Map Feedback diagnostic; unavailable stays "—",
     never a fabricated 0%."""
@@ -135,9 +156,8 @@ def result_warning_callout_text(source: str, map_feedback_intensity_enabled: boo
         )
     if sharped:
         return (
-            "SharpED uses a neural-network model for electron-density map processing. The selected "
-            "result should be validated against the original measured diffraction data and an "
-            "independent crystallographic refinement."
+            "SharpED predictions must be validated against original measured diffraction data "
+            "and independent crystallographic refinement."
         )
     if map_feedback_intensity_enabled:
         return (
@@ -185,7 +205,7 @@ def _build_candidate_table(
     metric_columns: tuple[tuple[str, str, str], ...],
     show_feedback_column: bool,
 ) -> QTableWidget:
-    headers = ["Recommended", "Cycle"] + [compact for compact, _full, _key in metric_columns]
+    headers = ["★", "Cycle"] + [compact for compact, _full, _key in metric_columns]
     if show_feedback_column:
         headers.append(_MAP_FEEDBACK_COLUMN_LABEL)
     table = QTableWidget(len(ordered), len(headers))
@@ -205,10 +225,11 @@ def _build_candidate_table(
         header.setFont(header_font)
     header.ensurePolished()
     header_metrics = header.fontMetrics()
-    header.setMinimumSectionSize(48)
-    header.setSectionResizeMode(0, QHeaderView.Interactive)
+    header.setMinimumSectionSize(35)
+    header.setSectionResizeMode(0, QHeaderView.Fixed)
     header.setSectionResizeMode(1, QHeaderView.Interactive)
-    header.resizeSection(0, header_metrics.horizontalAdvance("Recommended") + 20)
+    header.resizeSection(0, 40)
+    table.horizontalHeaderItem(0).setToolTip("Recommended candidate; the highlighted row is your selection.")
     longest_cycle = max((str(candidate.cycle) for candidate in ordered), key=len, default="1")
     header.resizeSection(
         1, max(header_metrics.horizontalAdvance("Cycle"),
@@ -226,7 +247,16 @@ def _build_candidate_table(
         item.setToolTip(full_name)
         item.setData(Qt.AccessibleDescriptionRole, full_name)
         item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        minimum = header_metrics.horizontalAdvance(item.text()) + 10
+        key = metric_columns[column - metric_start][2] if column < metric_end else None
+        values = [
+            format_result_metric(candidate.metrics.value(key)) if key else
+            format_map_feedback_change_column(candidate.map_feedback_change_percent)
+            for candidate in ordered
+        ]
+        minimum = max(
+            header_metrics.horizontalAdvance(item.text()) + 10,
+            max((table.fontMetrics().horizontalAdvance(value) + 16 for value in values), default=0),
+        )
         header.resizeSection(column, minimum)
     for row, candidate in enumerate(ordered):
         # The source is already stated in the table title and dynamic summary;
@@ -300,6 +330,7 @@ class _SourceView:
         container_layout.setSpacing(6)
         title_label = QLabel(table_title)
         title_label.setObjectName("sectionLabel")
+        title_label.setWordWrap(True)
         container_layout.addWidget(title_label)
         container_layout.addWidget(self.table)
         container_layout.addStretch(1)
@@ -353,6 +384,7 @@ class ResultSelectionDialog(QDialog):
         self._adjust_threshold = adjust_threshold
         self._adjust_threshold_async = adjust_threshold_async
         self._closed = False
+        self._pending_thresholds: dict[tuple, object] = {}
         self._map_feedback_intensity_enabled = bool(map_feedback_intensity_enabled)
         self._definition = definition
         self._reference_available = profile in {
@@ -369,7 +401,7 @@ class ResultSelectionDialog(QDialog):
         self._preview_user_interacted = False
         self._preview_fit_timer = QTimer(self)
         self._preview_fit_timer.setSingleShot(True)
-        self._preview_fit_timer.setInterval(80)
+        self._preview_fit_timer.setInterval(0)
         self._preview_fit_timer.timeout.connect(self._fit_preview)
 
         self.setObjectName("resultSelectionDialog")
@@ -425,7 +457,7 @@ class ResultSelectionDialog(QDialog):
             self._output_description.setObjectName("resultOutputDescription")
             self._output_description.setWordWrap(True)
             self._output_description.setStyleSheet("color:#334766; padding:2px 4px;")
-            content_layout.addWidget(self._output_description)
+            self._output_description.setVisible(False)
             self._superflip_btn = superflip_btn
             self._sharped_btn = sharped_btn
             superflip_btn.toggled.connect(lambda checked: checked and self._apply_source("superflip"))
@@ -448,6 +480,12 @@ class ResultSelectionDialog(QDialog):
             self._summary_value_labels[label_text] = value_label
 
         self._warning_callout = create_callout_label("Validation needed", "", "warning", compact=True)
+        self._warning_callout.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._warning_callout.setStyleSheet("background:#f3f5f8; color:#334766; padding:4px 8px;")
+        warning_policy = self._warning_callout.sizePolicy()
+        warning_policy.setRetainSizeWhenHidden(True)
+        self._warning_callout.setSizePolicy(warning_policy)
+        self._warning_callout.setFixedHeight(max(48, self._warning_callout.fontMetrics().lineSpacing() * 3 + 8))
         self._warning_callout.setVisible(False)
         content_layout.addWidget(self._warning_callout)
 
@@ -644,6 +682,7 @@ class ResultSelectionDialog(QDialog):
         self._selected_output_summary = QLabel("")
         self._selected_output_summary.setObjectName("selectedOutputSummary")
         self._selected_output_summary.setWordWrap(True)
+        self._selected_output_summary.setMinimumHeight(55)
         self._selected_output_summary.setStyleSheet(
             "QLabel { background:#eef4ff; border:1px solid #b9cae8; border-radius:4px; "
             "padding:4px 10px; color:#142b55; }"
@@ -725,7 +764,6 @@ class ResultSelectionDialog(QDialog):
         )
         self._detached_viewer.finished.connect(self._restore_fullscreen_action)
         QTimer.singleShot(0, self._fit_preview)
-        QTimer.singleShot(120, self._fit_preview)
 
     def _restore_fullscreen_action(self, _result: int = 0) -> None:
         self._fullscreen_button.setVisible(True)
@@ -739,10 +777,12 @@ class ResultSelectionDialog(QDialog):
                 self._apply_async_threshold_result(candidate, updated, report, request)
             request = self._adjust_threshold_async(candidate, add_atoms, completed)
             if request is not None:
+                self._pending_thresholds[self._threshold_key(candidate)] = request
                 self._threshold_status.setText(
                     f"EDMA {float(request.threshold):.2f} σ · updating… "
                     f"Current handoff: EDMA {float(candidate.edma_sigma):.2f} σ"
                 )
+                self._sync_action_button()
             return
         if self._adjust_threshold is None:
             return
@@ -762,12 +802,22 @@ class ResultSelectionDialog(QDialog):
     def _apply_async_threshold_result(self, original, updated, report, request) -> None:
         if self._closed:
             return
+        key = self._threshold_key(original)
+        if self._pending_thresholds.get(key) is not request:
+            return
+        self._pending_thresholds.pop(key, None)
         if report is not None:
-            self._threshold_status.setText(
-                "EDMA threshold update failed. Previous completed structure retained."
-            )
+            if self.selected_candidate is not None and self._threshold_key(self.selected_candidate) == key:
+                self._threshold_status.setText(
+                    "EDMA threshold update failed. Previous completed structure retained."
+                )
+            self._sync_action_button()
             return
         if updated is None:
+            self._sync_action_button()
+            return
+        if self._threshold_key(updated) != key:
+            self._sync_action_button()
             return
         view = self._views.get(original.source)
         if view is None:
@@ -785,10 +835,14 @@ class ResultSelectionDialog(QDialog):
         view.ordered[index] = updated
         if was_selected:
             view.selected = updated
-        self._threshold_status.clear()
         if was_selected and self._active_source == original.source:
             self._render_preview(updated)
         self._sync_action_button()
+
+    @staticmethod
+    def _threshold_key(candidate: ResultCandidate) -> tuple:
+        return (candidate.run_id, candidate.source, candidate.cycle,
+                candidate.map_sha256 or candidate.map_path)
 
     def done(self, result: int) -> None:
         self._closed = True
@@ -878,9 +932,21 @@ class ResultSelectionDialog(QDialog):
         warning_text = result_warning_callout_text(source, self._map_feedback_intensity_enabled)
         self._warning_callout.setVisible(warning_text is not None)
         if warning_text is not None:
-            self._warning_callout.setText(f"<b>Validation needed</b><br>{warning_text}")
+            self._warning_callout.setText(f"<b>Validation required</b> · {warning_text}")
         if view.selected is not None:
             self._render_preview(view.selected)
+        else:
+            self._current_candidate = None
+            self.preview_candidate_id = ""
+            self.preview_structure_hash = ""
+            self._preview_fit = None
+            self._preview_host._structure_interactive_axes = []
+            self._preview_figure.clear()
+            self._preview_figure.text(.5, .5, "No completed candidate available", ha="center", va="center", fontfamily="Segoe UI")
+            self._metadata_label.setText("No completed candidate available")
+            self._threshold_status.clear()
+            self._element_legend.clear()
+            self._preview_canvas.draw_idle()
         self._sync_action_button()
 
     def _on_source_table_selection_changed(self, source: str) -> None:
@@ -900,6 +966,8 @@ class ResultSelectionDialog(QDialog):
 
     def _sync_action_button(self) -> None:
         candidate = self.selected_candidate
+        pending = candidate is not None and self._threshold_key(candidate) in self._pending_thresholds
+        self._action_button.setEnabled(candidate is not None and not pending)
         usable_structure = candidate.usable_structure if candidate is not None else True
         self._action_button.setText(
             "Pass to Jana2020" if self._jana_context else
@@ -909,17 +977,12 @@ class ResultSelectionDialog(QDialog):
             candidate is not None and candidate.edma_enabled and candidate.edma_sigma is not None
             and (self._adjust_threshold is not None or self._adjust_threshold_async is not None)
         )
-        self._add_atoms_button.setEnabled(threshold_available)
-        self._remove_atoms_button.setEnabled(threshold_available)
+        self._add_atoms_button.setEnabled(threshold_available and not pending)
+        self._remove_atoms_button.setEnabled(threshold_available and not pending)
         if candidate is not None:
             family = "Charge-flipping solution" if candidate.source == "superflip" else "Model prediction"
-            model = f" · {html.escape(candidate.sharped_model)}" if candidate.sharped_model else ""
-            initialization = (
-                f" · {html.escape(candidate.superflip_initialization)}"
-                if candidate.source == "superflip" and candidate.superflip_initialization else ""
-            )
             provenance = (
-                f"<br>{html.escape(candidate.reflection_input_provenance)}"
+                f" · {html.escape(candidate.reflection_input_provenance)}"
                 if candidate.reflection_input_provenance else ""
             )
             threshold = (
@@ -927,14 +990,14 @@ class ResultSelectionDialog(QDialog):
                 if candidate.edma_enabled and candidate.edma_sigma is not None else ""
             )
             transfer = (
-                "<br>Map + EDMA structure will be passed to Jana2020."
+                "<br>Scientific map + corresponding Jana model will be passed to Jana2020."
                 if self._jana_context and candidate.edma_enabled else
                 "<br>EDMA disabled — Jana2020 will determine the structure from the map."
                 if self._jana_context else ""
             )
             self._selected_output_summary.setText(
                 f"<b>Selected for {'Jana2020' if self._jana_context else 'export'}:</b> "
-                f"{family} · Cycle {candidate.cycle}{model}{initialization}{threshold}"
+                f"{family} · Cycle {candidate.cycle}{threshold}"
                 f"{provenance}{transfer}"
             )
         else:
@@ -979,35 +1042,11 @@ class ResultSelectionDialog(QDialog):
         fit = getattr(self, "_preview_fit", None)
         if fit is None:
             return
-        from phase_studio.autosolve_window import _unit_zoom_sphere_fill
-        from mpl_toolkits.mplot3d import proj3d
-
-        center, radius = fit
-        extent = max(float(radius), 1.0e-3)
-        limits = tuple((float(center[i] - extent), float(center[i] + extent)) for i in range(3))
+        coords = getattr(self, "_preview_fit_coords", None)
+        if coords is None:
+            return
         for axis in self._preview_host._structure_interactive_axes:
-            # Matplotlib's default 3D box leaves a large internal margin even
-            # when the data limits are tight.  Use the same projected-sphere
-            # calibration as the execution viewer so Fit occupies about 80%
-            # of the actual canvas drawing square.
-            axis.set_box_aspect(
-                (1.0, 1.0, 1.0), zoom=0.80 / _unit_zoom_sphere_fill(),
-            )
-            self._preview_host._apply_structure_axis_limits(axis, limits)
-            coords = getattr(self, "_preview_fit_coords", None)
-            if coords is not None and len(coords):
-                # Measure this geometry in the resolved drawing canvas, not
-                # its rotation-safe sphere (which over-pads elongated models).
-                self._preview_canvas.draw()
-                projected = proj3d.proj_transform(*coords.T, axis.get_proj())
-                pixels = axis.transData.transform(np.column_stack(projected[:2]))
-                spans = np.ptp(pixels, axis=0)
-                viewport = axis.get_window_extent()
-                fill = max(spans[0] / viewport.width, spans[1] / viewport.height)
-                if np.isfinite(fill) and fill > 1e-6:
-                    axis.set_box_aspect(
-                        (1.0, 1.0, 1.0), zoom=(0.80 / _unit_zoom_sphere_fill()) * 0.80 / fill,
-                    )
+            fit_projected_structure(axis, coords)
         self._preview_canvas.draw_idle()
 
     def _reset_preview(self) -> None:
@@ -1032,7 +1071,7 @@ class ResultSelectionDialog(QDialog):
     def _preview_camera_interaction(self, kind: str) -> None:
         if kind in {"rotate", "pan", "zoom"}:
             self._preview_user_interacted = True
-        if kind == "rotate" and self._auto_rotate_button.isChecked():
+        if kind in {"rotate", "pan", "zoom"} and self._auto_rotate_button.isChecked():
             self._auto_rotate_button.setChecked(False)
 
     def _auto_rotate_tick(self) -> None:
@@ -1042,6 +1081,7 @@ class ResultSelectionDialog(QDialog):
         host.structure_azim = (float(host.structure_azim) + 0.4) % 360.0
         for axis in host._structure_interactive_axes:
             axis.view_init(elev=host.structure_elev, azim=host.structure_azim)
+        self._fit_preview()
         self._preview_canvas.draw_idle()
 
     def _on_preview_scroll(self, event) -> None:
@@ -1083,7 +1123,26 @@ class ResultSelectionDialog(QDialog):
         return result
 
     def _render_preview(self, candidate: ResultCandidate) -> None:
-        self._preview_user_interacted = False
+        previous = self._current_candidate
+        same_candidate = previous is not None and (
+            previous.run_id, previous.source, previous.cycle, previous.map_sha256,
+            previous.structure_sha256, self._view_mode
+        ) == (
+            candidate.run_id, candidate.source, candidate.cycle, candidate.map_sha256,
+            candidate.structure_sha256, getattr(self, "_rendered_view_mode", None)
+        )
+        old_axis = next(iter(self._preview_host._structure_interactive_axes), None)
+        retained_camera = None
+        if same_candidate and self._preview_user_interacted and old_axis is not None:
+            retained_camera = (
+                old_axis.get_xlim3d(), old_axis.get_ylim3d(), old_axis.get_zlim3d(),
+                getattr(old_axis, "_phase_fit_zoom", 1.0),
+            )
+        if not same_candidate:
+            self._preview_user_interacted = False
+            self._preview_host.structure_elev = 20.0
+            self._preview_host.structure_azim = 35.0
+        self._rendered_view_mode = self._view_mode
         self._current_candidate = candidate
         self.preview_candidate_id = candidate.candidate_id
         self.preview_structure_hash = candidate.structure_sha256
@@ -1140,15 +1199,34 @@ class ResultSelectionDialog(QDialog):
             host._structure_interactive_axes.append(axis)
             axis.set_axis_off()
         source = self._source_title(candidate.source)
+        lineage = recorded_edma_site_lineage(candidate)
+        raw_detail = (
+            f" · Raw EDMA peaks: {lineage['raw_edma_sites']}"
+            if lineage else ""
+        )
         model = f" · {candidate.sharped_model}" if candidate.sharped_model else ""
+        initialization = (
+            f" · {candidate.superflip_initialization}"
+            if candidate.source == "superflip" and candidate.superflip_initialization else ""
+        )
         self._metadata_label.setText(
-            f"{source} · Cycle {candidate.cycle}{model}<br>"
-            f"<b>{html.escape(composition_label)}:</b> {html.escape(composition or 'Unavailable')}"
+            f"{html.escape(source)} · Cycle {candidate.cycle}{html.escape(model)}{html.escape(initialization)}<br>"
+            f"<b>{html.escape(composition_label)}:</b> {html.escape((composition or 'Unavailable').translate(str.maketrans('0123456789', '₀₁₂₃₄₅₆₇₈₉')))}"
+            f"<br>EDMA candidate: {candidate.detected_atom_count if candidate.detected_atom_count is not None else detected_count} sites{raw_detail} · "
+            + (f"Jana model: {candidate.jana_model_site_count} atomic sites"
+               if candidate.jana_model_site_count is not None and candidate.jana_model_sha256
+               else "Jana model: prepared during handoff")
         )
         self._threshold_status.setText(
             f"EDMA {candidate.edma_sigma:.2f} σ · {detected_count:,} EDMA sites"
             if candidate.edma_enabled and candidate.edma_sigma is not None else "EDMA disabled"
         )
+        pending_request = self._pending_thresholds.get(self._threshold_key(candidate))
+        if pending_request is not None:
+            self._threshold_status.setText(
+                f"EDMA {float(pending_request.threshold):.2f} σ · updating… "
+                f"Current handoff: EDMA {float(candidate.edma_sigma):.2f} σ"
+            )
         if candidate.edma_enabled:
             from phase_studio.app import edma_asu_atoms, parse_cif_atoms, parse_cif_cell_and_sg
             path = Path(candidate.structure_path)
@@ -1171,6 +1249,12 @@ class ResultSelectionDialog(QDialog):
         # Source/cycle identity belongs to the compact metadata header.  The
         # scientific canvas contains geometry only and can use its full area.
         figure.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=0.995)
+        if retained_camera is not None:
+            xlim, ylim, zlim, zoom = retained_camera
+            axis.set_xlim3d(xlim); axis.set_ylim3d(ylim); axis.set_zlim3d(zlim)
+            axis.set_box_aspect((1, 1, 1), zoom=zoom)
+            axis._phase_fit_zoom = zoom
+            set_structure_viewport_clip(axis)
         self._camera.refresh_axes()
         self._preview_canvas.draw_idle()
         QTimer.singleShot(0, self._fit_preview)

@@ -199,9 +199,9 @@ def activate_user_launched_window(
                 pass
 
     activate()
-    QTimer.singleShot(0, activate)
-    QTimer.singleShot(120, activate)
-    QTimer.singleShot(350, activate)
+    QTimer.singleShot(0, window, activate)
+    QTimer.singleShot(120, window, activate)
+    QTimer.singleShot(350, window, activate)
 
 
 def transfer_user_foreground(
@@ -498,6 +498,10 @@ def apply_phase_studio_app_icon(app: "QApplication") -> None:
 # tests/test_jana_wizard_tile_icons.py fails if an action carries an icon that
 # does not come from this inventory, or if new icon artwork/assets appear.
 ESTABLISHED_ICON_INVENTORY = {
+    "workflow_superflip": "Navy line drawing: conventional phase retrieval.",
+    "workflow_sharped": "Navy line drawing: neural-network map processing.",
+    "workflow_autosolve": "Navy line drawing: iterative automatic solution.",
+    "workflow_settings": "Navy line drawing: scientific settings.",
     "phase_studio_mark": (
         "The Phase Studio monitor mark (create_phase_studio_logo_pixmap / "
         "create_phase_studio_app_icon; packaged as assets/phase_studio.ico) -- "
@@ -542,6 +546,25 @@ ICON_SOURCE_PROPERTY = "phaseStudioIconSource"
 
 def established_icon(source: str, style=None) -> QIcon:
     """The QIcon for one ESTABLISHED_ICON_INVENTORY entry."""
+    workflow_paths = {
+        "workflow_superflip": '<path d="M3 12h3l3-7 6 14 3-7h3"/><path d="M4 4v16h16"/>',
+        "workflow_sharped": '<path d="M6 6l6 6 6-6M6 18l6-6 6 6"/><circle cx="6" cy="6" r="2"/><circle cx="18" cy="6" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/>',
+        "workflow_autosolve": '<path d="M19 8a8 8 0 0 0-13-2L3 9m0-5v5h5M5 16a8 8 0 0 0 13 2l3-3m0 5v-5h-5"/>',
+        "workflow_settings": '<path d="M5 3v18M12 3v18M19 3v18M3 8h4M10 16h4M17 8h4"/><circle cx="5" cy="8" r="2"/><circle cx="12" cy="16" r="2"/><circle cx="19" cy="8" r="2"/>',
+    }
+    if source in workflow_paths:
+        from PySide6.QtSvg import QSvgRenderer
+        svg = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+               '<g fill="none" stroke="#001170" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">'
+               + workflow_paths[source] + '</g></svg>')
+        pixmap = QPixmap(96, 96)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        try:
+            QSvgRenderer(svg.encode()).render(painter)
+        finally:
+            painter.end()
+        return QIcon(pixmap)
     if source == "phase_studio_mark":
         return create_phase_studio_app_icon(64)
     if source in QT_STANDARD_ICON_SOURCES:

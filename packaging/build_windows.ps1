@@ -20,6 +20,9 @@ if ($distDir -ne $defaultDist -and -not $distDir.StartsWith($defaultDist + '\', 
 $buildDir = Join-Path $RepoRoot "build"
 $releaseDir = Join-Path $distDir "release"
 $PythonExe = (Get-Command python -ErrorAction Stop).Source
+$Version = (& $PythonExe -c "import runpy,sys; print(runpy.run_path(sys.argv[1])['VERSION'])" (Join-Path $RepoRoot "phase_studio\version.py")).Trim()
+if ($LASTEXITCODE -ne 0 -or $Version -notmatch '^\d+\.\d+\.\d+$') { throw "Cannot determine source version." }
+$ReleaseNotes = "RELEASE_NOTES_$($Version.Replace('.', '_')).md"
 & $PythonExe -m PyInstaller --version
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller is required in the active Python environment." }
 
@@ -85,7 +88,7 @@ try {
 
     if ($buildStandalone) {
         Write-Step "Building standalone release (ONEFILE)"
-        $standaloneExe = Join-Path $releaseDir "PhaseStudio-2.0.2-x64.exe"
+        $standaloneExe = Join-Path $releaseDir "PhaseStudio-$Version-x64.exe"
         if ($Clean) { Remove-SafePath $standaloneExe }
         Invoke-PyInstaller "packaging\pyinstaller\PhaseStudio.spec" "PhaseStudio" $releaseDir
         Assert-PathExists $standaloneExe "Standalone release"
@@ -97,7 +100,7 @@ try {
 
     if ($buildDeveloper) {
         Write-Step "Building Jana2020 developer integration (ONEDIR)"
-        $developerDir = Join-Path $distDir "PhaseStudio-Jana2020-2.0.2"
+        $developerDir = Join-Path $distDir "PhaseStudio-Jana2020-$Version"
         if ($Clean) { Remove-SafePath $developerDir }
         Invoke-PyInstaller "packaging\pyinstaller\PhaseStudioJanaDeveloper.spec" "PhaseStudioJanaDeveloper" $distDir
         Assert-PathExists (Join-Path $developerDir "Phase_studio.exe") "Jana developer executable"
@@ -109,7 +112,7 @@ try {
     }
 
     if ($Target -eq "All") {
-        $expected = @("PhaseStudio-2.0.2-x64.exe", "PhaseStudio-Jana2020-2.0.2.zip", "SHA256SUMS.txt", "RELEASE_NOTES_2_0_2.md")
+        $expected = @("PhaseStudio-$Version-x64.exe", "PhaseStudio-Jana2020-$Version.zip", "SHA256SUMS.txt", $ReleaseNotes)
         $publicFiles = @(Get-ChildItem -LiteralPath $releaseDir -File)
         if ($publicFiles.Count -ne $expected.Count -or @($publicFiles | Where-Object { $_.Name -notin $expected }).Count) {
             throw "Public release must contain standalone EXE, Jana developer ZIP, checksums and release notes only."

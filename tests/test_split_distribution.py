@@ -39,7 +39,7 @@ class SplitDistributionTests(unittest.TestCase):
         return {str(p.relative_to(self.target)): p.read_bytes() for p in self.target.rglob("*") if p.is_file()}
 
     def test_canonical_version(self):
-        self.assertEqual(VERSION, "2.0.2")
+        self.assertEqual(VERSION, "2.0.3")
         self.assertEqual(ji.bundled_integration_version(), VERSION)
         import phase_studio.app as app, phase_studio.jana_superflip as wizard
         self.assertEqual(app.__version__, VERSION)
@@ -255,8 +255,8 @@ class SplitDistributionTests(unittest.TestCase):
     def test_public_release_contract_is_standalone_and_developer_archive(self):
         build = (ROOT / "packaging/build_windows.ps1").read_text()
         spec = (ROOT / "packaging/pyinstaller/PhaseStudio.spec").read_text()
-        self.assertIn('PhaseStudio-2.0.2-x64.exe', build)
-        self.assertIn('PhaseStudio-Jana2020-2.0.2.zip', build)
+        self.assertIn('PhaseStudio-$Version-x64.exe', build)
+        self.assertIn('PhaseStudio-Jana2020-$Version.zip', build)
         self.assertIn('Phase_studio.exe', build)
         self.assertNotIn('JanaInstaller', build)
         self.assertIn('$publicFiles.Count -ne $expected.Count', build)

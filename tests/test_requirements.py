@@ -22,6 +22,8 @@ from pathlib import Path
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from scientific_tool_fixtures import program_bytes, isolate_discovery
+
 results_log = []
 
 
@@ -32,7 +34,7 @@ def check(name, cond):
 
 def make_exe(directory, name):
     path = Path(directory) / name
-    path.write_bytes(b"MZ fake executable")
+    path.write_bytes(program_bytes(name))
     return path
 
 
@@ -134,16 +136,16 @@ def main():
         pass
 
     download_root = Path(tempfile.mkdtemp()) / "tools"
-    downloaded = reqs.download_requirement_executable(
-        Kind.SUPERFLIP,
-        download_root,
-        opener=lambda *_args, **_kwargs: _Response(archive_bytes.getvalue()),
-    )
-    check("automatic download installs the expected executable", downloaded.is_file())
-    check("automatic download does not extract unrelated archive files",
-          not (download_root / "readme.txt").exists())
-    check("the automatically installed executable passes the same validation",
-          reqs.check_superflip(str(downloaded), jana_dir=empty).ok)
+    contacted = []
+    try:
+        reqs.download_requirement_executable(Kind.SUPERFLIP, download_root,
+            opener=lambda *a, **k: contacted.append(a))
+        rejected = False
+    except ValueError:
+        rejected = True
+    check("automatic download requires approved integrity and licence evidence", rejected)
+    check("unapproved automatic download never contacts the server", not contacted)
+    check("unapproved automatic download creates no installation", not download_root.exists())
 
     # =====================================================================
     # SharpED: classification, with the network stubbed out
@@ -168,7 +170,7 @@ def main():
     check("a missing token is reported without contacting the server",
           status.state is State.TOKEN_MISSING)
     check("the missing-token message names the token",
-          "token" in status.message.lower())
+          "access key" in status.message.lower())
 
     status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                     client_factory=factory(result=_Models()))
@@ -185,9 +187,9 @@ def main():
         status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                         client_factory=factory(error=_HttpError(code)))
         check("HTTP %d is classified as a rejected token" % code,
-              status.state is State.TOKEN_REJECTED)
+              status.state is (State.TOKEN_REJECTED if code == 401 else State.ACCESS_DENIED))
         check("HTTP %d advises creating a new token" % code,
-              "Create token" in status.message)
+              "Jana2020 account" in status.message)
 
     status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                     client_factory=factory(error=ConnectionError("refused")))
@@ -210,8 +212,8 @@ def main():
 
     status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                     client_factory=factory(error=_HttpError(503)))
-    check("a 5xx server error is classified as unreachable, not a bad token",
-          status.state is State.SERVER_UNREACHABLE)
+    check("a 5xx server error is classified as unavailable, not a bad key",
+          status.state is State.SERVER_UNAVAILABLE)
 
     status = reqs.check_sharped_api(
         "https://jana.fzu.cz", "tok",
@@ -295,7 +297,7 @@ def main():
               for repaired in result.repaired
           ))
     check("combined Jana auto-detection chooses Jana's EDMA without modifying it",
-          marked_edma.read_bytes() == b"MZ fake executable"
+          marked_edma.read_bytes() == program_bytes("EDMA.exe")
           and any(
               repaired.kind is Kind.EDMA and repaired.path == marked_edma.resolve()
               for repaired in result.repaired
@@ -340,4 +342,5 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    with isolate_discovery():
+        raise SystemExit(main())
