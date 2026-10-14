@@ -1,0 +1,13 @@
+cff-version: 1.2.0
+message: "Scientific publications reporting work performed with Phase Studio are expected to cite this software."
+type: software
+title: Phase Studio
+version: 2.0.3
+date-released: 2026-10-14
+authors:
+  - family-names: Zelenka
+    given-names: Jiří
+    affiliation: "Fyzikální ústav AV ČR, v. v. i. (Institute of Physics of the Czech Academy of Sciences)"
+repository-code: "https://github.com/ji-ze/Phase-Studio"
+url: "https://github.com/ji-ze/Phase-Studio"
+license: MIT

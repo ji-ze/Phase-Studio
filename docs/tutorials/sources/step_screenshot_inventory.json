@@ -1,0 +1,1190 @@
+[
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "Before you begin",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "Phase Studio is supplied with integrated Jana",
+    "image": "screenshots/jana2020/wizard-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "1 \u00b7 Know the supplied tool layout",
+    "image": "screenshots/standalone/setup-superflip.png",
+    "captured": true,
+    "keys": [],
+    "state": "Troubleshooting state, not a normal installation requirement for a correctly integrated Jana distribution."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "2 \u00b7 Launch from your Jana project",
+    "image": "screenshots/jana2020/wizard-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "Genuine Phase Studio Wizard on synthetic Jana-format input. This does not replace the missing native Jana launch capture."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "3 \u00b7 Read Input Summary",
+    "image": "screenshots/jana2020/wizard-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "4 \u00b7 Validate the reflections",
+    "image": "screenshots/workflow/hkl-validation.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "5 \u00b7 Analyze completeness",
+    "image": "screenshots/workflow/hkl-completeness.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "6 \u00b7 Select the workflow",
+    "image": "screenshots/jana2020/wizard-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "7 \u00b7 Connect your existing Jana account",
+    "image": "screenshots/web/sharped-token-controls.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "8 \u00b7 Protect the access key",
+    "image": "screenshots/web/jana-login.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "9 \u00b7 Choose cycles and model",
+    "image": "screenshots/workflow/configuration-multi-cycle.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "10 \u00b7 Follow execution",
+    "image": "screenshots/workflow/execution-concurrent.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual execution UI with a synthetic progress/prediction fixture, not a live neural-network job."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "10 \u00b7 Follow execution \u00b7 enlarged view",
+    "image": "screenshots/workflow/execution-concurrent.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual execution UI with a synthetic progress/prediction fixture, not a live neural-network job."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "11 \u00b7 Select the intended result",
+    "image": "screenshots/workflow/selector-model-prediction.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual selector with synthetic candidate/model and metric fixtures; no Jana transfer is executed."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "11 \u00b7 Select the intended result \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-model-prediction.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual selector with synthetic candidate/model and metric fixtures; no Jana transfer is executed."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "12 \u00b7 Finish threshold review",
+    "image": "screenshots/workflow/selector-edma-pending.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual pending-extraction UI state, driven by an explicit asynchronous fixture."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "12 \u00b7 Finish threshold review \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-edma-pending.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual pending-extraction UI state, driven by an explicit asynchronous fixture."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "13 \u00b7 Pass to Jana2020",
+    "image": "screenshots/workflow/selector-manual-candidate.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual Phase Studio selection UI. A native Jana return image is explicitly missing."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "13 \u00b7 Pass to Jana2020 \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-manual-candidate.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual Phase Studio selection UI. A native Jana return image is explicitly missing."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "Troubleshooting Jana workflows",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "section": "Useful links and attribution",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "Before you begin",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "What each program does",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "1 \u00b7 Download the Windows application",
+    "image": "screenshots/web/github-assets.png",
+    "captured": true,
+    "keys": [],
+    "state": "Live public v2.0.2 release page. The guide\u2019s source UI version is 2.0.3."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "2 \u00b7 Launch and recognise the main window",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "2 \u00b7 Launch and recognise the main window \u00b7 enlarged view",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "3 \u00b7 Locate Superflip and EDMA",
+    "image": "screenshots/standalone/setup-both.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual combined setup dialog. It appears only for local tools needed by the requested workflow."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "4 \u00b7 Open the SharpED account step",
+    "image": "screenshots/web/sharped-token-controls.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "5 \u00b7 Sign in only on the website",
+    "image": "screenshots/web/jana-login.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual public Jana login page, captured with a fresh browser profile; no credentials entered."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "6 \u00b7 Keep the key private",
+    "image": "screenshots/standalone/connect-sharped.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "7 \u00b7 Select the demonstration input",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "8 \u00b7 Validate the HKL interpretation",
+    "image": "screenshots/workflow/hkl-validation.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "9 \u00b7 Configure a short local run",
+    "image": "screenshots/standalone/standalone-workflow.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "10 \u00b7 Watch the calculation",
+    "image": "screenshots/standalone/local-run-active.png",
+    "captured": true,
+    "keys": [],
+    "state": "Genuine local calculation; any personal diagnostic paths are explicitly redacted."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "10 \u00b7 Watch the calculation \u00b7 enlarged view",
+    "image": "screenshots/standalone/local-run-active.png",
+    "captured": true,
+    "keys": [],
+    "state": "Genuine local calculation; any personal diagnostic paths are explicitly redacted."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "11 \u00b7 Inspect and save the result",
+    "image": "screenshots/standalone/local-run-completed.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual completed Superflip + EDMA demonstration; synthetic input does not imply independent experimental validation."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "11 \u00b7 Inspect and save the result \u00b7 enlarged view",
+    "image": "screenshots/standalone/local-run-completed.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual completed Superflip + EDMA demonstration; synthetic input does not imply independent experimental validation."
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "Common problems \u00b7 local tools and input",
+    "image": "screenshots/standalone/setup-edma.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "Common problems \u00b7 access and diagnostics",
+    "image": "screenshots/standalone/service-unavailable.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_FirstUse_Standalone.pdf",
+    "section": "Useful links and attribution",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Edition, evidence and limitations",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "The workflow in one page",
+    "image": "screenshots/workflow/execution-completed.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual GUI; combined processing state and scores are illustrative fixtures."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "The workflow in one page \u00b7 enlarged view",
+    "image": "screenshots/workflow/execution-completed.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual GUI; combined processing state and scores are illustrative fixtures."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "1 \u00b7 Verify input and optional models",
+    "image": "screenshots/jana2020/wizard-input.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "2 \u00b7 Validate HKL before phasing",
+    "image": "screenshots/workflow/hkl-validation.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "3 \u00b7 Understand completeness",
+    "image": "screenshots/workflow/hkl-completeness.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "4 \u00b7 One cycle versus multiple cycles",
+    "image": "screenshots/workflow/configuration-one-cycle.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "5 \u00b7 Automatic model selection",
+    "image": "screenshots/workflow/configuration-multi-cycle.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "6 \u00b7 Manual model selection",
+    "image": "screenshots/workflow/configuration-manual.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "7 \u00b7 Wizard SharpED settings",
+    "image": "screenshots/workflow/wizard-sharped-settings.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "8 \u00b7 Generate the SharpED access key",
+    "image": "screenshots/web/sharped-token-controls.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "9 \u00b7 Authentication and entitlement",
+    "image": "screenshots/web/jana-login.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "10 \u00b7 Advanced inference controls",
+    "image": "screenshots/workflow/professional-sharped.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "11 \u00b7 Transfer and network limits",
+    "image": "screenshots/workflow/professional-sharped.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "12 \u00b7 Map Feedback changes later input",
+    "image": "screenshots/workflow/feedback-one-cycle-disabled.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "13 \u00b7 Missing-reflection completion",
+    "image": "screenshots/workflow/feedback-missing-reflections.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "14 \u00b7 Weak-reflection correction with \u03c3",
+    "image": "screenshots/workflow/feedback-single-crystal.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "15 \u00b7 Threshold zero and width-only data",
+    "image": "screenshots/workflow/feedback-powder.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "16 \u00b7 Powder overlap repartitioning",
+    "image": "screenshots/workflow/feedback-powder.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "17 \u00b7 Cross-validation is an opt-in",
+    "image": "screenshots/workflow/configuration-multi-cycle.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "18 \u00b7 EDMA threshold and atomic sites",
+    "image": "screenshots/workflow/selector-edma-pending.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "18 \u00b7 EDMA threshold and atomic sites \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-edma-pending.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "19 \u00b7 Four different atom counts",
+    "image": "screenshots/workflow/selector-model-prediction.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "19 \u00b7 Four different atom counts \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-model-prediction.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "20 \u00b7 Read execution progress",
+    "image": "screenshots/workflow/execution-concurrent.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "20 \u00b7 Read execution progress \u00b7 enlarged view",
+    "image": "screenshots/workflow/execution-concurrent.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "21 \u00b7 Rotate, pan, zoom and Fit",
+    "image": "screenshots/workflow/viewer-complete-molecules.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "21 \u00b7 Rotate, pan, zoom and Fit \u00b7 enlarged view",
+    "image": "screenshots/workflow/viewer-complete-molecules.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "22 \u00b7 Complete molecules versus Full cell",
+    "image": "screenshots/workflow/viewer-full-cell.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "22 \u00b7 Complete molecules versus Full cell \u00b7 enlarged view",
+    "image": "screenshots/workflow/viewer-full-cell.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "23 \u00b7 Browse completed candidates",
+    "image": "screenshots/workflow/execution-completed.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "23 \u00b7 Browse completed candidates \u00b7 enlarged view",
+    "image": "screenshots/workflow/execution-completed.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "24 \u00b7 Choose a family and cycle",
+    "image": "screenshots/workflow/selector-manual-candidate.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "24 \u00b7 Choose a family and cycle \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-manual-candidate.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "25 \u00b7 What R factor and Amplitude CC mean",
+    "image": "screenshots/workflow/selector-charge-flipping.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "25 \u00b7 What R factor and Amplitude CC mean \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-charge-flipping.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "26 \u00b7 C3, holdout and recommendations",
+    "image": "screenshots/workflow/selector-model-prediction.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "26 \u00b7 C3, holdout and recommendations \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-model-prediction.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "27 \u00b7 Graceful stop and early handoff",
+    "image": "screenshots/workflow/execution-completed.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "27 \u00b7 Graceful stop and early handoff \u00b7 enlarged view",
+    "image": "screenshots/workflow/execution-completed.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "28 \u00b7 Return the scientific map and model",
+    "image": "screenshots/workflow/selector-manual-candidate.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "28 \u00b7 Return the scientific map and model \u00b7 enlarged view",
+    "image": "screenshots/workflow/selector-manual-candidate.png",
+    "captured": true,
+    "keys": [],
+    "state": "Actual application UI; synthetic teaching input / labelled demonstration state."
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "29 \u00b7 Interpreting your results",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "30 \u00b7 Professional mode: use it deliberately",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Input \u00b7 1",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [
+      "input_source_mode",
+      "jana_inflip"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Input \u00b7 2",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [
+      "hkl",
+      "reflection_data_mode"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Input \u00b7 3",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [
+      "metadata_source",
+      "reference_cif"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Input \u00b7 4",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [
+      "first_cycle_modelfile",
+      "manual_cell_a"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Input \u00b7 5",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [
+      "manual_cell_alpha",
+      "manual_cell_b"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Input \u00b7 6",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [
+      "manual_cell_beta",
+      "manual_cell_c"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Input \u00b7 7",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [
+      "manual_cell_gamma",
+      "manual_spacegroup_number"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Input \u00b7 8",
+    "image": "screenshots/standalone/standalone-input.png",
+    "captured": true,
+    "keys": [
+      "manual_spacegroup_symbol",
+      "manual_composition"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Workflow \u00b7 1",
+    "image": "screenshots/standalone/standalone-workflow.png",
+    "captured": true,
+    "keys": [
+      "workflow_preset",
+      "cycles"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Workflow \u00b7 2",
+    "image": "screenshots/standalone/standalone-workflow.png",
+    "captured": true,
+    "keys": [
+      "reconstruction_mode",
+      "damping_factor"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Workflow \u00b7 3",
+    "image": "screenshots/standalone/standalone-workflow.png",
+    "captured": true,
+    "keys": [
+      "exclude_atoms",
+      "sharped_model"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Workflow \u00b7 4",
+    "image": "screenshots/standalone/standalone-workflow.png",
+    "captured": true,
+    "keys": [
+      "run_edma_superflip",
+      "run_sharped"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Workflow \u00b7 5",
+    "image": "screenshots/standalone/standalone-workflow.png",
+    "captured": true,
+    "keys": [
+      "symmetrize_deblurred_map",
+      "run_edma_deblurred"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Workflow \u00b7 6",
+    "image": "screenshots/standalone/standalone-workflow.png",
+    "captured": true,
+    "keys": [
+      "compute_omit_maps",
+      "compute_omit_rfree"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Workflow \u00b7 7",
+    "image": "screenshots/standalone/standalone-workflow.png",
+    "captured": true,
+    "keys": [
+      "run_edma_recycle_final",
+      "modelfile_source"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Map feedback \u00b7 1",
+    "image": "screenshots/standalone/standalone-map-feedback.png",
+    "captured": true,
+    "keys": [
+      "map_feedback_missing_enabled",
+      "map_feedback_missing_from_cycle"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Map feedback \u00b7 2",
+    "image": "screenshots/standalone/standalone-map-feedback.png",
+    "captured": true,
+    "keys": [
+      "map_feedback_missing_percent_limit",
+      "map_feedback_intensity_enabled"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Map feedback \u00b7 3",
+    "image": "screenshots/standalone/standalone-map-feedback.png",
+    "captured": true,
+    "keys": [
+      "map_feedback_intensity_from_cycle",
+      "map_feedback_intensity_damping"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Map feedback \u00b7 4",
+    "image": "screenshots/standalone/standalone-map-feedback.png",
+    "captured": true,
+    "keys": [
+      "map_feedback_intensity_max_i_over_sigma",
+      "redistribute_overlaps"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Map feedback \u00b7 5",
+    "image": "screenshots/standalone/standalone-map-feedback.png",
+    "captured": true,
+    "keys": [
+      "powder_redistribution_from_cycle",
+      "powder_wavelength"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Map feedback \u00b7 6",
+    "image": "screenshots/standalone/standalone-map-feedback.png",
+    "captured": true,
+    "keys": [
+      "powder_separation_factor",
+      "powder_redistribution_mix"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Output \u00b7 1",
+    "image": "screenshots/standalone/standalone-output.png",
+    "captured": true,
+    "keys": [
+      "work_dir",
+      "map_export_format"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Output \u00b7 2",
+    "image": "screenshots/standalone/standalone-output.png",
+    "captured": true,
+    "keys": [
+      "structure_export_format"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Setup \u00b7 1",
+    "image": "screenshots/workflow/professional-setup.png",
+    "captured": true,
+    "keys": [
+      "superflip_exe",
+      "edma_exe"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Setup \u00b7 2",
+    "image": "screenshots/workflow/professional-setup.png",
+    "captured": true,
+    "keys": [
+      "sharped_base_url",
+      "sharped_api_token"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Setup \u00b7 3",
+    "image": "screenshots/workflow/professional-setup.png",
+    "captured": true,
+    "keys": [
+      "show_beta_features"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 1",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "perform_algorithm",
+      "maxcycles"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 2",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "repeatmode",
+      "randomseed"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 3",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "delta",
+      "weakratio"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 4",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "biso",
+      "polish"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 5",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "voxel",
+      "bestdensities_count"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 6",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "bestdensities_metric",
+      "searchsymmetry"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 7",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "derivesymmetry",
+      "i_over_sigma_min"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 8",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "resolution_d_min",
+      "normalize"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 9",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "nresshells",
+      "missing"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 Superflip \u00b7 10",
+    "image": "screenshots/workflow/professional-superflip.png",
+    "captured": true,
+    "keys": [
+      "electrons",
+      "extra_superflip_keywords"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 EDMA \u00b7 1",
+    "image": "screenshots/workflow/professional-edma.png",
+    "captured": true,
+    "keys": [
+      "plimit_superflip",
+      "plimit_deblur"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 EDMA \u00b7 2",
+    "image": "screenshots/workflow/professional-edma.png",
+    "captured": true,
+    "keys": [
+      "edma_maxima",
+      "edma_numberofatoms"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 EDMA \u00b7 3",
+    "image": "screenshots/workflow/professional-edma.png",
+    "captured": true,
+    "keys": [
+      "merge_distance",
+      "edma_fullcell"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 EDMA \u00b7 4",
+    "image": "screenshots/workflow/professional-edma.png",
+    "captured": true,
+    "keys": [
+      "edma_centerofcharge",
+      "edma_chlimit"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 EDMA \u00b7 5",
+    "image": "screenshots/workflow/professional-edma.png",
+    "captured": true,
+    "keys": [
+      "edma_chlimlist",
+      "extra_edma_keywords"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 SharpED \u00b7 1",
+    "image": "screenshots/workflow/professional-sharped.png",
+    "captured": true,
+    "keys": [
+      "sharped_elements",
+      "sharped_outres"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 SharpED \u00b7 2",
+    "image": "screenshots/workflow/professional-sharped.png",
+    "captured": true,
+    "keys": [
+      "sharped_map_value_exponent",
+      "sharped_max_upload_mb"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 SharpED \u00b7 3",
+    "image": "screenshots/workflow/professional-sharped.png",
+    "captured": true,
+    "keys": [
+      "sharped_timeout_seconds",
+      "sharped_poll_seconds"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Parameter reference \u00b7 SharpED \u00b7 4",
+    "image": "screenshots/workflow/professional-sharped.png",
+    "captured": true,
+    "keys": [
+      "sharped_max_polls"
+    ],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Technical appendix \u00b7 native Jana files",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Troubleshooting and unresolved definitions",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  },
+  {
+    "document": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "section": "Useful links, sources and attribution",
+    "image": null,
+    "captured": false,
+    "keys": [],
+    "state": "See source/asset provenance inventories"
+  }
+]

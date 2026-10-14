@@ -13,6 +13,18 @@ env/
 
 build/
 dist/
+/build.lnk
+.env
+.env.*
+!.env.example
+*_api_token.txt
+credentials.json
+# Local scientific acceptance reports; public results are summarized separately.
+/docs/FINAL_UX_OCHLOR_2_0_2.md
+/docs/JANA_DENSITY_FRAME_2_0_2.md
+# Private real-project selector captures; release screenshots use synthetic data.
+/docs/screenshots/2.0.3-result-selection/**/16-real-*
+/docs/screenshots/2.0.3-result-selection/**/17-real-*
 *.egg-info/
 
 .pytest_cache/

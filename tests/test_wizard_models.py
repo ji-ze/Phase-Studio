@@ -57,6 +57,7 @@ def pump(app, wizard, seconds=3.0):
 
 
 def main():
+    from PySide6.QtCore import QSettings
     from PySide6.QtWidgets import QApplication, QDialog
 
     app = QApplication.instance() or QApplication([sys.argv[0]])
@@ -66,14 +67,18 @@ def main():
     import phase_studio.jana_superflip as js
 
     QDialog.exec = lambda self: QDialog.Rejected
+    QSettings("PhaseStudio", "JanaSuperflipWrapper").clear()
 
-    calls = {"n": 0, "fail": False}
+    calls = {"n": 0, "fail": False, "models": [
+        "PEAK A (model prediction)", "UNIVERSAL", "SEED (cyclic CF)",
+        "PEAK B (model prediction)",
+    ]}
 
     def fake_get_models(self, *args, **kwargs):
         calls["n"] += 1
         if calls["fail"]:
             raise RuntimeError("synthetic server failure")
-        return _Models(["koala 2.0", "wombat 1.4", "emu 0.9"], "koala 2.0")
+        return _Models(calls["models"], "UNIVERSAL")
 
     js.SharpEDServerClient.get_models = fake_get_models
 
@@ -99,10 +104,22 @@ def main():
     # =====================================================================
     calls["n"] = 0
     wizard = build(js.WORKFLOW_SUPERFLIP_SHARPED)
+    wizard.dialog.show()
+    app.processEvents()
+    check("SharpED configuration form uses the available page width",
+          wizard.model.width() >= int(wizard.page2.width() * 0.50))
+    check("SharpED model selector has a readable responsive maximum width",
+          450 <= wizard.model.minimumWidth() <= wizard.model.maximumWidth() <= 550)
+    check("cycle control has a practical responsive width",
+          110 <= wizard.cycles.width() <= 140)
+    check("cycle control stays in the compact 110-140 px band",
+          wizard.cycles.minimumWidth() == 110 and wizard.cycles.maximumWidth() == 140)
     wizard._ensure_models_loaded()
     pump(app, wizard)
     check("Superflip + SharpED: models are fetched automatically", calls["n"] == 1)
     check("Superflip + SharpED: the list is populated", wizard.model.count() >= 4)
+    check("model dropdown is capped to a compact scrolling list",
+          wizard.model.maxVisibleItems() == 8)
     status = wizard.model_status.text()
     check(
         "Superflip + SharpED: 'Model list not loaded.' is gone",
@@ -110,20 +127,50 @@ def main():
     )
     check(
         "Superflip + SharpED: the count is reported",
-        "3 models available" in status,
+        "4 models available" in status,
     )
     check(
-        "Superflip + SharpED: the resolved server default is shown",
-        "server default: koala 2.0" in status,
+        "Superflip + SharpED: server-default presentation is hidden",
+        "server default" not in status.lower(),
     )
-    check(
-        "the API sentinel 'default' is preserved as the internal value",
-        wizard.model.currentText() == "default",
-    )
+    check("five cycles auto-select the canonical multi-cycle recommendation",
+          wizard.model.currentText() == "SEED (cyclic CF)")
+    wizard.cycles.setValue(2)
+    check("two cycles select the iterative policy model",
+          wizard.model.currentText() == "SEED (cyclic CF)")
+    wizard.cycles.setValue(1)
+    check("one cycle auto-selects the canonical one-cycle recommendation",
+          wizard.model.currentText() == "PEAK A (model prediction)")
+    check("one-cycle helper describes automatic selection without duplicating the model",
+          wizard.model_recommendation.text() ==
+          "Automatically selected · Recommended for 1 cycle")
+    wizard.cycles.setValue(5)
+    check("returning to multiple cycles restores its recommendation while unlocked",
+          wizard.model.currentText() == "SEED (cyclic CF)")
+    check("multi-cycle helper describes automatic selection without duplicating the model",
+          wizard.model_recommendation.text() ==
+          "Automatically selected · Recommended for 5 cycles")
     check(
         "Refresh models stays available as an explicit manual control",
         wizard.refresh_models_button.isEnabled(),
     )
+    wizard._go_to_map_feedback()
+    wizard.cycles.setValue(5)
+    wizard.missing_enabled_checkbox.setChecked(True)
+    wizard.missing_start_cycle_spin.setValue(3)
+    wizard.cycles.setValue(1)
+    check("one-cycle Map Feedback is marked inapplicable and editing is disabled",
+          wizard.feedback_applicability_note.isVisible()
+          and not wizard.missing_enabled_checkbox.isEnabled()
+          and not wizard.missing_start_cycle_spin.isEnabled())
+    check("one-cycle Map Feedback preserves the previously entered start cycle",
+          wizard.missing_start_cycle_spin.value() == 3)
+    wizard.cycles.setValue(5)
+    check("multi-cycle Map Feedback restores editing and enforces N-1",
+          wizard.missing_enabled_checkbox.isEnabled()
+          and wizard.missing_start_cycle_spin.isEnabled()
+          and wizard.missing_start_cycle_spin.maximum() == 4
+          and wizard.missing_start_cycle_spin.value() == 3)
 
     # --- caching: re-entering the page must not re-query ---
     wizard._ensure_models_loaded()
@@ -131,20 +178,54 @@ def main():
     check("a cached list is reused on re-entry (Back/Next)", calls["n"] == 1)
 
     # --- an explicit user choice survives a later refresh ---
-    wizard.model.setCurrentText("wombat 1.4")
+    wizard.model.setCurrentText("UNIVERSAL")
+    wizard.model.activated.emit(wizard.model.currentIndex())
+    wizard.cycles.setValue(1)
+    check("a manual model selection survives later cycle changes",
+          wizard.model.currentText() == "UNIVERSAL")
     wizard.refresh_models_button.click()
     pump(app, wizard)
     check("manual Refresh models performs a new request", calls["n"] == 2)
     check(
         "an explicit model choice is preserved across a refresh",
-        wizard.model.currentText() == "wombat 1.4",
+        wizard.model.currentText() == "UNIVERSAL",
     )
+    check("manual selection exposes a restore action", not wizard.manual_model_row.isHidden())
+    wizard.restore_automatic_model_button.click()
+    check("automatic selection hides manual status", wizard.manual_model_row.isHidden())
+    check("explicit automatic-mode restore reapplies the cycle policy",
+          wizard.model.currentText() == "PEAK A (model prediction)")
 
-    # --- a changed server configuration invalidates the cache ---
+    # --- the hidden compatibility field cannot redirect normal Wizard traffic ---
     wizard.server_url.setText("https://another.example.invalid")
     wizard._ensure_models_loaded()
     pump(app, wizard)
-    check("changing the server configuration re-queries", calls["n"] == 3)
+    check("normal Wizard traffic remains fixed to one server authority", calls["n"] == 2)
+
+    # A removed manual choice explicitly returns to automatic policy.
+    wizard.model.setCurrentText("PEAK B (model prediction)")
+    wizard.model.activated.emit(wizard.model.currentIndex())
+    calls["models"] = ["PEAK A (model prediction)", "UNIVERSAL", "SEED (cyclic CF)"]
+    wizard.refresh_models_button.click()
+    pump(app, wizard)
+    check("an unavailable manual override restores automatic selection",
+          not wizard.model_user_picked["value"]
+          and wizard.model.currentText() == "PEAK A (model prediction)")
+    check("manual-removal warning is explicit",
+          "no longer available" in wizard.model_status.text())
+
+    # A required policy model may never fall back to the server default.
+    calls["models"] = ["UNIVERSAL", "SEED (cyclic CF)", "PEAK B (model prediction)"]
+    wizard.refresh_models_button.click()
+    pump(app, wizard)
+    check("missing one-cycle policy model leaves no substituted selection",
+          wizard.model.currentIndex() == -1)
+    check("missing one-cycle policy model is a blocking policy error",
+          "PEAK A (model prediction)" in wizard.model_policy_error)
+    calls["models"] = [
+        "PEAK A (model prediction)", "UNIVERSAL", "SEED (cyclic CF)",
+        "PEAK B (model prediction)",
+    ]
 
     # =====================================================================
     # Phase recycling: exactly one automatic request
@@ -155,8 +236,8 @@ def main():
     pump(app, wizard)
     check("Phase recycling: models are fetched automatically", calls["n"] == 1)
     check(
-        "Phase recycling: the resolved server default is shown",
-        "server default: koala 2.0" in wizard.model_status.text(),
+        "Phase recycling: the server default remains out of normal presentation",
+        "server default" not in wizard.model_status.text().lower(),
     )
     wizard._ensure_models_loaded()
     pump(app, wizard, seconds=0.4)
@@ -174,17 +255,54 @@ def main():
     check("a failed model request is reported", calls["n"] == 1)
     check(
         "the failure state is concise and names the retry",
-        "unavailable" in status.lower() and "refresh" in status.lower(),
+        "failed" in status.lower() and "refresh" in status.lower(),
     )
     check(
         "Refresh models is still available after a failure",
         wizard.refresh_models_button.isEnabled(),
     )
     check(
-        "a model identifier can still be typed by hand after a failure",
-        wizard.model.isEditable(),
+        "a failed catalog cannot be bypassed with an unverified model name",
+        not wizard.model.isEditable(),
     )
     calls["fail"] = False
+
+    import tempfile
+    settings_dir = tempfile.TemporaryDirectory()
+    original_imports = js._qt_imports
+    def fixture_imports():
+        qt = original_imports()
+        qt["QSettings"] = lambda _organization, application: QSettings(
+            str(Path(settings_dir.name) / (application + ".ini")), QSettings.IniFormat,
+        )
+        return qt
+    js._qt_imports = fixture_imports
+    settings = QSettings(str(Path(settings_dir.name) / "JanaSuperflipWrapper.ini"), QSettings.IniFormat)
+    settings.setValue("model", "UNIVERSAL")
+    settings.remove("model_selection_mode")
+    wizard = build(js.WORKFLOW_SUPERFLIP_SHARPED)
+    wizard._ensure_models_loaded()
+    pump(app, wizard)
+    check("legacy model text alone does not establish a manual preference",
+          not wizard.model_user_picked["value"])
+    check("programmatic catalogue population remains automatic",
+          wizard.manual_model_row.isHidden())
+    settings.setValue("model_selection_mode", "manual")
+    settings.setValue("model", "UNIVERSAL")
+    wizard = build(js.WORKFLOW_SUPERFLIP_SHARPED)
+    wizard._ensure_models_loaded()
+    pump(app, wizard)
+    check("explicit valid saved manual preference is restored",
+          wizard.model_user_picked["value"] and wizard.model.currentText() == "UNIVERSAL")
+    settings.setValue("model", "REMOVED MODEL")
+    wizard = build(js.WORKFLOW_SUPERFLIP_SHARPED)
+    wizard._ensure_models_loaded()
+    pump(app, wizard)
+    check("invalid saved manual preference returns to automatic",
+          not wizard.model_user_picked["value"])
+    settings.clear()
+    js._qt_imports = original_imports
+    settings_dir.cleanup()
 
     failures = [name for name, ok in results_log if not ok]
     print()

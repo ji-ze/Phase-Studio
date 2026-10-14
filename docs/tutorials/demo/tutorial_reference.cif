@@ -1,0 +1,22 @@
+data_synthetic_carbon_ring
+_cell_length_a 10
+_cell_length_b 10
+_cell_length_c 10
+_cell_angle_alpha 90
+_cell_angle_beta 90
+_cell_angle_gamma 90
+_symmetry_space_group_name_H-M 'P 1'
+loop_
+_atom_site_label
+_atom_site_type_symbol
+_atom_site_fract_x
+_atom_site_fract_y
+_atom_site_fract_z
+_atom_site_occupancy
+_atom_site_U_iso_or_equiv
+C1 C 0.64000000 0.50000000 0.50000000 1 .025
+C2 C 0.57000000 0.62124356 0.50000000 1 .025
+C3 C 0.43000000 0.62124356 0.50000000 1 .025
+C4 C 0.36000000 0.50000000 0.50000000 1 .025
+C5 C 0.43000000 0.37875644 0.50000000 1 .025
+C6 C 0.57000000 0.37875644 0.50000000 1 .025

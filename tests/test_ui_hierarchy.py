@@ -148,15 +148,20 @@ def main():
 
     # =========================================================================
     # Metrics tab bar: no corner widget competing with the tab bar, scroll
-    # (not silent elision) used for overflow, all 6 scientific tab names present.
+    # (not silent elision) used for overflow, exactly three profile metrics present.
     # =========================================================================
     check("Metrics tab bar has no corner widget (moved to its own toolbar row)", win.metrics_tabs.cornerWidget() is None)
     check("Metrics tab bar uses scroll buttons rather than eliding", win.metrics_tabs.usesScrollButtons())
     from PySide6.QtCore import Qt as _Qt
     check("Metrics tab bar never silently elides", win.metrics_tabs.tabBar().elideMode() == _Qt.TextElideMode.ElideNone)
-    expected_metrics_tabs = {"Superflip", "SharpED", "Superflip validation", "SharpED validation", "Powder repartitioning", "Intensity correction"}
-    actual_metrics_tabs = {win.metrics_tabs.tabText(i) for i in range(win.metrics_tabs.count())}
-    check("All 6 scientific metrics tab names preserved, unshortened", actual_metrics_tabs == expected_metrics_tabs)
+    expected_metrics_tabs = {"Amplitude agreement R factor", "Amplitude CC", "Weighted triplet C3"}
+    # A 4th tab (the restored Map Feedback change diagnostic) always exists
+    # but stays hidden until Map Feedback intensity correction is enabled --
+    # "shown" means visible, not merely present in the QTabWidget.
+    actual_metrics_tabs = {
+        win.metrics_tabs.tabText(i) for i in range(win.metrics_tabs.count()) if win.metrics_tabs.isTabVisible(i)
+    }
+    check("Exactly 3 reference-free profile metric tabs are shown initially", actual_metrics_tabs == expected_metrics_tabs)
 
     # =========================================================================
     # Callout system: kind-aware property, Warning stays prominent.
@@ -227,9 +232,29 @@ def main():
             log_colors[block.text()] = it.fragment().charFormat().foreground().color().name()
         block = block.next()
     check("Execution log NORMAL tier color", log_colors.get("Micro-polish test: normal info line.") == "#14204a")
-    check("Execution log DETAIL tier is a distinct, lighter secondary color", log_colors.get("Micro-polish test: detail line.") == "#7183a6")
+    check("Execution log hides DIAGNOSTIC detail from the concise GUI",
+          "Micro-polish test: detail line." not in log_colors)
     check("Execution log WARNING tier stays visually prominent (distinct color)", log_colors.get("Micro-polish test: warning line.") == "#8a5a00")
     check("Execution log ERROR tier stays visually prominent (distinct color)", log_colors.get("Micro-polish test: error line.") == "#b42318")
+    persisted = []
+    win._run_diagnostic_log = type("CaptureDiagnostic", (), {
+        "write": lambda self, record: persisted.append(record),
+    })()
+    win._append_execution_log(
+        r"[SharpED] Input map C:\project\run_0001\map.xplor · SHA-256 abc · dimensions (10, 10, 10)",
+        level="DETAIL", subsystem="SharpED",
+    )
+    win._append_execution_log("[SharpED] Processing…", subsystem="SharpED")
+    win._append_execution_log("Unrelated visible progress", subsystem="Workflow")
+    win._append_execution_log("[SharpED] Processing…", subsystem="SharpED")
+    concise_text = win.log_text.toPlainText()
+    check("GUI log omits map paths/hashes/statistics retained by diagnostics",
+          "SHA-256 abc" not in concise_text and any("SHA-256 abc" in record.text for record in persisted))
+    check("GUI log suppresses SharpED HTTP polling states entirely",
+          "[SharpED] Processing…" not in concise_text)
+    check("diagnostic sink receives every repeated polling observation",
+          sum(record.text == "[SharpED] Processing…" for record in persisted) == 2)
+    win._run_diagnostic_log = None
 
     help_page = page_widget("Basic", "Help")
     guide_headings = [w for w in help_page.findChildren(QGroupBox) if w.title() in ("Systematic setup guide", "Phase Studio guide")]
@@ -318,6 +343,35 @@ def main():
             real_load_settings(win)
             check("The 0.0 bypass value also persists and is restored, not reset to the default",
                   exponent_widget.value() == 0.0)
+
+            # Representative pre-1.0.9 keys must continue to populate their
+            # current controls without rewriting the user's settings first.
+            win.settings.clear()
+            win.settings.setValue("inputs/bestdensities_symmetry", True)
+            win.settings.setValue("inputs/plimit", "2.75")
+            win.settings.setValue("inputs/export_superflip_jana", True)
+            win.settings.setValue("inputs/superflip_reference_xplor", r"C:\old\reference.xplor")
+            win.settings.setValue("inputs/superflip_exe", "superflip.exe")
+            win.settings.setValue("inputs/edma_exe", "edma.exe")
+            win.settings.sync()
+            win._set_widget_value_from_string(win.inputs["bestdensities_metric"], "contrast")
+            win._set_widget_value_from_string(win.inputs["plimit_superflip"], "0.5")
+            win._set_widget_value_from_string(win.inputs["plimit_deblur"], "0.5")
+            win._set_widget_value_from_string(win.inputs["map_export_format"], "xplor")
+            win._set_widget_value_from_string(win.inputs["reference_cif"], "")
+            real_load_settings(win)
+            check("legacy best-densities symmetry key maps to the current metric choice",
+                  win._widget_value_as_string(win.inputs["bestdensities_metric"]) == "symmetry")
+            check("legacy common EDMA threshold populates both current threshold controls",
+                  abs(float(win._widget_value_as_string(win.inputs["plimit_superflip"])) - 2.75) < 1e-9 and
+                  abs(float(win._widget_value_as_string(win.inputs["plimit_deblur"])) - 2.75) < 1e-9)
+            check("legacy Jana export flag maps to the current map-format control",
+                  win._widget_value_as_string(win.inputs["map_export_format"]) == "jana")
+            check("legacy reference-map key populates the current reference control",
+                  win._widget_value_as_string(win.inputs["reference_cif"]) == r"C:\old\reference.xplor")
+            check("generic legacy executable names migrate to Jana2020 defaults",
+                  win._widget_value_as_string(win.inputs["superflip_exe"]) == r"C:\Jana2020\SUPERFLIP\superflip.exe" and
+                  win._widget_value_as_string(win.inputs["edma_exe"]) == r"C:\Jana2020\SUPERFLIP\EDMA.exe")
         finally:
             win.settings = original_settings
             exponent_widget.setValue(1.0)
@@ -389,45 +443,40 @@ def main():
 
     check("Structure Comparison builds all 3 panels", len(win.structure_axes) == 3)
     check("All 3 panels count as interactive when all have atoms", len(win._structure_interactive_axes) == 3)
-    check("All panels start from identical 3D limits (they share one cell)",
-          len({panel_limits(a) for a in win.structure_axes}) == 1)
+    check("Each populated panel starts from its own safe content fit",
+          len({panel_limits(a) for a in win.structure_axes}) > 1)
 
-    limits_before = panel_limits(win.structure_axes[0])
     source_ax = win.structure_axes[1]
+    limits_before = panel_limits(source_ax)
+    other_limits_before = [panel_limits(win.structure_axes[i]) for i in (0, 2)]
 
-    # Right-button drag == matplotlib's 3D zoom. Drive matplotlib's own
-    # handler exactly as the canvas would, then let the app mirror the result.
-    source_ax.button_pressed = 3
-    source_ax._sx, source_ax._sy = 0.5, 0.5
-    win._begin_structure_view_drag(FakeMouseEvent(source_ax, 700, 400, 0.5, 0.5, 3))
-    check("A populated panel is accepted as the drag source", win._structure_view_drag_source is source_ax)
-
-    zoom_move = FakeMouseEvent(source_ax, 700, 300, 0.5, 0.30, 3)
-    source_ax._on_move(zoom_move)
-    win._sync_structure_view_from_event(zoom_move)
+    # Right-button drag is the shared controller's panel-local pan gesture.
+    win._classic_camera._press(FakeMouseEvent(source_ax, 700, 400, 0.5, 0.5, 3))
+    check("A populated panel is accepted as the drag source",
+          win._classic_camera._drag is not None and win._classic_camera._drag["axis"] is source_ax)
+    pan_move = FakeMouseEvent(source_ax, 740, 360, 0.55, 0.45, 3)
+    win._classic_camera._motion(pan_move)
 
     limits_after = panel_limits(source_ax)
-    check("Right-drag actually zoomed the panel under the cursor", limits_after != limits_before)
-    check("Right-drag zoom is mirrored onto every other panel",
-          len({panel_limits(a) for a in win.structure_axes}) == 1)
-    stored_limits = tuple(
-        tuple(round(float(v), 6) for v in pair) for pair in (win.structure_view_limits or ())
-    )
-    check("The shared zoom is recorded on the window for later re-renders", stored_limits == limits_after)
+    check("Right-drag actually moved the panel under the cursor", limits_after != limits_before)
+    check("Right-drag pan leaves every other panel's independent fit unchanged",
+          [panel_limits(win.structure_axes[i]) for i in (0, 2)] == other_limits_before)
+    check("No shared zoom/center is stored across independently fitted panels", win.structure_view_limits is None)
 
-    win._finish_structure_view_drag(FakeMouseEvent(source_ax, 700, 300, 0.5, 0.30, 3))
-    check("Finishing the drag clears the drag source", win._structure_view_drag_source is None)
+    win._classic_camera._release(pan_move)
+    check("Finishing the drag clears the drag source", win._classic_camera._drag is None)
 
-    # The zoom must survive a redraw, exactly as the rotation already does.
+    # A redraw restores each panel's own fit while preserving orientation.
     win._update_structure_views()
-    check("Zoom is preserved across a panel re-render", panel_limits(win.structure_axes[0]) == limits_after)
-    check("Panels stay identical after the re-render",
-          len({panel_limits(a) for a in win.structure_axes}) == 1)
+    check("A panel re-render restores content fit rather than sharing another panel's zoom",
+          panel_limits(win.structure_axes[1]) != limits_after)
+    check("Panels retain independent fits after the re-render",
+          len({panel_limits(a) for a in win.structure_axes}) > 1)
 
     # A different cell must reset the view rather than inherit a stale zoom.
     win.structure_cell = gemmi.UnitCell(20.0, 21.0, 22.0, 90.0, 90.0, 90.0)
     win._update_structure_views()
-    check("A cell change drops the stored zoom instead of reusing it", win.structure_view_limits is None)
+    check("A cell change retains the independent-fit contract", win.structure_view_limits is None)
     check("A cell change reframes the panels on the new cell",
           panel_limits(win.structure_axes[0]) != limits_after)
 
@@ -439,8 +488,8 @@ def main():
     win._begin_structure_view_drag(FakeMouseEvent(win.structure_axes[2], 1200, 400, 0.5, 0.5, 3))
     check("An empty panel is refused as a drag source", win._structure_view_drag_source is None)
 
-    check("Structure viewer hint documents the right-button zoom",
-          "right-drag to zoom" in win.structure_rotation_hint.text())
+    check("Structure viewer hint documents the right-button pan gesture",
+          "right/middle/shift-left-drag: pan" in win.structure_rotation_hint.text().lower())
     check("Structure viewer hint still documents rotation and the shared views",
           "rotate" in win.structure_rotation_hint.text() and "sync" in win.structure_rotation_hint.text())
 

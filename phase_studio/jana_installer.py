@@ -1,17 +1,19 @@
 """Dedicated Jana2020 integration manager; never imports the scientific GUI."""
 from __future__ import annotations
 import html
+import os
 import sys
 from pathlib import Path
 from typing import Dict, Optional
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from PySide6.QtWidgets import (QApplication, QDialog, QWidget, QVBoxLayout, QHBoxLayout,
     QScrollArea, QFrame, QGroupBox, QLineEdit, QPushButton, QLabel, QTextEdit,
     QFileDialog, QMessageBox)
 from phase_studio.version import VERSION
 from phase_studio.ui_style import apply_phase_studio_style
 from phase_studio.ui_branding import (create_phase_studio_brand_header,
-    create_phase_studio_context_banner, apply_safe_dialog_geometry, apply_phase_studio_app_icon)
+    create_phase_studio_context_banner, apply_safe_dialog_geometry, apply_phase_studio_app_icon,
+    close_bootloader_splash)
 
 
 def create_integration_dialog(parent=None, configured_paths=()):
@@ -33,8 +35,8 @@ def create_integration_dialog(parent=None, configured_paths=()):
     scroll_area.setFrameShape(QFrame.NoFrame)
     content = QWidget()
     content_layout = QVBoxLayout(content)
-    content_layout.setContentsMargins(14, 10, 14, 10)
-    content_layout.setSpacing(10)
+    content_layout.setContentsMargins(16, 10, 16, 8)
+    content_layout.setSpacing(8)
     scroll_area.setWidget(content)
     outer.addWidget(scroll_area, 1)
 
@@ -56,6 +58,8 @@ def create_integration_dialog(parent=None, configured_paths=()):
 
     status_group = QGroupBox("Detection Status")
     status_layout = QVBoxLayout(status_group)
+    status_layout.setContentsMargins(10, 12, 10, 8)
+    status_layout.setSpacing(5)
     content_layout.addWidget(status_group)
 
     state_label = QLabel("")
@@ -85,7 +89,6 @@ def create_integration_dialog(parent=None, configured_paths=()):
     log_view.setVisible(False)
     log_view.setMaximumHeight(140)
     content_layout.addWidget(log_view)
-    content_layout.addStretch(1)
 
     footer = QWidget()
     footer.setObjectName("wizardFooter")
@@ -100,6 +103,8 @@ def create_integration_dialog(parent=None, configured_paths=()):
     # state depends on detecting a payload/writable directory first.
     remove_btn.setEnabled(False)
     primary_btn.setEnabled(False)
+    for button in (close_btn, remove_btn, primary_btn):
+        button.setMinimumHeight(30)
     footer_layout.addWidget(close_btn)
     footer_layout.addStretch(1)
     footer_layout.addWidget(remove_btn)
@@ -180,8 +185,19 @@ def create_integration_dialog(parent=None, configured_paths=()):
             )
         else:
             sig = ji.authenticode_signature_status(payload_dir / ji.WRAPPER_EXE_NAME)
-            sig_text = {"signed": "Signed", "unsigned": "Unsigned"}.get(sig, "Unknown")
-            signature_label.setText(f"<b>Integration package: Ready</b><br>Wrapper signature: {sig_text}")
+            sig_text = {
+                "signed": "Present",
+                "unsigned": "Not present",
+            }.get(sig, "Could not be determined")
+            integrity_text = (
+                "Package integrity: Verified"
+                if getattr(sys, "frozen", False)
+                else "Package integrity: Development files loaded"
+            )
+            signature_label.setText(
+                f"<b>Integration package: Ready</b><br>{integrity_text}<br>"
+                f"Digital signature: {sig_text}"
+            )
 
         can_write = report is not None and report.exists and report.is_writable
         primary_btn.setText({
@@ -206,7 +222,7 @@ def create_integration_dialog(parent=None, configured_paths=()):
             except OSError:
                 has_valid_backup = False
         remove_btn.setEnabled(can_write and owns_installation and has_valid_backup)
-        apply_safe_dialog_geometry(dialog, 640, 640)
+        apply_safe_dialog_geometry(dialog, 640, 590)
 
     def browse_clicked() -> None:
         start_dir = str(state["jana_root"]) if state.get("jana_root") else r"C:\Jana2020"
@@ -281,11 +297,14 @@ def create_integration_dialog(parent=None, configured_paths=()):
     close_btn.clicked.connect(dialog.reject)
 
     refresh(ji.detect_jana_root(configured_paths))
-    apply_safe_dialog_geometry(dialog, 640, 640)
+    apply_safe_dialog_geometry(dialog, 640, 590)
     dialog.primary_button = primary_btn
     dialog.remove_button = remove_btn
     dialog.refresh_status = refresh
     dialog.integration_state = state
+    dialog.path_edit = path_edit
+    dialog.signature_label = signature_label
+    dialog.status_group = status_group
     return dialog
 
 
@@ -303,6 +322,11 @@ def main():
     paths = [Path(value) for key in ("superflip_exe", "edma_exe")
              if (value := str(settings.value(f"inputs/{key}", ""))).strip()]
     dialog = create_integration_dialog(configured_paths=paths)
+    dialog.show()
+    app.processEvents()
+    close_bootloader_splash()
+    if os.environ.get("PHASE_STUDIO_STARTUP_PROBE") == "1":
+        QTimer.singleShot(250, dialog.accept)
     dialog.exec()
     return 0
 

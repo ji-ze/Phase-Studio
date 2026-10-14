@@ -2,7 +2,7 @@
 
 The Store product is the standalone Phase Studio desktop application.
 The Jana2020 installer and its payload are distributed separately and must
-never enter an MSIX. Scientific support for Jana .inflip files is retained.
+never enter an MSIX. Scientific support for Jana2020 .inflip files is retained.
 
 ## Build
 
@@ -29,7 +29,7 @@ Default outputs:
 - `dist/store/PhaseStudio-<version>-x64.msix`
 - `dist/store/manifest/AppxManifest.xml`
 
-The manifest version is canonical `VERSION + ".0"` (currently 1.0.9.0).
+The manifest version is canonical `VERSION + ".0"` (currently 2.0.2.0).
 An explicit `-Version` must agree; it cannot override the application version.
 No Jana wrapper signing parameters or integration payload markers are used by
 this Store build.

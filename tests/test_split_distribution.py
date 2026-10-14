@@ -39,7 +39,7 @@ class SplitDistributionTests(unittest.TestCase):
         return {str(p.relative_to(self.target)): p.read_bytes() for p in self.target.rglob("*") if p.is_file()}
 
     def test_canonical_version(self):
-        self.assertEqual(VERSION, "1.0.9")
+        self.assertEqual(VERSION, "2.0.3")
         self.assertEqual(ji.bundled_integration_version(), VERSION)
         import phase_studio.app as app, phase_studio.jana_superflip as wizard
         self.assertEqual(app.__version__, VERSION)
@@ -49,6 +49,53 @@ class SplitDistributionTests(unittest.TestCase):
     def test_installer_import_does_not_load_scientific_gui(self):
         code = "import sys; import phase_studio.jana_installer; assert 'phase_studio.app' not in sys.modules; assert 'phase_studio.jana_superflip' not in sys.modules"
         subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True)
+
+    def test_onefile_installer_uses_private_embedded_payload(self):
+        bundle = Path(self.temp.name) / "onefile-temp"
+        payload_package = bundle / "JanaIntegrationPayload"
+        package_payload = __import__("runpy").run_path(
+            str(ROOT / "packaging/tools/package_jana_payload.py")
+        )["package_payload"]
+        package_payload(self.payload, payload_package)
+        adjacent = Path(self.temp.name) / "public"
+        adjacent.mkdir()
+        import shutil
+        shutil.copytree(self.payload, adjacent / "JanaIntegration")
+        with patch.object(sys, "frozen", True, create=True), \
+             patch.object(sys, "_MEIPASS", str(bundle), create=True), \
+             patch.object(sys, "executable", str(adjacent / "installer.exe")):
+            extracted = ji.resolve_bundled_jana_payload_dir()
+            self.assertIsNotNone(extracted)
+            self.assertNotEqual(extracted, adjacent / "JanaIntegration")
+            self.assertEqual(self.snapshot_payload(extracted), self.snapshot_payload(self.payload))
+            installed = ji.install_or_update_integration(self.target, extracted)
+            self.assertTrue(installed.success, installed.message)
+        ji._cleanup_embedded_payload()
+        self.assertTrue((self.target / "superflip.exe").is_file())
+        self.assertTrue((self.target / "_internal/runtime.dll").is_file())
+
+    @staticmethod
+    def snapshot_payload(root):
+        return {str(path.relative_to(root)): path.read_bytes()
+                for path in Path(root).rglob("*") if path.is_file()}
+
+    def test_embedded_payload_rejects_path_escape(self):
+        import zipfile
+        package = Path(self.temp.name) / "unsafe"
+        package.mkdir()
+        archive = package / "jana-wrapper.zip"
+        manifest = package / "jana-wrapper-manifest.json"
+        data = b"escape"
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("../escape.exe", data)
+        import hashlib
+        manifest.write_text(json.dumps({"format": 1, "files": [{
+            "path": "../escape.exe", "size": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }]}))
+        with self.assertRaisesRegex(ValueError, "unsafe path"):
+            ji._extract_verified_payload(archive, manifest)
+        self.assertFalse((package.parent / "escape.exe").exists())
 
     def test_entrypoint_versions(self):
         for module in ("phase_studio", "phase_studio.jana_installer"):
@@ -146,7 +193,7 @@ class SplitDistributionTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
 
     def test_installer_dialog_drives_lifecycle(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QApplication, QLabel, QMessageBox
         from phase_studio.jana_installer import create_integration_dialog
         app = QApplication.instance() or QApplication([])
         self.install("1.0.8")
@@ -156,6 +203,14 @@ class SplitDistributionTests(unittest.TestCase):
              patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
             dialog = create_integration_dialog()
             self.assertIn(VERSION, dialog.windowTitle())
+            self.assertEqual(dialog.path_edit.text(), str(self.root))
+            status_text = " ".join(label.text() for label in dialog.status_group.findChildren(QLabel))
+            self.assertIn("SUPERFLIP directory detected", status_text)
+            self.assertIn("Original Superflip detected", status_text)
+            self.assertIn("EDMA detected", status_text)
+            self.assertIn("Integration package: Ready", dialog.signature_label.text())
+            self.assertIn("Package integrity:", dialog.signature_label.text())
+            self.assertIn("Digital signature: Not present", dialog.signature_label.text())
             self.assertEqual(dialog.primary_button.text(), "Update integration")
             dialog.primary_button.click()
             self.assertEqual(dialog.primary_button.text(), "Repair integration")
@@ -170,7 +225,7 @@ class SplitDistributionTests(unittest.TestCase):
             dialog.deleteLater()
             app.processEvents()
 
-    def test_standalone_has_no_management_action(self):
+    def test_standalone_has_result_export_action_but_no_management_action(self):
         from PySide6.QtWidgets import QApplication, QPushButton
         from phase_studio.app import IterativeSuperflipPipelineQtGUI
         app = QApplication.instance() or QApplication([])
@@ -178,7 +233,9 @@ class SplitDistributionTests(unittest.TestCase):
              patch.object(IterativeSuperflipPipelineQtGUI, "save_settings"), \
              patch.object(IterativeSuperflipPipelineQtGUI, "refresh_sharped_models"):
             win = IterativeSuperflipPipelineQtGUI()
-            self.assertTrue(win.jana_action_btn.isHidden())
+            self.assertFalse(win.jana_action_btn.isHidden())
+            self.assertEqual(win.jana_action_btn.text(), "Save map and model")
+            self.assertFalse(win.jana_action_btn.isEnabled())
             self.assertFalse(hasattr(win, "open_install_to_jana_dialog"))
             self.assertFalse(any("Install" in button.text() or "Repair" in button.text()
                                  for button in win.findChildren(QPushButton)))
@@ -189,10 +246,62 @@ class SplitDistributionTests(unittest.TestCase):
 
     def test_store_selects_only_standalone(self):
         script = (ROOT / "packaging/build_store_msix.ps1").read_text()
-        self.assertIn('-Target Standalone', script)
+        self.assertIn('PhaseStudioStore.spec', script)
+        self.assertIn('--profile store', script)
         self.assertNotIn('JanaSigningCertificate', script)
         self.assertIn('Store packaging refuses a Jana installation payload', script)
         self.assertIn('$Version = $canonicalVersion', script)
+
+    def test_public_release_contract_is_standalone_and_developer_archive(self):
+        build = (ROOT / "packaging/build_windows.ps1").read_text()
+        spec = (ROOT / "packaging/pyinstaller/PhaseStudio.spec").read_text()
+        self.assertIn('PhaseStudio-$Version-x64.exe', build)
+        self.assertIn('PhaseStudio-Jana2020-$Version.zip', build)
+        self.assertIn('Phase_studio.exe', build)
+        self.assertNotIn('JanaInstaller', build)
+        self.assertIn('$publicFiles.Count -ne $expected.Count', build)
+        self.assertIn('a.binaries, a.datas', spec)
+        self.assertIn('"JanaIntegrationPayload"', spec)
+        self.assertIn('Splash(', spec)
+        self.assertIn('phase_studio_splash.png', spec)
+        self.assertIn('splash, splash.binaries, a.binaries, a.datas', spec)
+        self.assertIn('PHASE_STUDIO_STARTUP_PROBE', (ROOT / "phase_studio/app.py").read_text(encoding="utf-8"))
+        self.assertIn('PHASE_STUDIO_STARTUP_PROBE', (ROOT / "phase_studio/jana_installer.py").read_text(encoding="utf-8"))
+        self.assertTrue((ROOT / "phase_studio/assets/phase_studio_splash.png").is_file())
+        self.assertTrue((ROOT / "phase_studio/assets/fonts/ScienceGothic-Variable.ttf").is_file())
+        self.assertTrue((ROOT / "phase_studio/assets/fonts/OFL-Science-Gothic.txt").is_file())
+        self.assertIn('(str(project_dir / "phase_studio" / "assets"), "phase_studio/assets")', spec)
+        self.assertTrue((ROOT / "packaging/pyinstaller/PhaseStudioStore.spec").is_file())
+
+    def test_portable_distribution_manifest_schema_is_stable(self):
+        portable = __import__("runpy").run_path(
+            str(ROOT / "packaging/pyinstaller/portable_runtime.py")
+        )
+        manifest_path = Path(self.temp.name) / "portable-runtime.json"
+        portable["write_portable_manifest"](
+            manifest_path,
+            app="PhaseStudio",
+            staged_runtime=[{"name": "vcruntime140.dll", "version": "14.0", "source": "wheel"}],
+            qt_report={"pyside6_version": "6.x", "shiboken6_version": "6.x", "pyside6_path": "Qt"},
+            removed_ucrt=["ucrtbase.dll"],
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        self.assertEqual(set(manifest), {
+            "app", "python", "python_prefix", "qt", "msvc_runtime",
+            "removed_app_local_ucrt", "required_binaries",
+        })
+        self.assertEqual(manifest["app"], "PhaseStudio")
+        self.assertEqual(manifest["qt"], {
+            "pyside6_version": "6.x", "shiboken6_version": "6.x", "pyside6_path": "Qt",
+        })
+        self.assertEqual(manifest["msvc_runtime"], [
+            {"name": "vcruntime140.dll", "version": "14.0", "source": "wheel"},
+        ])
+        self.assertEqual(manifest["removed_app_local_ucrt"], ["ucrtbase.dll"])
+        self.assertEqual(
+            manifest["required_binaries"],
+            ["Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll"],
+        )
 
     def test_scientific_functions_match_integrated_baseline(self):
         git = r"C:\Program Files\Git\cmd\git.exe" if os.name == "nt" else "git"
@@ -205,9 +314,140 @@ class SplitDistributionTests(unittest.TestCase):
             old, new = functions(baseline), functions(current)
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
-                        "fitted_dialog_client_size", "fit_dialog_to_available_screen"}
+                        "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record",
+                        # Explicitly extended for immutable validation holdouts;
+                        # the existing correction formula remains unchanged.
+                        "apply_map_feedback_to_reflections", "compute_rfree", "atom_recall_precision",
+                        # Explicit profile-aware per-cycle/source reporting.
+                        "write_metrics_csv"}
+            if filename == "app.py":
+                # API orchestration is pinned by test_sharped_api_contract.py;
+                # DEFAULT resolution here was restored from commit 396270c.
+                # Performance-only wrappers and in-memory FFT reuse are pinned
+                # by test_performance.py; the numerical outputs remain covered
+                # by the golden scientific suite.
+                excluded |= {"run_sharped_deblur", "assess_xplor_map",
+                             "run_superflip_cycle", "run_superflip_symmetrize_map",
+                             "run_edma_on_xplor", "run_command",
+                             "xplor_fft_predictions", "compose_fobs_phicalc_map",
+                             # Moved byte-for-byte policies are pinned by
+                             # test_scientific_core.py and inflip_io.py.
+                             "split_inflip_line", "inflip_first_token",
+                             "insert_before_fbegin", "without_inflip_keywords",
+                             "inflip_header_for_m80", "define_m80_inflip_from_model"}
+                # Uncalled legacy Authenticode warning chain; current
+                # requirement/error dialogs own executable guidance.
+                excluded |= {"resolve_executable_for_validation", "warn_if_windows_unsigned_exe"}
+                # Moved unchanged with the workflow-metrics presentation.
+                excluded |= {"robust_detail_range"}
+                # Presentation aliases accepted by the metadata-source combo;
+                # authoritative resolution is covered by test_final_ui.py.
+                excluded |= {"normalize_metadata_source", "normalize_input_source_mode"}
+                # 2.0.2 composition presentation now carries a typed,
+                # run-wide Jana model authority (m40 sites + m50 atom types,
+                # symmetry and explicit unitsnumb). The crystallographic
+                # cell/space-group/input composition values returned by these
+                # functions are unchanged; dedicated viewer tests pin the new
+                # authority and forbid EDMA peak-count substitution.
+                excluded |= {
+                    "read_reference_crystal_metadata", "resolve_crystal_metadata",
+                    "crystal_metadata_composition_label",
+                }
+                # Startup-only handoff from PyInstaller's extraction splash to
+                # the existing Qt splash; no scientific code is involved.
+                excluded |= {"main"}
+                # 2.0.0: moved unchanged into phase_studio/xplor_io.py so the
+                # lightweight Jana wrapper can share XPLOR I/O without
+                # importing the full scientific GUI (needed for shared
+                # large-map SharpED tiling); see the follow-up assertion below.
+                excluded |= {"read_xplor_map", "write_xplor_map", "_xplor_numbers", "_xplor_float_values"}
+                # 2.0.0: removed entirely. Its only purpose was coarsening
+                # Superflip's own voxel grid to fit the SharpED upload-size
+                # limit; the scientific grid is no longer degraded to satisfy
+                # an upload constraint -- oversized maps use tiled SharpED
+                # inference instead (phase_studio/sharped_tiling.py).
+                excluded |= {"sharped_limited_superflip_voxel"}
+                # 2.0.0: removed entirely. Its only behavior was a size check
+                # that raised a hard error above the upload limit; that
+                # decision now belongs to sharped_tiling.decide_sharped_
+                # submission, which tiles instead of failing.
+                excluded |= {"prepare_xplor_for_sharped_upload"}
+                # 2.0.0: gained an additional jana_m90_path source (Autosolve
+                # Option B's FWHM branch), inserted into the existing
+                # priority chain between manual entry and the .inflip lambda
+                # line; the three original sources' own resolution is
+                # unchanged. See parse_m90_wavelength/resolve_jana_m90_path.
+                excluded |= {"resolve_powder_wavelength"}
+                # 2.0.0: busy=True now actually switches the per-cycle
+                # progress bar to indeterminate (setRange(0, 0)) instead of
+                # being silently ignored -- benefits the full GUI too, not
+                # just Autosolve's borrowed progress bars; the determinate
+                # range/value path is unchanged.
+                excluded |= {"_apply_cycle_progress_state"}
+                # 2.0.2 release-blocker repair: Result Selection now passes
+                # the exact hash-pinned EDMA CIF into the established
+                # maxcycles=0 Jana m80/m81 conversion instead of reconstructing
+                # the handoff independently from only source/cycle map state.
+                # Dedicated Jana completion tests pin this new byte-identity
+                # contract, mutation failure, and absence of workflow reruns.
+                excluded |= {"return_phase_studio_result_to_jana", "perform_jana_handoff"}
+                # 2.0.2 displacement correction: AtomSite now carries canonical
+                # Uiso through every clone/export boundary; EDMA Biso is
+                # converted explicitly for Jana/CIF and converted back only
+                # for PDB. Dedicated displacement tests pin the formulas,
+                # complete .coo peak mapping, m40 conversion, and round trips.
+                excluded |= {
+                    "expand_atoms_by_symmetry", "parse_cif_atoms", "edma_asu_atoms",
+                    "composition_from_full_cell_atoms", "expanded_unique_atoms",
+                    "write_structure_cif", "write_structure_pdb", "write_structure_bundle",
+                    "write_filtered_cif",
+                    "run_edma_on_xplor",
+                }
+            elif filename == "jana_superflip.py":
+                # UI-only requirement routing: the former generic token warning
+                # became unreachable once the shared dedicated remediation dialog
+                # was connected, so its removal is intentional and non-scientific.
+                excluded |= {"launch_phase_studio_from_jana", "main", "_show_missing_token_warning",
+                             "extract_embedded_hkl",
+                             "deblur_with_sharped", "split_inline_comment", "split_inflip_line",
+                             "first_token", "line_has_xplor_output", "insert_before_fbegin",
+                             "ensure_xplor_output", "without_keywords", "add_modelseed_modelfile",
+                             "apply_reference_override", "inflip_header_for_m80", "define_m80_inflip"}
+                # 2.0.2 handoff repair: the running wrapper's own integration
+                # root must win over C:\Jana2020 and PATH. Jana completion
+                # tests pin alternate-root resolution and version diagnostics.
+                # The final lightweight handoff input is also now created in
+                # the authoritative Jana project and removed after use; the
+                # former implementation wrote it under the wrapper's installed
+                # ``deblurrer`` directory. This changes runtime placement only;
+                # dedicated completion tests pin the generated input and map.
+                excluded |= {
+                    "resolve_original_superflip", "build_jana_handoff_import",
+                    "resolve_active_jana_superflip", "run_final_jana_handoff",
+                    "run_jana_superflip", "log_wrapper_runtime_identity",
+                }
+            elif filename == "sharped_server_client.py":
+                # These split-catalog helpers postdate the restored historical
+                # client. The one-host behavior is pinned by its contract test.
+                excluded |= {"normalize_server_url", "model_selection", "current_model_catalog",
+                             "model_catalog_status", "apply_model_catalog", "sync_model_catalog",
+                             "resolve_effective_model"}
             for name in old.keys() - excluded:
                 self.assertEqual(old[name], new.get(name), f"{filename}:{name}")
+            if filename == "app.py":
+                metrics_ui = (ROOT / "phase_studio" / "workflow_metrics_ui.py").read_text(encoding="utf-8")
+                moved = functions(metrics_ui)
+                self.assertEqual(old["robust_detail_range"], moved.get("robust_detail_range"))
+                input_context = (ROOT / "phase_studio" / "input_context.py").read_text(encoding="utf-8")
+                moved_inputs = functions(input_context)
+                self.assertEqual(
+                    old["normalize_input_source_mode"],
+                    moved_inputs.get("normalize_input_source_mode"),
+                )
+                xplor_io = (ROOT / "phase_studio" / "xplor_io.py").read_text(encoding="utf-8")
+                moved_xplor_io = functions(xplor_io)
+                for moved_name in ("read_xplor_map", "write_xplor_map", "_xplor_numbers", "_xplor_float_values"):
+                    self.assertEqual(old[moved_name], moved_xplor_io.get(moved_name), moved_name)
 
 
 if __name__ == "__main__":

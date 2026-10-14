@@ -1,12 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import sys
+import runpy
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 
 project_dir = Path(SPECPATH).resolve()
+release_version = runpy.run_path(str(project_dir / "phase_studio/version.py"))["VERSION"]
 
 # Shared portable-runtime staging, identical to the one the main application
 # uses (see packaging/pyinstaller/portable_runtime.py). It matters especially
@@ -16,6 +18,7 @@ project_dir = Path(SPECPATH).resolve()
 packaging_dir = project_dir / "packaging" / "pyinstaller"
 sys.path.insert(0, str(packaging_dir))
 import portable_runtime  # noqa: E402
+from release_legal import exclude_unused_qt_plugins, legal_datas
 from windows_version import version_resource
 
 qt_report = portable_runtime.validate_pyside6_installation()
@@ -39,6 +42,7 @@ except Exception:
 
 datas = []
 datas += [(str(project_dir / "phase_studio" / "assets"), "phase_studio/assets")]
+datas += legal_datas(project_dir)
 try:
     datas += collect_data_files("qtvscodestyle")
 except Exception:
@@ -46,7 +50,7 @@ except Exception:
 
 
 a = Analysis(
-    ["phase_studio/jana_superflip.py"],
+    [str(project_dir / "phase_studio" / "jana_superflip.py")],
     pathex=[str(project_dir)],
     binaries=[],
     datas=datas,
@@ -75,6 +79,7 @@ a = Analysis(
 # Universal CRT, and exactly one copy of each required VC++ runtime DLL at the
 # _internal root.
 a.binaries, removed_ucrt = portable_runtime.strip_app_local_ucrt(a.binaries)
+a.binaries = exclude_unused_qt_plugins(a.binaries)
 a.binaries, staged_runtime = portable_runtime.stage_msvc_runtime(a.binaries)
 
 portable_runtime.report("superflip", staged_runtime, qt_report, removed_ucrt)
@@ -93,7 +98,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="superflip",
+    name="Phase_studio" if globals().get("developer_build", False) else "superflip",
     version=version_resource("Phase Studio Jana2020 Wrapper", project_dir),
     debug=False,
     bootloader_ignore_signals=False,
@@ -124,5 +129,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="superflip",
+    name=f"PhaseStudio-Jana2020-{release_version}" if globals().get("developer_build", False) else "superflip",
 )

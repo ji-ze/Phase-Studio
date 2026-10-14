@@ -35,6 +35,14 @@ Install them separately from:
 
 https://superflip.fzu.cz/
 
+Phase Studio checks only the programs needed by the selected workflow when
+you click **Run phasing**. It first looks in `C:\Jana2020\SUPERFLIP` and saves
+valid detected paths. If setup is still required, the dedicated Superflip or
+EDMA dialog can browse to an installation, open the official download page, or
+download the program after explicit third-party-license acknowledgement.
+Choosing **Skip for now** returns to configuration without starting the
+workflow.
+
 Configure their executable paths in **Advanced → Setup** if the defaults do not match your installation.
 
 ### 2.3 Jana2020
@@ -58,10 +66,17 @@ https://sharped.fzu.cz/
 The default server configured in Phase Studio is:
 
 ```text
-https://jana.fzu.cz/
+https://sharped.fzu.cz/
 ```
 
 Never commit API tokens to a repository or include them in shared logs.
+
+When a SharpED workflow starts, Phase Studio checks that a token is configured
+and that the current service can be reached. Public model discovery does not
+prove that a token is valid. An explicit HTTP 401/403 from an authenticated
+operation is reported as **SharpED access required**, where a replacement token
+can be saved. The dialog never displays the server URL or writes the token to
+the Execution Log.
 
 ### 2.5 Source installation
 
@@ -267,11 +282,13 @@ Because FWHM is not comparable in scale or meaning to σ, an `I/FWHM` ratio is n
 
 ### 6.1 Starting preset
 
-**Starting preset** applies a bundle of starting values in one step; every value stays individually editable afterward, and re-selecting a preset re-applies its values. **Recommended** is the default: a general-purpose baseline (cycles 5, Phasing method Superflip, next-cycle model deblurred_xplor, XPLOR damping 0.3, all optional processing enabled except symmetry averaging, SharpED model default) that matches the built-in defaults, so a fresh install and a fresh selection of **Recommended** produce the same configuration. The other presets (MOF atomic resolution, MOF medium resolution, small molecule, inorganic) tune a handful of settings for a specific sample type. **custom** applies nothing and is only a placeholder for "I've configured this by hand" — selecting it does not change or reset any current value.
+**Starting preset** applies a bundle of starting values in one step; every value stays individually editable afterward, and re-selecting a preset re-applies its values. **Recommended** is the default: a general-purpose baseline (cycles 5, Phasing method Superflip, next-cycle model deblurred_xplor, XPLOR damping 0.3, all optional processing enabled except symmetry averaging, SharpED model koala 2.0) that matches the built-in defaults, so a fresh install and a fresh selection of **Recommended** produce the same configuration. The other presets (MOF atomic resolution, MOF medium resolution, small molecule, inorganic) tune a handful of settings for a specific sample type. **custom** applies nothing and is only a placeholder for "I've configured this by hand" — selecting it does not change or reset any current value.
 
-The SharpED model selector and Jana2020 Wizard use the current server catalog. **default** remains a selection preference and resolves to the live server default immediately before upload. Refresh replaces the catalog and its default together; removed selections return to **default**. If discovery fails, the last successful catalog remains visibly marked as cached. A default-model job requires a successful fresh lookup, while an explicit model identifier is sent unchanged.
-
-The current service is `https://sharped.fzu.cz`; saved URLs for the former bundled `https://jana.fzu.cz` host migrate to it. Use an API token issued by the current service: tokens accepted by the former host may be rejected by the current host. Custom server URLs remain supported. See [model discovery diagnostics](docs/SHARPED_MODEL_DISCOVERY.md).
+The SharpED model selector and Jana2020 Wizard query the configured server. The
+Phase Studio 2.0.2 default is `https://sharped.fzu.cz/`; model
+discovery, upload, polling, and download use that same base URL. **default** is
+resolved from that server's model response immediately before upload. Custom
+server URLs remain supported and are used unchanged.
 
 Treat presets as starting points rather than universal scientific recommendations.
 
@@ -450,7 +467,7 @@ The SharpED model selector is on the **Basic → Workflow** page. Server connect
 The current default is:
 
 ```text
-https://jana.fzu.cz/
+https://sharped.fzu.cz/
 ```
 
 #### API token
@@ -569,11 +586,11 @@ Each time repartitioning runs, it writes `cycle_NNN_powder_repartitioning.log` i
 
 ## 11. Running and monitoring a reconstruction
 
-### 11.1 Run pipeline
+### 11.1 Run phasing
 
-**Run pipeline** validates the active configuration and starts the reconstruction.
+**Run phasing** validates the active configuration and starts the reconstruction.
 
-Configuration controls are locked while the pipeline is running.
+Configuration controls are locked while the workflow is running.
 
 ### 11.2 Stop after current cycle
 
@@ -581,7 +598,7 @@ Requests a graceful stop after the current cycle has completed.
 
 ### 11.3 Stop immediately
 
-Requests immediate termination of the active external calculation and stops the pipeline as soon as possible.
+Requests immediate termination of the active external calculation and stops the workflow as soon as possible.
 
 After cancellation, Phase Studio retains information about where the run stopped.
 
@@ -600,19 +617,22 @@ The Run Status area contains two levels:
 
 Phase Studio does not need to fabricate time-based percentages when no reliable denominator exists.
 
-### 11.6 Superflip Convergence
+### 11.6 Map-quality metrics
 
-The convergence panel has five tabs, each scaled and colored independently:
+The metrics panel always has three profile-aware tabs. Phase Studio chooses their contents automatically from two independent facts: whether a reference structure is available and whether the 5% holdout is enabled.
 
-- **Superflip** — metrics tied to the raw Superflip map. With a reference structure: Reference match, Superflip RMSD, Recall and Precision (heavy, i.e. non-H/He, atoms matched to the reference within EDMA's **Merge distance**; recall = fraction of reference atoms found, precision = fraction of found atoms that are real). Without a reference: only **Heavy atoms found**, a plain count of non-H/He atoms in the EDMA output, as a fallback progress indicator. (Superflip's own internal R/Peaks/FOM/Symmetry indicators were removed from this graph: cycle 1 normally runs ab initio while cycle 2 onward is seeded by the selected next-cycle model, so they are not a like-for-like series across that transition, and `bestdensities`/`repeatmode` selects the best of several stochastic attempts each cycle, adding further cycle-to-cycle fluctuation unrelated to genuine quality change. They remain in `metrics.csv` and the execution log.)
-- **SharpED** (formerly labeled "Deblurred") — the same reference-dependent set (SharpED RMSD, Recall, Precision) or reference-free fallback (Heavy atoms found) for the SharpED-processed map, plus Map correlation (SharpED phase-recycling methods only, correlating each cycle's recomposed map with the previous cycle's — always empty for the standard Superflip phasing method).
-- **Superflip (omit+rfree)** — only populated when **Compute omit maps** is enabled: Omit map correlation (the raw Superflip map compared with the same cycle's omit map) and, if **Compute R_free from excluded 5%** is also enabled, R_free for the raw Superflip map. Needs no reference structure.
-- **SharpED (omit+rfree)** — the same two metrics for the SharpED-processed map and its omit-map counterpart. Needs no reference structure.
-- **Powder repartitioning** — only populated when [10.3 Powder overlap repartitioning](#103-powder-overlap-repartitioning) is enabled: the average, across overlap groups, of each group's mean member-wise intensity change caused by that repartitioning run (lower is better — it should shrink toward 0% as the map increasingly agrees with the observed data). Since repartitioning happens between cycles, each cycle's point reflects the repartitioning that fed its input, so it lags one cycle behind the repartitioning run itself (and the very first repartitioned cycle appears on the *next* cycle's point). Needs no reference structure.
+| Assessment | Three plotted metrics and direction |
+|---|---|
+| Reference + cross-validation | Reference F0.5 ↑; R_free ↓; OMIT map correlation ↑ |
+| Reference-backed | Reference F0.5 ↑; matched-peak RMSD ↓; reference phase agreement ↑ |
+| Cross-validation | R_free ↓; CC_free ↑; OMIT map correlation ↑ |
+| Reference-free · no holdout | Amplitude R_F ↓; Amplitude CC ↑; Weighted triplet C3 ↑ |
 
-Every series is normalized per tab to a 0 (worst) to 1 (best) scale for comparison; the underlying values are in `metrics.csv`.
+Each tab plots available Superflip and SharpED candidates versus cycle. Reference-free map assessment is a map-character assessment and is not independent validation. The full diagnostic set, reflection/triplet counts, unavailable reasons, and candidate recommendation are written to `metrics.csv` and `map_quality_assessment.txt`.
 
-Unavailable series can be omitted in partial or cancelled runs.
+When **Map feedback → Intensity correction** is enabled, a 4th tab, **Map Feedback change (%)**, appears alongside the three profile metrics. It plots the average intensity change that cycle's map-based intensity correction applied to the reflections feeding the next cycle (one value per cycle, the same figure regardless of source, since the correction acts on reflection data shared by both Superflip and SharpED). Lower is better — it should shrink toward 0% as the map increasingly agrees with the observed data — and each point lags one cycle behind the correction that produced it. This is a diagnostic only: it is never part of the automatic recommendation, which always uses just the three profile metrics above.
+
+When enabled, the free set is selected once in complete symmetry/Friedel orbits before cycle 1. It remains excluded from Superflip input, SharpED feedback, missing-reflection completion, intensity correction, powder repartitioning, and later-cycle work data. Map feedback never changes the original measured validation basis.
 
 ### 11.7 Structure Comparison
 
@@ -653,13 +673,147 @@ When Phase Studio is launched in a Jana2020 context, it can import compatible pr
 
 Explicit Jana2020 values and `.inflip` values take precedence over stale unrelated saved settings.
 
-### 12.2 Send to Jana2020
+### 12.2 Result Selection and Pass to Jana2020
 
-When a compatible result is available, **Send to Jana2020** opens the hand-off workflow.
+After successful completion, or a graceful stop with usable completed results, a Jana2020-launched session opens the shared **Result Selection** dialog automatically. **Pass to Jana2020** reopens it later.
 
-The available result choices depend on the completed run and the active Jana2020 context.
+Superflip and SharpED are shown as two independent candidate sets, switched with a compact **Superflip | SharpED** control above the table when both are available. Each source has its own table (only the active profile's three metrics, plus a 4th **Map Feedback change (%)** column when intensity correction is enabled), its own lexicographic recommendation, and its own remembered manual selection — switching sources never overwrites the other source's selection. When only one source produced usable results (SharpED disabled or unavailable, or a graceful stop before SharpED ran), the switch is hidden and that source's table opens directly. The action always operates on whichever candidate is selected in the currently visible source; switching source never happens implicitly. The SharpED table always carries a compact warning that its map/model comes from a neural-network model and should be validated against the original measured data and an independent refinement; the Superflip table adds a Map Feedback warning whenever intensity correction is enabled (combined into one callout when both apply).
+
+The user may choose another candidate within a source; the report records whether the recommendation was accepted or manually overridden. Handoff uses the selected existing map and structure files without recomputing them.
+
+Standalone Phase Studio does not open the selector automatically. After a valid result exists, **Save map and model** opens the same source-split dialog and copies the selected canonical output files. A map remains exportable when no structure model is available, and existing destination files require confirmation before replacement.
 
 After hand-off, detailed model completion and final refinement should be performed in Jana2020.
+
+### 12.3 Guided Autosolve (2.0.1)
+
+The Jana2020 Wizard's **Autosolve** has two goals: **Solve the phase
+problem** and **Predict the structure model**. Both run the same stages
+below. The goal only decides which ranking judges refinement.
+
+**Common phase search.** Both goals use the ordinary iterative loop. Each
+cycle runs:
+
+1. Superflip.
+2. EDMA on the Superflip map at **1.0 σ**, giving the Observed data candidate.
+3. SharpED with the model **"koala phase boost 2"**.
+4. EDMA at **1.0 σ** on that map. The resulting **structure** becomes the
+   initial model of the next Superflip cycle; this is the existing
+   *SharpED structure (EDMA CIF)* next-cycle model. Both sides of the
+   search use the same 1.0 σ default.
+
+The search keeps the established 10-cycle budget with +5 extensions. It is
+ranked on the Observed data for both goals.
+
+**Observed data.** The best completed Superflip result, ranked by the
+existing profile-aware recommendation. It is derived from the measured data;
+the atomic model itself is not "observed".
+
+**Predicted structure.** After the search, SharpED runs **once** with the
+model **"koala model progressive"** on the best Observed data map, followed
+by EDMA at 1.0 σ. Its EDMA log/input is explicitly labelled "Predicted
+structure map", never "Superflip map". Phase-boost output from the search
+is never called a Predicted structure.
+
+**Model preflight.** Both exact model names must be in the live SharpED
+catalog, from the one request preflight already makes. Otherwise Autosolve
+does not start, and it names the missing model. There is no fuzzy matching
+and no fallback to another model. Every SharpED submission is preceded by
+an explicit `[SharpED] Model: <name>` log line.
+
+**Stage A -- initial Predicted-model tuning.** Immediately after the first
+prediction, a waiting state opens -- not COMPLETE, STOPPED, CANCELLED or
+FAILED, and no process runs until you act. **Observed data is shown
+read-only**, for comparison only. The **Predicted structure** panel alone
+exposes:
+
+- **+ atoms** / **- atoms** -- EDMA-only threshold steps (see below).
+- **Refine 5 cycles** -- seeds the first refinement block from the
+  Predicted structure's current, tuned threshold.
+
+No result can be passed to Jana2020 at this stage; there is no "Pass to
+Jana2020" control here, on either panel or anywhere else in the window.
+
+**Threshold controls.** Default **1.0 σ** on both sides. Range **0.3–3.0 σ**.
+Step is variable: **0.2 σ at/above 0.8 σ, 0.1 σ below it** -- so stepping
+down from 1.4 σ gives 1.2, 1.0, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, and stepping
+up from 0.3 σ gives 0.4, 0.5, 0.6, 0.7, 0.8, 1.0, 1.2, … up to 3.0. **+
+atoms** lowers the threshold (more peaks survive); **- atoms** raises it
+(fewer peaks survive). Only EDMA reruns, on the unchanged map; only one
+panel's EDMA recalculation runs at a time, so every action across both
+panels waits while any one is busy (never a mix of active/disabled controls
+that looks accidental). At a range boundary, the button that would exceed
+it is disabled.
+
+**Refinement (Refine 5 cycles / Recalculate).** Whichever panel started it,
+the pressed panel's *current* structure, at its *current* threshold, is the
+first Superflip initial model. Every SharpED call inside the block uses
+"koala model progressive", and every structure fed forward is extracted at
+that captured threshold for the whole block; the Observed-data side keeps
+1.0 σ. The first cycle's log names the real seed explicitly (for example
+`[Refinement seed] Predicted structure · Cycle 4 · EDMA 0.7 σ`) instead of
+a misleading "from the previous cycle" description; from the second
+refinement cycle on, the usual previous-cycle wording resumes.
+
+**Stage B -- Final Review.** Reached only after the first refinement block
+finishes. Both panels are now independently tunable, each showing its
+composition, atom count, technical origin (for example *Superflip · EDMA
+1.0 σ*) and all four actions:
+
+- **+ atoms** / **- atoms** -- the same EDMA-only threshold steps.
+- **Recalculate** starts another five-cycle refinement block from that
+  panel's current structure/threshold.
+- **Pass to Jana2020** uses the established handoff with that panel's map
+  and cycle. The standalone equivalent is **Save map and model**, which
+  copies the map and the current-threshold structure. The structure at the
+  current threshold is recorded in `autosolve_result_provenance.json`, with
+  the map's SHA-256 and the exact SharpED model.
+
+This is the only Jana2020 handoff in the guided view -- there is no
+separate global "Pass to Jana2020" button competing with it. Observed data
+starts Final Review at 1.0 σ; the Predicted structure keeps whatever
+threshold the refinement actually used (never silently reset to a default).
+
+The Predicted structure always carries the SharpED neural-network warning.
+The Observed data carries the Map Feedback warning only when measured data
+feeding into that result were modified; the warning never implies Map
+Feedback applies to *Solve the phase problem* unless it actually does.
+
+**Automatic extension.** After a block, another five cycles start only if
+the goal's own stream strictly improved under the existing lexicographic
+ranking:
+
+- Observed data for *Solve the phase problem*;
+- Predicted structure for *Predict the structure model*.
+
+A tie or an unavailable primary metric is not an improvement. Refinement
+never starts a block that would exceed the workflow's Cycles maximum.
+
+**Measured-data correction (Final Review only).** Shows **Powder
+repartitioning** (FWHM data with a resolvable wavelength) or **Correct
+suspect intensities** (other data) only when the existing eligibility logic
+allows it. Clicking either first shows a confirmation dialog stating that
+measured data will be modified and that the original is retained; the
+correction runs only once confirmed. The established Map Feedback
+configuration then applies from the next cycle, the phase search continues
+on the corrected data, a new Predicted structure is generated, and the
+initial tuning stage opens again. The original measured reflection file is
+never overwritten; the provenance file records that data were modified and
+which routine ran.
+
+**Progress presentation.** Either review stage clears the cycle/stage row
+to a plain "Review" -- no stale "SharpED · downloading" or "Stage N of M"
+left over from the last real cycle. An EDMA-only recalculation shows only
+that operation (e.g. "Predicted structure · EDMA 0.7 σ · recalculating
+structure…"), never a SharpED line. Refinement shows "Refinement cycle N of
+5" plus the seed's source/cycle/threshold.
+
+**Failures.**
+- A failed prediction keeps the completed search; **Retry** generates only
+  the prediction again.
+- A failed threshold recalculation keeps the previous structure/threshold.
+- A failed refinement cycle resumes at its first incomplete stage, reusing
+  every already-completed stage.
 
 ---
 
@@ -674,7 +828,8 @@ Depending on the selected workflow, Phase Studio can generate:
 - SharpED-processed XPLOR maps,
 - symmetry-averaged processed maps,
 - per-cycle models,
-- metrics files.
+- `metrics.csv`, with one row per cycle and source,
+- `map_quality_assessment.txt`, with the profile, criteria, recommendation, all computed diagnostics, and final user selection.
 
 Original and processed files are kept separately where practical so reconstruction decisions can be inspected and reproduced.
 
@@ -691,7 +846,7 @@ Check:
 - whether values are intensities or amplitudes,
 - sigma/phase column mapping.
 
-Use **Validate HKL** before starting the pipeline.
+Use **Validate HKL** before starting the workflow.
 
 ### 14.2 Completeness appears unexpectedly low
 
@@ -782,7 +937,7 @@ General project/support contact:
 ## Windows distribution targets
 
 Phase Studio standalone and the Phase Studio Jana2020 Installer are separate
-applications. The standalone application supports Jana .inflip scientific data,
+applications. The standalone application supports Jana2020 .inflip scientific data,
 but does not install, update, repair, or remove Jana integration.
 
 Run `PhaseStudioJanaInstaller.exe` from its complete distribution directory to

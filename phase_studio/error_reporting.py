@@ -22,10 +22,20 @@ _TOKEN_QUERY_RE = re.compile(
     r"(?i)([?&](?:token|access_token|api_token|job_token|download_token)=)[^&#\s]+"
 )
 
+_PRIVATE_VALUES: set[str] = set()
+
+
+def register_private_value(value: str) -> None:
+    """Redact a configured credential even if a server echoes it without a label."""
+    if str(value or "").strip():
+        _PRIVATE_VALUES.add(str(value).strip())
+
 
 def sanitize_error_details(value: object) -> str:
     """Remove credentials from any user-visible or copyable diagnostic text."""
     text = str(value or "")
+    for private in sorted(tuple(_PRIVATE_VALUES), key=len, reverse=True):
+        text = text.replace(private, "[REDACTED]")
     text = _BEARER_RE.sub(r"\1[REDACTED]", text)
     text = _SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", text)
     text = _TOKEN_URL_RE.sub(r"\1[REDACTED]", text)
@@ -64,10 +74,10 @@ class ErrorAction:
 
 def _subsystem_from_message(message: str, fallback: str) -> str:
     lower = message.lower()
-    if "sharped" in lower or "sharp-ed" in lower:
-        return "SharpED"
     if "superflip" in lower:
         return "Superflip"
+    if "sharped" in lower or "sharp-ed" in lower:
+        return "SharpED"
     if "edma" in lower:
         return "EDMA"
     if "jana2020" in lower or ".inflip" in lower:
@@ -101,13 +111,30 @@ def build_error_report(
         summary = "The current operation was stopped at your request."
         guidance = "You can review the preserved output in the Execution Log or start another run."
         severity = "warning"
+    elif (
+        "superflip executable" in lower
+        and any(token in lower for token in ("not found", "was not found", "could not be resolved"))
+    ):
+        resolved_subsystem = "Jana2020 integration"
+        category = "superflip_runtime"
+        title = "Jana2020 Superflip runtime unavailable"
+        summary = "The Superflip executable for the active Jana2020 installation could not be resolved."
+        guidance = "Repair the Phase Studio integration for this Jana2020 installation and try again."
     elif "sharped" in lower or resolved_subsystem == "SharpED":
         resolved_subsystem = "SharpED"
         if any(token in lower for token in ("missing sharped api token", "api token is required", "http error 401", "http error 403", "authentication", "unauthorized", "forbidden")):
             category = "sharped_authentication"
-            title = "SharpED authentication failed"
-            summary = "The SharpED API token is missing or was rejected."
-            guidance = "Open SharpED settings and enter a valid API token before trying again."
+            title = "SharpED account access"
+            summary = "The SharpED access key is missing or was not accepted."
+            guidance = "Connect using your existing Jana2020 account and check its SharpED access key."
+        elif any(token in lower for token in ("certificate_verify_failed", "certificate verify failed", "could not verify", "tls certificate chain")):
+            category = "sharped_tls_certificate"
+            title = "SharpED secure connection failed"
+            summary = "Phase Studio reached sharped.fzu.cz, but could not verify the server's TLS certificate chain."
+            guidance = (
+                "Check Windows updates and system date/time. If the problem persists, Phase Studio may not "
+                "be using the Windows trusted certificate store."
+            )
         elif any(token in lower for token in ("timed out", "timeout", "polling limit", "did not finish within")):
             category = "sharped_timeout"
             title = "SharpED request timed out"
@@ -123,11 +150,24 @@ def build_error_report(
             title = "SharpED result could not be downloaded"
             summary = "Phase Studio could not retrieve or save the SharpED map."
             guidance = "Check the server connection and working-folder permissions, then retry the operation."
-        elif any(token in lower for token in ("request failed", "unreachable", "urlerror", "tls error", "certificate", "name or service", "connection refused", "connection reset")):
+        elif any(token in lower for token in ("name or service", "getaddrinfo", "nodename nor servname", "hostname resolution")):
+            category = "sharped_dns"
+            title = "SharpED server name could not be resolved"
+            summary = "Windows could not resolve the SharpED server name."
+            guidance = "Check the network connection and DNS configuration, then try Refresh models."
+        elif any(token in lower for token in ("http error 500", "http error 501", "http error 502", "http error 503", "http error 504", "http error 505")):
+            category = "sharped_server"
+            title = "SharpED server error"
+            summary = "The SharpED service returned a server-side error."
+            guidance = "Try again later or check the SharpED service status."
+        elif any(token in lower for token in ("request failed", "unreachable", "urlerror", "tls error", "connection refused", "connection reset")):
             category = "sharped_network"
             title = "SharpED server unavailable"
             summary = "Phase Studio could not connect to the configured SharpED server."
-            guidance = "Check your internet connection and the SharpED server URL."
+            guidance = (
+                "Check your internet connection and try again. "
+                "If the problem persists, the SharpED service may be temporarily unavailable."
+            )
         else:
             category = "sharped_server"
             title = "SharpED processing failed"
@@ -243,7 +283,7 @@ def build_error_report(
         category = "structure_viewer"
         title = "Structure preview unavailable"
         summary = "Phase Studio could not load one structure preview."
-        guidance = "The pipeline can continue; review the structure file and technical details in the Execution Log."
+        guidance = "The workflow can continue; review the structure file and technical details in the Execution Log."
     elif "metadata" in lower:
         resolved_subsystem = "Crystal metadata"
         category = "metadata"
@@ -271,12 +311,51 @@ def build_error_report(
 def build_validation_report(issues: Sequence[str], *, technical_details: str = "") -> ErrorReport:
     unique = list(dict.fromkeys(str(issue).strip() for issue in issues if str(issue).strip()))
     bullets = "\n".join(f"• {issue}" for issue in unique)
+    wavelength_issue = next((issue for issue in unique if "wavelength" in issue.casefold()
+                             and "powder overlap" in issue.casefold()), None)
+    if wavelength_issue:
+        return ErrorReport(
+            category="input_validation", subsystem="Input", title="Powder wavelength required",
+            summary="Powder overlap repartitioning needs a positive radiation wavelength.",
+            guidance="Enter Wavelength (Å) in Map feedback → Powder overlap repartitioning, "
+                     "or provide it in the Jana project, incoming .inflip or reference CIF. "
+                     "Zero requests automatic detection; no wavelength was found.\n" + bullets,
+            technical_details=sanitize_error_details(technical_details or bullets),
+            operation="Pre-run validation", severity="error",
+        )
+    if len(unique) == 1:
+        issue = unique[0]
+        lowered = issue.casefold()
+        if "working edma executable" in lowered:
+            return ErrorReport(
+                category="edma_missing", subsystem="EDMA", title="EDMA setup required",
+                summary="Phase Studio could not find a working EDMA executable.",
+                guidance="Select an existing EDMA installation or install EDMA before starting this workflow.",
+                technical_details=sanitize_error_details(technical_details or issue),
+                operation="Pre-run validation", severity="error",
+            )
+        if "working superflip executable" in lowered:
+            return ErrorReport(
+                category="superflip_missing", subsystem="Superflip", title="Superflip setup required",
+                summary="Phase Studio could not find a working Superflip executable.",
+                guidance="Select an existing Superflip installation or install Superflip before starting this workflow.",
+                technical_details=sanitize_error_details(technical_details or issue),
+                operation="Pre-run validation", severity="error",
+            )
+        if "sharped api token" in lowered:
+            return ErrorReport(
+                category="sharped_authentication", subsystem="SharpED", title="Connect to SharpED",
+                summary="A SharpED access key is required for the selected workflow.",
+                guidance="Connect using your existing Jana2020 account before starting this workflow.",
+                technical_details=sanitize_error_details(technical_details or issue),
+                operation="Pre-run validation", severity="error",
+            )
     return ErrorReport(
         category="input_validation",
         subsystem="Input",
-        title="Cannot start pipeline",
+        title="Cannot start workflow",
         summary="Please fix the following before starting:\n" + bullets,
-        guidance="Open the relevant configuration page, correct the listed items, and start the pipeline again.",
+        guidance="Open the relevant configuration page, correct the listed items, and start the workflow again.",
         technical_details=sanitize_error_details(technical_details or bullets),
         operation="Pre-run validation",
         severity="error",
@@ -352,6 +431,7 @@ def show_phase_studio_error(
     details.setObjectName("errorDialogDetails")
     details.setReadOnly(True)
     details.setLineWrapMode(QPlainTextEdit.NoWrap)
+    details.setMinimumHeight(160)
     details.setMaximumHeight(220)
     details_font = QFont("Cascadia Mono")
     details_font.setStyleHint(QFont.Monospace)
@@ -378,7 +458,8 @@ def show_phase_studio_error(
         copy_button.setVisible(expanded)
         details_button.setText("Hide details" if expanded else "Show details")
         dialog.adjustSize()
-        dialog.resize(max(520, min(700, dialog.width())), min(610, dialog.height()))
+        target_height = min(610, dialog.sizeHint().height()) if expanded else max(250, dialog.minimumSizeHint().height())
+        dialog.resize(max(520, min(700, dialog.width())), target_height)
 
     details_button.clicked.connect(toggle_details)
     copy_button.clicked.connect(lambda: QApplication.clipboard().setText(report.diagnostic_block()))
@@ -386,6 +467,7 @@ def show_phase_studio_error(
     for action in actions:
         button = QPushButton(action.label)
         button.setObjectName("errorPrimaryAction" if action.primary else "errorAction")
+        button.setMinimumHeight(30)
 
         def choose(_checked: bool = False, selected_action: ErrorAction = action) -> None:
             selected["label"] = selected_action.label
@@ -396,6 +478,8 @@ def show_phase_studio_error(
 
     close_button = QPushButton("Close")
     close_button.setObjectName("errorCloseButton")
+    for button in (details_button, copy_button, close_button):
+        button.setMinimumHeight(30)
     close_button.clicked.connect(dialog.reject)
     close_button.setDefault(not any(action.primary for action in actions))
     button_row.addWidget(close_button)

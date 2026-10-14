@@ -99,14 +99,14 @@ Two independent things share the name "Jana2020 integration":
    installs, and rollback on failure. Driven by the "Jana2020 Integration"
    dialog in `app.py` (`open_install_to_jana_dialog`).
 
-`packaging/build_windows.ps1` builds both the standalone app and the Jana
-wrapper, then stages a copy of the wrapper into
-`dist\PhaseStudio\JanaIntegration\` (a plain file copy -- never a second
-PyInstaller build) so the running standalone app can find and install it.
-`packaging/build_store_msix.ps1` delegates the actual build to
-`build_windows.ps1` and stages its already-built output into the MSIX
-layout; it does not rebuild anything itself. Both scripts share small
-helpers from `packaging/common.ps1`.
+`packaging/build_windows.ps1` first builds the authoritative wrapper, then
+embeds that complete ONEDIR tree in the dedicated Jana installer ONEFILE.
+PyInstaller extracts it to private `_MEIPASS` storage; `jana_integration.py`
+accepts only that private payload and keeps the existing stage/verify/swap and
+rollback behavior. The standalone ONEFILE never contains it. Public output is
+exactly two EXEs under `dist/release`; `dist/superflip` is an internal build
+input. `packaging/build_store_msix.ps1` uses the standalone-only
+`PhaseStudioStore.spec` ONEDIR profile for the MSIX layout.
 
 ## SharpED flow
 
@@ -123,7 +123,7 @@ genuinely different purposes, not a bug.
 ### Map value scaling around a SharpED request
 
 `run_sharped_deblur()` is the single choke point for every SharpED request
-the pipeline makes (full map, omit map, and both phase-recycling methods),
+the workflow makes (full map, omit map, and both phase-recycling methods),
 so the optional `sharped_map_value_exponent` transform lives there and
 nowhere else: exactly one forward `sign(x)*|x|**a` on the last file handed
 to `SharpEDServerClient.execute()`, and exactly one inverse
@@ -160,6 +160,21 @@ stored view is dropped rather than applied to a different crystal.
 The Jana2020 result-selection dialog reuses these same methods through its
 `_PreviewHost` shim, so its preview panels behave identically without a second
 implementation.
+
+## Profile-aware map quality
+
+`phase_studio/map_quality.py` is the Qt-free authority for the four validation
+profiles, their three visible metrics, display direction, recommendation
+priority, and report-only metrics. It also owns immutable `ValidationContext`,
+map metrics, and source-neutral lexicographic recommendation. GUI plots, the
+shared Jana2020/standalone selector, and the report read those definitions.
+
+The context is frozen from original measured reflections before cycle 1. Its
+work/free masks and measured-data triplets never change when map feedback
+changes later-cycle input. Each periodic full-cell map is transformed once;
+the sampled complex coefficients are reused for amplitude, phase, holdout,
+triplet, and map-character metrics. Cropped maps or maps without usable cell,
+grid, or axis metadata produce an explicit unavailable reason.
 
 ## Where UI formatting belongs
 
@@ -206,13 +221,12 @@ called from the same method for now.
 
 ## How to add a workflow metric
 
-1. Compute it where the relevant cycle data is available (usually inside
-   `_run_pipeline_cycles()`), as a plain value on `CycleResult`.
-2. Add a presentation label via a small formatting function (see "Where UI
-   formatting belongs"), not an inline string.
-3. Surface it in `_render_metrics_tab()` and/or `write_metrics_csv()` and,
-   if it should feed the phase-recycling Selection score, in
-   `open_jana_result_selector()`'s ranking-columns list.
+1. Add its `MetricDefinition` and profile membership in `map_quality.py`.
+2. Compute it as pure logic against `ValidationContext`, reusing a map's
+   existing Fourier transform where applicable.
+3. Store it on `MapQualityMetrics`. The profile-driven plots, selector,
+   ranking criteria, CSV, and report then consume the shared definition and
+   result without a separate combined score.
 
 ## How to add a result-source label
 
@@ -233,6 +247,56 @@ control the full-GUI hand-off) add it to `build_jana_handoff_import()`'s
 Reuse the existing branded chrome builders (`create_phase_studio_brand_header`,
 `create_phase_studio_context_banner`) rather than building a new dialog's
 header from scratch -- every dialog in the app already shares this look.
+
+## Execution-time requirements preflight
+
+`phase_studio/requirements.py` owns executable identity, Jana2020-directory
+auto-detection, SharpED reachability classification, conditional requirement
+sets, and the official third-party archive installer. It has no application
+startup hook. The shared remediation dialog is built by
+`show_requirement_remediation_dialog()` in `requirements_ui.py` and is reused by the full
+window and the Jana2020 Wizard.
+
+The full-window route is:
+
+```text
+Run phasing
+  -> get_config()
+  -> _validate_run_config()                 [local input/configuration checks]
+  -> _ensure_workflow_requirements()
+  -> requirements.run_preflight()
+  -> dedicated remediation -> re-check      [only on failure]
+  -> create work directory
+  -> workflow worker
+```
+
+The lightweight Wizard routes are:
+
+```text
+Superflip only / Superflip + SharpED
+  -> Wizard Run phasing
+  -> _ensure_workflow_requirements()
+  -> requirements.run_preflight()
+  -> dedicated remediation -> re-check
+  -> close Wizard with action=run
+  -> run_jana_superflip()
+
+Phase recycling
+  -> Wizard Run phasing
+  -> the same Wizard preflight
+  -> launch full window with auto_start=True
+  -> full-window preflight above
+  -> workflow worker
+
+Open full configuration
+  -> open full window without starting
+  -> later Run phasing uses the full-window route above
+```
+
+Skip returns `False` from the requirement gate and never starts the requested
+workflow. A detected or user-selected executable updates the active RunConfig,
+Advanced -> Setup, and the existing QSettings store. The SharpED dialog edits
+only the masked token; it neither exposes nor changes the server URL.
 
 ## How to bump the application version
 

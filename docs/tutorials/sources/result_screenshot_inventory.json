@@ -1,0 +1,110 @@
+[
+  {
+    "id": "execution-concurrent",
+    "path": "screenshots/workflow/execution-concurrent.png",
+    "captured": true,
+    "synthetic": true,
+    "source_window": "AutosolveWindow",
+    "fixture": "Illustrative combined-workflow state; synthetic structures and fixture metrics, no live inference or Jana transfer",
+    "redaction": "No private data or credentials",
+    "targets": []
+  },
+  {
+    "id": "execution-completed",
+    "path": "screenshots/workflow/execution-completed.png",
+    "captured": true,
+    "synthetic": true,
+    "source_window": "AutosolveWindow",
+    "fixture": "Illustrative combined-workflow state; synthetic structures and fixture metrics, no live inference or Jana transfer",
+    "redaction": "No private data or credentials",
+    "targets": []
+  },
+  {
+    "id": "viewer-full-cell",
+    "path": "screenshots/workflow/viewer-full-cell.png",
+    "captured": true,
+    "synthetic": true,
+    "source_window": "AutosolveWindow",
+    "fixture": "Illustrative combined-workflow state; synthetic structures and fixture metrics, no live inference or Jana transfer",
+    "redaction": "No private data or credentials",
+    "targets": []
+  },
+  {
+    "id": "viewer-complete-molecules",
+    "path": "screenshots/workflow/viewer-complete-molecules.png",
+    "captured": true,
+    "synthetic": true,
+    "source_window": "AutosolveWindow",
+    "fixture": "Illustrative combined-workflow state; synthetic structures and fixture metrics, no live inference or Jana transfer",
+    "redaction": "No private data or credentials",
+    "targets": []
+  },
+  {
+    "id": "selector-charge-flipping",
+    "path": "screenshots/workflow/selector-charge-flipping.png",
+    "captured": true,
+    "synthetic": true,
+    "source_window": "ResultSelectionDialog",
+    "fixture": "Illustrative combined-workflow state; synthetic structures and fixture metrics, no live inference or Jana transfer",
+    "redaction": "No private data or credentials",
+    "targets": [
+      {
+        "label": "Choose the result family",
+        "rect": [
+          0.009655172413793104,
+          0.16331096196868009,
+          0.4903448275862069,
+          0.040268456375838924
+        ]
+      },
+      {
+        "label": "Select an actual candidate",
+        "rect": [
+          0.009655172413793104,
+          0.3926174496644295,
+          0.29310344827586204,
+          0.1342281879194631
+        ]
+      },
+      {
+        "label": "Pass the selected candidate",
+        "rect": [
+          0.8882758620689655,
+          0.9463087248322147,
+          0.10206896551724139,
+          0.04809843400447427
+        ]
+      }
+    ]
+  },
+  {
+    "id": "selector-model-prediction",
+    "path": "screenshots/workflow/selector-model-prediction.png",
+    "captured": true,
+    "synthetic": true,
+    "source_window": "ResultSelectionDialog",
+    "fixture": "Illustrative combined-workflow state; synthetic structures and fixture metrics, no live inference or Jana transfer",
+    "redaction": "No private data or credentials",
+    "targets": []
+  },
+  {
+    "id": "selector-manual-candidate",
+    "path": "screenshots/workflow/selector-manual-candidate.png",
+    "captured": true,
+    "synthetic": true,
+    "source_window": "ResultSelectionDialog",
+    "fixture": "Illustrative combined-workflow state; synthetic structures and fixture metrics, no live inference or Jana transfer",
+    "redaction": "No private data or credentials",
+    "targets": []
+  },
+  {
+    "id": "selector-edma-pending",
+    "path": "screenshots/workflow/selector-edma-pending.png",
+    "captured": true,
+    "synthetic": true,
+    "source_window": "ResultSelectionDialog",
+    "fixture": "Illustrative combined-workflow state; synthetic structures and fixture metrics, no live inference or Jana transfer",
+    "redaction": "No private data or credentials",
+    "targets": []
+  }
+]

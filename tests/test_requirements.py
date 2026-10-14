@@ -11,13 +11,18 @@ Jana2020 Wizard use it, so the rules cannot drift apart.
 The network is never contacted here: the SharpED client is replaced with stubs,
 so the failure classification is asserted rather than hoped for.
 """
+import hashlib
 import os
 import sys
 import tempfile
+import io
+import zipfile
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from scientific_tool_fixtures import program_bytes, isolate_discovery
 
 results_log = []
 
@@ -29,7 +34,7 @@ def check(name, cond):
 
 def make_exe(directory, name):
     path = Path(directory) / name
-    path.write_bytes(b"MZ fake executable")
+    path.write_bytes(program_bytes(name))
     return path
 
 
@@ -59,16 +64,21 @@ def main():
     check("a missing Superflip path is reported as not found",
           status.state is State.NOT_FOUND)
 
+    wrong = make_exe(tmp, "unrelated.exe")
+    status = reqs.check_superflip(str(wrong), jana_dir=empty)
+    check("an arbitrary executable is not accepted as Superflip",
+          status.state is State.WRONG_EXECUTABLE)
+
     # --- auto-detection from the standard Jana2020 directory ----------
     jana = Path(tempfile.mkdtemp())
     original = make_exe(jana, reqs.ORIGINAL_EXE_NAME)
-    make_exe(jana, reqs.WRAPPER_EXE_NAME)
+    active = make_exe(jana, reqs.WRAPPER_EXE_NAME)
     status = reqs.check_superflip("", jana_dir=jana)
     check("an unconfigured Superflip is auto-detected in the Jana2020 directory",
-          status.suggested_path == original.resolve())
-    check("auto-detection prefers superflip_original.exe over superflip.exe",
+          status.suggested_path == active.resolve())
+    check("auto-detection prefers the active superflip.exe over the legacy original name",
           status.suggested_path is not None
-          and status.suggested_path.name == reqs.ORIGINAL_EXE_NAME)
+          and status.suggested_path.name == reqs.WRAPPER_EXE_NAME)
 
     # --- the Phase Studio wrapper must never be accepted as Superflip --
     marked = Path(tempfile.mkdtemp())
@@ -76,7 +86,8 @@ def main():
     marked_original = make_exe(marked, reqs.ORIGINAL_EXE_NAME)
     (marked / "phase_studio_integration.json").write_text(
         '{"product": "Phase Studio", "version": "1.0.8",'
-        ' "wrapper": "superflip.exe", "original_superflip": "superflip_original.exe"}',
+        ' "wrapper": "superflip.exe", "original_superflip": "superflip_original.exe",'
+        f' "payload_hash": "{hashlib.sha256(wrapper.read_bytes()).hexdigest()}"}}',
         encoding="utf-8",
     )
     check("a marked superflip.exe is identified as the Phase Studio wrapper",
@@ -111,6 +122,30 @@ def main():
           reqs.check_edma("", jana_dir=jana).suggested_path == edma.resolve())
     check("a missing EDMA is reported as not found",
           reqs.check_edma(str(tmp / "nope.exe"), jana_dir=empty).state is State.NOT_FOUND)
+    check("an arbitrary executable is not accepted as EDMA",
+          reqs.check_edma(str(wrong), jana_dir=empty).state is State.WRONG_EXECUTABLE)
+
+    # The automatic installer copies only the expected member from the
+    # official-style ZIP into a Phase Studio-owned directory.
+    archive_bytes = io.BytesIO()
+    with zipfile.ZipFile(archive_bytes, "w") as archive:
+        archive.writestr("package/readme.txt", "third-party package")
+        archive.writestr("package/superflip.exe", b"MZ downloaded Superflip")
+
+    class _Response(io.BytesIO):
+        pass
+
+    download_root = Path(tempfile.mkdtemp()) / "tools"
+    contacted = []
+    try:
+        reqs.download_requirement_executable(Kind.SUPERFLIP, download_root,
+            opener=lambda *a, **k: contacted.append(a))
+        rejected = False
+    except ValueError:
+        rejected = True
+    check("automatic download requires approved integrity and licence evidence", rejected)
+    check("unapproved automatic download never contacts the server", not contacted)
+    check("unapproved automatic download creates no installation", not download_root.exists())
 
     # =====================================================================
     # SharpED: classification, with the network stubbed out
@@ -135,11 +170,13 @@ def main():
     check("a missing token is reported without contacting the server",
           status.state is State.TOKEN_MISSING)
     check("the missing-token message names the token",
-          "token" in status.message.lower())
+          "access key" in status.message.lower())
 
     status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                     client_factory=factory(result=_Models()))
     check("a healthy SharpED response is accepted", status.ok)
+    check("a healthy SharpED check keeps the already-fetched server default",
+          status.sharped_default_model == "koala 2.0")
 
     class _HttpError(Exception):
         def __init__(self, code):
@@ -150,9 +187,9 @@ def main():
         status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                         client_factory=factory(error=_HttpError(code)))
         check("HTTP %d is classified as a rejected token" % code,
-              status.state is State.TOKEN_REJECTED)
+              status.state is (State.TOKEN_REJECTED if code == 401 else State.ACCESS_DENIED))
         check("HTTP %d advises creating a new token" % code,
-              "Create token" in status.message)
+              "Jana2020 account" in status.message)
 
     status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                     client_factory=factory(error=ConnectionError("refused")))
@@ -175,8 +212,15 @@ def main():
 
     status = reqs.check_sharped_api("https://jana.fzu.cz", "tok",
                                     client_factory=factory(error=_HttpError(503)))
-    check("a 5xx server error is classified as unreachable, not a bad token",
-          status.state is State.SERVER_UNREACHABLE)
+    check("a 5xx server error is classified as unavailable, not a bad key",
+          status.state is State.SERVER_UNAVAILABLE)
+
+    status = reqs.check_sharped_api(
+        "https://jana.fzu.cz", "tok",
+        client_factory=factory(error=RuntimeError("unexpected public catalog failure")),
+    )
+    check("an unknown public request failure does not reject the token",
+          status.state is State.MALFORMED_RESPONSE)
 
     # --- the token must never appear anywhere user-visible -------------
     secret = "SECRET-TOKEN-abcdef123456"
@@ -201,6 +245,23 @@ def main():
                                 jana_dir=empty)
     check("an EDMA-free workflow is not blocked by a missing EDMA", result.ok)
 
+    result = reqs.run_preflight(
+        reqs.requirements_for_workflow(
+            needs_superflip=True, needs_edma=False, needs_sharped=False,
+        ),
+        superflip_path=str(real), sharped_token="", jana_dir=empty,
+    )
+    check("a SharpED-disabled workflow is not blocked by a missing token", result.ok)
+
+    result = reqs.run_preflight(
+        reqs.requirements_for_workflow(
+            needs_superflip=True, needs_edma=False, needs_sharped=True,
+        ),
+        superflip_path=str(real), sharped_token="", jana_dir=empty,
+    )
+    check("a SharpED-enabled workflow is blocked by a missing token",
+          not result.ok and result.first_failure.kind is Kind.SHARPED)
+
     required = reqs.requirements_for_workflow(needs_superflip=True, needs_edma=True,
                                               needs_sharped=False)
     check("remediation order is Superflip, then EDMA, then SharpED",
@@ -221,9 +282,26 @@ def main():
     check("a correct Jana2020 installation satisfies the preflight unaided", result.ok)
     check("both repaired paths are reported back to the caller",
           len(result.repaired) == 2)
-    check("the repaired Superflip is the real executable, not the wrapper",
-          all(r.path.name != reqs.WRAPPER_EXE_NAME
+    check("the repaired Superflip is the active scientific superflip.exe",
+          any(r.path == active.resolve()
               for r in result.repaired if r.kind is Kind.SUPERFLIP))
+
+    marked_edma = make_exe(marked, reqs.EDMA_EXE_NAME)
+    result = reqs.run_preflight(
+        required, superflip_path=str(wrapper), edma_path="",
+        jana_dir=marked, accept_suggestion=lambda _status: True,
+    )
+    check("combined Jana auto-detection chooses original Superflip beside the marked wrapper",
+          result.ok and any(
+              repaired.kind is Kind.SUPERFLIP and repaired.path == marked_original.resolve()
+              for repaired in result.repaired
+          ))
+    check("combined Jana auto-detection chooses Jana's EDMA without modifying it",
+          marked_edma.read_bytes() == program_bytes("EDMA.exe")
+          and any(
+              repaired.kind is Kind.EDMA and repaired.path == marked_edma.resolve()
+              for repaired in result.repaired
+          ))
 
     # Declining a suggestion must not silently satisfy the requirement.
     result = reqs.run_preflight(required, superflip_path="", edma_path="",
@@ -239,11 +317,18 @@ def main():
 
     source = inspect.getsource(appmod.IterativeSuperflipPipelineQtGUI)
     check("the main window runs the shared preflight before a workflow starts",
-          "_run_workflow_preflight" in source)
-    check("the preflight is driven from run validation",
-          "preflight_issues" in source)
+          "return reqs.run_preflight(" in source)
+    check("the preflight is driven after configuration validation and before the worker",
+          "if not self._ensure_workflow_requirements(cfg)" in source)
     check("the main window imports the shared requirements module",
           "from phase_studio import requirements as reqs" in source)
+
+    import phase_studio.jana_superflip as jana
+    wizard_source = inspect.getsource(jana._JanaWorkflowWizard)
+    check("the Jana Wizard calls the shared requirement gate",
+          "_ensure_workflow_requirements" in wizard_source)
+    check("the obsolete generic missing-token warning is gone",
+          "_show_missing_token_warning" not in inspect.getsource(jana))
 
     failures = [name for name, ok in results_log if not ok]
     print()
@@ -257,4 +342,5 @@ def main():
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    with isolate_discovery():
+        raise SystemExit(main())

@@ -1,0 +1,19 @@
+{
+  "logical_size": [
+    1500,
+    900
+  ],
+  "device_pixel_ratio": 1.0,
+  "source": "superflip",
+  "cycle": 3,
+  "threshold": 0.5,
+  "edma_sites": 2,
+  "jana_sites": 2,
+  "map_sha256": "826de4719300e9a33e4e5103c4f5e81229041bb7ce5338e78dade2daa335b1cc",
+  "model_sha256": "ab3aa1662acc7c4062e2fb9a870c8d9ed7006aed699d33fdb86a5756d9270136",
+  "canvas": [
+    1028,
+    345
+  ],
+  "projected_fill": 0.7999999999999993
+}

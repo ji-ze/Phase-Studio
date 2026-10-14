@@ -1,0 +1,11 @@
+{
+  "source_runtime": true,
+  "scale": 1.0,
+  "logical_size": [
+    650,
+    640
+  ],
+  "device_pixel_ratio": 1.0,
+  "scroll_maximum": 13,
+  "production_automatic_setup_available": false
+}

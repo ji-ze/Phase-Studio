@@ -1,0 +1,59 @@
+[
+  {
+    "filename": "PhaseStudio_FirstUse_Jana2020.pdf",
+    "pages": 23,
+    "bytes": 1304792,
+    "unique_screenshots": 11,
+    "embedded_image_occurrences": 19,
+    "hyperlinks": 34,
+    "outline_entries": 23,
+    "sha256": "d35ac69ce7e7a2c135d27123b3d87d8f2cd4cb3be22f723511876bf703f80e8f",
+    "path": "docs/tutorials/PhaseStudio_FirstUse_Jana2020.pdf",
+    "distribution_copy": "dist/documentation/PhaseStudio_FirstUse_Jana2020.pdf",
+    "qa": "All pages rendered; automated bounds/text/privacy/link/navigation checks passed",
+    "source": "sources\\first_use_jana2020.md",
+    "publication_ready": false,
+    "acceptance_gaps": [
+      "native Jana launch/return and continuation screenshots",
+      "2.0.3 packaged/native acceptance"
+    ]
+  },
+  {
+    "filename": "PhaseStudio_FirstUse_Standalone.pdf",
+    "pages": 21,
+    "bytes": 1438419,
+    "unique_screenshots": 12,
+    "embedded_image_occurrences": 18,
+    "hyperlinks": 33,
+    "outline_entries": 21,
+    "sha256": "a8b322944398d0f5c6f5bf6a0a7054c502fc0056ecb6982c45dba6dffc5fe047",
+    "path": "docs/tutorials/PhaseStudio_FirstUse_Standalone.pdf",
+    "distribution_copy": "dist/documentation/PhaseStudio_FirstUse_Standalone.pdf",
+    "qa": "All pages rendered; automated bounds/text/privacy/link/navigation checks passed",
+    "source": "sources\\first_use_standalone.md",
+    "publication_ready": false,
+    "acceptance_gaps": [
+      "native Jana launch/return and continuation screenshots",
+      "2.0.3 packaged/native acceptance"
+    ]
+  },
+  {
+    "filename": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "pages": 97,
+    "bytes": 3015744,
+    "unique_screenshots": 109,
+    "embedded_image_occurrences": 129,
+    "hyperlinks": 104,
+    "outline_entries": 94,
+    "sha256": "21597453307bd175d78589b2c97bd9fccbc1ac2400d40a26cc587d4f346fb995",
+    "path": "docs/tutorials/PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "distribution_copy": "dist/documentation/PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+    "qa": "All pages rendered; automated bounds/text/privacy/link/navigation checks passed",
+    "source": "sources\\superflip_sharped_complete.md",
+    "publication_ready": false,
+    "acceptance_gaps": [
+      "native Jana launch/return and continuation screenshots",
+      "2.0.3 packaged/native acceptance"
+    ]
+  }
+]

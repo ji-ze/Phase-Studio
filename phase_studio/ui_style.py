@@ -361,11 +361,11 @@ QWidget#brandHeader {
     border-radius: 0;
 }
 QLabel#brandTitle {
+    font-family: "Science Gothic";
     background-color: #f2f4f9;
     color: #001170;
     font-size: 17pt;
-    font-weight: 800;
-    letter-spacing: 1px;
+    font-weight: 400;
 }
 QLabel#brandSubtitle {
     background-color: #f2f4f9;
@@ -462,7 +462,7 @@ QTextEdit#executionLog {
     border: none;
     border-top: 1px solid #cbd7ea;
     border-radius: 0;
-    padding: 5px 9px;
+    padding: 8px 11px;
     background-color: #ffffff;
     color: #14204a;
     font-family: "Cascadia Mono", "Consolas", monospace;
@@ -479,6 +479,14 @@ QPushButton#primaryButton:hover {
     background-color: #2264b8;
     border-color: #2264b8;
 }
+QPushButton#primaryButton:disabled {
+    /* Without this, a disabled primary action looked exactly like an
+       enabled one (e.g. Autosolve's "Pass to Jana2020" before any
+       completed result exists). */
+    color: #7183a6;
+    background-color: #e7ecf3;
+    border-color: #cbd7ea;
+}
 QPushButton#handoffButton {
     color: #2264b8;
     background-color: #ffffff;
@@ -490,7 +498,7 @@ QPushButton#handoffButton:hover {
     color: #001170;
 }
 QPushButton#handoffButton:disabled {
-    color: #8794ad;
+    color: #5a6b8c;
     background-color: #f7f9fc;
     border-color: #cbd7ea;
 }
@@ -505,7 +513,7 @@ QPushButton#continueButton:hover {
     color: #001170;
 }
 QPushButton#continueButton:disabled {
-    color: #8794ad;
+    color: #5a6b8c;
     background-color: #f7f9fc;
     border-color: #cbd7ea;
 }
@@ -551,6 +559,25 @@ QWidget#runStatusPanel QLabel {
 QWidget#runStatusPanel QProgressBar {
     background-color: #edf2f8;
 }
+/* Superflip's own repeat counter is subordinate to the stage bar above it:
+   thinner and lighter, with a small muted caption. Without an explicit rule
+   the generic QProgressBar min-height (14px) overrode its fixed 6px height,
+   making the sub-progress the heaviest bar in the panel. */
+QWidget#runStatusPanel QProgressBar#superflipRepeatProgress {
+    min-height: 4px;
+    max-height: 4px;
+    border-bottom: none;
+}
+QWidget#runStatusPanel QProgressBar#superflipRepeatProgress::chunk {
+    background-color: #8fb6da;
+}
+QLabel#superflipRepeatDetail {
+    color: #7183a6;
+    background-color: transparent;
+    font-size: 8pt;
+    font-weight: 600;
+    padding: 0;
+}
 QLabel#runStatusTitle {
     color: #001170;
     background-color: transparent;
@@ -584,6 +611,79 @@ QToolButton#disclosureToggle:checked {
     background-color: #edf3fa;
     border-color: #2264b8;
 }
+/* Autosolve structure-view toolbar: one shared button geometry (same
+   border, radius, padding, font) for Fit / Reset view / Auto rotate and the
+   two view-mode segments, so the row reads as one control family. */
+QToolButton#viewToolButton, QToolButton#viewToggleButton,
+QToolButton#viewModeSegmentLeft, QToolButton#viewModeSegmentRight {
+    background-color: #ffffff;
+    border: 1px solid #cbd7ea;
+    border-radius: 3px;
+    padding: 3px 10px;
+    color: #33456e;
+    font-weight: 600;
+}
+QToolButton#viewToolButton:hover, QToolButton#viewToggleButton:hover {
+    background-color: #edf3fa;
+    border-color: #2264b8;
+    color: #001170;
+}
+QToolButton#viewToolButton:pressed {
+    background-color: #dceaf8;
+    border-color: #14509a;
+}
+QToolButton#viewToolButton:focus, QToolButton#viewToggleButton:focus,
+QToolButton#viewModeSegmentLeft:focus, QToolButton#viewModeSegmentRight:focus {
+    border-color: #2264b8;
+}
+/* Toggle: the ON state is a light blue fill with a blue border (clearly
+   "engaged"), lighter than the solid fill used for the selected segment. */
+QToolButton#viewToggleButton:checked {
+    background-color: #dceaf8;
+    border-color: #2264b8;
+    color: #001170;
+}
+/* Auto rotate "Off" must still read as an ordinary enabled button (same
+   text colour as Fit / Reset view), not a dimmed/disabled one -- checked
+   is what carries the "engaged" signal, via the light-blue fill above. */
+/* Segmented control: adjoining halves share the middle border line. */
+QToolButton#viewModeSegmentLeft {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+    border-right: none;
+}
+QToolButton#viewModeSegmentRight {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+}
+QToolButton#viewModeSegmentLeft:hover, QToolButton#viewModeSegmentRight:hover {
+    background-color: #edf3fa;
+    color: #001170;
+}
+QToolButton#viewModeSegmentLeft:checked, QToolButton#viewModeSegmentRight:checked {
+    background-color: #2264b8;
+    border-color: #2264b8;
+    color: #ffffff;
+}
+QLabel#autosolveFormula {
+    color: #33456e;
+    background-color: transparent;
+    font-size: 11.5pt;
+    font-weight: 600;
+    padding: 0;
+}
+QLabel#autosolveEdmaThreshold {
+    color: #7183a6;
+    background-color: transparent;
+    font-size: 8.5pt;
+    padding: 0;
+}
+QLabel#elementLegend {
+    color: #33456e;
+    background-color: transparent;
+    font-size: 9pt;
+    padding: 0;
+}
 QFrame#workflowCard {
     background-color: #ffffff;
     border: 1px solid #cbd7ea;
@@ -604,6 +704,99 @@ QFrame#workflowCard QLabel {
 }
 QLabel#workflowCardDescription {
     color: #52658b;
+}
+/* Action tiles: 1px margin + 1px border normally, 0 margin + 2px border on
+   focus -- the same 2px total inset either way (TILE_FRAME_INSET in
+   jana_superflip.py), so gaining focus never shifts the tile's text. Rule
+   order sets precedence: hover < focus < pressed. */
+QFrame#actionTile {
+    background-color: #ffffff;
+    border: 1px solid #cbd7ea;
+    border-radius: 4px;
+    margin: 1px;
+}
+QFrame#actionTile[workflowTier="secondary"] {
+    background-color: #f7f9fc;
+    border-color: #d7e0ee;
+}
+QFrame#actionTile[workflowTier="secondary"] QLabel#actionTileTitle {
+    color: #33456e;
+    font-size: 11pt;
+}
+QLabel#workflowGroupLabel {
+    color: #7183a6;
+    font-size: 8pt;
+    font-weight: 800;
+    letter-spacing: 1px;
+    padding-top: 4px;
+}
+QFrame#actionTile:hover {
+    background-color: #edf3fa;
+    border: 1px solid #2264b8;
+}
+QFrame#actionTile[recommended="true"] {
+    background-color: #f3f8ff;
+    border-color: #8fb6da;
+}
+QFrame#actionTile[recommended="true"]:hover {
+    background-color: #edf3fa;
+    border-color: #2264b8;
+}
+QFrame#actionTile:focus {
+    border: 2px solid #2264b8;
+    margin: 0px;
+    background-color: #f5f9ff;
+}
+QFrame#actionTile[pressed="true"] {
+    background-color: #dceaf8;
+    border: 2px solid #14509a;
+    margin: 0px;
+}
+QFrame#actionTile QLabel {
+    background-color: transparent;
+}
+QLabel#actionTileTitle {
+    color: #001170;
+    font-size: 13pt;
+    font-weight: 700;
+}
+QLabel#actionTileSubtitle {
+    color: #33456e;
+    font-size: 10pt;
+}
+QLabel#actionTileSecondary {
+    color: #7183a6;
+    font-size: 9pt;
+}
+QLabel#actionTileSecondary[placeholder="true"] {
+    color: transparent;
+}
+QLabel#actionTileChevron {
+    color: #8fa3c4;
+    font-size: 16pt;
+    font-weight: 600;
+}
+QPushButton#wizardSecondaryAction {
+    color: #33456e;
+    background-color: #f7f9fc;
+    border: 1px solid #d7e0ee;
+    border-radius: 4px;
+    font-size: 9pt;
+    font-weight: 600;
+    padding: 5px 12px;
+}
+QPushButton#wizardSecondaryAction:hover {
+    color: #001170;
+    background-color: #edf3fa;
+    border-color: #8fb6da;
+}
+QPushButton#wizardSecondaryAction:pressed {
+    background-color: #dceaf8;
+    border-color: #2264b8;
+}
+QPushButton#wizardSecondaryAction:focus {
+    border: 2px solid #2264b8;
+    padding: 4px 11px;
 }
 QScrollBar:vertical {
     background: #f2f4f9;
@@ -753,6 +946,34 @@ QLabel#pageHeading {
     font-size: 12pt;
     font-weight: 700;
     background-color: #ffffff;
+}
+QPushButton#restoreAutomaticLink {
+    color: #001170;
+    border: none;
+    background: transparent;
+    padding: 3px 5px;
+    min-height: 20px;
+}
+QPushButton#restoreAutomaticLink:hover {
+    color: #1fa5ff;
+    text-decoration: underline;
+}
+QPushButton#restoreAutomaticLink:focus {
+    border: 1px solid #1fa5ff;
+}
+QFrame#configurationValidation {
+    background: #f3f6fb;
+    border: 1px solid #dce5f2;
+    border-radius: 4px;
+}
+QFrame#configurationValidation QLabel {
+    background: transparent;
+    border: none;
+    color: #52658b;
+}
+QLabel#configurationValidationHeading {
+    color: #001170;
+    font-weight: 600;
 }
 QFrame#pageHeadingRule {
     background-color: #2264b8;
@@ -950,8 +1171,8 @@ QPushButton#metricsViewToggle:checked {
     color: #001170;
 }
 QPushButton#metricsViewToggle:disabled {
-    color: #b7c2d9;
-    border-color: #e3e9f3;
+    color: #5a6b8c;
+    border-color: #cbd7ea;
     background-color: #f7f9fc;
 }
 QLabel#metricsHintLabel {
@@ -1024,7 +1245,7 @@ QLabel#splashTitle {
     color: #001170;
     background-color: transparent;
     font-size: 19pt;
-    font-weight: 800;
+    font-weight: 400;
 }
 QLabel#splashSubtitle {
     color: #52658b;
@@ -1255,6 +1476,21 @@ def install_wheel_safety(app: object) -> object:
 
 def apply_phase_studio_style(app: object) -> None:
     """Apply the SharpED logo palette and Phase Studio visual system."""
+    # Windows' offscreen Qt plugin can start with an empty font database.
+    # Register its existing UI fonts before a bundled display face becomes
+    # the fallback for every unrelated control in generated previews.
+    import os
+    if os.name == "nt":
+        from pathlib import Path
+        from PySide6.QtGui import QFontDatabase
+        if not QFontDatabase.families():
+            fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+            for filename in ("segoeui.ttf", "segoeuib.ttf"):
+                QFontDatabase.addApplicationFont(str(fonts / filename))
+        if "Segoe UI" in QFontDatabase.families():
+            normal_font = app.font()
+            normal_font.setFamily("Segoe UI")
+            app.setFont(normal_font)
     try:
         _install_tooltip_width_cap(app)
     except Exception:

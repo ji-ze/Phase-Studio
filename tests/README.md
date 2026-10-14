@@ -19,12 +19,10 @@ for every file, checking the exit code) without any additional tooling.
   scientific functions with the integrated baseline; standard-library unittest.
 
 
-- `test_sharped_catalog.py` -- standard-library unittest coverage of the real
-  model response schema, atomic catalog/default replacement, selection intent,
-  multipart DEFAULT/explicit uploads through both application entry points,
-  late QSettings restoration, widget reconstruction, restart, shared preflight
-  and Wizard state, failed refreshes, custom servers, and bounded reuse.
-  Run directly with `python tests/test_sharped_catalog.py`; no pytest required.
+- `test_sharped_api_contract.py` -- standard-library unittest coverage proving
+  that model discovery and the complete authenticated lifecycle use the same
+  historical base URL, preserve token headers, resolve DEFAULT historically,
+  and never route a custom server request to a hidden production host.
 
 - `test_scientific_core.py` -- golden regression baseline for the pure
   parsing/analysis functions in `phase_studio/app.py`: HKL parsing
@@ -58,31 +56,37 @@ for every file, checking the exit code) without any additional tooling.
   the wrapper-only workflows one visible console owned by the wrapper, with
   the child's output teed out progressively rather than buffered until exit.
 
-- `test_metric_legends.py` -- Workflow-metrics legend determinism. Walks the
-  real lifecycle (no data -> first cycle -> second cycle -> re-render -> tab
-  switch -> view reset -> completion) and checks after every step that each
-  multi-metric tab shows a legend matching exactly the series it plotted,
-  with no duplicate or empty entries, and that the two genuinely
-  single-metric tabs still omit theirs. The first-cycle case is the
-  regression itself: the legend used to disappear whenever only one series
-  happened to carry finite values.
+- `test_metric_legends.py` -- all four profile-driven three-tab layouts,
+  direction labels, Superflip/SharpED series, and deterministic legends.
 
-- `test_jana_completion.py` -- the Jana2020 Wizard completion path. Drives
-  the real pipeline message queue and Qt event loop to COMPLETE and checks
-  that the locked result selector opens automatically exactly once, on the
-  Wizard's own map source, with "Send to Jana2020" left enabled and
-  reopening the same locked selector. Also covers Full configuration
-  (manual, switchable, never auto-opened), standalone (never auto-opened),
-  and the locked-source-unavailable error path. Uses structures that
-  actually parse, because the original failure only appeared once the
-  selector had real atoms to render.
+- `test_jana_completion.py` -- the shared profile-aware result selector in
+  Jana2020 and standalone contexts: automatic completion/graceful-stop open,
+  all four column sets, absence of Selection score, matching recommendations,
+  and the standalone Save map and model action.
+
+- `test_input_context.py` -- pure and GUI-bound guards for the resolved input
+  boundary: External/embedded HKL, active versus stale Jana `.inflip`, metadata
+  precedence, reference/initial models, captured `RunConfig`, QSettings
+  compatibility, and Jana-versus-standalone handoff eligibility.
+
+- `test_map_quality.py` -- pure periodic-map metrics, immutable validation
+  data, all four profiles, and exact source-neutral lexicographic ranking.
+
+- `test_requirements.py` -- pure shared preflight checks: executable identity,
+  wrapper-safe Jana auto-detection, conditional requirement sets, safe official
+  ZIP extraction, SharpED reachability/authentication classification, and token
+  redaction.
+
+- `test_preflight_ui.py` -- click-driven Qt coverage from the full window's
+  Run phasing button and every Jana Wizard run path. It verifies the three
+  dedicated remediation dialogs, silent success, repair/re-check/resume,
+  settings synchronization, and Skip semantics.
 
 - `test_wizard_geometry.py` -- the Jana2020 Wizard's window geometry: the
   preferred width is substantially wider than the old narrow layout, always
   clamped inside the available screen at 1920x1080 / 1600x900 / 1366x768,
-  the header and footer stay outside the scrollable body, and the window
-  height follows the page actually on screen instead of the tallest page in
-  the stack.
+  the header and footer stay outside the scrollable body, and every main step
+  keeps one stable outer window geometry while only the body scrolls.
 
 - `test_workflow_states.py` -- the four user-facing workflow terminal states.
   COMPLETE, STOPPED, CANCELLED and FAILED must stay distinct; in particular a
@@ -93,12 +97,52 @@ for every file, checking the exit code) without any additional tooling.
 - `test_wizard_models.py` -- the Wizard's SharpED model list. The list is
   fetched automatically when a SharpED page is entered (never for Superflip
   only), exactly once, asynchronously, and cached for the session; an explicit
-  user choice survives a refresh; the resolved server default is shown while
-  the internal `default` sentinel is preserved; a failure stays concise with
-  Refresh models still available. The server is stubbed, so the request count
-  itself is asserted.
+  user choice survives cycle changes and refreshes; the live catalog drives
+  the canonical one-cycle and multi-cycle recommendations; a failure stays
+  concise with Refresh models still available. The server is stubbed, so the
+  request count itself is asserted.
+
+- `test_requirement_dialog_scaling.py` -- SharpED/EDMA remediation-dialog
+  frame and button bounds at 100%, 125%, and 150% scaling.
+
+- `test_edma_threshold.py` -- the per-map automatic EDMA threshold
+  (`phase_studio/edma_threshold.py`). Deterministic synthetic fixtures stand in
+  for EDMA: a known structure whose atoms appear as the threshold drops, plus
+  noise peaks below a defined onset. It covers:
+  - the noise-onset plateau, where the lowest pre-noise threshold is chosen;
+  - different maps selecting different thresholds;
+  - the composition constraint, the placeholder-composition gate and the
+    no-composition case;
+  - the genuine holdout: corrupting only work reflections cannot change the
+    decision;
+  - reference independence through the real app integration, with EDMA
+    patched out;
+  - fallback, cache and user stop.
+
+- `test_element_colors.py` -- the one period-based element-colour authority
+  (`app.element_color`). It checks:
+  - all 118 elements get a valid, deterministic colour, and period metadata
+    is correct, including the f-block;
+  - same-period elements are not identical, and neighbours and the required
+    pairs are distinguishable (CIELAB ΔE);
+  - every colour is readable on white and none is near-black;
+  - unknown labels get a neutral fallback;
+  - the renderer, preview, Autosolve and legend use the same authority, and no
+    element-to-colour table exists.
+
+- `test_wizard_text_clipping.py` -- no Jana Wizard tile, input-summary or
+  warning text is cropped before or after the deferred `.inflip` input-summary
+  population, including descender strings. Each check runs in a child process
+  at QT_SCALE_FACTOR 1, 1.25 and 1.5, on a synthetic `.inflip` shaped like a
+  real job. It also checks identical paired-tile geometry and visible tile
+  icons.
 
 ## Adding a new golden regression test
+
+`test_sharped_api_contract.py` proves model discovery, upload, polling, and
+download all derive from one configured base URL, with the historical token
+headers and DEFAULT resolution. It uses mocked HTTP transport; no live token is
+needed.
 
 1. Build a small, fully hand-verifiable fixture (few reflections/cycles,
    not a large randomized one) so a human can sanity-check the pinned

@@ -1,0 +1,33 @@
+{
+  "checks": [
+    {
+      "filename": "PhaseStudio_FirstUse_Jana2020.pdf",
+      "pages": 23,
+      "fonts": "embedded",
+      "local_links": "resolved",
+      "distribution_copy": "identical",
+      "assets": "present/readable",
+      "font_licence": "attached"
+    },
+    {
+      "filename": "PhaseStudio_FirstUse_Standalone.pdf",
+      "pages": 21,
+      "fonts": "embedded",
+      "local_links": "resolved",
+      "distribution_copy": "identical",
+      "assets": "present/readable",
+      "font_licence": "attached"
+    },
+    {
+      "filename": "PhaseStudio_Superflip_SharpED_Complete_Guide.pdf",
+      "pages": 97,
+      "fonts": "embedded",
+      "local_links": "resolved",
+      "distribution_copy": "identical",
+      "assets": "present/readable",
+      "font_licence": "attached"
+    }
+  ],
+  "documented_controls": 87,
+  "pages_rendered": 141
+}

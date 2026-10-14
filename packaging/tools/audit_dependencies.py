@@ -14,9 +14,9 @@ Anything else -- most importantly the MSVC runtime (``vcruntime140*.dll``,
 
 Usage::
 
-    python packaging/tools/audit_dependencies.py dist/PhaseStudio/PhaseStudio.exe
+    python packaging/tools/audit_dependencies.py dist/superflip/superflip.exe
     python packaging/tools/audit_dependencies.py --env      # audit the build env
-    python packaging/tools/audit_dependencies.py --dist dist/PhaseStudio
+    python packaging/tools/audit_dependencies.py --dist dist/superflip
 """
 
 from __future__ import annotations
