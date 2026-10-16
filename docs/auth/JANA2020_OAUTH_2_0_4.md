@@ -110,9 +110,10 @@ The real dialog uses a separate session-only CredentialStore and reports method,
 granted scope and remaining lifetime, never the token. This is opt-in, not a
 routine test or inference request. It cannot prove protected API permission.
 
-Capture evidence: `docs/screenshots/2.0.4-oauth/scale-{1,1.25,1.5}`. All automated
-UI captures are explicitly mocked and must not be presented as production login.
-Reproduce with `packaging/tools/capture_oauth.py` under QT_SCALE_FACTOR.
+The current reviewed connection-dialog image is capture 08 in
+`docs/screenshots/2.0.4/wizard/README.md`. Its isolated empty credential store
+does not establish production login. Geometry/DPI tests likewise do not prove
+browser authorization or protected API permission.
 
 Production acceptance must separately record real browser return/token exchange,
 an explicitly authorized normal job's upload/status/download, manual fallback,
