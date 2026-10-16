@@ -1161,6 +1161,8 @@ class HklAnalysis:
     d_full_98: Optional[float]
     bins: List[Dict[str, float]]
     source_note: str
+    diagnostics: object = None
+    format_verified: bool = True
 
 @dataclass
 class HklAnalysisRequest:
@@ -1185,6 +1187,8 @@ class HklLoadResult:
     include_000: bool
     reflections: List[Reflection]
     unique_reflections: List[Reflection]
+    diagnostics: object = None
+    format_verified: bool = True
 
 REFERENCE_STRUCTURE_SUFFIXES = {".cif", ".ins", ".res"}
 REFERENCE_DENSITY_SUFFIXES = {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"}
@@ -2977,11 +2981,18 @@ def analyze_hkl_data(
     sg_hm: str,
     source_note: str = "",
     bin_count: int = 12,
+    _loaded: Optional[HklLoadResult] = None,
 ) -> HklAnalysis:
     mode = normalize_reflection_data_mode(data_mode)
+    format_verified = mode != REFLECTION_DATA_MODE_AUTO
+    if mode == REFLECTION_DATA_MODE_AUTO:
+        mode = resolve_reflection_data_mode(hkl_path, mode)
     value_col, sigma_col, include_000 = reflection_columns_for_mode(mode)
-    raw = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
-    unique = merge_duplicate_reflections(raw)
+    from phase_studio.hkl_diagnostics import read_diagnostic_reflections, build_diagnostics, shell_statistics, validate_cell, check_cancelled
+    check_cancelled()
+    validate_cell(cell)
+    raw = _loaded.reflections if _loaded is not None else list(read_diagnostic_reflections(hkl_path, mode)[0])
+    unique = _loaded.unique_reflections if _loaded is not None else merge_duplicate_reflections(raw)
     gstar = reciprocal_metric_tensor(cell)
     unique_hkls = np.asarray([[int(r.h), int(r.k), int(r.l)] for r in unique], dtype=np.int32)
     unique_stls = hkl_stl_array_from_metric(gstar, unique_hkls)
@@ -2991,7 +3002,17 @@ def analyze_hkl_data(
     if ds.size == 0:
         raise ValueError("No non-zero HKL reflections with finite d-spacing were found.")
     d_min = float(np.min(ds))
-    theory_stl_by_key = theoretical_unique_hkl_stl_from_observed(unique, cell, sg, d_min)
+    # Inclusive input-resolution boundary. Gemmi's independently rounded
+    # metric can otherwise omit an observed reflection exactly at d_min.
+    # Generate with a tiny guard, then filter using this analysis's own metric.
+    boundary_stl = 0.5 / d_min
+    boundary_tolerance = max(1e-12 * boundary_stl, 8 * float(np.spacing(boundary_stl)))
+    theory_stl_by_key = {
+        key: stl for key, stl in theoretical_unique_hkl_stl_from_observed(
+            unique, cell, sg, d_min * (1.0 - 1e-12)
+        ).items() if stl <= boundary_stl + boundary_tolerance
+    }
+    check_cancelled()
     observed_asu = np.array(unique_hkls, copy=True)
     try:
         sg.switch_to_asu(observed_asu)
@@ -3038,7 +3059,7 @@ def analyze_hkl_data(
     for idx in range(bin_total):
         lo = float(edges[idx])
         hi = float(edges[idx + 1])
-        completeness = 100.0 * float(observed_counts[idx]) / float(theory_counts[idx]) if theory_counts[idx] else 0.0
+        completeness = 100.0 * float(observed_counts[idx]) / float(theory_counts[idx]) if theory_counts[idx] else math.nan
         mean_signal = float(signal_sums[idx] / signal_counts[idx]) if signal_counts[idx] else math.nan
         bins.append(
             {
@@ -3058,6 +3079,8 @@ def analyze_hkl_data(
     theory_cum_count = 0
     observed_cum_count = 0
     while theory_idx < len(theory_sorted):
+        if theory_idx % 4096 == 0:
+            check_cancelled()
         edge = float(theory_sorted[theory_idx][0])
         while theory_idx < len(theory_sorted) and theory_sorted[theory_idx][0] <= edge + 1e-12:
             key = theory_sorted[theory_idx][1]
@@ -3068,7 +3091,7 @@ def analyze_hkl_data(
             theory_idx += 1
         if theory_cum_count and 100.0 * observed_cum_count / theory_cum_count >= 98.0:
             d_full_98 = 1.0 / (2.0 * edge) if edge > 0 else None
-    return HklAnalysis(
+    analysis = HklAnalysis(
         hkl_path=Path(hkl_path),
         data_mode=mode,
         cell=cell,
@@ -3080,7 +3103,12 @@ def analyze_hkl_data(
         d_full_98=d_full_98,
         bins=bins,
         source_note=source_note,
+        format_verified=_loaded.format_verified if _loaded is not None else format_verified,
     )
+    from dataclasses import replace
+    diagnostics = _loaded.diagnostics if _loaded is not None else build_diagnostics(analysis)
+    analysis.diagnostics = replace(diagnostics, shells=shell_statistics(analysis, diagnostics))
+    return analysis
 
 def _phase_studio_float7(value: float) -> str:
     try:
@@ -4536,11 +4564,17 @@ def resolve_hkl_analysis_inputs(request: HklAnalysisRequest) -> Tuple[Path, str,
 def build_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResult:
     """Plain-function equivalent of resolve_hkl_analysis_inputs() that also
     reads and merges the reflections -- see resolve_hkl_analysis_inputs()."""
+    from phase_studio.hkl_diagnostics import cached_load_result
+    return cached_load_result(request)
+
+
+def _build_uncached_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResult:
+    from phase_studio.hkl_diagnostics import read_diagnostic_reflections, build_diagnostics
     hkl_path, data_mode, cell, sg, hm, source_note = resolve_hkl_analysis_inputs(request)
     value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
-    reflections = read_hkl(hkl_path, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
+    reflections = list(read_diagnostic_reflections(hkl_path, data_mode)[0])
     unique = merge_duplicate_reflections(reflections)
-    return HklLoadResult(
+    result = HklLoadResult(
         hkl_path=hkl_path,
         data_mode=data_mode,
         cell=cell,
@@ -4553,6 +4587,17 @@ def build_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResult:
         reflections=reflections,
         unique_reflections=unique,
     )
+    # An AUTO filename/default guess is not evidence that column 5 is sigma.
+    # Embedded Jana columns and explicitly selected external formats are declared.
+    embedded = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
+    result.format_verified = (embedded and bool(embedded_reflection_data_mode_from_inflip(Path(request.jana_text)))) or normalize_reflection_data_mode(request.configured_mode) != REFLECTION_DATA_MODE_AUTO
+    if embedded:
+        from phase_studio.powder_diagnostics import standard_powder_context
+        result.powder_diagnostic_context = standard_powder_context(Path(request.jana_text))
+        if result.powder_diagnostic_context.get('unsupported_layout'):
+            raise ValueError(result.powder_diagnostic_context['error'])
+    result.diagnostics = build_diagnostics(result)
+    return result
 
 
 def build_hkl_analysis_request_from_inflip(
@@ -7603,7 +7648,7 @@ INPUT_TOOLTIPS = {
     "delta": "Superflip delta keyword. AUTO lets Superflip estimate the flip threshold.",
     "weakratio": "Superflip weakratio keyword.",
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
-    "reflection_data_mode": "Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so sigma-based statistics are hidden or relabeled I/FWHM.",
+    "reflection_data_mode": "Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so uncertainty-based significance is unavailable.",
     "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle model instead.",
     "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
@@ -8704,7 +8749,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Input mode</b> chooses the reflection source: <b>Jana2020 .inflip</b>, <b>Jana2020 .inflip with overrides</b>, or <b>External HKL</b>. In Jana modes, the .inflip file's fbegin/endf block is the default HKL source and its cell/space-group/composition keywords can provide crystallographic metadata; External mode uses reflection data loaded independently of Jana2020 and requires metadata from another source.</p>
             <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
             <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
-            <p><b>HKL format</b> is the exact displayed column order. <b>Set from .inflip</b> imports Jana's dataformat. For example, <b>h k l · F · phase · σ(F)</b> means Miller indices, amplitude, phase in degrees, and amplitude uncertainty. FWHM formats contain peak width rather than measurement uncertainty, so validation and completeness use I/FWHM and omit the I/&sigma;(I)=3 threshold.</p>
+            <p><b>HKL format</b> is the exact displayed column order. <b>Set from .inflip</b> imports Jana's dataformat. For example, <b>h k l · F · phase · σ(F)</b> means Miller indices, amplitude, phase in degrees, and amplitude uncertainty. FWHM formats contain peak width rather than measurement uncertainty, so validation and completeness show intensity and peak width separately; no uncertainty-based significance is inferred.</p>
             <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
             <h3>Crystal metadata</h3>
             <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana2020 .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
@@ -11087,6 +11132,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode, metadata)
 
     def _set_hkl_task_running(self, running: bool) -> None:
+        if not running:
+            progress = getattr(self, "_hkl_progress_dialog", None)
+            if progress is not None:
+                progress.close()
+                progress.deleteLater()
+                self._hkl_progress_dialog = None
         for button_name in ("test_hkl_btn", "analyze_hkl_btn"):
             button = getattr(self, button_name, None)
             if isinstance(button, QPushButton):
@@ -11113,11 +11164,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._hkl_task_generation += 1
         task_id = self._hkl_task_generation
         self._active_hkl_task_id = task_id
+        from PySide6.QtWidgets import QProgressDialog
+        from phase_studio.hkl_diagnostics import diagnostic_cancellation
+        from concurrent.futures import CancelledError
+        cancel_event = threading.Event()
+        self._hkl_cancel_event = cancel_event
+        progress = QProgressDialog(label + "…", "Cancel", 0, 0, self)
+        progress.setWindowTitle("HKL diagnostics")
+        progress.setMinimumDuration(500)
+        progress.setAutoClose(False)
+        progress.canceled.connect(cancel_event.set)
+        self._hkl_progress_dialog = progress
+        progress.setValue(0)
 
         def worker() -> None:
             try:
-                result = worker_fn()
-                self.msg_queue.put((done_kind, (task_id, result)))
+                with diagnostic_cancellation(cancel_event):
+                    result = worker_fn()
+                if not cancel_event.is_set():
+                    self.msg_queue.put((done_kind, (task_id, result)))
+            except CancelledError:
+                pass
             except Exception as exc:
                 report = build_error_report(
                     exc,
@@ -11337,157 +11404,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
 
     def _build_hkl_validation_dialog(self, result: HklLoadResult) -> QDialog:
-        hkl_path = result.hkl_path
-        data_mode = result.data_mode
-        cell = result.cell
-        hm = result.spacegroup_hm
-        source_note = result.source_note
-        value_col = result.value_col
-        sigma_col = result.sigma_col
-        include_000 = result.include_000
-        reflections = result.reflections
-        unique = result.unique_reflections
-        sigma_count = sum(1 for reflection in reflections if reflection.sigma is not None)
-        phase_count = sum(1 for reflection in reflections if reflection.phase is not None)
-        value_label = reflection_value_label(data_mode)
-        sigma_label = reflection_sigma_label(data_mode)
-        snr_label = reflection_primary_snr_label(data_mode)
-        is_fwhm_mode = reflection_mode_has_fwhm(data_mode)
-        derived_ios_label = snr_label if is_fwhm_mode else "Derived I/σ(I)"
-
-        dialog = QDialog(self)
-        dialog.setObjectName("hklValidationDialog")
-        dialog.setWindowTitle("HKL Validation")
-        dialog.resize(1060, 680)
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(9)
-        layout.addWidget(self._diagnostic_header("HKL VALIDATION", "Reflection parsing and input diagnostics", "PARSED"))
-        column_summary = (
-            f"{value_label}: column {value_col} · {sigma_label}: column "
-            f"{sigma_col if sigma_col is not None else 'none'} · "
-            f"000 input record: {'retained for the phase-bearing Superflip format; excluded from physical statistics' if include_000 else 'not retained by this input format'}"
-        )
-        layout.addWidget(self._diagnostic_input_summary(
-            hkl_path,
-            data_mode,
-            cell,
-            f"{compact_spacegroup_symbol(result.spacegroup)} (#{result.spacegroup.number})",
-            source_note,
-            (("Columns", column_summary),),
-        ))
-        layout.addWidget(self._diagnostic_metric_grid((
-            (f"{len(reflections):,}", "Parsed"),
-            (f"{len(unique):,}", "Unique literal HKL triplets"),
-            (f"{sigma_count:,} / {len(reflections):,}", f"{sigma_label} coverage"),
-            (f"{phase_count:,} / {len(reflections):,}", "Phase-field coverage"),
-        )))
-
-        sample_header = QHBoxLayout()
-        sample_title = QLabel("REFLECTION SAMPLE")
-        sample_title.setObjectName("diagnosticSectionTitle")
-        sample_header.addWidget(sample_title)
-        sample_header.addStretch(1)
-        rows = min(50, len(reflections))
-        sample_count = QLabel(f"First {rows:,} of {len(reflections):,} parsed reflections")
-        sample_count.setObjectName("diagnosticMeta")
-        sample_header.addWidget(sample_count)
-        layout.addLayout(sample_header)
-
-        # The significance value is derived from the parsed value and sigma/FWHM
-        # fields. It is shown once; the former primary and "Derived" columns
-        # called the same function and therefore duplicated every value.
-        headers = ["h", "k", "l", value_label, sigma_label, "Phase (°)", derived_ios_label]
-        headers.extend(["d (Å)", "sinθ/λ"])
-        sigma_column_index = headers.index(sigma_label)
-        table = QTableWidget(rows, len(headers))
-        self._configure_diagnostic_table(table)
-        table.setHorizontalHeaderLabels(headers)
-        if not is_fwhm_mode:
-            sigma_header_item = table.horizontalHeaderItem(sigma_column_index)
-            if sigma_header_item is not None:
-                sigma_header_item.setToolTip(
-                    "~value marks a theoretical estimate (Poisson counting statistics, "
-                    "σ ≈ √value) shown only because no measured uncertainty was parsed "
-                    "for that reflection; it is not measured data."
-                )
-        for column in range(3):
-            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.ResizeToContents)
-        for column in range(3, len(headers)):
-            table.horizontalHeader().setSectionResizeMode(column, QHeaderView.Stretch)
-        estimated_sigma_color = QColor("#7183a6")
-        for row, reflection in enumerate(reflections[:rows]):
-            d_spacing = reflection_d_spacing(cell, int(reflection.h), int(reflection.k), int(reflection.l))
-            stl = reflection_sintheta_over_lambda(cell, int(reflection.h), int(reflection.k), int(reflection.l))
-            primary_snr = reflection_primary_signal_to_noise(reflection, data_mode)
-
-            sigma_is_estimated = False
-            if reflection.sigma is not None:
-                sigma_text = f"{float(reflection.sigma):.7g}"
-            elif is_fwhm_mode:
-                sigma_text = "—"
-            else:
-                # No measured uncertainty was parsed for this reflection: show a
-                # theoretical Poisson counting-statistics estimate (sigma ~= sqrt
-                # of the observed intensity/amplitude) instead of leaving it blank,
-                # clearly marked with "~" so it is never mistaken for measured data.
-                theoretical_sigma = math.sqrt(abs(float(reflection.value)))
-                sigma_text = f"~{theoretical_sigma:.7g}"
-                sigma_is_estimated = True
-
-            row_values: List[Tuple[str, bool]] = [
-                (str(int(reflection.h)), False),
-                (str(int(reflection.k)), False),
-                (str(int(reflection.l)), False),
-                (f"{float(reflection.value):.7g}", False),
-                (sigma_text, sigma_is_estimated),
-                ("—" if reflection.phase is None else f"{float(reflection.phase):.7g}", False),
-                ("—" if primary_snr is None else f"{float(primary_snr):.7g}", False),
-            ]
-            row_values.append(("—" if not math.isfinite(d_spacing) else f"{d_spacing:.5g}", False))
-            row_values.append((f"{stl:.5g}", False))
-
-            for column, (text_value, is_estimate) in enumerate(row_values):
-                item = QTableWidgetItem(text_value)
-                item.setTextAlignment(Qt.AlignCenter if column < 3 else Qt.AlignRight | Qt.AlignVCenter)
-                if is_estimate:
-                    font = item.font()
-                    font.setItalic(True)
-                    item.setFont(font)
-                    item.setForeground(estimated_sigma_color)
-                    item.setToolTip(
-                        "Theoretical estimate (σ ≈ √value, Poisson counting statistics) -- "
-                        "no measured uncertainty was parsed for this reflection."
-                    )
-                table.setItem(row, column, item)
-        layout.addWidget(table, 1)
-
-        summary_text = (
-            "HKL VALIDATION\n"
-            f"Source: {hkl_path}\nFormat: {format_reflection_data_mode(data_mode)}\n"
-            f"Unit cell: {cell.a:.5g} × {cell.b:.5g} × {cell.c:.5g} Å · "
-            f"{cell.alpha:.4g}° × {cell.beta:.4g}° × {cell.gamma:.4g}°\n"
-            f"Space group: {hm}\nParsed: {len(reflections):,}\nUnique: {len(unique):,}\n"
-            f"{sigma_label} coverage: {sigma_count:,}/{len(reflections):,}\n"
-            f"Phase-field coverage: {phase_count:,}/{len(reflections):,}\n"
-            "Unique definition: literal HKL triplets after exact-duplicate merging (not symmetry orbits)\n"
-            f"000 handling: {'retained in raw input/field counts and excluded from physical resolution/completeness statistics' if include_000 else 'excluded by the selected input format'}"
-        )
-        footer = QHBoxLayout()
-        copy_summary = QPushButton("Copy summary")
-        copy_summary.setObjectName("diagnosticSecondaryButton")
-        copy_summary.clicked.connect(lambda: QApplication.clipboard().setText(summary_text))
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(dialog.accept)
-        footer.addWidget(copy_summary)
-        footer.addStretch(1)
-        footer.addWidget(close_button)
-        layout.addLayout(footer)
-        dialog.hkl_table = table  # type: ignore[attr-defined]
-        dialog.summary_text = summary_text  # type: ignore[attr-defined]
-        dialog.full_source_path = str(hkl_path)  # type: ignore[attr-defined]
-        fit_dialog_to_available_screen(dialog, QSize(1060, 680))
-        return dialog
+        from phase_studio.hkl_diagnostics_ui import validation_dialog
+        return validation_dialog(self, result)
 
     def _show_hkl_load_result_dialog(self, payload: object) -> None:
         dialog = self._build_hkl_validation_dialog(payload)  # type: ignore[arg-type]
@@ -11505,585 +11423,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return
 
         def worker() -> object:
-            hkl_path, data_mode, cell, sg, hm, source_note = resolve_hkl_analysis_inputs(request)
-            analysis = analyze_hkl_data(hkl_path, data_mode, cell, sg, hm, source_note)
-            return analysis
+            from phase_studio.hkl_diagnostics import cached_analysis
+            return cached_analysis(request)
 
         self._start_hkl_background_task("HKL completeness analysis", worker, "hkl_completeness_result")
 
     def _build_hkl_completeness_dialog(self, analysis: HklAnalysis) -> QDialog:
-        dialog = QDialog(self)
-        dialog.setObjectName("hklCompletenessDialog")
-        dialog.setWindowTitle("HKL Completeness")
-        layout = QVBoxLayout(dialog)
-        layout.setContentsMargins(9, 8, 9, 8)
-        layout.setSpacing(4)
-        layout.addWidget(self._diagnostic_header(
-            "HKL COMPLETENESS",
-            "Resolution-dependent completeness and intensity statistics",
-            compact=True,
-        ))
-        d_min_text = format_resolution_d(analysis.d_min)
-        d_full = format_resolution_d(analysis.d_full_98)
-        sigma_label = reflection_sigma_label(analysis.data_mode)
-        signal_label = reflection_primary_snr_label(analysis.data_mode)
-        is_fwhm_mode = reflection_mode_has_fwhm(analysis.data_mode)
-        raw_sigma_count = sum(1 for r in analysis.reflections_raw if r.sigma is not None)
-        unique_sigma_count = sum(1 for r in analysis.reflections_unique if r.sigma is not None)
-        phase_count = sum(1 for r in analysis.reflections_raw if r.phase is not None)
-        primary_snr_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
-        primary_snr_values = [float(v) for v in primary_snr_values if v is not None and math.isfinite(float(v))]
-        median_signal = "n/a" if not primary_snr_values else f"{float(np.median(np.asarray(primary_snr_values, dtype=np.float64))):.3g}"
-        signal_threshold = 3.0
-        threshold_stl: Optional[float] = None
-        threshold_d: Optional[float] = None
-        signal_points = [
-            (float(b["center"]), float(b["mean_signal_to_noise"]))
-            for b in analysis.bins
-            if math.isfinite(float(b["center"])) and math.isfinite(float(b["mean_signal_to_noise"]))
-        ]
-        # The I/sigma(I) = 3 significance convention does not apply to FWHM data:
-        # FWHM is a peak-shape parameter (e.g. from a Le Bail powder extraction),
-        # not a measurement uncertainty, so an I/FWHM ratio is not comparable in
-        # scale or meaning to a genuine signal-to-noise ratio. Skip the threshold
-        # entirely rather than presenting a number that looks like one but isn't.
-        if not is_fwhm_mode:
-            for idx, (stl, signal) in enumerate(signal_points):
-                if signal >= signal_threshold:
-                    continue
-                if idx > 0:
-                    prev_stl, prev_signal = signal_points[idx - 1]
-                    if prev_signal >= signal_threshold and stl > prev_stl and not math.isclose(signal, prev_signal):
-                        fraction = (signal_threshold - prev_signal) / (signal - prev_signal)
-                        threshold_stl = prev_stl + fraction * (stl - prev_stl)
-                    else:
-                        threshold_stl = stl
-                else:
-                    threshold_stl = stl
-                break
-            if threshold_stl is not None and threshold_stl > 0:
-                threshold_d = 1.0 / (2.0 * threshold_stl)
-        threshold_d_text = "n/a (not meaningful for FWHM)" if is_fwhm_mode else format_resolution_d(threshold_d)
-        input_summary = self._diagnostic_input_summary(
-            analysis.hkl_path,
-            analysis.data_mode,
-            analysis.cell,
-            f"{compact_spacegroup_symbol(analysis.spacegroup)} (#{analysis.spacegroup.number})",
-            analysis.source_note,
-            compact=True,
-        )
-        layout.addWidget(input_summary)
-        if is_fwhm_mode:
-            fwhm_note = QLabel(
-                "<b>FWHM data</b><br>FWHM is a peak-shape parameter, not a measurement uncertainty. "
-                "I/FWHM is shown only as a descriptive intensity-to-width measure; I/&sigma;(I)-based "
-                "significance thresholds do not apply and are omitted below."
-            )
-            fwhm_note.setObjectName("helpCallout")
-            fwhm_note.setTextFormat(Qt.RichText)
-            fwhm_note.setWordWrap(True)
-            layout.addWidget(fwhm_note)
-        metric_cards = [
-            (f"{len(analysis.reflections_unique):,}", "Unique reflections"),
-            (d_min_text, "dₘᵢₙ"),
-            (d_full, "d₉₈ · highest-resolution cumulative completeness ≥ 98%"),
-            (median_signal, f"Median {signal_label}"),
-        ]
-        if not is_fwhm_mode:
-            # A significance threshold on I/FWHM would misrepresent it as a
-            # conventional I/sigma(I)-style signal-to-noise ratio; omit the
-            # card entirely rather than show a prose fallback as a metric value.
-            metric_cards.append((threshold_d_text, f"Interpolated first d where mean {signal_label} < {signal_threshold:.1f}"))
-        metric_cards.extend([
-            (f"{phase_count:,} / {len(analysis.reflections_raw):,}", "Phase-field coverage"),
-            (f"{raw_sigma_count:,} / {len(analysis.reflections_raw):,}", f"{sigma_label} coverage"),
-        ])
-        metrics_panel = self._diagnostic_metric_grid(
-            metric_cards,
-            compact=True,
-            row_columns=(4, len(metric_cards) - 4),
-        )
-        layout.addWidget(metrics_panel)
-
-        content_splitter = QSplitter(Qt.Vertical)
-        content_splitter.setObjectName("diagnosticSplitter")
-        content_splitter.setChildrenCollapsible(False)
-        plot_panel = QWidget()
-        plot_panel.setMinimumHeight(300)
-        plot_layout = QVBoxLayout(plot_panel)
-        plot_layout.setContentsMargins(0, 0, 0, 0)
-        plot_layout.setSpacing(3)
-        plot_title = QLabel("COMPLETENESS AND SIGNAL VS RESOLUTION")
-        plot_title.setObjectName("diagnosticSectionTitle")
-        plot_layout.addWidget(plot_title)
-        figure = Figure(figsize=(8.4, 6.4), dpi=100)
-        canvas = FigureCanvas(figure)
-        canvas.setObjectName("hklCompletenessCanvas")
-        canvas.setMinimumHeight(280)
-        canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        plot_grid = figure.add_gridspec(
-            2,
-            2,
-            # The nested first row becomes two equal 1.15-height axes; the
-            # histogram remains the deliberately secondary 0.65-height panel.
-            height_ratios=(2.30, 0.65),
-            width_ratios=(0.82, 0.18),
-            hspace=0.64,
-            wspace=0.04,
-            left=0.095,
-            right=0.985,
-            bottom=0.14,
-            top=0.942,
-        )
-
-        resize_hooks: Dict[str, Callable[[], None]] = {}
-
-        def adjust_plot_bottom_margin(event) -> None:
-            # Preserve a readable, unclipped histogram xlabel when the splitter
-            # compresses the canvas: Matplotlib margins are fractional, while
-            # the label needs approximately the same physical pixel clearance.
-            canvas_height = max(1.0, float(event.height))
-            responsive_bottom = min(0.21, max(0.14, 52.0 / canvas_height))
-            responsive_hspace = min(0.86, max(0.64, 0.64 + (340.0 - canvas_height) / 420.0))
-            responsive_top = min(0.942, 1.0 - 21.0 / canvas_height)
-            responsive_ylabel_size = 6.0 if canvas_height < 320.0 else (8.0 if canvas_height < 360.0 else 9.0)
-            if (
-                not math.isclose(float(plot_grid.bottom), responsive_bottom, abs_tol=0.001)
-                or not math.isclose(float(plot_grid.hspace), responsive_hspace, abs_tol=0.001)
-                or not math.isclose(float(plot_grid.top), responsive_top, abs_tol=0.001)
-            ):
-                plot_grid.update(bottom=responsive_bottom, hspace=responsive_hspace, top=responsive_top)
-                for plot_axis in figure.axes:
-                    subplot_spec = plot_axis.get_subplotspec()
-                    if subplot_spec is not None:
-                        plot_axis.set_position(subplot_spec.get_position(figure))
-                for resolution_axis in figure.axes[:2]:
-                    resolution_axis.yaxis.label.set_fontsize(responsive_ylabel_size)
-                if figure.legends:
-                    responsive_legend_column = plot_grid[0, 1].get_position(figure)
-                    figure.legends[0].set_bbox_to_anchor(
-                        (
-                            responsive_legend_column.x0 + 0.008,
-                            (responsive_legend_column.y0 + responsive_legend_column.y1) / 2.0,
-                        ),
-                        transform=figure.transFigure,
-                    )
-                canvas.draw_idle()
-            # Re-evaluate d_min/d_98 label placement for the new canvas size:
-            # their screen-space separation (not their scientific values)
-            # determines whether the labels can be shown side by side.
-            relayout_guides = resize_hooks.get("relayout_guides")
-            if relayout_guides is not None:
-                relayout_guides()
-
-        layout_resize_cid = canvas.mpl_connect("resize_event", adjust_plot_bottom_margin)
-        resolution_grid = plot_grid[0, 0].subgridspec(
-            2,
-            1,
-            height_ratios=(1.0, 1.0),
-            hspace=0.15,
-        )
-        ax_completeness = figure.add_subplot(resolution_grid[0, 0])
-        ax_signal = figure.add_subplot(resolution_grid[1, 0], sharex=ax_completeness)
-        ax_histogram = figure.add_subplot(plot_grid[1, 0])
-        centers = [float(b["center"]) for b in analysis.bins]
-        widths = [max(0.0001, float(b["hi"]) - float(b["lo"])) for b in analysis.bins]
-        completeness = [float(b["completeness"]) for b in analysis.bins]
-        mean_signal = [float(b["mean_signal_to_noise"]) if math.isfinite(float(b["mean_signal_to_noise"])) else np.nan for b in analysis.bins]
-        signal_values = [reflection_primary_signal_to_noise(r, analysis.data_mode) for r in analysis.reflections_unique]
-        signal_values = [float(v) for v in signal_values if v is not None and math.isfinite(float(v))]
-        if is_fwhm_mode:
-            fwhm_numerator = "F" if reflection_mode_is_amplitude(analysis.data_mode) else "I"
-            signal_math_label = rf"${fwhm_numerator}/\mathrm{{FWHM}}$"
-            mean_signal_math_label = rf"Mean ${fwhm_numerator}/\mathrm{{FWHM}}$"
-            threshold_math_label = None
-        else:
-            signal_math_label = r"$I/\sigma(I)$"
-            mean_signal_math_label = r"Mean $I/\sigma(I)$"
-            threshold_math_label = rf"$I/\sigma(I) = {signal_threshold:.1f}$"
-        resolution_math_label = r"$\sin\theta/\lambda$"
-        d_min_stl = 1.0 / (2.0 * analysis.d_min) if analysis.d_min > 0 else None
-        d_full_stl = 1.0 / (2.0 * analysis.d_full_98) if analysis.d_full_98 is not None and analysis.d_full_98 > 0 else None
-        d_min_plot_text = rf"{analysis.d_min:.5g} $\AA$" if d_min_stl is not None else "n/a"
-        d_full_plot_text = rf"{analysis.d_full_98:.5g} $\AA$" if d_full_stl is not None else "n/a"
-        figure.patch.set_facecolor("#ffffff")
-        for axis in (ax_completeness, ax_signal, ax_histogram):
-            axis.set_facecolor("#ffffff")
-        completeness_artist = ax_completeness.bar(
-            centers,
-            completeness,
-            width=widths,
-            align="center",
-            color="#2264b8",
-            alpha=0.60,
-            edgecolor="none",
-            zorder=2,
-            label="Completeness",
-        )
-        ax_completeness.step(
-            centers,
-            completeness,
-            where="mid",
-            color="#2264b8",
-            linewidth=1.3,
-            zorder=3,
-        )
-        ax_completeness.axhline(98.0, color="#001170", linewidth=1.0, linestyle="--", zorder=3)
-        d_min_label = r"$d_{\mathrm{min}}$"
-        d_98_label = r"$d_{98}$"
-        d_min_artist = None
-        d_full_artist = None
-        if d_min_stl is not None:
-            d_min_artist = ax_completeness.axvline(
-                d_min_stl, color="#001170", linewidth=1.1, linestyle="-", label=d_min_label
-            )
-            ax_signal.axvline(d_min_stl, color="#001170", linewidth=1.1, linestyle="-")
-        if d_full_stl is not None:
-            d_full_artist = ax_completeness.axvline(
-                d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":", label=d_98_label
-            )
-            ax_signal.axvline(d_full_stl, color="#44b7ff", linewidth=1.1, linestyle=":")
-        ax_completeness.set_ylabel("Completeness (%)", labelpad=8, fontsize=9)
-        shared_ylabel_x = -0.075
-        ax_completeness.yaxis.set_label_coords(shared_ylabel_x, 0.5)
-        ax_completeness.set_ylim(0, 102)
-        ax_completeness.set_yticks((0, 50, 100))
-        ax_completeness.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
-        ax_completeness.grid(True, axis="y", color="#cbd7ea", linewidth=0.45, alpha=0.42)
-        mean_artist, = ax_signal.plot(
-            centers,
-            mean_signal,
-            marker="o",
-            color="#001170",
-            linewidth=1.9,
-            markersize=4.5,
-            zorder=3,
-            label=mean_signal_math_label,
-        )
-        threshold_artist = None
-        if not is_fwhm_mode:
-            threshold_artist = ax_signal.axhline(
-                signal_threshold,
-                color="#2264b8",
-                linewidth=1.0,
-                linestyle="--",
-                zorder=2,
-                label=threshold_math_label,
-            )
-        ax_signal.set_ylabel(mean_signal_math_label, labelpad=8, fontsize=9)
-        ax_signal.yaxis.set_label_coords(shared_ylabel_x, 0.5)
-        ax_signal.set_xlabel(resolution_math_label, labelpad=2)
-        ax_signal.yaxis.set_major_locator(MaxNLocator(nbins=4, min_n_ticks=3))
-        ax_signal.margins(y=0.08)
-        ax_signal.grid(True, axis="y", color="#cbd7ea", linewidth=0.45, alpha=0.42)
-        if threshold_stl is not None:
-            ax_signal.axvline(threshold_stl, color="#2264b8", linewidth=1.1, linestyle="-.")
-            threshold_plot_text = rf"{threshold_d:.5g} $\AA$" if threshold_d is not None else ""
-            threshold_label = (
-                rf"$I/\sigma(I)=3$ · {threshold_plot_text}"
-                if threshold_plot_text
-                else r"$I/\sigma(I)=3$"
-            )
-            ax_signal.annotate(
-                threshold_label,
-                xy=(threshold_stl, signal_threshold),
-                xytext=(4, 5),
-                textcoords="offset points",
-                ha="left",
-                va="bottom",
-                color="#52658b",
-                fontsize=7.0,
-            )
-        guide_annotation_artists: List[object] = []
-
-        def place_resolution_guide_annotations() -> None:
-            """Place the d_min/d_98 labels, avoiding overlap regardless of the
-            current canvas size. The scientific values (d_min_plot_text,
-            d_full_plot_text) are never altered here -- only where and how the
-            two labels are drawn depends on their current screen-space gap."""
-            for artist in guide_annotation_artists:
-                try:
-                    artist.remove()
-                except Exception:
-                    pass
-            guide_annotation_artists.clear()
-
-            entries: List[Tuple[float, str, str]] = []
-            if d_min_stl is not None:
-                entries.append((d_min_stl, d_min_label, d_min_plot_text))
-            if d_full_stl is not None:
-                entries.append((d_full_stl, d_98_label, d_full_plot_text))
-            if not entries:
-                return
-
-            def annotate_one(x: float, text: str, ha: str, dx: float) -> None:
-                guide_annotation_artists.append(
-                    ax_completeness.annotate(
-                        text,
-                        xy=(x, 0.99),
-                        xycoords=ax_completeness.get_xaxis_transform(),
-                        xytext=(dx, -1.0),
-                        textcoords="offset points",
-                        ha=ha,
-                        va="top",
-                        color="#14204a",
-                        fontsize=7.2,
-                        bbox={"boxstyle": "square,pad=0.16", "facecolor": "#ffffff", "edgecolor": "none", "alpha": 0.88},
-                        annotation_clip=False,
-                    )
-                )
-
-            if len(entries) == 1:
-                x, short_label, value_text = entries[0]
-                annotate_one(x, f"{short_label}\n{value_text}", "center", 0.0)
-                return
-
-            entries.sort(key=lambda item: item[0])
-            (x_left, label_left, text_left), (x_right, label_right, text_right) = entries
-            # A real draw is needed so transData reflects the canvas size the
-            # labels will actually be rendered at (including after a resize).
-            try:
-                figure.canvas.draw()
-            except Exception:
-                pass
-            px_left = ax_completeness.transData.transform((x_left, 0.0))[0]
-            px_right = ax_completeness.transData.transform((x_right, 0.0))[0]
-            pixel_gap = abs(px_right - px_left)
-            merge_threshold_px = 10.0
-            collision_threshold_px = 62.0
-            if pixel_gap < merge_threshold_px:
-                # Case C: the two guide positions are visually indistinguishable
-                # at this plot width. Report both scientific values together in
-                # one box rather than drawing two illegibly close labels; the
-                # values themselves are unchanged and still shown independently
-                # in the summary cards and CSV export.
-                x_mid = (x_left + x_right) / 2.0
-                annotate_one(
-                    x_mid,
-                    f"{label_left} = {text_left}\n{label_right} = {text_right}",
-                    "center",
-                    0.0,
-                )
-            elif pixel_gap < collision_threshold_px:
-                # Case B: close but distinguishable -- push the two labels apart
-                # so their boxes clear each other while each stays visually
-                # anchored (via the small xytext offset) to its own guide line.
-                annotate_one(x_left, f"{label_left}\n{text_left}", "right", -8.0)
-                annotate_one(x_right, f"{label_right}\n{text_right}", "left", 8.0)
-            else:
-                # Case A: well separated -- centered placement, as before.
-                for x, label, text in entries:
-                    annotate_one(x, f"{label}\n{text}", "center", 0.0)
-
-        place_resolution_guide_annotations()
-        resize_hooks["relayout_guides"] = place_resolution_guide_annotations
-
-        legend_handles = [completeness_artist, mean_artist]
-        legend_labels = ["Completeness", mean_signal_math_label]
-        if threshold_artist is not None:
-            legend_handles.append(threshold_artist)
-            legend_labels.append(threshold_math_label)
-        if d_full_artist is not None:
-            legend_handles.append(d_full_artist)
-            legend_labels.append(d_98_label)
-        if d_min_artist is not None:
-            legend_handles.append(d_min_artist)
-            legend_labels.append(d_min_label)
-        legend_column = plot_grid[0, 1].get_position(figure)
-        legend_anchor = (
-            legend_column.x0 + 0.008,
-            (legend_column.y0 + legend_column.y1) / 2.0,
-        )
-        figure.legend(
-            legend_handles,
-            legend_labels,
-            loc="center left",
-            bbox_to_anchor=legend_anchor,
-            bbox_transform=figure.transFigure,
-            ncol=1,
-            frameon=False,
-            fontsize=8.0,
-            handlelength=1.10,
-            handletextpad=0.30,
-            labelspacing=0.26,
-            borderaxespad=0.0,
-        )
-        histogram_denominator = max(1, len(analysis.reflections_unique))
-        if is_fwhm_mode:
-            # The sigma storage field holds peak width in these input modes.
-            # Width is not uncertainty; display its actual distribution.
-            widths = np.asarray([
-                r.sigma for r in analysis.reflections_unique
-                if r.sigma is not None and math.isfinite(r.sigma) and r.sigma > 0
-            ], dtype=np.float64)
-            unavailable = len(analysis.reflections_unique) - len(widths)
-            if len(widths):
-                lo, hi = float(widths.min()), float(widths.max())
-                if hi == lo:
-                    lo, hi = lo * 0.9, hi * 1.1
-                bins = np.geomspace(lo, hi, 21)
-                ax_histogram.hist(widths, bins=bins,
-                                  weights=np.full(len(widths), 100.0 / histogram_denominator),
-                                  color="#44b7ff", alpha=0.82)
-                ax_histogram.set_xscale("log")
-            else:
-                ax_histogram.text(0.5, 0.5, "No positive finite FWHM values available",
-                                  transform=ax_histogram.transAxes, ha="center", va="center")
-            histogram_title_artist = ax_histogram.set_title(
-                f"PEAK-WIDTH DISTRIBUTION ? UNAVAILABLE: {unavailable:,}",
-                loc="left", pad=9, color="#001170", fontsize=9, fontweight="bold",
-            )
-            ax_histogram.set_xlabel("FWHM (original input units)", labelpad=4)
-            ax_histogram.set_ylabel("Reflections (%)", labelpad=8, fontsize=9)
-        else:
-            histogram_denominator = max(1, len(analysis.reflections_unique))
-            histogram_overflow_count = sum(1 for value in signal_values if value >= 15.0)
-            if signal_values:
-                # Preserve every finite value in the display. The final bin is an
-                # explicit >=15 overflow bin; negative values join the first <1 bin.
-                histogram_bins = np.arange(0.0, 17.0, 1.0)
-                histogram_display_values = np.clip(np.asarray(signal_values, dtype=np.float64), 0.5, 15.5)
-                histogram_weights = np.full(len(signal_values), 100.0 / float(histogram_denominator), dtype=np.float64)
-                ax_histogram.hist(histogram_display_values, bins=histogram_bins, weights=histogram_weights, color="#44b7ff", alpha=0.82)
-            else:
-                no_signal_text = (
-                    f"No {reflection_primary_snr_label(analysis.data_mode)} values available"
-                    if is_fwhm_mode else "No sigma values available"
-                )
-                ax_histogram.text(0.5, 0.5, no_signal_text, transform=ax_histogram.transAxes, ha="center", va="center")
-            histogram_title_artist = ax_histogram.set_title(
-                f"REFLECTION DISTRIBUTION · ≥15 OVERFLOW: {histogram_overflow_count:,}",
-                loc="left",
-                pad=9,
-                color="#001170",
-                fontsize=9,
-                fontweight="bold",
-            )
-            ax_histogram.set_xlabel(signal_math_label, labelpad=4)
-            ax_histogram.set_ylabel("Reflections (%)", labelpad=8, fontsize=9)
-            ax_histogram.set_xlim(0.0, 16.0)
-            ax_histogram.set_xticks(np.arange(0.5, 16.0, 1.0))
-            ax_histogram.set_xticklabels(["<1", *[str(value) for value in range(1, 15)], "≥15"], fontsize=7)
-        ax_histogram.grid(True, axis="y", color="#cbd7ea", linewidth=0.45, alpha=0.42)
-        for axis in (ax_completeness, ax_signal, ax_histogram):
-            axis.tick_params(colors="#14204a")
-            axis.xaxis.label.set_color("#14204a")
-            axis.yaxis.label.set_color("#14204a")
-            for spine in ("top", "right"):
-                axis.spines[spine].set_visible(False)
-        plot_layout.addWidget(canvas, 1)
-        content_splitter.addWidget(plot_panel)
-
-        bins_panel = QWidget()
-        bins_panel.setMinimumHeight(150)
-        bins_layout = QVBoxLayout(bins_panel)
-        bins_layout.setContentsMargins(0, 0, 0, 0)
-        bins_layout.setSpacing(3)
-        bins_title = QLabel("RESOLUTION BINS")
-        bins_title.setObjectName("diagnosticSectionTitle")
-        bins_layout.addWidget(bins_title)
-        headers = ["sinθ/λ range", "Observed", "Theoretical", "Completeness (%)", f"Mean {signal_label}"]
-        table = QTableWidget(len(analysis.bins), len(headers))
-        table.setMinimumHeight(132)
-        self._configure_diagnostic_table(table)
-        table.setHorizontalHeaderLabels(headers)
-        table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        for row, item in enumerate(analysis.bins):
-            theory_count = int(item["theory"])
-            values = [
-                f"{float(item['lo']):.4g} - {float(item['hi']):.4g}",
-                str(int(item["observed"])),
-                str(theory_count),
-                # Completeness is undefined with no theoretical reflections in the shell.
-                "—" if theory_count == 0 else f"{float(item['completeness']):.2f}",
-                "n/a" if not math.isfinite(float(item["mean_signal_to_noise"])) else f"{float(item['mean_signal_to_noise']):.3g}",
-            ]
-            for column, text_value in enumerate(values):
-                cell_item = QTableWidgetItem(text_value)
-                cell_item.setTextAlignment(Qt.AlignCenter if column == 0 else Qt.AlignRight | Qt.AlignVCenter)
-                table.setItem(row, column, cell_item)
-        bins_layout.addWidget(table, 1)
-        content_splitter.addWidget(bins_panel)
-        # Give the scientific plots the reclaimed height while retaining a
-        # fully visible, independently scrollable resolution-bin table.
-        content_splitter.setSizes([390, 180])
-        content_splitter.setStretchFactor(0, 3)
-        content_splitter.setStretchFactor(1, 2)
-        layout.addWidget(content_splitter, 1)
-
-        summary_text = (
-            "HKL COMPLETENESS\n"
-            f"Source: {analysis.hkl_path}\nFormat: {format_reflection_data_mode(analysis.data_mode)}\n"
-            f"Unit cell: {analysis.cell.a:.5g} {analysis.cell.b:.5g} {analysis.cell.c:.5g} {analysis.cell.alpha:.4g} {analysis.cell.beta:.4g} {analysis.cell.gamma:.4g}\n"
-            f"Space group: {compact_spacegroup_symbol(analysis.spacegroup)} (#{analysis.spacegroup.number})\nParsed / unique: {len(analysis.reflections_raw):,} / {len(analysis.reflections_unique):,}\n"
-            f"{sigma_label} coverage: {raw_sigma_count:,}/{len(analysis.reflections_raw):,} raw; {unique_sigma_count:,}/{len(analysis.reflections_unique):,} unique\n"
-            f"Phase fields populated: {phase_count:,}/{len(analysis.reflections_raw):,}\n"
-            "Unique definition: literal HKL triplets after exact-duplicate merging; completeness uses symmetry-reduced theoretical ASU orbits\n"
-            "000 handling: retained only when required by the phase-bearing input format; excluded from physical statistics\n"
-            f"d_min: {d_min_text}\nd98 (highest-resolution cumulative completeness >= 98%): {d_full}\n"
-            f"Median {signal_label}: {median_signal}\nFirst linearly interpolated bin crossing below mean {signal_label} {signal_threshold:.1f}: {threshold_d_text}\n"
-            + (f"FWHM peak-width histogram: {len(widths):,} positive finite values; {unavailable:,} unavailable"
-             if is_fwhm_mode else f"Histogram overflow ({signal_label} >= 15): {histogram_overflow_count:,}")
-        )
-
-        def export_csv() -> None:
-            file_name, _ = QFileDialog.getSaveFileName(dialog, "Export resolution bins", "hkl_completeness.csv", "CSV files (*.csv)")
-            if not file_name:
-                return
-            with Path(file_name).open("w", newline="", encoding="utf-8") as stream:
-                writer = csv.writer(stream)
-                writer.writerow(headers)
-                for bin_item in analysis.bins:
-                    writer.writerow([
-                        f"{float(bin_item['lo']):.8g} - {float(bin_item['hi']):.8g}",
-                        int(bin_item["observed"]),
-                        int(bin_item["theory"]),
-                        float(bin_item["completeness"]),
-                        "" if not math.isfinite(float(bin_item["mean_signal_to_noise"])) else float(bin_item["mean_signal_to_noise"]),
-                    ])
-
-        def export_plot() -> None:
-            file_name, _ = QFileDialog.getSaveFileName(dialog, "Export completeness plot", "hkl_completeness.png", "PNG image (*.png);;PDF document (*.pdf);;SVG image (*.svg)")
-            if file_name:
-                figure.savefig(file_name, dpi=200, bbox_inches="tight")
-
-        footer = QHBoxLayout()
-        copy_summary = QPushButton("Copy summary")
-        copy_summary.setObjectName("diagnosticSecondaryButton")
-        copy_summary.clicked.connect(lambda: QApplication.clipboard().setText(summary_text))
-        export_csv_button = QPushButton("Export CSV")
-        export_csv_button.setObjectName("diagnosticSecondaryButton")
-        export_csv_button.clicked.connect(export_csv)
-        export_plot_button = QPushButton("Export plot")
-        export_plot_button.setObjectName("diagnosticSecondaryButton")
-        export_plot_button.clicked.connect(export_plot)
-        close_button = QPushButton("Close")
-        close_button.clicked.connect(dialog.accept)
-        footer.addWidget(copy_summary)
-        footer.addWidget(export_csv_button)
-        footer.addWidget(export_plot_button)
-        footer.addStretch(1)
-        footer.addWidget(close_button)
-        layout.addLayout(footer)
-        dialog.hkl_bins_table = table  # type: ignore[attr-defined]
-        dialog.hkl_input_summary = input_summary  # type: ignore[attr-defined]
-        dialog.hkl_metrics_panel = metrics_panel  # type: ignore[attr-defined]
-        dialog.hkl_plot_panel = plot_panel  # type: ignore[attr-defined]
-        dialog.hkl_figure = figure  # type: ignore[attr-defined]
-        dialog.hkl_canvas = canvas  # type: ignore[attr-defined]
-        dialog.hkl_resolution_axes = (ax_completeness, ax_signal)  # type: ignore[attr-defined]
-        dialog.hkl_histogram_axis = ax_histogram  # type: ignore[attr-defined]
-        dialog.hkl_histogram_title_artist = histogram_title_artist  # type: ignore[attr-defined]
-        dialog.hkl_bins_title = bins_title  # type: ignore[attr-defined]
-        dialog.hkl_plot_grid = plot_grid  # type: ignore[attr-defined]
-        dialog.hkl_resolution_grid = resolution_grid  # type: ignore[attr-defined]
-        dialog.hkl_legend_column_bounds = legend_column  # type: ignore[attr-defined]
-        dialog.hkl_layout_resize_cid = layout_resize_cid  # type: ignore[attr-defined]
-        dialog.hkl_content_splitter = content_splitter  # type: ignore[attr-defined]
-        dialog.summary_text = summary_text  # type: ignore[attr-defined]
-        dialog.full_source_path = str(analysis.hkl_path)  # type: ignore[attr-defined]
-        fit_dialog_to_available_screen(dialog)
-        return dialog
+        from phase_studio.hkl_diagnostics_ui import completeness_dialog
+        return completeness_dialog(self, analysis)
 
     def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
         dialog = self._build_hkl_completeness_dialog(analysis)

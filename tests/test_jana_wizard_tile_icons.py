@@ -190,6 +190,12 @@ def main():
     def untraceable_icons(root):
         bad = []
         for widget in root.findChildren(QAbstractButton):
+            if widget is wizard.files_toggle:
+                # Requested standard Qt disclosure arrow, not product artwork.
+                from PySide6.QtWidgets import QStyle
+                arrow = QStyle.SP_ArrowDown if widget.isChecked() else QStyle.SP_ArrowRight
+                if _images_equal(widget.icon(), widget.style().standardIcon(arrow), 16):
+                    continue
             if not widget.icon().isNull() and widget.property(branding.ICON_SOURCE_PROPERTY) not in APPROVED_ICON_SOURCES:
                 bad.append(widget.text() or widget.objectName())
         return bad

@@ -39,7 +39,7 @@ class SplitDistributionTests(unittest.TestCase):
         return {str(p.relative_to(self.target)): p.read_bytes() for p in self.target.rglob("*") if p.is_file()}
 
     def test_canonical_version(self):
-        self.assertEqual(VERSION, "2.0.3")
+        self.assertEqual(VERSION, "2.0.4")
         self.assertEqual(ji.bundled_integration_version(), VERSION)
         import phase_studio.app as app, phase_studio.jana_superflip as wizard
         self.assertEqual(app.__version__, VERSION)
@@ -305,8 +305,10 @@ class SplitDistributionTests(unittest.TestCase):
 
     def test_scientific_functions_match_integrated_baseline(self):
         git = r"C:\Program Files\Git\cmd\git.exe" if os.name == "nt" else "git"
+        # Pin the released starting point; main can advance independently.
+        baseline_ref = "v2.0.3"
         for filename in ("app.py", "jana_superflip.py", "sharped_server_client.py", "sharped_map_scaling.py"):
-            baseline = subprocess.check_output([git, "show", f"main:phase_studio/{filename}"], cwd=ROOT).decode()
+            baseline = subprocess.check_output([git, "show", f"{baseline_ref}:phase_studio/{filename}"], cwd=ROOT).decode()
             current = (ROOT / "phase_studio" / filename).read_text(encoding="utf-8")
             def functions(text):
                 return {node.name: ast.dump(node, include_attributes=False) for node in ast.parse(text).body
@@ -321,6 +323,19 @@ class SplitDistributionTests(unittest.TestCase):
                         # Explicit profile-aware per-cycle/source reporting.
                         "write_metrics_csv"}
             if filename == "app.py":
+                # 2.0.4 explicitly modernizes only the HKL diagnostic load and
+                # coverage analysis: shared cached parsing, invalid-index
+                # reporting, undefined shells and an inclusive resolution edge.
+                # test_hkl_diagnostics.py independently enumerates the edge and
+                # pins capabilities; test_scientific_core.py retains d98 goldens.
+                # Phasing, symmetry providers and scientific writers remain
+                # subject to the unchanged AST comparisons below.
+                excluded |= {"build_hkl_load_result", "analyze_hkl_data"}
+                # Optional UI-only inclusion of metrics rows without maps.
+                # Default candidate output/metrics are separately compared in
+                # test_ui_unavailable_option_does_not_change_available_candidates_or_metrics.
+                # No quality calculation or ranking function is exempted.
+                excluded |= {"result_candidates_from_results"}
                 # API orchestration is pinned by test_sharped_api_contract.py;
                 # DEFAULT resolution here was restored from commit 396270c.
                 # Performance-only wrappers and in-memory FFT reuse are pinned
@@ -433,21 +448,26 @@ class SplitDistributionTests(unittest.TestCase):
                              "model_catalog_status", "apply_model_catalog", "sync_model_catalog",
                              "resolve_effective_model"}
             for name in old.keys() - excluded:
-                self.assertEqual(old[name], new.get(name), f"{filename}:{name}")
+                # 2.0.4 explicitly renames the user-facing family. Normalize
+                # this literal only; retain every scientific/control-flow AST
+                # comparison, rather than excluding affected functions.
+                normalize_label = lambda value: value.replace("Model prediction", "Structure prediction") if value else value
+                self.assertEqual(normalize_label(old[name]), normalize_label(new.get(name)), f"{filename}:{name}")
             if filename == "app.py":
-                metrics_ui = (ROOT / "phase_studio" / "workflow_metrics_ui.py").read_text(encoding="utf-8")
-                moved = functions(metrics_ui)
-                self.assertEqual(old["robust_detail_range"], moved.get("robust_detail_range"))
-                input_context = (ROOT / "phase_studio" / "input_context.py").read_text(encoding="utf-8")
-                moved_inputs = functions(input_context)
-                self.assertEqual(
-                    old["normalize_input_source_mode"],
-                    moved_inputs.get("normalize_input_source_mode"),
-                )
-                xplor_io = (ROOT / "phase_studio" / "xplor_io.py").read_text(encoding="utf-8")
-                moved_xplor_io = functions(xplor_io)
-                for moved_name in ("read_xplor_map", "write_xplor_map", "_xplor_numbers", "_xplor_float_values"):
-                    self.assertEqual(old[moved_name], moved_xplor_io.get(moved_name), moved_name)
+                # These authorities already reside in modules in the release.
+                # Compare against their released locations, retaining AST guards.
+                for module, names in {
+                    "workflow_metrics_ui.py": ("robust_detail_range",),
+                    "input_context.py": ("normalize_input_source_mode",),
+                    "xplor_io.py": ("read_xplor_map", "write_xplor_map", "_xplor_numbers", "_xplor_float_values"),
+                }.items():
+                    released = functions(subprocess.check_output(
+                        [git, "show", f"{baseline_ref}:phase_studio/{module}"], cwd=ROOT,
+                    ).decode())
+                    current_functions = functions((ROOT / "phase_studio" / module).read_text(encoding="utf-8"))
+                    for name in names:
+                        self.assertIn(name, released)
+                        self.assertEqual(released[name], current_functions.get(name), f"{module}:{name}")
 
 
 if __name__ == "__main__":

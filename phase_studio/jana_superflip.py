@@ -1837,7 +1837,7 @@ class _JanaWorkflowWizard:
         self.page1 = QWidget()
         self.page1_layout = QVBoxLayout(self.page1)
         self.page1_layout.setContentsMargins(0, 0, 0, 0)
-        self.page1_layout.setSpacing(6)
+        self.page1_layout.setSpacing(4)
 
         # A hidden, never-shown full Phase Studio window used purely as a dialog
         # factory: it reuses the exact same HKL parsing/validation/completeness
@@ -1864,7 +1864,7 @@ class _JanaWorkflowWizard:
             section = QWidget()
             section_layout = QVBoxLayout(section)
             section_layout.setContentsMargins(0, 0, 0, 0)
-            section_layout.setSpacing(4)
+            section_layout.setSpacing(3)
             heading_row = QHBoxLayout()
             heading_row.setSpacing(8)
             heading_label = QLabel(title.upper())
@@ -1883,7 +1883,7 @@ class _JanaWorkflowWizard:
             section_layout.addWidget(separator)
             body = QWidget()
             body_layout = QVBoxLayout(body)
-            body_layout.setContentsMargins(0, 6, 0, 0)
+            body_layout.setContentsMargins(0, 2, 0, 0)
             body_layout.setSpacing(4)
             section_layout.addWidget(body)
             return section, body_layout
@@ -1903,8 +1903,12 @@ class _JanaWorkflowWizard:
         class _SummaryFields(QWidget):
             def resizeEvent(self, event):
                 super().resizeEvent(event)
+                narrow_actions = wizard.dialog.width() < 800
                 wizard.input_summary_outer.setDirection(
-                    QHBoxLayout.TopToBottom if wizard.dialog.width() < 800 else QHBoxLayout.LeftToRight
+                    QHBoxLayout.TopToBottom if narrow_actions else QHBoxLayout.LeftToRight
+                )
+                wizard.hkl_buttons_column.setDirection(
+                    QHBoxLayout.LeftToRight if narrow_actions else QHBoxLayout.TopToBottom
                 )
                 narrow = event.size().width() < 500
                 wizard.input_summary_columns.setDirection(
@@ -1956,6 +1960,20 @@ class _JanaWorkflowWizard:
         self.hkl_buttons_column.addWidget(self.validate_hkl_button)
         self.hkl_buttons_column.addWidget(self.analyze_completeness_button)
         self.hkl_buttons_column.addStretch(1)
+        for button in (self.validate_hkl_button, self.analyze_completeness_button):
+            button.setMinimumHeight(36)
+            button.setStyleSheet(
+                "QPushButton { background:#ffffff; color:#001170; border:1px solid #8fa9cc; padding:5px 12px; }"
+                "QPushButton:hover { background:#edf3fa; border-color:#527dab; }"
+                "QPushButton:focus { background:#f5f9ff; border:2px solid #2264b8; padding:4px 11px; }"
+                "QPushButton:pressed { background:#dceaf8; border-color:#2264b8; }"
+            )
+            button.ensurePolished()
+        diagnostic_width = max(button.sizeHint().width() for button in (
+            self.validate_hkl_button, self.analyze_completeness_button
+        ))
+        for button in (self.validate_hkl_button, self.analyze_completeness_button):
+            button.setMinimumWidth(diagnostic_width)
         self.input_summary_outer.addLayout(self.hkl_buttons_column)
         composition_row = QHBoxLayout()
         composition_row.setSpacing(10)
@@ -1998,7 +2016,45 @@ class _JanaWorkflowWizard:
                 request = build_hkl_analysis_request_from_inflip(
                     self.inflip_path, reference_file=reference_file, work_dir=work_dir
                 )
-                result = build_hkl_load_result(request)
+                # Large input summaries use the same cached diagnostic worker
+                # as the dialogs, without doing a long parse on the Qt thread.
+                # Small inputs retain their immediate summary presentation.
+                state = getattr(self, "_hkl_summary_state", None)
+                if self.inflip_path.stat().st_size > 1_000_000 and state is None:
+                    import threading
+                    from phase_studio.hkl_diagnostics import diagnostic_cancellation
+                    from shiboken6 import isValid
+                    state = self._hkl_summary_state = {"done": False}
+                    cancelled = threading.Event()
+                    self.dialog.finished.connect(lambda _result: cancelled.set())
+
+                    def load_summary() -> None:
+                        try:
+                            with diagnostic_cancellation(cancelled):
+                                state["result"] = build_hkl_load_result(request)
+                        except Exception:
+                            state["error"] = True
+                        finally:
+                            state["done"] = True
+
+                    def poll_summary() -> None:
+                        if not isValid(self.dialog) or cancelled.is_set():
+                            return
+                        if not state["done"]:
+                            QTimer.singleShot(25, poll_summary)
+                        else:
+                            refresh_input_summary_and_refit()
+
+                    threading.Thread(target=load_summary, daemon=True).start()
+                    self.reflections_value.setText("Loading HKL diagnostics…")
+                    QTimer.singleShot(25, poll_summary)
+                    return
+                if state is not None:
+                    if not state["done"] or state.get("error"):
+                        return
+                    result = state["result"]
+                else:
+                    result = build_hkl_load_result(request)
             except Exception:
                 # Per spec: never show a raw exception in this summary. The
                 # existing structured error dialog still covers Validate HKL /
@@ -2021,13 +2077,12 @@ class _JanaWorkflowWizard:
             self.composition_value.setText(composition.translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")))
             self.validate_hkl_button.setEnabled(True)
             self.analyze_completeness_button.setEnabled(True)
-            self.validate_hkl_button.setToolTip(
-                "Parse the incoming Jana2020 .inflip reflection block and show which h, k, l, "
-                "value, sigma and phase fields were read. Uses the same parser as Basic → Input."
+            # These short hints need no application-wide rich-text wrapping.
+            self.validate_hkl_button.setProperty("toolTip",
+                "Check reflection data and input format."
             )
-            self.analyze_completeness_button.setToolTip(
-                "Open completeness and data-statistics plots for the incoming Jana2020 .inflip "
-                "reflection data. Uses the same analysis as Basic → Input."
+            self.analyze_completeness_button.setProperty("toolTip",
+                "Show reflection completeness and intensity statistics."
             )
 
         def validate_hkl_clicked() -> None:
@@ -2121,14 +2176,16 @@ class _JanaWorkflowWizard:
             edit = QLineEdit(initial)
             from_inflip = bool(initial)
             edit.setPlaceholderText(placeholder)
+            edit.setStyleSheet("QLineEdit { placeholder-text-color:#566b8c; }")
             edit.setToolTip(
                 (tooltip + "\n\nCurrently set from the incoming .inflip.") if from_inflip else tooltip
             )
             browse = QPushButton("Browse…")
+            browse.setObjectName("optionalFileBrowse")
             browse.setToolTip(f"Select {label_text.lower()}.")
 
             source_note = QLabel("From .inflip")
-            source_note.setStyleSheet("color: #7183a6; font-style: italic;")
+            source_note.setStyleSheet("color: #566b8c; font-style: italic;")
             source_note.setVisible(from_inflip)
 
             def browse_file() -> None:
@@ -2137,9 +2194,11 @@ class _JanaWorkflowWizard:
                     edit.setText(selected)
                     # A manual replacement is no longer "from the .inflip".
                     source_note.setVisible(False)
-                    edit.setToolTip(tooltip)
 
             browse.clicked.connect(browse_file)
+            edit.textChanged.connect(lambda value: edit.setToolTip(tooltip + ("\n\n" + value if value else "")))
+            if initial:
+                edit.setToolTip(tooltip + "\n\n" + initial)
             row_layout.addWidget(edit, 1)
             row_layout.addWidget(source_note)
             row_layout.addWidget(browse)
@@ -2187,17 +2246,20 @@ class _JanaWorkflowWizard:
         # for all four workflows on the opening page at Full HD / 125%.
         # Expanding changes only the scroll area's contents; the Wizard's
         # stable outer geometry remains fixed.
-        self.files_toggle = QPushButton("Show optional reference and initial model  ›")
+        QStyle = self.qt["QStyle"]
+        self.files_toggle = QPushButton("Optional reference and initial model")
         self.files_toggle.setObjectName("compactDisclosureButton")
         self.files_toggle.setCheckable(True)
         self.files_toggle.setChecked(False)
+        self.files_toggle.setIcon(self.dialog.style().standardIcon(QStyle.SP_ArrowRight))
         self.files_toggle.setCursor(Qt.PointingHandCursor)
         self.files_toggle.setToolTip("Show or hide the optional reference and first-cycle model files.")
         self.files_toggle.setStyleSheet(
             "QPushButton#compactDisclosureButton { text-align:left; background:transparent; "
-            "border:1px solid transparent; border-radius:4px; padding:5px 7px; color:#29456f; }"
+            "border:1px solid transparent; border-radius:4px; padding:3px 7px; color:#29456f; }"
             "QPushButton#compactDisclosureButton:hover { background:#f1f5fb; border-color:#d7e1ef; }"
             "QPushButton#compactDisclosureButton:checked { background:#edf3fb; border-color:#c7d6e9; }"
+            "QPushButton#compactDisclosureButton:focus { border-color:#2264b8; }"
         )
         self.files_body.insertWidget(0, self.files_toggle)
         self.files_form_widget.setVisible(False)
@@ -2215,10 +2277,11 @@ class _JanaWorkflowWizard:
 
         def toggle_optional_files(expanded: bool) -> None:
             self.files_form_widget.setVisible(expanded)
-            self.files_toggle.setText(
-                "Hide optional reference and initial model  ⌄"
-                if expanded else "Show optional reference and initial model  ›"
-            )
+            self.files_toggle.setIcon(self.dialog.style().standardIcon(
+                QStyle.SP_ArrowDown if expanded else QStyle.SP_ArrowRight
+            ))
+            self.page1_layout.invalidate()
+            self.page1.updateGeometry()
             QTimer.singleShot(0, lambda: self._size_stack_to_current_page(self.dialog.width()))
 
         self.files_toggle.toggled.connect(toggle_optional_files)
@@ -2294,7 +2357,13 @@ class _JanaWorkflowWizard:
                 self.setProperty("workflowTier", tier)
                 self.setProperty("recommended", secondary == "Recommended")
                 if icon_source.startswith("workflow_"):
-                    self.setMinimumHeight(96 if tier == "primary" else 110)
+                    self.setMinimumHeight(88 if tier == "primary" else 96)
+                    # Recommendation is a label, not a permanent selection.
+                    self.setStyleSheet(
+                        'QFrame#actionTile[recommended="true"] { background:#ffffff; border-color:#cbd7ea; }'
+                        'QFrame#actionTile[recommended="true"]:hover { background:#edf3fa; border-color:#2264b8; }'
+                        'QFrame#actionTile[recommended="true"]:focus { background:#f5f9ff; border:2px solid #2264b8; }'
+                    )
                 # Compact established icon, strong title, one explanatory
                 # line, optional result line, right chevron. Every tile uses
                 # the same TILE_* geometry, so tiles on one page line up
@@ -2307,8 +2376,11 @@ class _JanaWorkflowWizard:
                 if icon_source:
                     self.icon_label = QLabel()
                     self.icon_label.setObjectName("actionTileIcon")
-                    apply_established_icon(self.icon_label, icon_source, size=TILE_ICON_SIZE)
-                    self.icon_label.setFixedSize(TILE_ICON_SIZE, TILE_ICON_SIZE)
+                    workflow_icon = icon_source.startswith("workflow_")
+                    apply_established_icon(self.icon_label, icon_source, size=32 if workflow_icon else TILE_ICON_SIZE)
+                    self.icon_label.setFixedSize(40 if workflow_icon else TILE_ICON_SIZE,
+                                                40 if workflow_icon else TILE_ICON_SIZE)
+                    self.icon_label.setAlignment(Qt.AlignCenter)
                     outer.addWidget(self.icon_label, 0, Qt.AlignVCenter)
                     outer.addSpacing(TILE_ICON_GAP - TILE_CHEVRON_GAP)
                 text_layout = QVBoxLayout()
@@ -2322,6 +2394,7 @@ class _JanaWorkflowWizard:
                 self.subtitle_label = QLabel(subtitle)
                 self.subtitle_label.setObjectName("actionTileSubtitle")
                 self.subtitle_label.setWordWrap(True)
+                self.subtitle_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
                 self.secondary_label = QLabel(secondary)
                 self.secondary_label.setObjectName("actionTileSecondary")
                 self.secondary_label.setWordWrap(False)
@@ -2343,19 +2416,25 @@ class _JanaWorkflowWizard:
                 self.runtime_label = QLabel(runtime)
                 self.runtime_label.setObjectName("actionTileSecondary")
                 self.runtime_label.setWordWrap(True)
-                if runtime:
+                # Local contrast adjustment: other dialogs retain their styles.
+                for label in (self.secondary_label, self.runtime_label):
+                    if label.text():
+                        label.setStyleSheet("color:#566b8c;")
+                if runtime or tier == "secondary":
+                    self.runtime_label.setMinimumHeight(self.runtime_label.fontMetrics().lineSpacing())
                     text_layout.addWidget(self.runtime_label)
                 else:
                     self.runtime_label.hide()
-                # Any surplus row height belongs below the text. Keeping it
-                # out of QLabel geometry preserves common title/subtitle
-                # baselines when paired cards contain different copy lengths.
-                text_layout.addStretch(1)
-                outer.addLayout(text_layout, 1)
+                text_widget = QWidget()
+                text_widget.setLayout(text_layout)
+                text_widget.setStyleSheet("background: transparent;")
+                self.text_widget = text_widget
+                outer.addWidget(text_widget, 1, Qt.AlignVCenter)
                 self.chevron_label = None
                 if chevron:
                     self.chevron_label = QLabel("›")
                     self.chevron_label.setObjectName("actionTileChevron")
+                    self.chevron_label.setStyleSheet("color:#566b8c;")
                     self.chevron_label.setAlignment(Qt.AlignCenter)
                     self.chevron_label.ensurePolished()
                     self.chevron_label.setFixedWidth(
@@ -2372,7 +2451,7 @@ class _JanaWorkflowWizard:
                 if self.property("workflowTier") == "secondary":
                     # Both columns reserve the same title band when their
                     # adjacent status forces wrapping on a narrow display.
-                    column_width = (self.parentWidget().width() - 9) // 2
+                    column_width = self.width()
                     compact = column_width < 300
                     self.title_row_layout.setDirection(QHBoxLayout.TopToBottom if compact else QHBoxLayout.LeftToRight)
                     lines = 3 if compact else (2 if column_width < 360 else 1)
@@ -2446,9 +2525,10 @@ class _JanaWorkflowWizard:
         # clickable primary workflow tiles. Professional mode remains a
         # visually subordinate expert action below them.
         self.workflow_section, self.workflow_body = build_page1_section("Workflow")
-        self.workflow_body.setSpacing(8)
+        self.workflow_body.setSpacing(6)
         self.primary_workflows_label = QLabel("PRIMARY WORKFLOWS")
         self.primary_workflows_label.setObjectName("workflowGroupLabel")
+        self.primary_workflows_label.setStyleSheet("color:#566b8c;")
         self.workflow_body.addWidget(self.primary_workflows_label)
         self.original_superflip_tile = _ActionTile(
             WORKFLOW_LABELS[WORKFLOW_SUPERFLIP_ONLY],
@@ -2485,8 +2565,50 @@ class _JanaWorkflowWizard:
 
         self.secondary_workflows_label = QLabel("SECONDARY WORKFLOWS")
         self.secondary_workflows_label.setObjectName("workflowGroupLabel")
+        self.secondary_workflows_label.setStyleSheet("color:#566b8c;")
         self.workflow_body.addWidget(self.secondary_workflows_label)
-        secondary_actions_row = QHBoxLayout()
+        class _SecondaryActions(QWidget):
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                wizard.secondary_actions_row.setDirection(
+                    QHBoxLayout.TopToBottom if event.size().width() < self.minimum_pair_width() else QHBoxLayout.LeftToRight
+                )
+                if event.size().width() != event.oldSize().width():
+                    QTimer.singleShot(0, self.align_text)
+
+            def minimum_pair_width(self):
+                # Reserve a readable title/status band plus the established
+                # icon, chevron, padding and gap, using the current UI font.
+                tiles = (wizard.autosolve_tile, wizard.professional_mode_tile)
+                card_width = max(
+                    tile.title_label.fontMetrics().horizontalAdvance(tile.title_label.text())
+                    + (tile.secondary_label.sizeHint().width() + tile.title_row_layout.spacing()
+                       if tile.secondary_label.text() else 0)
+                    + 2 * TILE_PADDING_H + tile.icon_label.width() + tile.chevron_label.width()
+                    + 3 * TILE_CHEVRON_GAP + TILE_ICON_GAP - TILE_CHEVRON_GAP
+                    + 4  # two-pixel focus border on both sides
+                    for tile in tiles
+                )
+                return 2 * card_width + wizard.secondary_actions_row.spacing() + 1
+
+            def align_text(self):
+                from shiboken6 import isValid
+                if not isValid(self):
+                    return
+                tiles = (wizard.autosolve_tile, wizard.professional_mode_tile)
+                for tile in tiles:
+                    tile.subtitle_label.setMinimumHeight(0)
+                subtitle_height = max(
+                    max(tile.subtitle_label.fontMetrics().lineSpacing(),
+                        tile.subtitle_label.heightForWidth(max(1, tile.subtitle_label.width())))
+                    for tile in tiles
+                )
+                for tile in tiles:
+                    tile.subtitle_label.setMinimumHeight(subtitle_height)
+
+        self.secondary_actions = _SecondaryActions()
+        secondary_actions_row = QHBoxLayout(self.secondary_actions)
+        self.secondary_actions_row = secondary_actions_row
         # One trailing logical pixel makes the two equal-stretch columns
         # divide exactly even when the available page width is odd.
         secondary_actions_row.setContentsMargins(0, 0, 1, 0)
@@ -2508,7 +2630,7 @@ class _JanaWorkflowWizard:
         )
         secondary_actions_row.addWidget(self.autosolve_tile, 1)
         secondary_actions_row.addWidget(self.professional_mode_tile, 1)
-        self.workflow_body.addLayout(secondary_actions_row)
+        self.workflow_body.addWidget(self.secondary_actions)
 
         self.page1_layout.addWidget(self.workflow_section)
         self.page1_layout.addStretch(1)
@@ -3353,6 +3475,43 @@ class _JanaWorkflowWizard:
         self.button_row.addWidget(self.primary_button)
         self.outer_root.addWidget(self.footer)
         self.chrome_holder["footer"] = self.footer
+
+        # Qt's default scroll-area focus handling may expose only a child or
+        # cursor rectangle. Keep the whole focused control and its focus ring
+        # inside the viewport, without moving the fixed footer.
+        from PySide6.QtCore import QEvent, QObject, QPoint
+
+        wizard = self
+
+        class _FocusVisibility(QObject):
+            def eventFilter(self, watched, event):
+                if event.type() == QEvent.FocusIn:
+                    QTimer.singleShot(0, lambda: self.reveal(watched))
+                return False
+
+            def reveal(self, control):
+                from shiboken6 import isValid
+                if not isValid(control) or not control.hasFocus() or not control.isVisible():
+                    return
+                viewport = wizard.scroll_area.viewport()
+                rect = control.rect().translated(control.mapTo(viewport, QPoint()))
+                margin = 6
+                bar = wizard.scroll_area.verticalScrollBar()
+                if rect.bottom() + margin >= viewport.height():
+                    bar.setValue(bar.value() + rect.bottom() + margin - viewport.height() + 1)
+                elif rect.top() < margin:
+                    bar.setValue(bar.value() + rect.top() - margin)
+
+        self._focus_visibility = _FocusVisibility(self.dialog)
+        browses = self.files_form_widget.findChildren(QPushButton, "optionalFileBrowse")
+        controls = [self.validate_hkl_button, self.analyze_completeness_button, self.files_toggle,
+                    self.reference_file, browses[0], self.model_file, browses[1],
+                    self.original_superflip_tile, self.superflip_sharped_tile,
+                    self.autosolve_tile, self.professional_mode_tile, self.cancel_button]
+        for before, after in zip(controls, controls[1:]):
+            QWidget.setTabOrder(before, after)
+        for control in controls[:-1]:
+            control.installEventFilter(self._focus_visibility)
 
 
 

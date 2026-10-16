@@ -169,11 +169,11 @@ def main() -> int:
                                            gemmi.UnitCell(10, 10, 10, 90, 90, 90), gemmi.SpaceGroup("P 1"), "P 1")
         dialog = win._build_hkl_completeness_dialog(analysis)
         axes = dialog.findChild(FigureCanvasQTAgg).figure.axes
-        histogram = next(axis for axis in axes if axis.get_xlabel() == "FWHM (original input units)")
-        check("powder histogram plots actual widths on an adaptive scale",
-              histogram.get_xscale() == "log" and histogram.get_xlim()[1] < 1)
+        width_axis = next(axis for axis in axes if axis.get_ylabel() == "Mean FWHM (input units)")
+        check("powder plot shows actual shell widths in input units",
+              max(v for v in width_axis.lines[0].get_ydata() if v is not None) <= .1)
         check("powder display never labels widths as intensity uncertainties",
-              "PEAK-WIDTH DISTRIBUTION" in histogram.get_title(loc="left"))
+              not any('FWHM' in axis.get_ylabel() and '/' in axis.get_ylabel() for axis in axes))
         check("powder diagnostic leaves the original reflection values unchanged",
               hkl.read_bytes() == original and [r.sigma for r in analysis.reflections_unique] == [0.01, 0.03, 0.1])
         dialog.close()
