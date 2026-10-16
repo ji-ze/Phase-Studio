@@ -16,9 +16,28 @@ for _ in range(8):app.processEvents()
 available=d.screen().availableGeometry()
 assert available.contains(d.frameGeometry()),(available,d.frameGeometry())
 assert d._footer.geometry().bottom()<d.height()
-assert d.connect_button.geometry().right()<d._footer.width()
+assert not d.manual_panel.isVisible()
+assert d.sign_in_button.isVisible()
+assert d._scroll.verticalScrollBar().maximum()==0
+assert d._scroll.horizontalScrollBar().maximum()==0
+assert d.sign_in_button.hasFocus()
+d.manual_button.click()
+d.management_button.click()
+for _ in range(8):app.processEvents()
+assert d.manual_panel.isVisible()
+assert not d._footer.isAncestorOf(d.connect_button)
+assert d.manual_panel.isAncestorOf(d.connect_button)
 assert d.key_edit.echoMode()==QLineEdit.Password
-assert d.key_edit.placeholderText()=='Paste your access key here'
+assert d.key_edit.placeholderText()=='Paste your access key'
+assert not d.help_panel.isVisible()
+for widget in (d.key_edit,d.remember,d.replace_button,d.remove_button,d.connect_button,d.account_button,d.help_button):
+    d._scroll.ensureWidgetVisible(widget)
+    for _ in range(8):app.processEvents()
+    bounds=QRect(widget.mapTo(d._scroll.viewport(),QPoint()),widget.size())
+    assert d._scroll.viewport().rect().contains(bounds),(widget.objectName(),bounds,d._scroll.viewport().rect())
+d.help_button.click()
+for _ in range(8):app.processEvents()
+assert d.help_panel.isVisible()
 # The shortened high-DPI window yields body height to a scroll area; fixed
 # header/footer remain visible. Error feedback can be reached without clipping.
 d.show_feedback(req.RequirementStatus(req.RequirementKind.SHARPED,req.RequirementState.SERVER_UNAVAILABLE).message)

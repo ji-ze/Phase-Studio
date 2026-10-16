@@ -34,7 +34,7 @@ class MemorySettings:
 class CredentialStorageTests(unittest.TestCase):
     def test_session_only_does_not_write_storage(self):
         backend=MemorySecureBackend();store=CredentialStore(backend)
-        store.set(KEY)
+        store.set(KEY,remember=False)
         self.assertEqual(store.get(),KEY)
         self.assertEqual(backend.writes,[])
         self.assertFalse(store.remembered())
@@ -45,21 +45,21 @@ class CredentialStorageTests(unittest.TestCase):
         store.remove()
         self.assertEqual(store.get(),'')
         self.assertEqual(CredentialStore(backend).get(),'')
-    def test_session_only_choice_removes_previously_saved_key(self):
+    def test_session_only_choice_preserves_previously_saved_key(self):
         backend=MemorySecureBackend();store=CredentialStore(backend)
         store.set(KEY,remember=True);store.set(OTHER,remember=False)
         self.assertEqual(store.get(),OTHER)
-        self.assertEqual(CredentialStore(backend).get(),'')
-    def test_legacy_plaintext_migration_is_session_only_and_scrubs_both_stores(self):
+        self.assertEqual(CredentialStore(backend).get(),KEY)
+    def test_legacy_plaintext_migration_secures_key_before_scrubbing_matching_stores(self):
         shared=MemorySettings({'inputs/sharped_api_token':KEY,'inputs/cycles':3})
         legacy=MemorySettings({'api_token':OTHER,'model':'preserved-model'})
         backend=MemorySecureBackend();store=CredentialStore(backend)
         self.assertEqual(store.load_settings(shared,legacy),KEY)
         self.assertNotIn('inputs/sharped_api_token',shared.values)
-        self.assertNotIn('api_token',legacy.values)
+        self.assertEqual(legacy.values['api_token'],OTHER)
         self.assertEqual(shared.values['inputs/cycles'],3)
         self.assertEqual(legacy.values['model'],'preserved-model')
-        self.assertEqual(backend.writes,[])
+        self.assertEqual(CredentialStore(backend).get(),KEY)
     def test_no_secure_backend_never_falls_back_to_plaintext(self):
         store=CredentialStore()
         with self.assertRaises(OSError):store.set(KEY,remember=True)
@@ -78,7 +78,7 @@ class CredentialStorageTests(unittest.TestCase):
         self.assertEqual(store.load_settings(shared,base_url='invalid old address'),KEY)
         self.assertFalse(store.remembered('invalid old address'))
         self.assertEqual(backend.writes,[])
-        self.assertNotIn('inputs/sharped_api_token',shared.values)
+        self.assertEqual(shared.values['inputs/sharped_api_token'],KEY)
         self.assertEqual(shared.values['inputs/cycles'],3)
     def test_configured_key_redacted_even_when_server_echoes_it_without_label(self):
         store=CredentialStore();store.set(KEY)
@@ -132,14 +132,14 @@ class AccessDialogTests(unittest.TestCase):
     def test_missing_key_is_normal_onboarding_not_an_error_banner(self):
         self.assertEqual(self.dialog.windowTitle(),'Connect to SharpED')
         self.assertFalse(self.dialog.feedback.isVisible())
-        self.assertEqual(self.dialog.findChild(QLabel,'sharpedAccountSubtitle').text(),'Use your existing Jana2020 account')
+        self.assertEqual(self.dialog.findChild(QLabel,'sharpedAccountSubtitle').text(),"Use your existing Jana2020 account to access SharpED's online electron-density processing.")
     def test_empty_key_shows_help_without_request(self):
         self.dialog.connect_button.click()
         self.assertEqual(self.calls,[])
         self.assertEqual(self.dialog.feedback.text(),'Enter your SharpED access key to continue.')
     def test_verified_token_page_and_exact_confirmed_web_steps(self):
         self.assertEqual(req.SHARPED_ACCOUNT_URL,'https://sharped.fzu.cz/sharp-ed')
-        self.assertEqual(self.dialog.account_button.text(),'Open SharpED token page')
+        self.assertEqual(self.dialog.account_button.text(),'Get an access key \u2197')
         with patch('phase_studio.sharped_access.QDesktopServices.openUrl') as open_url:
             self.dialog.account_button.click()
             self.assertEqual(open_url.call_args.args[0].toString(),'https://sharped.fzu.cz/sharp-ed')
@@ -150,7 +150,7 @@ class AccessDialogTests(unittest.TestCase):
         self.assertNotIn('account settings',instructions)
     def test_no_separate_account_registration_or_desktop_password(self):
         text=' '.join(label.text() for label in self.dialog.findChildren(QLabel))
-        self.assertIn('No separate SharpED account is required',text)
+        self.assertIn('existing Jana2020 account',text)
         self.assertNotIn('Create a SharpED account',text)
         self.assertNotIn('https://jana.fzu.cz/login',text)
         self.assertEqual(len(self.dialog.findChildren(QLineEdit)),1)
@@ -162,11 +162,11 @@ class AccessDialogTests(unittest.TestCase):
         self.assertEqual(self.dialog.show_button.text(),'Hide')
         self.dialog.show_button.click()
         self.assertEqual(self.dialog.key_edit.echoMode(),QLineEdit.Password)
-    def test_connection_success_accepts_session_key_without_claiming_token_validation(self):
+    def test_connection_success_persists_key_without_claiming_token_validation(self):
         self.enter_and_connect()
         self.assertEqual(self.dialog.selected_key,KEY)
         self.assertEqual(self.store.get(),KEY)
-        self.assertEqual(self.backend.writes,[])
+        self.assertEqual(CredentialStore(self.backend).get(),KEY)
         self.assertEqual(self.dialog.result(),QDialog.Accepted)
         self.assertIn('permission is confirmed',self.dialog.findChild(QLabel,'sharpedVerificationNote').text())
     def test_invalid_key_retains_workflow_and_allows_retry(self):
@@ -215,6 +215,21 @@ class AccessDialogTests(unittest.TestCase):
     def test_remember_persists_only_to_secure_backend(self):
         self.dialog.remember.setChecked(True);self.enter_and_connect()
         self.assertEqual(CredentialStore(self.backend).get(),KEY)
+    def test_live_full_configuration_and_wizard_fields_follow_replace_and_remove(self):
+        full=QLineEdit();wizard=QLineEdit()
+        self.store.bind_input(full);self.store.bind_input(wizard)
+        self.store.set(KEY)
+        self.app.processEvents()
+        self.assertEqual((full.text(),wizard.text()),(KEY,KEY))
+        self.store.set(OTHER)
+        self.app.processEvents()
+        self.assertEqual((full.text(),wizard.text()),(OTHER,OTHER))
+        self.store.remove()
+        self.app.processEvents()
+        self.assertEqual((full.text(),wizard.text()),('',''))
+        self.store.save_input(full.text());self.store.save_input(wizard.text())
+        self.assertEqual(CredentialStore(self.backend).get(),'')
+        full.deleteLater();wizard.deleteLater()
     def test_storage_failure_never_accepts_or_writes_plaintext(self):
         self.backend.write=lambda *args:(_ for _ in ()).throw(OSError('failed '+KEY))
         self.dialog.remember.setChecked(True);self.enter_and_connect()
@@ -225,6 +240,7 @@ class AccessDialogTests(unittest.TestCase):
         self.assertEqual(self.dialog.selected_key,KEY)
     def test_replace_saved_key_and_remove_access(self):
         self.store.set(KEY,remember=True)
+        self.dialog.management_button.setChecked(True)
         self.dialog.key_edit.setText(KEY);self.dialog.replace_button.click()
         self.assertEqual(self.dialog.key_edit.text(),'')
         self.dialog.remember.setChecked(True);self.enter_and_connect(OTHER)
@@ -272,6 +288,8 @@ class AccessDialogTests(unittest.TestCase):
             with patch.object(js,'_qt_imports',qt_imports), patch.object(js,'credential_store',self.store), patch.object(access,'credential_store',self.store), patch.object(js.SharpEDServerClient,'get_models',Client.get_models), patch.dict(os.environ,{'SHARPED_API_TOKEN':''}):
                 with patch.object(QDialog,'exec',lambda d:QDialog.Rejected):
                     wizard=js._JanaWorkflowWizard([],inflip);wizard.run()
+                if remove:
+                    self.assertEqual(wizard.api_token.text(),KEY)
                 wizard._ensure_models_loaded=lambda:None
                 wizard.model_cache['loaded']=True
                 wizard.workflow_state['key']=js.WORKFLOW_PHASE_RECYCLING

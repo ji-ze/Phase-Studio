@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import re
 import socket
 import ssl
 import time
@@ -176,6 +177,8 @@ class SharpEDServerClient:
         log: ProgressLog = None,
         stop_event: object = None,
     ) -> Path:
+        self._use_oauth_origin(bearer_token)
+        self._oauth_stop_event = stop_event
         self._raise_if_stopped(stop_event)
         upload = self.upload(file_path, bearer_token, elements, model, outres, log=log)
         with profile_stage(self.performance_profiler, "SharpED server processing and polling", "external"):
@@ -211,6 +214,7 @@ class SharpEDServerClient:
         outres: float,
         log: ProgressLog = None,
     ) -> UploadResult:
+        self._use_oauth_origin(bearer_token)
         from phase_studio.error_reporting import register_private_value
         register_private_value(bearer_token)
         self._log_tls_fallback(log)
@@ -370,7 +374,10 @@ class SharpEDServerClient:
                 self._url(f"/api/user/sharp-ed/download/{job_token}"),
                 [job_token, bearer_token],
             )
-        except SharpEDServerError:
+        except SharpEDServerError as exc:
+            from phase_studio.credentials import credential_store
+            if credential_store.is_oauth(bearer_token) and exc.category == "authentication":
+                raise  # Do not hide repeated login/permission failure in polling.
             return None
         return body if self._looks_like_map_payload(body) else None
 
@@ -407,14 +414,51 @@ class SharpEDServerClient:
     def _request_text(self, method: str, url: str, data: Optional[bytes] = None, headers: Optional[dict[str, str]] = None) -> str:
         return self._request_bytes(method, url, data=data, headers=headers).decode("utf-8", errors="replace")
 
-    def _request_bytes(self, method: str, url: str, data: Optional[bytes] = None, headers: Optional[dict[str, str]] = None) -> bytes:
+    def _use_oauth_origin(self, bearer_token):
+        from phase_studio.credentials import credential_store
+        if credential_store.is_oauth(bearer_token):
+            from phase_studio.oauth import RESOURCE
+            self.base_url = RESOURCE
+
+    def _request_bytes(self, method: str, url: str, data: Optional[bytes] = None, headers: Optional[dict[str, str]] = None,
+                       *, _oauth_retry: bool = False) -> bytes:
         req_headers = {"User-Agent": self.user_agent}
         req_headers.update(headers or {})
+        from phase_studio.credentials import credential_store
+        bearer = req_headers.get("Authorization", "").removeprefix("Bearer ")
+        oauth = credential_store.is_oauth(bearer)
+        request_opener = urlopen
+        if oauth:
+            from phase_studio.oauth import RESOURCE, OAuthError, _NoRedirect
+            from urllib.parse import urlsplit
+            from urllib.request import build_opener, HTTPSHandler
+            parsed = urlsplit(url)
+            if (parsed.scheme != "https" or parsed.hostname != "sharped.fzu.cz" or
+                    parsed.port not in (None, 443) or parsed.username or parsed.password):
+                raise SharpEDServerError("OAuth credentials cannot be sent to this server.", category="authentication")
+            try:
+                bearer = credential_store.oauth_for_request(bearer, cancel_event=getattr(self, "_oauth_stop_event", None))
+            except OAuthError as exc:
+                raise SharpEDServerError(str(exc), category="authentication") from None
+            req_headers["Authorization"] = "Bearer " + bearer
+            opener = build_opener(_NoRedirect(), HTTPSHandler(context=self.ssl_context))
+            request_opener = lambda request, **kwargs: opener.open(request, timeout=kwargs["timeout"])
+        self._validate_request_headers(req_headers)
         req = Request(url, data=data, headers=req_headers, method=method)
         try:
-            with urlopen(req, timeout=self.timeout, context=self.ssl_context) as resp:
+            with request_opener(req, timeout=self.timeout, context=self.ssl_context) as resp:
                 return resp.read()
         except HTTPError as exc:
+            if oauth and exc.code == 401 and method == "GET" and not _oauth_retry:
+                # GET status/download can resume. Never replay an upload POST.
+                exc.close()
+                try:
+                    renewed = credential_store.oauth_for_request(bearer, force=True,
+                        cancel_event=getattr(self, "_oauth_stop_event", None))
+                except OAuthError as error:
+                    raise SharpEDServerError(str(error), category="authentication") from None
+                return self._request_bytes(method, url, data=data,
+                    headers={**(headers or {}), "Authorization": "Bearer " + renewed}, _oauth_retry=True)
             body = exc.read().decode("utf-8", errors="replace")
             category = "authentication" if exc.code in (401, 403) else ("server" if exc.code >= 500 else "http")
             raise SharpEDServerError(
@@ -456,10 +500,45 @@ class SharpEDServerClient:
                 f"SharpED connection timed out for {redact_server_diagnostic(url)}: {exc}", category="timeout",
             ) from exc
 
+    @staticmethod
+    def _validate_request_headers(headers: dict[str, str]) -> None:
+        """Reject invalid configuration before http.client can expose its value.
+
+        Multipart metadata is UTF-8; HTTP field values are not UTF-8 strings.
+        Bearer credentials use the ASCII b64token grammar (RFC 6750).
+        Never include a supplied field name/value or encoding exception in errors.
+        """
+        for name, value in headers.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name):
+                raise SharpEDServerError("Invalid SharpED HTTP header name. Check client configuration.", category="configuration")
+            authorization = name.lower() == "authorization"
+            valid = isinstance(value, str)
+            if valid:
+                valid = all(ch == "\t" or 32 <= ord(ch) <= 255 and ord(ch) != 127 for ch in value)
+            if authorization:
+                valid = valid and bool(re.fullmatch(r"Bearer [A-Za-z0-9._~+/-]+=*", value))
+            if not valid:
+                if authorization:
+                    raise SharpEDServerError(
+                        "Invalid SharpED authentication credential in Authorization header. "
+                        "Sign in with Jana2020 again, or paste only the access key without labels or instructions.",
+                        category="authentication",
+                    ) from None
+                label = "User-Agent" if name.lower() == "user-agent" else "configured"
+                raise SharpEDServerError(
+                    f"Invalid SharpED {label} HTTP header value. Check client configuration; "
+                    "Unicode metadata belongs in the UTF-8 request body.", category="configuration",
+                ) from None
+
     def _request_text_with_auth_candidates(self, url: str, tokens: list[str]) -> str:
         return self._request_bytes_with_auth_candidates(url, tokens).decode("utf-8", errors="replace")
 
     def _request_bytes_with_auth_candidates(self, url: str, tokens: list[str]) -> bytes:
+        from phase_studio.credentials import credential_store
+        oauth_tokens = [token for token in tokens if credential_store.is_oauth(token)]
+        if oauth_tokens:
+            # Job path identity is never substituted for account authorization.
+            return self._request_bytes("GET", url, headers={"Authorization": "Bearer " + oauth_tokens[0]})
         candidates = [token for token in tokens if token]
         if not candidates:
             candidates = [""]

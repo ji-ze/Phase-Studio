@@ -49,9 +49,20 @@ def _run_catalog_check(output_path):
 
 
 def main():
+    if "--credential-self-check" in sys.argv:
+        index = sys.argv.index("--credential-self-check")
+        from phase_studio.oauth_diagnostics import run_credential_check
+        return run_credential_check(sys.argv[index + 1], sys.argv[index + 2])
     if "--version" in sys.argv:
         print(VERSION)
         return 0
+    for flag in ("--oauth-self-check", "--oauth-sign-in-check"):
+        if flag in sys.argv:
+            index = sys.argv.index(flag)
+            if index + 1 >= len(sys.argv):
+                raise ValueError(flag + " requires an output JSON path")
+            from phase_studio.oauth_diagnostics import run_oauth_check
+            return run_oauth_check(sys.argv[index + 1], interactive=flag == "--oauth-sign-in-check")
     catalog_output = _catalog_check_output_path(sys.argv)
     if catalog_output is not None:
         return _run_catalog_check(catalog_output)
