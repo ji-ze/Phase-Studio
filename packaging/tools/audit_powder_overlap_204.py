@@ -1,3 +1,4 @@
+import os
 """Local executable comparisons only; no phasing, network or project writes."""
 import hashlib
 import json
@@ -63,7 +64,7 @@ def main():
         results[name]=compare(name,rows,cell,wave,factor)
     rows=[a.Reflection(1,0,0,100.,None),a.Reflection(2,0,0,100.,None),a.Reflection(3,0,0,100.,None)]
     results['explicit']=compare('explicit',rows,cell,1,explicit={(1,0,0):5,(2,0,0):5,(3,0,0):0})
-    source=Path('C:/Users/honzi/Documents/ochlor/ochlor_Superflip.inflip')
+    source=Path(os.environ.get('PHASE_STUDIO_TEST_INFLIP', str(ROOT / 'build/powder-final/wizard-input/ochlor_Superflip.inflip')))
     before=hashlib.sha256(source.read_bytes()).hexdigest()
     request=a.build_hkl_analysis_request_from_inflip(source,work_dir=OUT/'load')
     load=a.build_hkl_load_result(request)

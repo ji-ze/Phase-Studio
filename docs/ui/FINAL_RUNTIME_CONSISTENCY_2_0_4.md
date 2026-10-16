@@ -35,9 +35,9 @@ The clean-revision suite also passed **303 tests, 1 skipped, 37 subtests**, zero
 
 | Artifact | Absolute delivery path | Bytes | SHA-256 |
 |---|---|---:|---|
-| Standalone ONEFILE | `C:\Users\honzi\Documents\GitHub\Phase-Studio\dist\2.0.4-clean\release\PhaseStudio-2.0.4-x64.exe` | 78085479 | `87b9332d5fff3ae66e5dd8b513eacfd30be149303639e6f7638c6da48c1ce180` |
-| Jana developer EXE (requires its ONEDIR) | `C:\Users\honzi\Documents\GitHub\Phase-Studio\dist\2.0.4-clean\PhaseStudio-Jana2020-2.0.4\Phase_studio.exe` | 10093508 | `5dc1dd361f7e79bb95dde2ee85812c5380d7ae3227cd99b2a8cfad9e77dfc567` |
-| Jana developer ZIP | `C:\Users\honzi\Documents\GitHub\Phase-Studio\dist\2.0.4-clean\release\PhaseStudio-Jana2020-2.0.4.zip` | 78474941 | `ee6c288fd0e58fc2de35bf0e524d2dbe036616bd642c8557a35da05506f63a30` |
+| Standalone ONEFILE | `dist\2.0.4-clean\release\PhaseStudio-2.0.4-x64.exe` | 78085479 | `87b9332d5fff3ae66e5dd8b513eacfd30be149303639e6f7638c6da48c1ce180` |
+| Jana developer EXE (requires its ONEDIR) | `dist\2.0.4-clean\PhaseStudio-Jana2020-2.0.4\Phase_studio.exe` | 10093508 | `5dc1dd361f7e79bb95dde2ee85812c5380d7ae3227cd99b2a8cfad9e77dfc567` |
+| Jana developer ZIP | `dist\2.0.4-clean\release\PhaseStudio-Jana2020-2.0.4.zip` | 78474941 | `ee6c288fd0e58fc2de35bf0e524d2dbe036616bd642c8557a35da05506f63a30` |
 
 Both PE versions are 2.0.4.0. Both frozen profiles passed version invocation, Science Gothic asset/license/family/Regular weight 400/zero tracking checks and a mocked local OAuth callback/exchange with responsive Qt. No remote OAuth or inference was used. Their module analyses contain only Phase Studio Python paths inside the clean worktree. All recorded runtime/packaging source hashes match the selected commit after building. Delivery copies match the original clean-build hashes; the ZIP contains 900 byte-identical ONEDIR files. Test/capture modules are absent from the executable Python archives.
 

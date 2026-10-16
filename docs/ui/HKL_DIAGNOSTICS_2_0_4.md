@@ -138,7 +138,7 @@ All stated project numbers come from local calculations, not those references.
 
 ## Real powder acceptance — ochlor
 
-Source: `C:/Users/honzi/Documents/ochlor/ochlor_Superflip.inflip`.
+Source: `<local-project>/ochlor_Superflip.inflip`.
 631 parsed, 631 literal unique, 631 symmetry-independent physical orbits;
 P21/n setting from the project metadata; no forbidden entries, duplicates,
 invalid values or invalid widths. FWHM is **0.0527 across all 631 records**.
@@ -152,7 +152,7 @@ Known-unit overlap screenshots use explicitly labeled synthetic fixtures only.
 
 ## Real amplitude acceptance — 2int3total
 
-Source: `C:/Users/honzi/Documents/flipovani-phase-studio/2int3total.inflip`,
+Source: `<local-data>/2int3total.inflip`,
 used only for statistics following the user's explicit authorization.
 328606 raw/literal-unique records, including one `000`; 328605 physical orbits;
 P-1 with the project's nonorthogonal cell. All 328606 numerical phase fields

@@ -100,7 +100,7 @@ def main(mode):
             with patch('phase_studio.app.apply_safe_dialog_geometry',lambda dialog,width,height:dialog.resize(width,height)):
                 w._adjust_dialog_size();settle()
                 save(w.dialog,name,w.dialog.width(),w.dialog.height())
-        source=Path('C:/Users/honzi/Documents/ochlor/ochlor_Superflip.inflip')
+        source=Path(os.environ.get('PHASE_STUDIO_TEST_INFLIP', str(ROOT / 'build/powder-final/wizard-input/ochlor_Superflip.inflip')))
         if mode=='hkl':
             w=a.IterativeSuperflipPipelineQtGUI()
             request=a.build_hkl_analysis_request_from_inflip(source,work_dir=ROOT/'build/powder-final/capture')

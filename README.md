@@ -66,7 +66,7 @@ its server code, architecture and model weights are not distributed here.
 4. Expand **API tokens for desktop application** using **Show**. Enter a
    **New token name** and click **Create token**.
 5. Paste the access key into Phase Studio's masked **SharpED access key** field
-   and choose **Connect to SharpED**. Development 2.0.4 remembers manual keys in
+   and choose **Connect using access key**. Phase Studio 2.0.4 remembers manual keys in
    Windows Credential Manager by default; keys are not written to QSettings.
    Uncheck **Remember access on this device** for session-only use, or use
    **Remove saved access** to explicitly delete a saved key.
@@ -116,14 +116,14 @@ Scientific publications reporting work performed with Phase Studio should cite
 the software. This is the project's scientific-attribution policy, separate
 from the standard MIT license; it adds no license restriction.
 
-> Zelenka, Jiří. *Phase Studio*, version 2.0.3. Institute of Physics of the
+> Zelenka, Jiří. *Phase Studio*, version 2.0.4. Institute of Physics of the
 > Czech Academy of Sciences. https://github.com/ji-ze/Phase-Studio
 
 ```bibtex
-@software{zelenka_phase_studio_203,
+@software{zelenka_phase_studio_204,
   author  = {Zelenka, Jiří},
   title   = {Phase Studio},
-  version = {2.0.3},
+  version = {2.0.4},
   url     = {https://github.com/ji-ze/Phase-Studio}
 }
 ```

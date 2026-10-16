@@ -27,7 +27,7 @@ The existing parser/counters were inspected first. For formats without a phase c
 
 ochlor overlap remains: 529 total groups, 438 singletons, 91 overlapping groups, 193 affected records (30.586%), largest group four, intensity fraction 21.064%. Distribution remains 81 groups of two, nine groups of three and one group of four. Membership in the unchanged exported diagnostics is identical.
 
-The original `C:/Users/honzi/Documents/ochlor/ochlor_Superflip.inflip` is no longer present. The accepted real-data reference is its previously retained byte-identical copy, `build/powder-final/wizard-input/ochlor_Superflip.inflip`, with matching Jana `.m90`. Its SHA-256 is `9136270c5e8ab6850ac6bd4390c301f17a32dcc83994184d8562735b9a26b88c`. The current different `ochlor.inflip` was not silently substituted. `2int3total.inflip` is read directly from the existing local dataset and its prior source hash is verified. Original inputs are unchanged.
+The original `<local-project>/ochlor_Superflip.inflip` is no longer present. The accepted real-data reference is its previously retained byte-identical copy, `build/powder-final/wizard-input/ochlor_Superflip.inflip`, with matching Jana `.m90`. Its SHA-256 is `9136270c5e8ab6850ac6bd4390c301f17a32dcc83994184d8562735b9a26b88c`. The current different `ochlor.inflip` was not silently substituted. `2int3total.inflip` is read directly from the existing local dataset and its prior source hash is verified. Original inputs are unchanged.
 
 ## Visual acceptance
 

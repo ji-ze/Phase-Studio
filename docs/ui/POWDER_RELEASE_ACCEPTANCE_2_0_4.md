@@ -33,9 +33,9 @@ Built using the existing `packaging/build_windows.ps1 -Target All -DistRoot dist
 
 | Artifact | Absolute path | Bytes | SHA-256 |
 |---|---|---:|---|
-| Standalone ONEFILE | `C:\Users\honzi\Documents\GitHub\Phase-Studio\dist\2.0.4-final\release\PhaseStudio-2.0.4-x64.exe` | 78082913 | `70ba02bee46815cff2da625959c5740db0347166cb662a8f46bc82ad92864a7d` |
-| Jana developer EXE | `C:\Users\honzi\Documents\GitHub\Phase-Studio\dist\2.0.4-final\PhaseStudio-Jana2020-2.0.4\Phase_studio.exe` | 10090989 | `f92b938f5b184bdb3092e56d7587e8ead610b78683a3bdf092c6f448cc5104dd` |
-| Developer ZIP | `C:\Users\honzi\Documents\GitHub\Phase-Studio\dist\2.0.4-final\release\PhaseStudio-Jana2020-2.0.4.zip` | 78473472 | `149d0e3a43d6d90467f06475db1733db78f57754407711cd1643d1e082e9a5d7` |
+| Standalone ONEFILE | `dist\2.0.4-final\release\PhaseStudio-2.0.4-x64.exe` | 78082913 | `70ba02bee46815cff2da625959c5740db0347166cb662a8f46bc82ad92864a7d` |
+| Jana developer EXE | `dist\2.0.4-final\PhaseStudio-Jana2020-2.0.4\Phase_studio.exe` | 10090989 | `f92b938f5b184bdb3092e56d7587e8ead610b78683a3bdf092c6f448cc5104dd` |
+| Developer ZIP | `dist\2.0.4-final\release\PhaseStudio-Jana2020-2.0.4.zip` | 78473472 | `149d0e3a43d6d90467f06475db1733db78f57754407711cd1643d1e082e9a5d7` |
 
 The existing distribution naming is preserved: the developer folder `PhaseStudio-Jana2020-2.0.4/` directly contains `Phase_studio.exe` and `_internal/`. Its ZIP was extracted and all **900 files** verified against the source tree. No duplicated scientific Superflip/EDMA executables are bundled.
 

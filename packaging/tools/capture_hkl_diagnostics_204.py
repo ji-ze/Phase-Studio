@@ -90,7 +90,7 @@ def analysis(load):
     return a.analyze_hkl_data(load.hkl_path,load.data_mode,load.cell,load.spacegroup,load.spacegroup_hm,load.source_note,_loaded=load)
 
 
-real = a.build_hkl_load_result(a.build_hkl_analysis_request_from_inflip(Path('C:/Users/honzi/Documents/ochlor/ochlor_Superflip.inflip'),work_dir=work/'ochlor'))
+real = a.build_hkl_load_result(a.build_hkl_analysis_request_from_inflip(Path(os.environ.get('PHASE_STUDIO_TEST_INFLIP', str(ROOT / 'build/powder-final/wizard-input/ochlor_Superflip.inflip'))),work_dir=work/'ochlor'))
 capture('01-real-ochlor-validation',win._build_hkl_validation_dialog(real),height=780)
 x = analysis(real)
 capture('02-real-ochlor-completeness-constant-fwhm',win._build_hkl_completeness_dialog(x))
@@ -107,7 +107,7 @@ assert dict(overlapping.diagnostics.overlap)['group_count']>0
 capture('08-synthetic-estimated-overlap',win._build_hkl_completeness_dialog(analysis(overlapping)),advanced=True)
 warnings = fixture('symmetry-duplicates-invalid-values','0 1 0 10 .05\n0 2 0 -3 .05\n1 0 0 5 .05\n1 0 0 7 .05\n2 0 1 nan -1\n',a.REFLECTION_DATA_MODE_INTENSITY_FWHM)
 capture('09-synthetic-symmetry-warnings',win._build_hkl_validation_dialog(warnings),advanced=True)
-large_request = a.build_hkl_analysis_request_from_inflip(Path('C:/Users/honzi/Documents/flipovani-phase-studio/2int3total.inflip'),work_dir=work/'2int3total')
+large_request = a.build_hkl_analysis_request_from_inflip(Path(os.environ.get('PHASE_STUDIO_LARGE_INFLIP', str(ROOT / 'build/acceptance-inputs/2int3total.inflip'))),work_dir=work/'2int3total')
 large = a.build_hkl_load_result(large_request)
 capture('10-real-2int3total-validation',win._build_hkl_validation_dialog(large),height=800)
 capture('11-real-2int3total-completeness',win._build_hkl_completeness_dialog(d.cached_analysis(large_request)))

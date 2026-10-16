@@ -23,7 +23,7 @@ from phase_studio.displacement import normalize_jana_m40_isotropic_displacements
 
 
 def main():
-    project = Path('C:/Users/honzi/Documents/ochlor')
+    project = Path(os.environ.get('PHASE_STUDIO_JANA_PROJECT', str(ROOT / 'build/acceptance-inputs/ochlor')))
     old_run = Path(os.environ.get('PHASE_STUDIO_ACCEPTANCE_RUN',str(ROOT / 'build/oauth-2.0.4-ochlor-run/calculation/run_0001')))
     root = ROOT / 'build/selection-integrity-real'
     root.mkdir(exist_ok=True)

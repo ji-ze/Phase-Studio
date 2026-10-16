@@ -1,3 +1,4 @@
+import os
 """Compare real input and validated report fields across the presentation adapter."""
 import hashlib
 import json
@@ -16,8 +17,8 @@ out=ROOT/'build/hkl-presentation'
 out.mkdir(parents=True,exist_ok=True)
 baseline=json.loads((ROOT/'build/hkl-modernization/real-acceptance.json').read_text())
 checks={}
-for name,path in [('ochlor',Path('C:/Users/honzi/Documents/ochlor/ochlor_Superflip.inflip')),
-                  ('2int3total',Path('C:/Users/honzi/Documents/flipovani-phase-studio/2int3total.inflip'))]:
+for name,path in [('ochlor',Path(os.environ.get('PHASE_STUDIO_TEST_INFLIP', str(ROOT / 'build/powder-final/wizard-input/ochlor_Superflip.inflip')))),
+                  ('2int3total',Path(os.environ.get('PHASE_STUDIO_LARGE_INFLIP', str(ROOT / 'build/acceptance-inputs/2int3total.inflip'))))]:
     sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
     before=sha(path)
     request=a.build_hkl_analysis_request_from_inflip(path,work_dir=out/name)

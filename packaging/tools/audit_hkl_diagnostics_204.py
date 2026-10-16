@@ -29,8 +29,8 @@ records={}
 def digest(path): return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-for name,path in [('ochlor',Path('C:/Users/honzi/Documents/ochlor/ochlor_Superflip.inflip')),
-                  ('2int3total',Path('C:/Users/honzi/Documents/flipovani-phase-studio/2int3total.inflip'))]:
+for name,path in [('ochlor',Path(os.environ.get('PHASE_STUDIO_TEST_INFLIP', str(ROOT / 'build/powder-final/wizard-input/ochlor_Superflip.inflip')))),
+                  ('2int3total',Path(os.environ.get('PHASE_STUDIO_LARGE_INFLIP', str(ROOT / 'build/acceptance-inputs/2int3total.inflip'))))]:
     original=digest(path)
     request=a.build_hkl_analysis_request_from_inflip(path,work_dir=out/name)
     ticks=[]

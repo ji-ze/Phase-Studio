@@ -25,7 +25,8 @@ Opening Advanced diagnostics and switching graph tabs preserve plot-panel and sh
 
 - [Before: expanded overlap diagnostics](../screenshots/2.0.4-hkl-presentation/before/scale-1/08-synthetic-estimated-overlap.png)
 - [After: overlap tab](../screenshots/2.0.4-hkl-presentation/after/scale-1/08-synthetic-estimated-overlap-overlap.png)
-- [After: structured details](../screenshots/2.0.4-hkl-presentation/after/scale-1/08-synthetic-estimated-overlap-details.png)
+- Structured-details capture remains in local acceptance evidence because it
+  contains a personal filesystem path; see the [public samples](../screenshots/2.0.4-hkl-presentation/README.md).
 - [Real ochlor: constant width](../screenshots/2.0.4-hkl-presentation/after/scale-1/02-real-ochlor-completeness-constant-fwhm.png)
 - [Real 2int3total: Validation](../screenshots/2.0.4-hkl-presentation/after/scale-1/10-real-2int3total-validation.png)
 - [Real 2int3total: 150% Completeness](../screenshots/2.0.4-hkl-presentation/after/scale-1.5/11-real-2int3total-completeness.png)
