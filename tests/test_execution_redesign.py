@@ -97,6 +97,32 @@ class ExecutionRedesign(unittest.TestCase):
         self.settle()
         return result
 
+    def test_run_log_placeholder_replaced_and_completed_cycle_event_owns_count(self):
+        backend=self.backend
+        backend.progress_bar.setRange(0,3)
+        backend._overall_progress_floor=0
+        backend._set_run_status('RUNNING')
+        self.assertNotIn('Ready. Select an input',backend.log_text.toPlainText())
+        self.assertIn('Workflow started',backend.log_text.toPlainText())
+        backend._append_execution_log('Superflip map completed.',subsystem='Superflip')
+        text=backend.log_text.toPlainText()
+        self.window._refresh_tick()
+        self.assertEqual(text,backend.log_text.toPlainText())
+        backend._apply_cycle_progress_state(self.engine.CycleProgressState(1,3,'EDMA',3,7,busy=True))
+        self.assertEqual(backend.progress_bar.value(),0)
+        backend._apply_cycle_progress_state(self.engine.CycleProgressState(1,3,'Finalizing cycle',7,7,complete=True))
+        self.assertEqual(backend.progress_bar.value(),1)
+
+    def test_active_handoff_rejects_wrong_run_or_unsealed_jana_model(self):
+        result=self.structures()
+        self.backend._set_run_status('RUNNING')
+        with patch.object(self.backend,'request_autosolve_pass_now') as request:
+            self.window._on_pass_now()
+            request.assert_not_called()  # visualization fixture has no Jana model
+        result.run_id='another-run'
+        self.window._refresh_tick()
+        self.assertFalse(self.window.pass_now_button.isEnabled())
+
     def test_projected_fit_compact_elongated_dense_orientations(self):
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -208,6 +234,7 @@ class ExecutionRedesign(unittest.TestCase):
 
     def test_early_pass_requires_explicit_confirmation_and_identifies_candidates(self):
         result = self.structures()
+        self._write_handoff_metadata_fixture(result)
         self.backend._set_run_status("RUNNING")
         from PySide6.QtWidgets import QMessageBox
         with patch.object(self.backend,"request_autosolve_pass_now") as request:
@@ -316,7 +343,8 @@ class ExecutionRedesign(unittest.TestCase):
         from dataclasses import replace
         from phase_studio import autosolve_review as guided
         from PySide6.QtWidgets import QMessageBox
-        self.structures()
+        result=self.structures()
+        self._write_handoff_metadata_fixture(result)
         self.backend._set_run_status("RUNNING")
         panel=self.window._last_panels[guided.ROLE_OBSERVED]
         self.window._last_panels[guided.ROLE_OBSERVED]=replace(panel,cycle=2)
@@ -325,6 +353,13 @@ class ExecutionRedesign(unittest.TestCase):
         text=self.window._last_early_handoff_dialog.informativeText()
         self.assertIn("completed Cycle 1",text)
         self.assertNotIn("Cycle 2",text)
+
+    def _write_handoff_metadata_fixture(self,result):
+        # File-backed UI eligibility fixture only. Actual m40 publication is
+        # independently exercised by the real EDMA/Jana acceptance and goldens.
+        for path in (result.superflip_edma_cif,result.deblur_edma_cif):
+            count=len(self.engine.parse_cif_atoms(path))
+            path.with_suffix('.m40').write_text(f'{count} 0 0 0\n# UI eligibility fixture; never published\n')
 
     def test_immediate_stop_freezes_animation_before_worker_acknowledgement(self):
         self.backend._set_run_status("RUNNING")

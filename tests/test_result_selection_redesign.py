@@ -102,11 +102,11 @@ class ResultSelectionRedesignTests(unittest.TestCase):
         self.assertEqual(len(engine.parse_cif_atoms(path)),9)
         self.assertEqual(engine._m40_model_count(path.with_suffix('.m40')),2)
         d._render_preview(updated)
-        self.assertIn('EDMA candidate: 9 sites',d._metadata_label.text())
+        self.assertIn('EDMA candidate: 9 sites',d._metadata_label.toolTip())
         self.assertIn('Jana model: 2 atomic sites',d._metadata_label.text())
         absent=replace(updated,jana_model_sha256='',jana_model_site_count=None)
         d._render_preview(absent)
-        self.assertIn('prepared during handoff',d._metadata_label.text())
+        self.assertIn('prepared during handoff',d._metadata_label.toolTip())
     def test_async_identity_pending_and_same_m40(self):
         d=self.dialog
         pending=[]
@@ -157,6 +157,214 @@ class ResultSelectionRedesignTests(unittest.TestCase):
         self.assertEqual(recorded_edma_site_lineage(replace(c,edma_sigma=.4)),{})
         data['cif_sites']=3;sidecar.write_text(json.dumps(data),encoding='utf8')
         self.assertEqual(recorded_edma_site_lineage(c),{})
+
+    def test_combined_default_and_unmodified_pass_use_recommended_sharped(self):
+        backend=self.backend
+        backend.last_run_config.modelfile_source='none'
+        backend._result_selection_session=None
+        selected=[]
+        def accept(dialog):
+            self.assertEqual(dialog.active_source,'deblurred')
+            candidate=dialog.selected_candidate
+            self.assertEqual(candidate,dialog.active_recommendation.recommended_candidate)
+            self.assertEqual(dialog.preview_candidate_id,candidate.candidate_id)
+            self.assertIn('Structure prediction',dialog._selected_output_summary.text())
+            self.assertIn(f'Cycle {candidate.cycle}',dialog._selected_output_summary.text())
+            selected.append(candidate)
+            return QDialog.Accepted
+        with patch.object(engine.ResultSelectionDialog,'exec',accept), patch.object(backend,'_start_jana_handoff') as handoff:
+            backend.open_result_selector('jana')
+            self.assertEqual(handoff.call_args.args[2],selected[0])
+            self.assertEqual(handoff.call_args.args[2].jana_model_sha256,selected[0].jana_model_sha256)
+
+    def test_manual_selection_reopens_same_run_but_new_run_resets_default(self):
+        backend=self.backend
+        opened=[]
+        def manual(dialog):
+            dialog._superflip_btn.setChecked(True)
+            dialog._views['superflip'].table.selectRow(0)
+            opened.append(dialog.selected_candidate)
+            return QDialog.Rejected
+        with patch.object(engine.ResultSelectionDialog,'exec',manual):
+            backend.open_result_selector('jana')
+        def inspect(dialog):
+            self.assertEqual(dialog.selected_candidate,opened[0])
+            self.assertEqual(dialog.active_source,'superflip')
+            return QDialog.Rejected
+        with patch.object(engine.ResultSelectionDialog,'exec',inspect):
+            backend.open_result_selector('jana')
+        backend.last_run_config.run_id='new-run-default'
+        def new_run(dialog):
+            self.assertEqual(dialog.active_source,'deblurred')
+            return QDialog.Rejected
+        with patch.object(engine.ResultSelectionDialog,'exec',new_run):
+            backend.open_result_selector('jana')
+
+    def test_async_new_structure_hash_preserves_user_camera(self):
+        d=self.dialog
+        axis=d._preview_figure.axes[0]
+        axis.set_xlim3d(-7,13)
+        d._preview_camera_interaction('zoom')
+        candidate=d.selected_candidate
+        path=Path(candidate.structure_path).with_name('updated-generation.cif')
+        path.write_bytes(Path(candidate.structure_path).read_bytes()+b'\n')
+        path.with_suffix('.m40').write_bytes(Path(candidate.jana_model_path).read_bytes())
+        d._render_preview(engine.seal_result_candidate(replace(candidate,structure_path=str(path),edma_sigma=.4)))
+        self.events()
+        self.assertEqual(d._preview_figure.axes[0].get_xlim3d(),(-7,13))
+
+    def test_single_line_tabs_and_default_sigma(self):
+        d=self.dialog
+        self.assertEqual(d._sharped_btn.title_label.text(),'STRUCTURE PREDICTION')
+        self.assertTrue(d._sharped_btn.subtitle_label.isHidden())
+        self.assertEqual(engine.NORMAL_EDMA_THRESHOLD_SIGMA,.5)
+        self.assertEqual(d.selected_candidate.edma_sigma,.5)
+
+    def test_superflip_only_and_failed_sharped_fallback(self):
+        backend=self.backend
+        backend.results=[replace(r,deblur_map=Path(r.deblur_map).with_name('missing.xplor'),
+                                 deblur_edma_cif=Path(r.deblur_edma_cif).with_name('missing.cif')) for r in backend.results]
+        def inspect(dialog):
+            self.assertEqual(dialog.active_source,'superflip')
+            self.assertIn('No completed SharpED structure is available',dialog._warning_callout.text())
+            self.assertTrue(dialog._action_button.isEnabled())
+            return QDialog.Rejected
+        backend._result_selection_session=None
+        with patch.object(engine.ResultSelectionDialog,'exec',inspect):
+            backend.open_result_selector('jana')
+
+    def test_nonorthogonal_cell_fit_and_incomplete_model_guard(self):
+        from mpl_toolkits.mplot3d import proj3d
+        from phase_studio.result_selection import format_result_metric
+        d=self.dialog
+        candidate=d.selected_candidate
+        path=Path(candidate.structure_path).with_name('nonorthogonal-preview.cif')
+        text=Path(candidate.structure_path).read_text(encoding='utf8')
+        text=text.replace('_cell_angle_beta 90','_cell_angle_beta 105').replace('_cell_angle_gamma 90','_cell_angle_gamma 73')
+        path.write_text(text,encoding='utf8')
+        d._view_mode='cell'
+        d._render_preview(engine.seal_result_candidate(replace(candidate,structure_path=str(path))))
+        self.events();d._request_preview_fit();d._preview_canvas.draw()
+        axis=d._preview_figure.axes[0];points=d._preview_fit_coords
+        x,y,_=proj3d.proj_transform(*points.T,axis.get_proj())
+        pixels=axis.transData.transform(np.column_stack((x,y)))
+        viewport=axis.get_position(original=True).transformed(axis.figure.transFigure)
+        self.assertAlmostEqual(max(np.ptp(pixels,axis=0)/[viewport.width,viewport.height]),.78,places=5)
+        self.assertEqual(format_result_metric(float('nan')),'n/a')
+        self.assertEqual(format_result_metric(float('inf')),'n/a')
+        view=d._views[d.active_source]
+        view.selected=replace(candidate,jana_model_sha256='',usable_structure=False)
+        d._sync_action_button()
+        self.assertFalse(d._action_button.isEnabled())
+
+    def test_unready_scientific_winner_selects_best_ready_without_moving_star(self):
+        backend=self.backend
+        backend.results[-1].deblur_edma_cif=Path(backend.results[-1].deblur_edma_cif).with_name('unfinished.cif')
+        def inspect(d):
+            self.assertEqual(d.active_source,'deblurred')
+            self.assertEqual(d.active_recommendation.recommended_candidate.cycle,3)
+            self.assertEqual(d.selected_candidate.cycle,2)
+            self.assertEqual(d.preview_candidate_id,d.selected_candidate.candidate_id)
+            self.assertIn('not handoff-ready',d._selected_output_summary.text())
+            self.assertTrue(d.selection_snapshot.ready)
+            d._views['deblurred'].table.selectRow(2)
+            self.assertFalse(d.selection_snapshot.ready)
+            self.assertFalse(d._action_button.isEnabled())
+            self.assertIn('No result is ready',d._selected_output_summary.text())
+            return QDialog.Rejected
+        with patch.object(engine.ResultSelectionDialog,'exec',inspect):
+            backend.open_result_selector('jana')
+
+    def test_metrics_only_rows_are_preserved_and_geometry_controls_disabled(self):
+        backend=self.backend
+        backend.results=[replace(r,superflip_map=Path(r.superflip_map).with_name('missing-sf.xplor'),
+            deblur_map=Path(r.deblur_map).with_name('missing-ed.xplor')) for r in backend.results]
+        self.assertEqual(engine.result_candidates_from_results(backend.results),[])
+        def inspect(d):
+            self.assertEqual(d._views['deblurred'].table.rowCount(),3)
+            self.assertIsNotNone(d.selected_candidate.metrics.reference_f05)
+            self.assertFalse(d.selection_snapshot.ready)
+            self.assertEqual(d.preview_candidate_id,'')
+            self.assertIn('No result is ready to pass to Jana2020',d._selected_output_summary.text())
+            messages=[t.get_text() for t in d._preview_figure.texts]
+            self.assertEqual(messages.count('No completed structure is available for this selection.'),1)
+            self.assertNotIn('No completed structure',d._metadata_label.text())
+            for b in (d._fit_button,d._fullscreen_button,d._add_atoms_button,d._remove_atoms_button,
+                      d._molecule_button,d._cell_button,d._auto_rotate_button,d._action_button):
+                self.assertFalse(b.isEnabled())
+            self.assertIn('Map unavailable',d._views['deblurred'].table.item(0,1).toolTip())
+            return QDialog.Rejected
+        with patch.object(engine.ResultSelectionDialog,'exec',inspect):
+            backend.open_result_selector('jana')
+
+    def test_fallback_writing_distinguishes_first_open_from_return(self):
+        backend=self.backend
+        for result in backend.results:
+            result.deblur_edma_cif=Path(result.deblur_edma_cif).with_name('missing-model.cif')
+        def first(d):
+            self.assertEqual(d.active_source,'superflip')
+            self.assertIn('selected instead',d._warning_callout.text())
+            self.assertTrue(d.selection_snapshot.ready)
+            return QDialog.Rejected
+        with patch.object(engine.ResultSelectionDialog,'exec',first):backend.open_result_selector('jana')
+        def returned(d):
+            self.assertIn('selected charge-flipping solution can be passed',d._warning_callout.text())
+            self.assertNotIn('Select a completed',d._warning_callout.text())
+            return QDialog.Rejected
+        with patch.object(engine.ResultSelectionDialog,'exec',returned):backend.open_result_selector('jana')
+
+    def test_wrong_threshold_and_cross_run_callbacks_are_rejected(self):
+        d=self.dialog;pending=[]
+        def request(c,add,callback):
+            r=SimpleNamespace(threshold=.4);pending.append((c,callback,r));return r
+        d._adjust_threshold_async=request
+        for change in ({'edma_sigma':.3},{'run_id':'other-run','edma_sigma':.4}):
+            original=d.selected_candidate
+            d._change_threshold(True)
+            c,callback,r=pending[-1]
+            callback(replace(c,**change),None,r)
+            self.assertEqual(d.selected_candidate,original)
+
+    def test_table_is_authority_and_click_revalidates_changed_files(self):
+        d=self.dialog;view=d._views[d.active_source]
+        view.table.selectRow(0);self.events()
+        c=d.selected_candidate
+        self.assertEqual(d.selection_snapshot.identity,(c.run_id,c.source,c.cycle,c.candidate_id,
+            c.map_sha256,c.edma_sigma,c.structure_sha256,c.jana_model_sha256))
+        self.assertEqual(d.preview_candidate_id,c.candidate_id)
+        Path(c.jana_model_path).write_bytes(Path(c.jana_model_path).read_bytes()+b'\n')
+        d.accept()
+        self.assertNotEqual(d.result(),QDialog.Accepted)
+        self.assertFalse(d.selection_snapshot.ready)
+        self.assertIn('identity changed',d._selected_output_summary.text())
+        view.selected=None
+        self.assertEqual(view.table.currentRow(),-1)
+        self.assertIsNone(d.selected_candidate)
+
+    def test_ui_unavailable_option_does_not_change_available_candidates_or_metrics(self):
+        base=engine.result_candidates_from_results(self.backend.results)
+        included=engine.result_candidates_from_results(self.backend.results,include_unavailable=True)
+        self.assertEqual(base,included)
+        self.assertEqual([c.metrics for c in base],[c.metrics for c in included])
+
+    def test_stale_recommendation_selected_field_does_not_override_first_ready_ranking(self):
+        from phase_studio.result_selection import _SourceView,result_selection_metric_columns
+        d=self.dialog;original=d._views['deblurred']
+        stale=original.recommendation.with_selected(original.ordered[0])
+        view=_SourceView('deblurred',original.ordered,stale,
+            result_selection_metric_columns(d._definition),False,'test',jana_context=True)
+        self.assertEqual(view.selected,stale.recommended_candidate)
+        self.assertEqual(view.table.currentRow(),2)
+        view.container.deleteLater()
+
+    def test_forced_accept_of_incomplete_row_never_starts_publication(self):
+        backend=self.backend
+        for r in backend.results:
+            r.deblur_edma_cif=Path(r.deblur_edma_cif).with_name('no-completed-structure.cif')
+            r.superflip_edma_cif=Path(r.superflip_edma_cif).with_name('no-completed-structure.cif')
+        with patch.object(engine.ResultSelectionDialog,'exec',lambda d:QDialog.Accepted), patch.object(backend,'_start_jana_handoff') as publish:
+            self.assertFalse(backend.open_result_selector('jana'))
+            publish.assert_not_called()
 
 class MetricTransparencyTests(unittest.TestCase):
     def test_imposed_amplitudes_cannot_validate_phases(self):

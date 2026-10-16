@@ -1165,8 +1165,16 @@ class _JanaWorkflowWizard:
         return int(target)
 
     def _preferred_dialog_height(self) -> int:
-        """One stable Wizard height, clamped for the active display."""
+        """Keep the main page stable; size configuration to its visible content."""
+        page = self.stack.currentWidget()
         target = self.WIZARD_PREFERRED_HEIGHT
+        if page is not self.page1:
+            width = self._preferred_dialog_width()
+            self._size_stack_to_current_page(width)
+            footer = self.chrome_holder.get('footer')
+            chrome = self.brand_header.sizeHint().height() + self.context_banner.sizeHint().height()
+            chrome += footer.sizeHint().height() if footer is not None else 0
+            target = max(420, self._content_height_for_width(width) + chrome + 16)
         available = self._available_screen_height()
         if available > 0:
             target = min(target, max(1, int(available * self.WIZARD_MAX_SCREEN_FRACTION)))
@@ -1485,6 +1493,9 @@ class _JanaWorkflowWizard:
              "Measured uncertainties have not been verified. ") + "Significance filtering is unavailable. "
             "Correction uses the existing threshold-0 mode: all reflections with a positive map prediction, without σ."
         )
+        self.intensity_enabled_checkbox.setText(
+            'Enable map-supported intensity correction (no σ filter)' if is_powder else
+            'Enable weak-reflection intensity correction')
         self._sync_feedback_applicability()
         self._adjust_dialog_size()
 
@@ -2827,6 +2838,7 @@ class _JanaWorkflowWizard:
             self._shared_or_legacy_value("sharped_api_token", "api_token", os.environ.get("SHARPED_API_TOKEN", ""))
         )
         self.api_token.setEchoMode(QLineEdit.Password)
+        credential_store.bind_input(self.api_token)
         self.api_token.setPlaceholderText("Paste your access key here")
         self.api_token.setMaximumWidth(550)
         self.api_token.setToolTip(
@@ -3334,8 +3346,11 @@ class _JanaWorkflowWizard:
             enabled = self.cycles.value() > 1 and self.missing_enabled_checkbox.isChecked()
             self.missing_start_cycle_spin.setEnabled(enabled)
             self.missing_percent_spin.setEnabled(enabled)
+            label = self.missing_form.labelForField(self.missing_percent_spin)
+            label.setText('Maximum added reflections (%)' + (' · No additions at 0%' if enabled and self.missing_percent_spin.value()==0 else ''))
 
         self.missing_enabled_checkbox.toggled.connect(sync_missing_dependency)
+        self.missing_percent_spin.valueChanged.connect(sync_missing_dependency)
         sync_missing_dependency()
 
         def sync_intensity_dependency(_checked: bool = False) -> None:
@@ -3348,8 +3363,9 @@ class _JanaWorkflowWizard:
             self.intensity_sigma_spin.setVisible(has_sigma)
             self.intensity_form.labelForField(self.intensity_sigma_spin).setVisible(has_sigma)
             inactive = enabled and self.intensity_damping_spin.value() == 0
-            self.intensity_effective_note.setText("Correction damping 0 keeps observed values; no intensity update is applied." if inactive else "")
-            self.intensity_effective_note.setVisible(inactive)
+            self.intensity_effective_note.setText("No intensity correction: damping is 0; observed values are retained." if inactive else
+                "Intensity correction will use the configured positive damping." if enabled else "")
+            self.intensity_effective_note.setVisible(enabled)
 
         self.intensity_enabled_checkbox.toggled.connect(sync_intensity_dependency)
         self.intensity_damping_spin.valueChanged.connect(sync_intensity_dependency)
@@ -3362,6 +3378,8 @@ class _JanaWorkflowWizard:
             self.powder_wavelength_spin.setEnabled(enabled)
             self.powder_separation_spin.setEnabled(enabled)
             self.powder_mix_spin.setEnabled(enabled)
+            self.powder_form.labelForField(self.powder_mix_spin).setText('Map ratio mix' +
+                (' · No repartitioning at 0' if enabled and self.powder_mix_spin.value()==0 else ''))
             if enabled and self.powder_wavelength_spin.value() == 0:
                 wavelength, source = self._map_feedback_wavelength()
                 self.powder_wavelength_status.setText(
@@ -3373,6 +3391,7 @@ class _JanaWorkflowWizard:
                 self.powder_wavelength_status.setVisible(False)
 
         self.powder_enabled_checkbox.toggled.connect(sync_powder_dependency)
+        self.powder_mix_spin.valueChanged.connect(sync_powder_dependency)
         self.powder_wavelength_spin.valueChanged.connect(sync_powder_dependency)
         sync_powder_dependency()
 
@@ -3654,8 +3673,6 @@ class _JanaWorkflowWizard:
                 # Retain the configured key in memory; never write plaintext
                 # when device storage is unavailable.
                 pass
-            self.shared_settings.remove("inputs/sharped_api_token")
-            self.settings.remove("api_token")
             self.shared_settings.sync()
             self.settings.setValue("model", self.model.currentText())
             self.settings.setValue(
@@ -4066,7 +4083,7 @@ def launch_autosolve_from_jana(
         win._append_execution_log(
             f"[Jana2020] SharpED Autosolve requested -- the shared phase search "
             f"(Superflip + SharpED '{PHASE_SEARCH_MODEL}') starts "
-            "automatically. When it converges, a Model prediction is generated from the best "
+            "automatically. When it converges, a Structure prediction is generated from the best "
             "Charge-flipping solution map and Review opens: tune the EDMA thresholds, recalculate, or pass "
             "the result you choose to Jana2020.",
             level="DETAIL",
@@ -4132,9 +4149,20 @@ def launch_autosolve_from_jana(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     args = argv[1:]
+    if "--credential-self-check" in args:
+        index = args.index("--credential-self-check")
+        from phase_studio.oauth_diagnostics import run_credential_check
+        return run_credential_check(args[index + 1], args[index + 2])
     if "--version" in args:
         print(__version__)
         return 0
+    for flag in ("--oauth-self-check", "--oauth-sign-in-check"):
+        if flag in args:
+            index = args.index(flag)
+            if index + 1 >= len(args):
+                raise ValueError(flag + " requires an output JSON path")
+            from phase_studio.oauth_diagnostics import run_oauth_check
+            return run_oauth_check(args[index + 1], interactive=flag == "--oauth-sign-in-check")
     if "--brand-font-check" in args:
         index = args.index("--brand-font-check")
         if index + 1 >= len(args):

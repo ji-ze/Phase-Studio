@@ -271,7 +271,7 @@ def main():
     all_candidates = [c for c in count_window._result_candidates() if c.source == "superflip"]
     original_candidates = count_window._result_candidates
     for candidate_count in (1, 2, 4, 10, 30):
-        count_window._result_candidates = lambda n=candidate_count: all_candidates[:n]
+        count_window._result_candidates = lambda n=candidate_count, **kwargs: all_candidates[:n]
         opened.clear()
         count_window.open_result_selector("standalone")
         dialog = opened[-1]
@@ -393,7 +393,7 @@ def main():
         "split: SharpED + Map Feedback uses one combined warning",
         combined_warning is not None and "neural-network" in combined_warning and "Map Feedback" in combined_warning,
     )
-    check("split: live callout hidden for plain Superflip with Map Feedback off", not split_dialog._warning_callout.isVisible())
+    check("split: live phase assessment explains amplitude limitations", 'amplitude' in split_dialog._warning_callout.text())
     split_dialog._apply_source("deblurred")
     check("split: live callout visible for SharpED", split_dialog._warning_callout.isVisible())
     split_dialog.close()
@@ -651,7 +651,7 @@ def main():
           ).resolve() == canonical_m50.resolve())
     (alternate_integration / "EDMA.exe").write_bytes(b"alternate edma")
     (alternate_root / "phase_studio_integration.json").write_text(
-        '{"product":"Phase Studio","version":"2.0.3","wrapper":"superflip.exe",'
+        '{"product":"Phase Studio","version":"2.0.4","wrapper":"superflip.exe",'
         '"original_superflip":"superflip_original.exe","payload_hash":"test"}',
         encoding="utf-8",
     )
@@ -669,7 +669,7 @@ def main():
         identity_log = []
         jana_superflip.log_wrapper_runtime_identity(identity_log.append)
         check("wrapper diagnostics record version, integration root and original executable",
-              any("Phase Studio version: 2.0.3" in line for line in identity_log)
+              any("Phase Studio version: 2.0.4" in line for line in identity_log)
               and any(str(alternate_root) in line for line in identity_log)
               and any(str(alternate_superflip.resolve()) in line for line in identity_log))
         (alternate_root / "phase_studio_integration.json").write_text(
@@ -818,7 +818,7 @@ def main():
               "project-local wrapper log" in project_log_path.read_text(encoding="utf-8")
               and not (wrapper_bin / "log.txt").exists())
         check("wrapper log has a session separator and millisecond timestamp",
-              "Phase Studio 2.0.3 session" in project_log_path.read_text(encoding="utf-8")
+              "Phase Studio 2.0.4 session" in project_log_path.read_text(encoding="utf-8")
               and "============================================================" in project_log_path.read_text(encoding="utf-8"))
         unicode_project = wrapper_dir / "Test User" / "Jana projekt Žluťoučký"
         unicode_inflip = unicode_project / "job with spaces.inflip"
@@ -963,7 +963,9 @@ def main():
 
         # Phase recycling: accept the automatic recommendation after successful
         # completion and verify the selected cycle/source's canonical files.
-        recycling, recycling_results = build_window(appmod, launch_mode="phase_recycling")
+        # Even an older Wizard preference for Superflip must initialize the
+        # new combined-run default to the recommended completed SharpED map.
+        recycling, recycling_results = build_window(appmod, source="superflip", launch_mode="phase_recycling")
         gui_windows.append(recycling)
         recycling.results = recycling_results
         recycling_inflip, recycling_exe, recycling_preview = configure_real_handoff(recycling, recycling_results)

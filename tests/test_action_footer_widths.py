@@ -63,7 +63,7 @@ for context, launch_mode in (("standalone", "standalone"), ("jana", "full_config
         print(f"MAIN {context} {width} label={label!r} actual={win.width()} " + ("OK" if not problems else "CLIPPED " + "; ".join(problems)))
     all_superflip = [c for c in win._result_candidates() if c.source == "superflip"]
     for count in COUNTS:
-        win._result_candidates = lambda n=count: all_superflip[:n]
+        win._result_candidates = lambda n=count, **kwargs: all_superflip[:n]
         opened.clear()
         win.open_result_selector("jana" if context == "jana" else "standalone")
         dialog = opened[-1]

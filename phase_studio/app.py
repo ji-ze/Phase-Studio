@@ -1052,7 +1052,7 @@ class CycleProgressState:
         # pipeline's own settings-summary log lines.
         stage_name = {
             "EDMA · Superflip map": "EDMA · Charge-flipping solution",
-            "EDMA · SharpED map": "EDMA · Model prediction",
+            "EDMA · SharpED map": "EDMA · Structure prediction",
         }.get(self.stage_name, self.stage_name)
         parts = [f"Cycle {self.cycle_index} of {self.cycle_total}", stage_name]
         if self.detail:
@@ -3687,7 +3687,7 @@ def format_validation_log_line(
         value = metrics.value(metric.key)
         label = compact_labels.get(metric.key, metric.label)
         fields.append(f"{label} {'n/a' if value is None else f'{value:.3f}'}")
-    family = "Charge-flipping solution" if str(source).casefold() == "superflip" else "Model prediction"
+    family = "Charge-flipping solution" if str(source).casefold() == "superflip" else "Structure prediction"
     return f"Validation · {family} · Cycle {int(cycle)} · " + " · ".join(fields)
 
 def candidate_missing_hkls_from_bounds(reflections: Sequence[Reflection], cell: gemmi.UnitCell, resolution_d_min: float) -> List[Tuple[int, int, int]]:
@@ -5041,7 +5041,7 @@ def return_phase_studio_result_to_jana(
     log("[Jana2020 handoff]")
     log(f"  Run: {candidate.run_id or result.run_id or cfg.run_id or 'legacy'}")
     log(f"  Candidate: {candidate.candidate_id}")
-    log(f"  Result: {'Charge-flipping solution' if source_key.startswith('super') else 'Model prediction'}")
+    log(f"  Result: {'Charge-flipping solution' if source_key.startswith('super') else 'Structure prediction'}")
     log(f"  Source: {source_label}")
     log(f"  Cycle: {int(candidate.cycle)}")
     if candidate.edma_enabled and candidate.edma_sigma is not None:
@@ -6716,7 +6716,7 @@ def run_edma_on_xplor(
     if not map_label:
         map_label = result_map_label("deblurred" if "deblur" in prefix.lower() else "superflip")
     # Indentation classifies the technical map identity as detailed output;
-    # the user-facing stage banner uses Charge-flipping solution / Model prediction.
+    # the user-facing stage banner uses Charge-flipping solution / Structure prediction.
     log(f"  [EDMA] {map_label} · threshold {plimit_sigma:g} σ")
     if map_sigma is None:
         log(f"  plimit={float(absolute_plimit):g}")
@@ -7218,7 +7218,7 @@ def promote_threshold_structure(
     return target
 
 
-def result_candidates_from_results(results: Sequence[CycleResult]) -> List[ResultCandidate]:
+def result_candidates_from_results(results: Sequence[CycleResult], *, include_unavailable: bool = False) -> List[ResultCandidate]:
     candidates: List[ResultCandidate] = []
     for result in results:
         model_source = str(result.model_source or "").strip().casefold()
@@ -7246,7 +7246,7 @@ def result_candidates_from_results(results: Sequence[CycleResult]) -> List[Resul
             if quality is None:
                 continue
             usable_map = map_path.is_file() and map_path.stat().st_size > 0
-            if not usable_map:
+            if not usable_map and not include_unavailable:
                 continue
             usable_structure = False
             if structure_path.is_file() and structure_path.stat().st_size > 0:
@@ -9643,7 +9643,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         data = prepare_structure_presentation(
             path, self.structure_view_mode, composition, composition_label,
         )
-        title = {"reference": "Reference", "superflip": "Charge-flipping solution", "deblur": "Model prediction"}[panel]
+        title = {"reference": "Reference", "superflip": "Charge-flipping solution", "deblur": "Structure prediction"}[panel]
         source = {"reference": "Reference", "superflip": "Superflip", "deblur": "SharpED"}[panel]
         cycle = f" · Cycle {candidate.cycle}" if candidate is not None else ""
         model = f" · {html.escape(candidate.sharped_model)}" if candidate is not None and candidate.sharped_model else ""
@@ -11006,6 +11006,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         saved_key = credential_store.load_settings(self.settings, base_url=base_url)
         if saved_key:
             self._set_widget_value_from_string(self.inputs["sharped_api_token"], saved_key)
+        credential_store.bind_input(
+            self.inputs["sharped_api_token"],
+            lambda: self._line_value("sharped_base_url") or DEFAULT_SERVER_URL,
+        )
 
         # Migrate legacy generic executable names to the Jana2020 installation
         # defaults while preserving any explicit custom absolute path.
@@ -11442,7 +11446,6 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if key == "sharped_api_token":
                 continue
             self.settings.setValue(f"inputs/{key}", self._widget_value_as_string(widget))
-        self.settings.remove("inputs/sharped_api_token")
         try:
             credential_store.save_input(self._line_value("sharped_api_token"),
                                         self._line_value("sharped_base_url") or DEFAULT_SERVER_URL)
@@ -11710,6 +11713,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # above before this presentation filter is applied.
         if record.category in {"DIAGNOSTIC", "TRACE"}:
             return False
+        # The idle line is a placeholder, not part of a run's history.
+        if record.text != "Ready. Select an input to begin." and self.log_text.document().firstBlock().text() == "Ready. Select an input to begin.":
+            cursor = QTextCursor(self.log_text.document().firstBlock())
+            cursor.select(QTextCursor.BlockUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
         repeatable_status = bool(
             record.subsystem.lower() == "sharped"
             and re.search(r"(?:server status:|\]\s*(?:processing|completed|uploading|downloading))", record.text, re.IGNORECASE)
@@ -11849,7 +11858,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                   for name, cycle, status in self._operation_states.values() if status == "running"]
         for update in self._structure_jobs.values():
             if update.status in {"queued", "running"}:
-                family = "Charge-flipping solution" if update.source == "superflip" else "Model prediction"
+                family = "Charge-flipping solution" if update.source == "superflip" else "Structure prediction"
                 labels.append(f"EDMA · {family} · Cycle {update.cycle} · "
                               f"{'Queued' if update.status == 'queued' else 'Running'}")
         for role, panel in self.autosolve_panels.items():
@@ -11925,6 +11934,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _apply_cycle_progress_state(self, state: CycleProgressState) -> None:
         self._cycle_progress_state = state
+        if state.complete:
+            self._set_overall_progress_value(state.cycle_index)
         stage_total = max(1, int(state.stage_total))
         if state.busy and not state.complete:
             # Unknown-duration stage (e.g. waiting on the SharpED server):
@@ -11984,7 +11995,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         outcome = "stopped by user" if terminal == "Stopped" else terminal.lower()
         stage_name = {
             "EDMA · Superflip map": "EDMA · Charge-flipping solution",
-            "EDMA · SharpED map": "EDMA · Model prediction",
+            "EDMA · SharpED map": "EDMA · Structure prediction",
         }.get(state.stage_name, state.stage_name)
         parts = [f"Cycle {state.cycle_index} of {state.cycle_total}", f"{stage_name} {outcome}"]
         self.current_cycle_detail.setText(" · ".join(parts))
@@ -12111,6 +12122,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             QTimer.singleShot(0, self._auto_open_jana_result_selector)
 
     def _set_run_status(self, status: str) -> None:
+        previous_status = getattr(self, "_run_status", "READY")
         normalized = str(status).strip().upper() or "READY"
         normalized = {
             "IDLE": "READY",
@@ -12128,6 +12140,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "STOPPING": "RUNNING",
         }.get(normalized, normalized)
         self._run_status = normalized
+        if normalized == "RUNNING" and previous_status != "RUNNING" and hasattr(self, "log_text"):
+            self._append_execution_log("Workflow started.", subsystem="Workflow")
         if hasattr(self, "status_badge"):
             self.status_badge.setText(normalized)
             self.status_badge.setProperty("runState", normalized.lower())
@@ -12984,7 +12998,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     )
                 self._append_execution_log(
                     f"[Autosolve] Cycle {completed}: no strict improvement of the "
-                    + ("Charge-flipping solution" if guided.goal_source(self.jana_wizard_context.autosolve_option) == "superflip" else "Model prediction")
+                    + ("Charge-flipping solution" if guided.goal_source(self.jana_wizard_context.autosolve_option) == "superflip" else "Structure prediction")
                     + " ranking -- automatic refinement stops.",
                     subsystem="Autosolve",
                 )
@@ -13104,7 +13118,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def autosolve_display_panel(self, role: str) -> Optional[guided.ReviewPanel]:
         """What a panel shows right now. In Review: the user-tuned panel.
         Otherwise the best COMPLETED candidate of that role (never an
-        in-flight cycle); no Model prediction exists before the first
+        in-flight cycle); no Structure prediction exists before the first
         dedicated prediction.
 
         While a refinement block is running, the panel that SEEDED it keeps
@@ -13200,7 +13214,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         if existing is not None:
             self._append_execution_log(
-                f"[Autosolve] The Model prediction for Charge-flipping solution Cycle {observed.cycle} already exists; "
+                f"[Autosolve] The Structure prediction for Charge-flipping solution Cycle {observed.cycle} already exists; "
                 "SharpED is not run again.",
                 subsystem="Autosolve",
             )
@@ -13271,7 +13285,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         sigma = guided.normalize_sigma(guided.PREDICTED_THRESHOLD_SIGMA)
         edma_cif = self._run_configured_edma_stage(
             state, prediction_map, prediction_dir / "edma", prefix, sigma,
-            map_label="Model prediction map", explicit_threshold=True,
+            map_label="Structure prediction map", explicit_threshold=True,
         )
         quality = self._autosolve_assess_sharped_map(state, prediction_map, edma_cif)
         return guided.PredictionRecord(
@@ -13309,7 +13323,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.autosolve_predictions.append(record)
         self.autosolve_timings.setdefault("prediction", []).append(float(elapsed))
         self._append_execution_log(
-            f"[Autosolve] Model prediction ready · SharpED · {record.sharped_model} · "
+            f"[Autosolve] Structure prediction ready · SharpED · {record.sharped_model} · "
             f"EDMA {guided.format_sigma(record.edma_sigma)} · from Cycle {record.cycle} "
             f"({elapsed:.1f} s).",
             level="SUCCESS", subsystem="Autosolve",
@@ -13329,7 +13343,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_run_status("Error")
         self._show_error_report(report)
         self._append_execution_log(
-            "[Autosolve] The Model prediction could not be generated. The completed phase "
+            "[Autosolve] The Structure prediction could not be generated. The completed phase "
             "search is kept; Retry generates only the prediction again.",
             level="ERROR", subsystem="Autosolve",
         )
@@ -13386,13 +13400,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _autosolve_enter_tuning(self) -> None:
         """Stage A -- initial Predicted-model tuning. Charge-flipping solution is shown
-        read-only for comparison; only the Model prediction's threshold
+        read-only for comparison; only the Structure prediction's threshold
         can change; the one decision is "Refine 3 cycles". No handoff yet."""
         self._autosolve_enter_waiting_state(guided.STAGE_TUNING)
         predicted = self.autosolve_panels.get(guided.ROLE_PREDICTED)
         self._append_execution_log(
             "[Autosolve] Predicted-model tuning · "
-            + (f"Model prediction: Cycle {predicted.cycle}, EDMA {guided.format_sigma(predicted.threshold_sigma)}" if predicted else "no Model prediction")
+            + (f"Structure prediction: Cycle {predicted.cycle}, EDMA {guided.format_sigma(predicted.threshold_sigma)}" if predicted else "no Structure prediction")
             + ". Adjust its EDMA threshold, then Refine 3 cycles.",
             level="STEP", subsystem="Autosolve",
         )
@@ -13408,7 +13422,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             "[Autosolve] Final Review · "
             + (f"Charge-flipping solution: Cycle {observed.cycle}, EDMA {guided.format_sigma(observed.threshold_sigma)}" if observed else "no Charge-flipping solution")
             + " · "
-            + (f"Model prediction: Cycle {predicted.cycle}, EDMA {guided.format_sigma(predicted.threshold_sigma)}" if predicted else "no Model prediction")
+            + (f"Structure prediction: Cycle {predicted.cycle}, EDMA {guided.format_sigma(predicted.threshold_sigma)}" if predicted else "no Structure prediction")
             + ". Adjust the EDMA thresholds, recalculate, or pass a result.",
             level="STEP", subsystem="Autosolve",
         )
@@ -13423,7 +13437,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return any(panel.busy for panel in self.autosolve_panels.values())
 
     def autosolve_panel_tunable(self, role: str) -> bool:
-        """Final Review: both panels. Initial tuning: the Model prediction
+        """Final Review: both panels. Initial tuning: the Structure prediction
         only (Charge-flipping solution is comparison-only until the first refinement)."""
         if self._autosolve_stage == guided.STAGE_REVIEW:
             return True
@@ -13459,7 +13473,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.current_cycle_detail.setText(activity)
         self.current_cycle_stage_counter.setText("EDMA")
         self.current_cycle_progress.setRange(0, 0)
-        map_label = "Charge-flipping solution (Superflip) map" if role == guided.ROLE_OBSERVED else "Model prediction map"
+        map_label = "Charge-flipping solution (Superflip) map" if role == guided.ROLE_OBSERVED else "Structure prediction map"
         run_id = str(state.run_id or self._active_run_id)
 
         def worker() -> None:
@@ -13764,7 +13778,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """User-initiated only: run the existing automatic correction exactly
         as the established Autosolve Map Feedback stage does (a fresh adaptive
         search stage on the corrected data from the next cycle), then
-        generate a new Model prediction and return to Review."""
+        generate a new Structure prediction and return to Review."""
         plan, _detail = self.autosolve_correction_plan()
         state = self._resume_state
         if (
@@ -13877,10 +13891,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             subsystem="Autosolve",
         )
 
-    def _result_candidates(self) -> List[ResultCandidate]:
+    def _result_candidates(self, *, include_unavailable: bool = False) -> List[ResultCandidate]:
         if self._handoff_pending and self._handoff_candidate_snapshot is not None:
             return list(self._handoff_candidate_snapshot)
-        return result_candidates_from_results(self.results)
+        return result_candidates_from_results(self.results, include_unavailable=include_unavailable)
 
     def _active_validation_profile(self) -> ValidationProfile:
         for result in self.results:
@@ -13931,7 +13945,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             f"review_{source_tag}_cycle_{candidate.cycle:03d}_{request_tag}_"
             f"{float(new_sigma):.2f}sigma"
         ).replace(".", "p")
-        family = "Charge-flipping solution" if candidate.source == "superflip" else "Model prediction"
+        family = "Charge-flipping solution" if candidate.source == "superflip" else "Structure prediction"
         live_job = (
             self._new_structure_job(
                 state, candidate.source, int(candidate.cycle), Path(candidate.map_path), float(new_sigma),
@@ -13958,7 +13972,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     state, Path(candidate.map_path), output_dir, prefix, float(new_sigma),
                     map_label=(
                         "Charge-flipping solution map" if candidate.source == "superflip"
-                        else "Model prediction map"
+                        else "Structure prediction map"
                     ),
                     explicit_threshold=True,
                     stop_event=review_stop,
@@ -14083,7 +14097,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 output_dir,
                 prefix,
                 new_sigma,
-                map_label=("Charge-flipping solution map" if candidate.source == "superflip" else "Model prediction map"),
+                map_label=("Charge-flipping solution map" if candidate.source == "superflip" else "Structure prediction map"),
                 explicit_threshold=True,
             )
         except Exception as exc:
@@ -14175,17 +14189,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _initial_result_source(
         self, cfg: Optional[RunConfig], superflip_available: bool, sharped_available: bool,
     ) -> str:
-        """Deterministic starting tab: the workflow's own feed-forward choice
-        (RunConfig.modelfile_source, already the single existing signal for
-        "which source the workflow is actually continuing from"), falling
-        back to whichever source actually has candidates. "superflip" is the
-        final fallback when genuinely ambiguous -- matching the existing
-        stable convention already in recommend_best_result's own tie-break
-        (source_order in map_quality.py) and the candidate sort order, not a
-        new claim that Superflip is scientifically preferable."""
+        """Prefer completed SharpED predictions for combined runs.
+
+        Explicit Autosolve callers can still supply their goal family. This
+        presentation choice never changes either family's scientific ranking.
+        """
         preferred = "superflip"
         wizard_context = self.jana_wizard_context
-        if wizard_context.launch_mode == "phase_recycling" and wizard_context.wizard_map_source in ("superflip", "deblurred"):
+        if cfg is not None and cfg.run_sharped and sharped_available:
+            preferred = "deblurred"
+        elif wizard_context.launch_mode == "phase_recycling" and wizard_context.wizard_map_source in ("superflip", "deblurred"):
             # The Wizard's "Map used for Jana2020 handoff" choice. It never
             # changes the feed-forward map (always SharpED, see
             # build_jana_handoff_import); it only decides which source
@@ -14211,7 +14224,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         goal defines the primary source (Autosolve) open on that tab;
         `dialog_parent` lets a visible front end own the dialog."""
         requested_source = initial_source
-        candidates = self._result_candidates()
+        candidates = self._result_candidates(include_unavailable=True)
         if not candidates:
             self._show_error_report(build_error_report(
                 RuntimeError("No completed map is available for result selection."),
@@ -14284,6 +14297,20 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ),
             adjust_threshold_async=self.request_result_candidate_retune,
         )
+        # A run owns its explicit selection; QSettings and a previous run do not.
+        session_key = (str(getattr(cfg, "run_id", "")),
+                       str(getattr(cfg, "work_dir", "")),
+                       () if getattr(cfg, "run_id", "") else
+                       tuple(sorted((c.run_id, c.source, c.cycle, c.map_sha256, c.map_path)
+                                    for c in candidates)))
+        previous_session = getattr(self, "_result_selection_session", None)
+        session_matches = previous_session is not None and previous_session[0] == session_key
+        restored = session_matches and bool(previous_session[1].get("source") or previous_session[1].get("candidates"))
+        if session_matches:
+            dialog.restore_selection(previous_session[1])
+        if cfg is not None and cfg.run_sharped:
+            dialog.set_sharped_expected(automatic=not restored and requested_source is None
+                and not (session_matches and previous_session[1].get("fallback_shown")))
 
         # Keep the completion dialog owned by, and visibly above, whichever
         # Phase Studio front end initiated it.  Queue activation until exec()
@@ -14302,7 +14329,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             f"[Results] Result selector opened · {definition.assessment_label}",
             level="DETAIL", subsystem="Results",
         )
-        if dialog.exec() != QDialog.Accepted:
+        accepted = dialog.exec() == QDialog.Accepted
+        self._result_selection_session = (session_key, dialog.selection_state())
+        if not accepted:
+            return False
+        if not dialog.selection_snapshot.ready:
+            self._append_execution_log("[Results] Handoff unavailable: " + dialog.selection_snapshot.reason,
+                level="WARNING", subsystem="Jana2020" if is_jana else "Results")
             return False
         chosen = dialog.selected_candidate
         active_recommendation = dialog.active_recommendation
@@ -15441,7 +15474,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if cfg.run_edma_superflip:
                 edma_summary.append(f"Charge-flipping solution {float(cfg.plimit_superflip):.2f} σ")
             if cfg.run_edma_deblurred and not use_superflip_xplor_modelfile:
-                edma_summary.append(f"Model prediction {float(cfg.plimit_deblur):.2f} σ")
+                edma_summary.append(f"Structure prediction {float(cfg.plimit_deblur):.2f} σ")
             if edma_summary:
                 self.log("EDMA: " + " · ".join(edma_summary), level="INFO")
             feedback_enabled = bool(
@@ -15785,7 +15818,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         stop_event: Optional[threading.Event] = None,
     ) -> Path:
         """Run EDMA with captured configuration and an explicit map role.
-        `map_label` names the map in the log (e.g. the Model prediction
+        `map_label` names the map in the log (e.g. the Structure prediction
         map); `explicit_threshold` (guided Autosolve's user-chosen value)
         always uses `plimit` exactly, never the automatic selection."""
         self._run_event_context.run_id = str(state.run_id)
@@ -15793,14 +15826,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if not explicit_threshold and str(getattr(cfg, "edma_threshold_mode", "manual")).lower() == "auto":
             return self._run_auto_threshold_edma_stage(state, input_map, output_dir, prefix)
         model = state.sharped_models_by_map.get(str(Path(input_map).resolve()), "")
-        family = "Model prediction" if model else "Charge-flipping solution"
+        family = "Structure prediction" if model else "Charge-flipping solution"
         self.log(
             f"{family} · EDMA started · {float(plimit):.2f} σ",
             level="INFO", subsystem="EDMA",
         )
         self.log(
             "[EDMA] "
-            f"Run {state.run_id or 'legacy'} · Source {'Model prediction' if model else 'Charge-flipping solution'} · "
+            f"Run {state.run_id or 'legacy'} · Source {'Structure prediction' if model else 'Charge-flipping solution'} · "
             f"SharpED model {model or 'n/a'} · Map "
             + describe_xplor_artifact(input_map)
             + f" · Threshold {float(plimit):.2f} sigma",
@@ -16575,7 +16608,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             checkpoint.validation_completed = True
             self._emit_cycle_progress(cyc, cfg.cycles, progress_stages, "Finalizing cycle", detail="calculating metrics")
             self.log(
-                f"Model prediction · EDMA complete · {len(parse_cif_atoms(deblur_edma_cif)):,} sites detected · "
+                f"Structure prediction · EDMA complete · {len(parse_cif_atoms(deblur_edma_cif)):,} sites detected · "
                 f"{float(cfg.plimit_deblur):.2f} σ"
                 + (f" · RMSD {float(deblur_metric):.3f} Å" if deblur_metric is not None else ""),
                 level="SUCCESS", subsystem="EDMA",

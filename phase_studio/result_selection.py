@@ -10,10 +10,12 @@ changes which existing _SourceView is visible.
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
 
 import html
 import json
+import math
 import gemmi
 import numpy as np
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -32,6 +34,7 @@ from PySide6.QtWidgets import (
 from phase_studio.map_quality import (
     ResultCandidate, ResultRecommendation, ValidationProfile,
     ValidationProfileDefinition,
+    recommend_best_result,
 )
 from phase_studio.ui_branding import (
     apply_safe_dialog_geometry, clamp_window_to_available_screen, create_callout_label,
@@ -40,6 +43,7 @@ from phase_studio.ui_branding import (
 from phase_studio.fullscreen_viewer import show_detached_viewer
 from phase_studio.structure_camera import (
     StructureCameraController, fit_projected_structure, set_structure_viewport_clip,
+    structure_marker_sizes,
 )
 
 
@@ -67,8 +71,60 @@ CAMERA_HELP_TEXT = (
 )
 
 
+@dataclass(frozen=True)
+class CandidateSelection:
+    """Completed immutable candidate plus current filesystem/readiness evidence."""
+    candidate: Optional[ResultCandidate]
+    ready: bool
+    geometry: bool
+    reason: str
+    pending: bool = False
+
+    @property
+    def identity(self) -> tuple:
+        c = self.candidate
+        return () if c is None else (c.run_id, c.source, c.cycle, c.candidate_id,
+            c.map_sha256, c.edma_sigma, c.structure_sha256, c.jana_model_sha256)
+
+
+def candidate_selection(candidate, *, jana=True, pending=False) -> CandidateSelection:
+    """Inspect sealed artifacts, never generate, repair or substitute them."""
+    if candidate is None:
+        return CandidateSelection(None, False, False, "No candidate selected.")
+    from phase_studio.app import candidate_artifact_sha256, parse_cif_atoms
+    c = candidate
+    def present(path):
+        return bool(path) and Path(path).is_file() and Path(path).stat().st_size > 0
+    try:
+        if not c.usable_map or not present(c.map_path):
+            return CandidateSelection(c, False, False, "Map unavailable; scientific metrics remain available.")
+        if c.map_sha256 and candidate_artifact_sha256(Path(c.map_path)) != c.map_sha256:
+            return CandidateSelection(c, False, False, "Source map identity changed.")
+        geometry = c.usable_structure and present(c.structure_path)
+        if geometry and c.structure_sha256 and candidate_artifact_sha256(Path(c.structure_path)) != c.structure_sha256:
+            return CandidateSelection(c, False, False, "EDMA structure identity changed.")
+        if geometry:
+            geometry = c.detected_atom_count > 0 if c.detected_atom_count is not None else bool(parse_cif_atoms(Path(c.structure_path)))
+        if pending:
+            return CandidateSelection(c, False, geometry, "EDMA recalculation pending; last completed structure retained.", True)
+        if jana and not (c.candidate_id and c.map_sha256):
+            return CandidateSelection(c, False, geometry, "Candidate identity is not sealed for handoff.")
+        if jana and c.edma_enabled:
+            if not geometry:
+                return CandidateSelection(c, False, False, "Completed EDMA structure unavailable.")
+            if not c.jana_model_sha256 or not present(c.jana_model_path):
+                return CandidateSelection(c, False, geometry, "Corresponding Jana model unavailable.")
+            if candidate_artifact_sha256(Path(c.jana_model_path)) != c.jana_model_sha256:
+                return CandidateSelection(c, False, geometry, "Jana model identity changed.")
+            if c.jana_model_site_count is None or c.jana_model_site_count <= 0:
+                return CandidateSelection(c, False, geometry, "Jana model contains no validated atomic sites.")
+        return CandidateSelection(c, True, geometry, "Ready for handoff." if jana else "Ready for export.")
+    except (OSError, ValueError, RuntimeError):
+        return CandidateSelection(c, False, False, "Candidate artifacts could not be read.")
+
+
 class ResultFamilySegment(QPushButton):
-    """Two-line selector whose height follows its actual font metrics."""
+    """Single-line family choice with a full accessible source description."""
 
     def __init__(self, title: str, subtitle: str, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -87,11 +143,14 @@ class ResultFamilySegment(QPushButton):
         for label in (self.title_label, self.subtitle_label):
             label.setAlignment(Qt.AlignCenter)
             label.setAttribute(Qt.WA_TransparentForMouseEvents)
-            layout.addWidget(label)
+            if label is self.title_label:
+                layout.addWidget(label)
+        self.subtitle_label.hide()
+        self.setToolTip(subtitle)
+        self.setAccessibleName(title)
         margins = layout.contentsMargins()
         self.setMinimumHeight(
             self.title_label.fontMetrics().lineSpacing()
-            + self.subtitle_label.fontMetrics().lineSpacing()
             + margins.top() + margins.bottom() + layout.spacing()
         )
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -116,7 +175,7 @@ def result_selection_metric_columns(
 
 def format_result_metric(value: Optional[float]) -> str:
     """Format candidate metrics consistently without changing their values."""
-    return "n/a" if value is None else f"{float(value):.3f}"
+    return "n/a" if value is None or not math.isfinite(float(value)) else f"{float(value):.3f}"
 
 
 def recorded_edma_site_lineage(candidate: ResultCandidate) -> dict:
@@ -149,10 +208,8 @@ def result_warning_callout_text(source: str, map_feedback_intensity_enabled: boo
     sharped = source == "deblurred"
     if sharped and map_feedback_intensity_enabled:
         return (
-            "SharpED processes the electron-density map with a neural-network model, and Map "
-            "Feedback may modify reflection data used by subsequent cycles. Validate the selected "
-            "result against the original measured diffraction data and an independent "
-            "crystallographic refinement."
+            "Map Feedback modified reflection inputs. Validate SharpED neural-network predictions against "
+            "original measured diffraction data and independent crystallographic refinement."
         )
     if sharped:
         return (
@@ -284,6 +341,11 @@ def _build_candidate_table(
             item.setData(Qt.UserRole, row)
             if column == 1:
                 item.setToolTip(f"Cycle {cycle_text}")
+            elif 2 <= column < 2 + len(metric_columns):
+                _heading, definition, key = metric_columns[column - 2]
+                raw = candidate.metrics.value(key)
+                item.setToolTip(definition + "\nUnrounded value: " + (
+                    f"{float(raw):.12g}" if raw is not None and math.isfinite(float(raw)) else "unavailable"))
             table.setItem(row, column, item)
     # One result must not reserve six empty table rows and starve the preview.
     # Two rows keeps the header/selection comfortable; additional cycles grow
@@ -311,18 +373,19 @@ class _SourceView:
         metric_columns: tuple[tuple[str, str, str], ...],
         show_feedback_column: bool,
         table_title: str,
+        jana_context: bool = False,
     ) -> None:
         self.source = source
         self.ordered: list[ResultCandidate] = sorted(candidates, key=lambda c: int(c.cycle))
         self.recommendation = recommendation
-        self.selected: Optional[ResultCandidate] = (
-            recommendation.selected_candidate
-            if recommendation.selected_candidate in self.ordered
-            else (self.ordered[0] if self.ordered else None)
-        )
+        self.manually_selected = False
         self.table = _build_candidate_table(self.ordered, recommendation, metric_columns, show_feedback_column)
-        if self.selected is not None:
-            self.table.selectRow(self.ordered.index(self.selected))
+        ready = [c for c in self.ordered if candidate_selection(c, jana=jana_context).ready]
+        best_ready = recommend_best_result(recommendation.profile, ready).selected_candidate
+        self.selected = best_ready or recommendation.recommended_candidate or (self.ordered[0] if self.ordered else None)
+        for row, candidate in enumerate(self.ordered):
+            status = candidate_selection(candidate, jana=jana_context)
+            self.table.item(row, 1).setToolTip(f"Cycle {candidate.cycle} · {status.reason}")
 
         self.container = QWidget()
         container_layout = QVBoxLayout(self.container)
@@ -340,6 +403,27 @@ class _SourceView:
         if 0 <= row < len(self.ordered):
             return self.ordered[row]
         return None
+
+    @property
+    def selected(self) -> Optional[ResultCandidate]:
+        return self.current_row_candidate()
+
+    @selected.setter
+    def selected(self, candidate) -> None:
+        if candidate is None:
+            self.table.clearSelection()
+            self.table.setCurrentCell(-1, -1)
+            return
+        if candidate in self.ordered:
+            row = self.ordered.index(candidate)
+        else:
+            key = lambda c: (c.run_id, c.source, c.cycle, c.map_sha256 or c.map_path)
+            row = next((i for i, c in enumerate(self.ordered) if key(c) == key(candidate)), None)
+            if row is None:
+                return
+            self.ordered[row] = candidate
+        if self.table.currentRow() != row or not self.table.selectionModel().selectedRows():
+            self.table.selectRow(row)
 
 
 class ResultSelectionDialog(QDialog):
@@ -438,12 +522,13 @@ class ResultSelectionDialog(QDialog):
             switch_label.setObjectName("sectionLabel")
             content_layout.addWidget(switch_label)
             superflip_btn = ResultFamilySegment("CHARGE-FLIPPING SOLUTION", "Superflip phase solution")
-            sharped_btn = ResultFamilySegment("MODEL PREDICTION", "SharpED-processed map")
+            sharped_btn = ResultFamilySegment("STRUCTURE PREDICTION", "SharpED-processed map")
             for btn in (superflip_btn, sharped_btn):
                 btn.setStyleSheet(
                     "QPushButton { background:#ffffff; color:#001170; border:1px solid #3158a6; "
                     "font-weight:600; text-align:center; }"
-                    "QPushButton:checked { background:#164ea6; color:#ffffff; border-color:#164ea6; }"
+                    "QPushButton:checked { background:#001170; color:#ffffff; border-color:#001170; }"
+                    "QPushButton:focus { border:2px solid #1fa5ff; }"
                     "QPushButton:hover:!checked { background:#eef4ff; }"
                 )
             switch_group = QButtonGroup(self)
@@ -468,32 +553,41 @@ class ResultSelectionDialog(QDialog):
         summary_form.setVerticalSpacing(1)
         content_layout.addLayout(summary_form)
         self._summary_value_labels: dict[str, QLabel] = {}
-        for index, label_text in enumerate(("Assessment", "Source", "Completed cycles", "Recommended cycle", "Reference", "Holdout")):
+        for index, label_text in enumerate(("Assessment", "Source", "Available cycles", "Recommended cycle", "Reference", "Holdout")):
             value_label = QLabel("")
             font = value_label.font()
             font.setBold(True)
             value_label.setFont(font)
             column = (index % 3) * 2
             row = index // 3
-            summary_form.addWidget(QLabel(label_text), row, column)
-            summary_form.addWidget(value_label, row, column + 1)
+            heading = QLabel(label_text)
+            if label_text not in {"Reference", "Holdout"} or (
+                label_text == "Reference" and self._reference_available
+            ) or (
+                label_text == "Holdout" and profile in {
+                    ValidationProfile.HOLDOUT_ONLY, ValidationProfile.REFERENCE_AND_HOLDOUT,
+                }
+            ):
+                summary_form.addWidget(heading, row, column)
+                summary_form.addWidget(value_label, row, column + 1)
+            else:
+                heading.hide(); value_label.hide()
             self._summary_value_labels[label_text] = value_label
 
         self._warning_callout = create_callout_label("Validation needed", "", "warning", compact=True)
         self._warning_callout.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._warning_callout.setStyleSheet("background:#f3f5f8; color:#334766; padding:4px 8px;")
         warning_policy = self._warning_callout.sizePolicy()
-        warning_policy.setRetainSizeWhenHidden(True)
+        warning_policy.setRetainSizeWhenHidden(False)
         self._warning_callout.setSizePolicy(warning_policy)
-        self._warning_callout.setFixedHeight(max(48, self._warning_callout.fontMetrics().lineSpacing() * 3 + 8))
+        self._warning_callout.setFixedHeight(self._warning_callout.fontMetrics().lineSpacing() * 2 + 8)
         self._warning_callout.setVisible(False)
-        content_layout.addWidget(self._warning_callout)
 
         reason_label = QLabel("")
         reason_label.setObjectName("recommendationReason")
         reason_label.setWordWrap(True)
         reason_label.setStyleSheet("color: #52658b;")
-        content_layout.addWidget(reason_label)
+        reason_label.setVisible(False)
         self._reason_label = reason_label
 
         self._stack = QStackedWidget()
@@ -505,6 +599,7 @@ class ResultSelectionDialog(QDialog):
                 "superflip", superflip_candidates, superflip_recommendation,
                 metric_columns, show_feedback_column,
                 "CHARGE-FLIPPING SOLUTION CANDIDATES  ·  SOURCE: SUPERFLIP",
+                jana_context=jana_context,
             )
             self._views["superflip"] = view
             self._stack.addWidget(view.container)
@@ -512,7 +607,8 @@ class ResultSelectionDialog(QDialog):
             view = _SourceView(
                 "deblurred", sharped_candidates, sharped_recommendation,
                 metric_columns, show_feedback_column,
-                "MODEL PREDICTION CANDIDATES  ·  SOURCE: SHARPED",
+                "STRUCTURE PREDICTION CANDIDATES  ·  SOURCE: SHARPED",
+                jana_context=jana_context,
             )
             self._views["deblurred"] = view
             self._stack.addWidget(view.container)
@@ -524,6 +620,7 @@ class ResultSelectionDialog(QDialog):
         self._preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
         preview_canvas = FigureCanvas(self._preview_figure)
         preview_canvas.setObjectName("resultPreviewCanvas")
+        preview_canvas.setFocusPolicy(Qt.StrongFocus)
         # This is the flexible region.  A large canvas minimum used to force
         # the native dialog taller after its pre-layout screen clamp, placing
         # the handoff actions below the Windows work area on short monitors.
@@ -538,13 +635,12 @@ class ResultSelectionDialog(QDialog):
 
         preview_section = QWidget()
         self._preview_section = preview_section
+        preview_section.setStyleSheet("QToolButton:disabled { color:#8a96ac; background:#f4f6f9; border:1px solid #dde3ed; }")
         preview_section.setMinimumWidth(420)
         preview_section.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         preview_layout = QVBoxLayout(preview_section)
         preview_layout.setContentsMargins(0, 0, 0, 0)
-        preview_label = QLabel(
-            "STRUCTURE COMPARISON" if self._reference_available else "STRUCTURE PREVIEW"
-        )
+        preview_label = QLabel("STRUCTURE PREVIEW")
         preview_label.setObjectName("sectionLabel")
         toolbar = QHBoxLayout()
         toolbar.setSpacing(6)
@@ -594,7 +690,7 @@ class ResultSelectionDialog(QDialog):
             button.setCursor(Qt.PointingHandCursor)
             toolbar.addWidget(button)
         toolbar.addSpacing(10)
-        for button in (self._fit_button, self._reset_button, self._auto_rotate_button):
+        for button in (self._fit_button, self._fullscreen_button):
             button.setCursor(Qt.PointingHandCursor)
             toolbar.addWidget(button)
         preview_layout.addLayout(toolbar)
@@ -606,11 +702,13 @@ class ResultSelectionDialog(QDialog):
             view_toolbar.addWidget(button)
         view_toolbar.addStretch(1)
         view_toolbar.addWidget(QLabel("View:"))
-        for button in (self._molecule_button, self._cell_button):
+        for button in (self._molecule_button, self._cell_button, self._auto_rotate_button):
             button.setCursor(Qt.PointingHandCursor)
             view_toolbar.addWidget(button)
         self._fullscreen_button.setCursor(Qt.PointingHandCursor)
-        view_toolbar.addWidget(self._fullscreen_button)
+        self._reset_button.setParent(self)
+        self._reset_button.hide()  # Reset remains available through the canvas R key.
+        self._fit_button.setToolTip("Fit visible geometry. Double-click to fit; press R to reset orientation.")
         preview_layout.addLayout(view_toolbar)
         camera_hint = QLabel(CAMERA_HELP_TEXT)
         camera_hint.setObjectName("structureInteractionHint")
@@ -696,6 +794,7 @@ class ResultSelectionDialog(QDialog):
         footer_layout = QVBoxLayout(footer)
         footer_layout.setContentsMargins(14, 4, 14, 5)
         footer_layout.setSpacing(4)
+        footer_layout.addWidget(self._warning_callout)
         footer_layout.addWidget(self._selected_output_summary)
         button_row = QHBoxLayout()
         close_button = QPushButton("Return to Phase Studio")
@@ -709,7 +808,17 @@ class ResultSelectionDialog(QDialog):
         close_button.clicked.connect(self.reject)
         action_button.clicked.connect(self.accept)
 
+        self._initializing_selection = True
+        self._source_explicit = False
         self._active_source = initial_source if initial_source in self._views else next(iter(self._views))
+        self._sharped_expected = sharped_tab_available
+        self._automatic_fallback = False
+        if jana_context and self._active_source == "deblurred":
+            sharped_ready = any(candidate_selection(c).ready for c in self._views['deblurred'].ordered)
+            superflip = self._views.get('superflip')
+            if not sharped_ready and superflip and any(candidate_selection(c).ready for c in superflip.ordered):
+                self._active_source = 'superflip'
+                self._automatic_fallback = True
         if self._superflip_btn is not None:
             (self._superflip_btn if self._active_source == "superflip" else self._sharped_btn).setChecked(True)
         else:
@@ -722,6 +831,7 @@ class ResultSelectionDialog(QDialog):
         self.layout().activate()
         self._apply_safe_initial_geometry()
         QTimer.singleShot(0, self._clamp_after_show)
+        self._initializing_selection = False
 
     def _apply_safe_initial_geometry(self) -> None:
         apply_safe_dialog_geometry(
@@ -750,14 +860,14 @@ class ResultSelectionDialog(QDialog):
             # The recommendation is already identified in the summary/table.
             # On short work areas, yield this duplicate prose row to the
             # scientific canvas while the fixed handoff footer stays visible.
-            self._reason_label.setVisible(self.height() >= 700)
+            self._reason_label.setVisible(False)
         if hasattr(self, "_splitter") and not getattr(self, "_splitter_user_resized", False):
             QTimer.singleShot(0, self._set_initial_splitter_sizes)
         if hasattr(self, "_preview_fit_timer") and not self._preview_user_interacted:
             self._preview_fit_timer.start()
 
     def _open_fullscreen(self) -> None:
-        family = "Charge-flipping solution" if self._active_source == "superflip" else "Model prediction"
+        family = "Charge-flipping solution" if self._active_source == "superflip" else "Structure prediction"
         self._fullscreen_button.setVisible(False)
         self._detached_viewer = show_detached_viewer(
             self, self._preview_section, f"{family} structure", self._detached_viewer,
@@ -819,6 +929,10 @@ class ResultSelectionDialog(QDialog):
         if self._threshold_key(updated) != key:
             self._sync_action_button()
             return
+        if updated.edma_sigma is None or not math.isclose(float(updated.edma_sigma), float(request.threshold), abs_tol=1e-9, rel_tol=0):
+            self._threshold_status.setText("Discarded an EDMA completion for a different threshold. Previous completed structure retained.")
+            self._sync_action_button()
+            return
         view = self._views.get(original.source)
         if view is None:
             return
@@ -828,6 +942,9 @@ class ResultSelectionDialog(QDialog):
         ), None)
         if index is None:
             return
+        if view.ordered[index] != original:
+            self._sync_action_button()
+            return  # An older completed generation cannot replace a newer one.
         was_selected = view.selected is not None and (
             view.selected.cycle == original.cycle
             and view.selected.map_sha256 == original.map_sha256
@@ -888,6 +1005,70 @@ class ResultSelectionDialog(QDialog):
         return view.selected if view is not None else None
 
     @property
+    def selection_snapshot(self) -> CandidateSelection:
+        candidate = self.selected_candidate
+        return candidate_selection(candidate, jana=self._jana_context,
+            pending=candidate is not None and self._threshold_key(candidate) in self._pending_thresholds)
+
+    def accept(self) -> None:
+        if not self.selection_snapshot.ready:
+            self._sync_action_button()
+            return  # Keep the explanation visible; never substitute another row.
+        super().accept()
+
+    def selection_state(self) -> dict:
+        return {"source": self._active_source if self._source_explicit else None, "mode": self._view_mode,
+                "fallback_shown": self._automatic_fallback,
+                "rotate": self._auto_rotate_enabled,
+                "candidates": {source: self._threshold_key(view.selected)
+                               for source, view in self._views.items() if view.selected and view.manually_selected}}
+
+    def restore_selection(self, state: dict) -> None:
+        self._automatic_fallback = False
+        for source, identity in state.get("candidates", {}).items():
+            view = self._views.get(source)
+            if view is not None:
+                for row, candidate in enumerate(view.ordered):
+                    if self._threshold_key(candidate) == identity:
+                        view.table.selectRow(row)
+                        break
+        self._auto_rotate_button.setChecked(state.get("rotate", True))
+        mode = state.get("mode", "molecule")
+        (self._cell_button if mode == "cell" else self._molecule_button).setChecked(True)
+        source = state.get("source")
+        if source in self._views:
+            button = self._superflip_btn if source == "superflip" else self._sharped_btn
+            if button is not None:
+                button.setChecked(True)
+            self._apply_source(source)
+        self._automatic_fallback = False
+        self._sync_action_button()
+
+    def set_fallback_message(self, message: str) -> None:
+        self._fallback_message = message
+        self._warning_callout.setText(html.escape(message))
+        self._warning_callout.show()
+
+    def set_sharped_expected(self, *, automatic: bool) -> None:
+        self._sharped_expected = True
+        self._automatic_fallback = automatic and self.active_source == 'superflip'
+        self._sync_action_button()
+
+    def _show_empty_preview(self, candidate=None, reason="") -> None:
+        self._current_candidate = candidate
+        self.preview_candidate_id = ""
+        self.preview_structure_hash = ""
+        self._preview_fit = None
+        self._preview_host._structure_interactive_axes = []
+        self._preview_figure.clear()
+        self._preview_figure.text(.5, .5, "No completed structure is available for this selection.",
+            ha="center", va="center", fontfamily="Segoe UI", wrap=True)
+        self._metadata_label.setText(html.escape(reason))
+        self._threshold_status.clear()
+        self._element_legend.clear()
+        self._preview_canvas.draw_idle()
+
+    @property
     def active_source(self) -> str:
         return self._active_source
 
@@ -905,11 +1086,16 @@ class ResultSelectionDialog(QDialog):
         view = self._views.get(source)
         if view is None:
             return
+        if not self._initializing_selection:
+            self._automatic_fallback = False
+            self._source_explicit = True
         self._active_source = source
         self._stack.setCurrentWidget(view.container)
         self._summary_value_labels["Assessment"].setText(self._definition.assessment_label)
         self._summary_value_labels["Source"].setText(self._source_title(source))
-        self._summary_value_labels["Completed cycles"].setText(str(len(view.ordered)))
+        self._summary_value_labels["Available cycles"].setText(str(sum(
+            c.usable_map and Path(c.map_path).is_file() for c in view.ordered)))
+        self._summary_value_labels["Available cycles"].setToolTip("Available completed source maps, not the overall workflow cycle count. Metrics-only rows remain available for inspection.")
         recommended = view.recommendation.recommended_candidate
         self._summary_value_labels["Recommended cycle"].setText(
             str(recommended.cycle) if recommended is not None else "Unavailable"
@@ -921,6 +1107,7 @@ class ResultSelectionDialog(QDialog):
         self._summary_value_labels["Holdout"].setText(
             f"5% · {free_count} reflections" if free_count else "Not enabled"
         )
+        self._summary_value_labels["Assessment"].setToolTip(self._definition.description)
         family_explanation = (
             "Superflip phase solution from the selected completed cycle. "
             "The EDMA structure below is extracted from the corresponding Superflip map."
@@ -929,24 +1116,22 @@ class ResultSelectionDialog(QDialog):
         )
         self._output_description.setText(family_explanation)
         self._reason_label.setText(view.recommendation.reason)
+        explanation = (view.recommendation.reason + " Compare within this family in order: "
+            + " → ".join(metric.label for metric in self._definition.primary_metrics)
+            + ". Each later metric breaks ties only (tolerance 1e-12). Missing tie-breakers are skipped. "
+              "Remaining ties prefer a complete result, then the earliest cycle. Values shown are rounded; hover for precision.")
+        self._summary_value_labels["Recommended cycle"].setToolTip(explanation)
+        view.table.setToolTip("★ marks the recommendation; the highlighted row is selected. " + explanation)
         warning_text = result_warning_callout_text(source, self._map_feedback_intensity_enabled)
-        self._warning_callout.setVisible(warning_text is not None)
+        self._warning_callout.setVisible(True)
         if warning_text is not None:
             self._warning_callout.setText(f"<b>Validation required</b> · {warning_text}")
+        else:
+            self._warning_callout.setText("<b>Phase assessment</b> · Imposed amplitude agreement does not independently validate phases. Inspect and refine against original measured data.")
         if view.selected is not None:
             self._render_preview(view.selected)
         else:
-            self._current_candidate = None
-            self.preview_candidate_id = ""
-            self.preview_structure_hash = ""
-            self._preview_fit = None
-            self._preview_host._structure_interactive_axes = []
-            self._preview_figure.clear()
-            self._preview_figure.text(.5, .5, "No completed candidate available", ha="center", va="center", fontfamily="Segoe UI")
-            self._metadata_label.setText("No completed candidate available")
-            self._threshold_status.clear()
-            self._element_legend.clear()
-            self._preview_canvas.draw_idle()
+            self._show_empty_preview(reason="Select a completed candidate, or return to Phase Studio to review the run.")
         self._sync_action_button()
 
     def _on_source_table_selection_changed(self, source: str) -> None:
@@ -957,6 +1142,7 @@ class ResultSelectionDialog(QDialog):
         if candidate is None:
             return
         view.selected = candidate
+        view.manually_selected = True
         if source != self._active_source:
             # A background table's selection changing must never touch the
             # preview or action button of whichever source is on screen.
@@ -967,20 +1153,25 @@ class ResultSelectionDialog(QDialog):
     def _sync_action_button(self) -> None:
         candidate = self.selected_candidate
         pending = candidate is not None and self._threshold_key(candidate) in self._pending_thresholds
-        self._action_button.setEnabled(candidate is not None and not pending)
+        snapshot = self.selection_snapshot
+        self._action_button.setEnabled(snapshot.ready)
+        self._action_button.setToolTip(snapshot.reason)
+        for button in (self._fit_button, self._fullscreen_button, self._reset_button,
+                       self._molecule_button, self._cell_button, self._auto_rotate_button):
+            button.setEnabled(snapshot.geometry)
         usable_structure = candidate.usable_structure if candidate is not None else True
         self._action_button.setText(
             "Pass to Jana2020" if self._jana_context else
             ("Save map and model" if usable_structure else "Save available result")
         )
         threshold_available = (
-            candidate is not None and candidate.edma_enabled and candidate.edma_sigma is not None
+            snapshot.geometry and candidate is not None and candidate.edma_enabled and candidate.edma_sigma is not None
             and (self._adjust_threshold is not None or self._adjust_threshold_async is not None)
         )
         self._add_atoms_button.setEnabled(threshold_available and not pending)
         self._remove_atoms_button.setEnabled(threshold_available and not pending)
-        if candidate is not None:
-            family = "Charge-flipping solution" if candidate.source == "superflip" else "Model prediction"
+        if candidate is not None and (snapshot.ready or snapshot.pending):
+            family = "Charge-flipping solution" if candidate.source == "superflip" else "Structure prediction"
             provenance = (
                 f" · {html.escape(candidate.reflection_input_provenance)}"
                 if candidate.reflection_input_provenance else ""
@@ -998,10 +1189,32 @@ class ResultSelectionDialog(QDialog):
             self._selected_output_summary.setText(
                 f"<b>Selected for {'Jana2020' if self._jana_context else 'export'}:</b> "
                 f"{family} · Cycle {candidate.cycle}{threshold}"
-                f"{provenance}{transfer}"
+                f"{provenance} · Jana model: {candidate.jana_model_site_count if candidate.jana_model_site_count is not None else 'unavailable'} atomic sites{transfer}"
             )
         else:
-            self._selected_output_summary.clear()
+            self._selected_output_summary.setText(
+                "<b>No result is ready to pass to Jana2020.</b> " + html.escape(snapshot.reason)
+                if self._jana_context else "No result is ready for export. " + html.escape(snapshot.reason))
+        if candidate is not None:
+            view = self._views[self._active_source]
+            row = view.table.currentRow()
+            if row >= 0:
+                view.table.item(row, 1).setToolTip(f"Cycle {candidate.cycle} · {snapshot.reason}")
+            if candidate.source == 'superflip' and snapshot.ready:
+                sharped = self._views.get('deblurred')
+                if self._sharped_expected and not any(candidate_selection(c, jana=self._jana_context).ready for c in (sharped.ordered if sharped else [])):
+                    message = ("No completed SharpED structure is available. A completed charge-flipping solution has been selected instead."
+                        if self._automatic_fallback else "No completed SharpED structure is available. The selected charge-flipping solution can be passed to Jana2020.")
+                    self.set_fallback_message(message)
+            recommended = view.recommendation.recommended_candidate
+            if snapshot.ready and recommended is not None and candidate != recommended and not candidate_selection(recommended, jana=self._jana_context).ready:
+                explanation = f"Scientific recommendation Cycle {recommended.cycle} is not handoff-ready. " + (
+                    f"Selected the highest-ranked ready candidate, Cycle {candidate.cycle}."
+                    if not view.manually_selected else f"Your selected Cycle {candidate.cycle} is ready.")
+                self._selected_output_summary.setToolTip(explanation)
+                self._selected_output_summary.setText(self._selected_output_summary.text() + "<br>" + explanation)
+            else:
+                self._selected_output_summary.setToolTip("The highlighted row is selected. The star indicates the independent scientific recommendation.")
         view = self._views.get(self._active_source)
         row = view.table.currentRow() if view is not None else -1
         count = len(view.ordered) if view is not None else 0
@@ -1123,13 +1336,17 @@ class ResultSelectionDialog(QDialog):
         return result
 
     def _render_preview(self, candidate: ResultCandidate) -> None:
+        status = candidate_selection(candidate, jana=self._jana_context)
+        if not status.geometry:
+            self._show_empty_preview(candidate, status.reason)
+            return
         previous = self._current_candidate
         same_candidate = previous is not None and (
             previous.run_id, previous.source, previous.cycle, previous.map_sha256,
-            previous.structure_sha256, self._view_mode
+            self._view_mode
         ) == (
             candidate.run_id, candidate.source, candidate.cycle, candidate.map_sha256,
-            candidate.structure_sha256, getattr(self, "_rendered_view_mode", None)
+            getattr(self, "_rendered_view_mode", None)
         )
         old_axis = next(iter(self._preview_host._structure_interactive_axes), None)
         retained_camera = None
@@ -1140,8 +1357,6 @@ class ResultSelectionDialog(QDialog):
             )
         if not same_candidate:
             self._preview_user_interacted = False
-            self._preview_host.structure_elev = 20.0
-            self._preview_host.structure_azim = 35.0
         self._rendered_view_mode = self._view_mode
         self._current_candidate = candidate
         self.preview_candidate_id = candidate.candidate_id
@@ -1178,10 +1393,7 @@ class ResultSelectionDialog(QDialog):
             axis.view_init(elev=host.structure_elev, azim=host.structure_azim)
             colors = [host._element_color(atom.element) for atom in atoms]
             count_scale = max(0.30, min(1.0, (320.0 / max(1, len(atoms))) ** 0.32))
-            sizes = np.asarray([
-                max(3.0, min(76.0, (12.0 + 1.2 * gemmi.Element(atom.element).atomic_number) * count_scale))
-                for atom in atoms
-            ])
+            sizes = structure_marker_sizes(len(atoms))
             axis.scatter(
                 coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors,
                 edgecolors="#ffffff", linewidths=max(0.08, 0.18 * count_scale),
@@ -1216,6 +1428,14 @@ class ResultSelectionDialog(QDialog):
             + (f"Jana model: {candidate.jana_model_site_count} atomic sites"
                if candidate.jana_model_site_count is not None and candidate.jana_model_sha256
                else "Jana model: prepared during handoff")
+        )
+        self._metadata_label.setToolTip(self._metadata_label.text().replace("<br>", "\n")
+            + f"\nRendered atoms: {len(atoms)}; candidate identity: {candidate.candidate_id}. "
+            "Changing EDMA sites need not change the composition-constrained Jana model count.")
+        self._metadata_label.setText(
+            f"<b>ASU:</b> {html.escape((composition or 'Unavailable').translate(str.maketrans('0123456789', '₀₁₂₃₄₅₆₇₈₉')))}"
+            f" · Jana model: {candidate.jana_model_site_count if candidate.jana_model_site_count is not None else 'unavailable'} atomic sites<br>"
+            f"{html.escape(source)} · Cycle {candidate.cycle}{html.escape(model)}{html.escape(initialization)}"
         )
         self._threshold_status.setText(
             f"EDMA {candidate.edma_sigma:.2f} σ · {detected_count:,} EDMA sites"

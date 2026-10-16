@@ -101,4 +101,3 @@ def test_invalid_headers_rejected_without_values(header, value):
 def test_compatible_latin1_header_and_ascii_credentials():
     SharpEDServerClient._validate_request_headers({'User-Agent': 'PhaseStudio Å',
                                                   'Authorization': 'Bearer mock._~+/-=='})
-

@@ -572,9 +572,13 @@ def completeness_dialog(win, analysis):
         overlap_page = QWidget()
         overlap_layout = QVBoxLayout(overlap_page)
         overlap_layout.setContentsMargins(0,0,0,0)
-        status = 'Estimated geometric overlap' if overlap.get('estimated') else 'Authoritative supplied overlap groups'
-        summary = QLabel(f'{status} · Indexed HKL: {report.count("parsed_records")-report.count("zero_000"):,} · '
-            f'Groups: {overlap["group_count"]:,} · Affected: {overlap["affected"]:,} ({100*overlap["fraction"]:.1f}%) · Largest group: {overlap["largest"]}')
+        status = 'Estimated geometric peak overlap' if overlap.get('estimated') else 'Authoritative supplied overlap groups'
+        physical = report.count('parsed_records')-report.count('zero_000')
+        intensity = overlap.get('integrated_intensity_fraction')
+        summary = QLabel(f'{status}\nOverlapping groups: {overlap["group_count"]:,} · Total groups: {overlap["geometric_group_count"]:,} · '
+            f'Isolated reflections: {physical-overlap["affected"]:,}\nReflections affected: {overlap["affected"]:,} / {physical:,} ({100*overlap["fraction"]:.1f}%) · '
+            + (f'Intensity in overlapping groups: {100*intensity:.1f}% · ' if intensity is not None else '')
+            + f'Largest group: {overlap["largest"]} reflections')
         summary.setToolTip('Groups here means multi-record overlap groups. Singletons and total group count are reported in Advanced diagnostics. Fractions count original non-000 input records, not symmetry orbits.')
         summary.setWordWrap(True)
         overlap_layout.addWidget(summary)
@@ -590,12 +594,14 @@ def completeness_dialog(win, analysis):
             size_axis.bar([x[0] for x in sizes],[x[1] for x in sizes],color='#2264b8')
             size_axis.set_xlabel('HKL per overlap group',fontsize=8)
             size_axis.set_ylabel('Groups',fontsize=8)
+            size_axis.set_title('Overlapping group sizes',fontsize=9)
         else:
             size_axis.text(.5,.5,'No overlapping groups under the stated criterion',transform=size_axis.transAxes,ha='center',va='center',fontsize=8)
             size_axis.set_axis_off()
         fraction_axis.plot(centers,[row['overlap_fraction'] if row['overlap_fraction'] is not None else np.nan for row in rows],'o-',color='#2264b8')
         fraction_axis.set_xlabel('sinθ/λ (Å⁻¹)',fontsize=8)
         fraction_axis.set_ylabel('HKL overlap fraction',fontsize=8)
+        fraction_axis.set_title('Affected input records vs resolution',fontsize=9)
         fraction_axis.set_ylim(0,1.05)
         for axis in (size_axis,fraction_axis):axis.tick_params(labelsize=8)
         overlap_layout.addWidget(overlap_canvas,1)

@@ -1,5 +1,5 @@
 """Phase Studio 2.0.2 guided Autosolve: shared phase search, one explicit
-Model prediction, and a Review / refinement state.
+Structure prediction, and a Review / refinement state.
 
 Pure policy and bookkeeping -- no Qt, no I/O beyond hashing a map file for
 provenance, no scientific computation. Every scientific step is an existing
@@ -9,7 +9,7 @@ production function called by IterativeSuperflipPipelineQtGUI:
   (``_run_pipeline_cycles``) with SharpED model PHASE_SEARCH_MODEL and the
   existing ``deblurred_edma_cif`` feed-forward (SharpED map -> EDMA ->
   structure -> next Superflip model);
-* the Model prediction is one SharpED inference (PREDICTION_MODEL) on the
+* the Structure prediction is one SharpED inference (PREDICTION_MODEL) on the
   best completed Superflip map, then EDMA -- the same stage functions a
   cycle uses;
 * threshold tuning reruns EDMA only, on the unchanged canonical map;
@@ -33,7 +33,7 @@ REQUIRED_SHARPED_MODELS = (PHASE_SEARCH_MODEL, PREDICTION_MODEL)
 # ----- EDMA thresholds (multiples of the map sigma) -----------------------
 # Guided Autosolve defaults: 1.0 sigma on BOTH sides -- Superflip /
 # Charge-flipping solution and every SharpED-derived structure (the phase-search
-# feed-forward and the first Model prediction).
+# feed-forward and the first Structure prediction).
 OBSERVED_THRESHOLD_SIGMA = 1.0
 PREDICTED_THRESHOLD_SIGMA = 1.0
 # Interactive range and variable step: 0.2 sigma at/above 0.8 sigma, 0.1
@@ -56,13 +56,13 @@ REFINEMENT_BLOCK_CYCLES = 3
 ROLE_OBSERVED = "observed"
 ROLE_PREDICTED = "predicted"
 ROLE_SOURCE = {ROLE_OBSERVED: "superflip", ROLE_PREDICTED: "deblurred"}
-ROLE_TITLE = {ROLE_OBSERVED: "Charge-flipping solution", ROLE_PREDICTED: "Model prediction"}
+ROLE_TITLE = {ROLE_OBSERVED: "Charge-flipping solution", ROLE_PREDICTED: "Structure prediction"}
 
 # Guided-workflow stages (IterativeSuperflipPipelineQtGUI._autosolve_stage).
 STAGE_SEARCH = "search"
 STAGE_PREDICTING = "predicting"
 STAGE_PREDICTION_FAILED = "prediction_failed"
-# Initial Predicted-model tuning: only the Model prediction is tunable,
+# Initial Predicted-model tuning: only the Structure prediction is tunable,
 # its only decision is "Refine 3 cycles"; nothing can be passed yet.
 STAGE_TUNING = "tuning"
 # Final dual Review (after the first refinement): both panels, four actions.
@@ -92,7 +92,7 @@ def missing_required_models(catalog_models: Iterable[str]) -> List[str]:
 
 def goal_source(option: str) -> str:
     """The candidate stream a goal judges improvement on: Charge-flipping solution
-    (Superflip) for "Solve the phase problem", Model prediction (SharpED)
+    (Superflip) for "Solve the phase problem", Structure prediction (SharpED)
     for "Predict the structure model"."""
     return "superflip" if str(option).strip().upper() != "B" else "deblurred"
 
@@ -154,7 +154,7 @@ def file_sha256(path: Optional[Path]) -> str:
 
 @dataclass
 class PredictionRecord:
-    """The dedicated first Model prediction: one PREDICTION_MODEL SharpED
+    """The dedicated first Structure prediction: one PREDICTION_MODEL SharpED
     inference on the best completed Superflip map of `cycle`."""
 
     cycle: int

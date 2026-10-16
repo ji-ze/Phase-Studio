@@ -9,6 +9,11 @@ candidate-specific map/model transfer to Jana2020.
 
 ## Features and workflows
 
+Development 2.0.4 adds [Sign in with Jana2020](docs/auth/SHARPED_SIGN_IN_2_0_4.md)
+using browser-based OAuth code + PKCE, with the existing manual-key fallback.
+See the [implementation and acceptance status](docs/auth/JANA2020_OAUTH_2_0_4.md).
+This development build is not a new published release.
+
 - **Superflip only:** original charge flipping without SharpED access.
 - **Superflip + SharpED:** iterative phasing and model prediction, retaining
   separate completed results and cycle recommendations for each source.
@@ -60,8 +65,10 @@ its server code, architecture and model weights are not distributed here.
 4. Expand **API tokens for desktop application** using **Show**. Enter a
    **New token name** and click **Create token**.
 5. Paste the access key into Phase Studio's masked **SharpED access key** field
-   and choose **Connect to SharpED**. Access is session-only unless you choose
-   secure device storage in Windows Credential Manager; keys are not saved in QSettings.
+   and choose **Connect to SharpED**. Development 2.0.4 remembers manual keys in
+   Windows Credential Manager by default; keys are not written to QSettings.
+   Uncheck **Remember access on this device** for session-only use, or use
+   **Remove saved access** to explicitly delete a saved key.
 
 The documented Public API is **https://jana.fzu.cz/**. The client uses that
 single host for model discovery, authenticated upload, status and download.
