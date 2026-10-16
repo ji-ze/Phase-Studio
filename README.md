@@ -25,7 +25,7 @@ listed in the release notes; automated previews do not establish those checks.
 - HKL validation/completeness, optional Map Feedback, and reproducible
   project-local inputs, scientific outputs and diagnostics.
 
-![Jana2020 Wizard](docs/tutorials/screenshots/jana2020/wizard-input.png)
+![Jana2020 Wizard](docs/screenshots/2.0.4-release/wizard.png)
 
 This is a reproducible offscreen UI preview, not scientific workstation acceptance.
 
