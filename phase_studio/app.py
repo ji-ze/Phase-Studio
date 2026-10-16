@@ -8352,6 +8352,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.timer.timeout.connect(self._poll_queue)
         self.timer.start(50)
 
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if not getattr(self, '_updates_attached', False):
+            self._updates_attached = True
+            from phase_studio.update_ui import update_service
+            update_service().attach(self)
+
     def _configure_form(self, form: QFormLayout) -> QFormLayout:
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
         form.setRowWrapPolicy(QFormLayout.DontWrapRows)
@@ -8815,7 +8822,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             developer ONEDIR package containing Phase_studio.exe and its complete _internal runtime. Do not replace the scientific Superflip executable.</p>
         """)
         self._add_back_to_contents(jana_integration_layout)
-        about_layout = self._add_help_section(basic_help_tab, "about", "About Phase Studio", """
+        about_layout = self._add_help_section(basic_help_tab, "about", "About Phase Studio", f"""
             <h2>Phase Studio</h2>
             <p>Phase Studio is a crystallographic reconstruction workflow integrating Superflip, SharpED and EDMA with Jana2020-oriented workflows.</p>
             <h3>Developed at</h3>
@@ -8823,7 +8830,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Phase Studio author and lead developer</h3>
             <p><b>Jiří Zelenka</b><br><a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>
             <p>Fyzikální ústav AV ČR, v. v. i. (Institute of Physics of the Czech Academy of Sciences).</p>
-            <p>Phase Studio is free open-source software under the MIT license. Scientific publications reporting work performed with Phase Studio should cite Jiří Zelenka, Phase Studio, version 2.0.2, <a href="https://github.com/ji-ze/Phase-Studio">the software repository</a>. Citation is the project's scientific-attribution policy, separate from the MIT license.</p>
+            <p>Phase Studio is free open-source software under the MIT license. Scientific publications reporting work performed with Phase Studio should cite Jiří Zelenka, Phase Studio, version {__version__}, <a href="https://github.com/ji-ze/Phase-Studio">the software repository</a>. Citation is the project's scientific-attribution policy, separate from the MIT license.</p>
             <h3>SharpED developers — separate hosted service</h3>
             <p><b>Jiří Zelenka</b></p>
             <p><b>Jan Rohlíček</b><br><a href="mailto:rohlicek@fzu.cz">rohlicek@fzu.cz</a></p>
@@ -8842,6 +8849,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             resource_row.addWidget(self._external_link_icon(resource_url, resource_tip))
             resource_row.addStretch(1)
             about_layout.addLayout(resource_row)
+        from phase_studio.update_ui import add_update_controls
+        add_update_controls(about_layout, self)
         self._add_back_to_contents(about_layout)
         basic_help_tab.addSpacing(CONFIG_MAJOR_SECTION_SPACING)
         basic_help_tab.addStretch(1)

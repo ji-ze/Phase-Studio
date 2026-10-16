@@ -1,0 +1,154 @@
+{
+  "01-default": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      323
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "02-browser-waiting": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      240
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "03-completing-sign-in": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      240
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "04-sign-in-completed": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      323
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "05-other-options": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      499
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 73,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": true,
+    "manual_connect_in_footer": false
+  },
+  "06-manual-help": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      499
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 221,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": true,
+    "manual_connect_in_footer": false
+  },
+  "07-connection-failure": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      284
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "08-expired": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      306
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "09-access-denied-mock-response": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      252
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "10-cancelled-wizard-preserved": {
+    "mocked": true,
+    "size_logical": [
+      490,
+      490
+    ],
+    "wizard_configuration_preserved": true
+  },
+  "11-jana-network-retry": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      284
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "12-timeout-retry": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      284
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": false
+  },
+  "13-manage-saved-access-mocked": {
+    "mocked": true,
+    "size_logical": [
+      504,
+      499
+    ],
+    "dpr": 1.5,
+    "scroll_maximum": 180,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": true,
+    "manual_connect_in_footer": false
+  }
+}

@@ -1,0 +1,418 @@
+{
+  "01-normal-collapsed": {
+    "size": [
+      821,
+      780
+    ],
+    "viewport": [
+      821,
+      613
+    ],
+    "scroll": 0,
+    "maximum": 0,
+    "horizontal": 0,
+    "cards": [
+      [
+        14,
+        263,
+        793,
+        88
+      ],
+      [
+        14,
+        357,
+        793,
+        88
+      ],
+      [
+        14,
+        476,
+        392,
+        96
+      ],
+      [
+        414,
+        476,
+        392,
+        96
+      ]
+    ],
+    "fully_visible": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "footer": [
+      0,
+      724,
+      821,
+      56
+    ],
+    "focus": "wizardScrollArea"
+  },
+  "02-normal-expanded": {
+    "size": [
+      821,
+      780
+    ],
+    "viewport": [
+      816,
+      613
+    ],
+    "scroll": 0,
+    "maximum": 49,
+    "horizontal": 0,
+    "cards": [
+      [
+        14,
+        343,
+        788,
+        88
+      ],
+      [
+        14,
+        437,
+        788,
+        88
+      ],
+      [
+        14,
+        556,
+        390,
+        96
+      ],
+      [
+        412,
+        556,
+        389,
+        96
+      ]
+    ],
+    "fully_visible": [
+      true,
+      true,
+      false,
+      false
+    ],
+    "footer": [
+      0,
+      724,
+      821,
+      56
+    ],
+    "focus": "wizardScrollArea"
+  },
+  "03-reduced-expanded-top": {
+    "size": [
+      821,
+      580
+    ],
+    "viewport": [
+      816,
+      413
+    ],
+    "scroll": 0,
+    "maximum": 249,
+    "horizontal": 0,
+    "cards": [
+      [
+        14,
+        343,
+        788,
+        88
+      ],
+      [
+        14,
+        437,
+        788,
+        88
+      ],
+      [
+        14,
+        556,
+        390,
+        96
+      ],
+      [
+        412,
+        556,
+        389,
+        96
+      ]
+    ],
+    "fully_visible": [
+      false,
+      false,
+      false,
+      false
+    ],
+    "footer": [
+      0,
+      524,
+      821,
+      56
+    ],
+    "focus": "wizardScrollArea"
+  },
+  "04-reduced-expanded-bottom": {
+    "size": [
+      821,
+      580
+    ],
+    "viewport": [
+      816,
+      413
+    ],
+    "scroll": 249,
+    "maximum": 249,
+    "horizontal": 0,
+    "cards": [
+      [
+        14,
+        94,
+        788,
+        88
+      ],
+      [
+        14,
+        188,
+        788,
+        88
+      ],
+      [
+        14,
+        307,
+        390,
+        96
+      ],
+      [
+        412,
+        307,
+        389,
+        96
+      ]
+    ],
+    "fully_visible": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "footer": [
+      0,
+      524,
+      821,
+      56
+    ],
+    "focus": "wizardScrollArea"
+  },
+  "05-last-card-keyboard-focus": {
+    "size": [
+      821,
+      580
+    ],
+    "viewport": [
+      816,
+      413
+    ],
+    "scroll": 249,
+    "maximum": 249,
+    "horizontal": 0,
+    "cards": [
+      [
+        14,
+        94,
+        788,
+        88
+      ],
+      [
+        14,
+        188,
+        788,
+        88
+      ],
+      [
+        14,
+        307,
+        390,
+        96
+      ],
+      [
+        412,
+        307,
+        389,
+        96
+      ]
+    ],
+    "fully_visible": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "footer": [
+      0,
+      524,
+      821,
+      56
+    ],
+    "focus": "actionTile"
+  },
+  "06-validate-tooltip": {
+    "size": [
+      821,
+      780
+    ],
+    "viewport": [
+      821,
+      613
+    ],
+    "scroll": 0,
+    "maximum": 0,
+    "horizontal": 0,
+    "cards": [
+      [
+        14,
+        263,
+        793,
+        88
+      ],
+      [
+        14,
+        357,
+        793,
+        88
+      ],
+      [
+        14,
+        476,
+        392,
+        96
+      ],
+      [
+        414,
+        476,
+        392,
+        96
+      ]
+    ],
+    "fully_visible": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "footer": [
+      0,
+      724,
+      821,
+      56
+    ],
+    "focus": "actionTile"
+  },
+  "07-completeness-tooltip": {
+    "size": [
+      821,
+      780
+    ],
+    "viewport": [
+      821,
+      613
+    ],
+    "scroll": 0,
+    "maximum": 0,
+    "horizontal": 0,
+    "cards": [
+      [
+        14,
+        263,
+        793,
+        88
+      ],
+      [
+        14,
+        357,
+        793,
+        88
+      ],
+      [
+        14,
+        476,
+        392,
+        96
+      ],
+      [
+        414,
+        476,
+        392,
+        96
+      ]
+    ],
+    "fully_visible": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "footer": [
+      0,
+      724,
+      821,
+      56
+    ],
+    "focus": "actionTile"
+  },
+  "08-narrow-expanded-bottom": {
+    "size": [
+      736,
+      700
+    ],
+    "viewport": [
+      731,
+      533
+    ],
+    "scroll": 282,
+    "maximum": 282,
+    "horizontal": 0,
+    "cards": [
+      [
+        14,
+        110,
+        703,
+        88
+      ],
+      [
+        14,
+        204,
+        703,
+        88
+      ],
+      [
+        14,
+        323,
+        702,
+        96
+      ],
+      [
+        14,
+        427,
+        702,
+        96
+      ]
+    ],
+    "fully_visible": [
+      true,
+      true,
+      true,
+      true
+    ],
+    "footer": [
+      0,
+      644,
+      736,
+      56
+    ],
+    "focus": "actionTile"
+  }
+}

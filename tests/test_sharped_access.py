@@ -127,6 +127,15 @@ class AccessDialogTests(unittest.TestCase):
         deadline=time.monotonic()+2
         while self.dialog._connecting and time.monotonic()<deadline:QTest.qWait(10)
         self.assertFalse(self.dialog._connecting)
+    def test_unavailable_storage_instructions_do_not_offer_disabled_remember(self):
+        dialog=SharpEDAccessDialog(None,store=CredentialStore(backend=None))
+        try:
+            text=' '.join(label.text() for label in dialog.findChildren(QLabel))
+            self.assertFalse(dialog.remember.isEnabled())
+            self.assertNotIn('Uncheck Remember',text)
+            self.assertIn('session only',text)
+        finally:
+            dialog.deleteLater()
     def enter_and_connect(self,key=KEY):
         self.dialog.key_edit.setText(key);self.dialog.connect_button.click();self.wait_probe()
     def test_missing_key_is_normal_onboarding_not_an_error_banner(self):

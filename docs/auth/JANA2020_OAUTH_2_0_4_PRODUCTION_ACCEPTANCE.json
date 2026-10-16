@@ -1,0 +1,97 @@
+{
+  "project": "ochlor",
+  "cycles_requested": 3,
+  "initial_repeatmode": 30,
+  "model": "SEED (cyclic CF)",
+  "jana_handoff_executed": false,
+  "authentication_method": "oauth",
+  "api_success_counts": {
+    "upload": 3,
+    "get_status": 22,
+    "download": 3
+  },
+  "completed_cycles": 3,
+  "finished": true,
+  "original_project_files_unchanged": true,
+  "results": [
+    {
+      "cycle": 1,
+      "sharped_model": "SEED (cyclic CF)",
+      "superflip_map": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_001\\cycle_001_superflip.xplor",
+        "sha256": "d7dd2f782c5cb20337a026c1818551a0e44ead9a9854d5bbebbbf1f80b467748"
+      },
+      "superflip_edma_cif": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_001\\edma_superflip\\cycle_001_superflip_edma.cif",
+        "sha256": "0cb2d46b7136c6fb6db64cd83be4b614b5caded89c8efd8bc1a73ba6d660c9ee"
+      },
+      "sharped_map": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_001\\cycle_001_deblurred.xplor",
+        "sha256": "e37fe11323d9e3233a2064b2bd84e19fd2f8e7c2c4ec1f218c83ac31953d16a1"
+      },
+      "sharped_edma_cif": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_001\\edma_deblurred\\cycle_001_deblurred_edma.cif",
+        "sha256": "c79e164ae12cb50c2591fd0be2f9fe9a7dd7176b0455d3543f0109adf1a0a34a"
+      },
+      "sharped_edma_m40": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_001\\edma_deblurred\\cycle_001_deblurred_edma.m40",
+        "sha256": "f1f34855bbe25c4aad0f9b585edca0008144abc351cf213494b727a01fba99f9"
+      },
+      "generated_repeatmode": "repeatmode 30"
+    },
+    {
+      "cycle": 2,
+      "sharped_model": "SEED (cyclic CF)",
+      "superflip_map": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_002\\cycle_002_superflip.xplor",
+        "sha256": "d572d0ce8421d0f2c085b98dda758839be971826c54698812b8177b8e8ec1b53"
+      },
+      "superflip_edma_cif": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_002\\edma_superflip\\cycle_002_superflip_edma.cif",
+        "sha256": "f0510c812bf397e6ed7eb8767c1764fdb4e75b53eb636da68ef1d9bbd2092562"
+      },
+      "sharped_map": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_002\\cycle_002_deblurred.xplor",
+        "sha256": "1b68aae5961b3924c8690d118cd740453261c21f51317dc276d6f5abb9320773"
+      },
+      "sharped_edma_cif": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_002\\edma_deblurred\\cycle_002_deblurred_edma.cif",
+        "sha256": "1b72c10d732b26941ff6eef101ebb86072cc5dc6ed6e517c986342308d35055d"
+      },
+      "sharped_edma_m40": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_002\\edma_deblurred\\cycle_002_deblurred_edma.m40",
+        "sha256": "227fb60945c53e50f3017cfc72b81e20b4cef2cf9017460c35f5a4343fd32282"
+      },
+      "generated_repeatmode": "repeatmode 1"
+    },
+    {
+      "cycle": 3,
+      "sharped_model": "SEED (cyclic CF)",
+      "superflip_map": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_003\\cycle_003_superflip.xplor",
+        "sha256": "6161843da19c5bd88eb5b875ab5d4d02d3f06cb8669cdac430ccda0987cc12ef"
+      },
+      "superflip_edma_cif": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_003\\edma_superflip\\cycle_003_superflip_edma.cif",
+        "sha256": "1da118952efe4f79b47a9b7855e63de001958c703255b8d3f334a14e061c7a84"
+      },
+      "sharped_map": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_003\\cycle_003_deblurred.xplor",
+        "sha256": "a2992483080d747086311a40332a785a754c3be9f7ad5d296aca26c13d0e8ecb"
+      },
+      "sharped_edma_cif": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_003\\edma_deblurred\\cycle_003_deblurred_edma.cif",
+        "sha256": "e7b63770d56217b3a51174958d8cc3ed7fe03203c74fe19ffba0add6fa763a02"
+      },
+      "sharped_edma_m40": {
+        "path": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\oauth-2.0.4-ochlor-run\\calculation\\run_0001\\cycle_003\\edma_deblurred\\cycle_003_deblurred_edma.m40",
+        "sha256": "0006a6fc3e30e8ec4a29c161ce54bd34b30965ca2bb0ec040219a0390676bf7a"
+      },
+      "generated_repeatmode": "repeatmode 1"
+    }
+  ],
+  "completion_evidence": "Workflow complete marker and three completed cycle records, scientific files exist.",
+  "production_api_access_verified": true,
+  "credentials_recorded": false,
+  "production_expiration_reauthorization_verified": false
+}

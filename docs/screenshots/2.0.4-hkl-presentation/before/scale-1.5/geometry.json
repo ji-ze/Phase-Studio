@@ -1,0 +1,125 @@
+{
+  "01-real-ochlor-validation": {
+    "size": [
+      1120,
+      780
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\ochlor\\ochlor_Superflip_embedded_reflections.hkl"
+  },
+  "02-real-ochlor-completeness-constant-fwhm": {
+    "size": [
+      1120,
+      900
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\ochlor\\ochlor_Superflip_embedded_reflections.hkl",
+    "visible_bin_rows": 7,
+    "table_size": [
+      1100,
+      208
+    ]
+  },
+  "03-real-ochlor-advanced-overlap-unavailable": {
+    "size": [
+      1120,
+      900
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\ochlor\\ochlor_Superflip_embedded_reflections.hkl",
+    "visible_bin_rows": 4,
+    "table_size": [
+      1100,
+      136
+    ]
+  },
+  "04-real-ochlor-narrow": {
+    "size": [
+      760,
+      800
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\ochlor\\ochlor_Superflip_embedded_reflections.hkl",
+    "visible_bin_rows": 4,
+    "table_size": [
+      740,
+      156
+    ]
+  },
+  "05-synthetic-single-crystal-validation": {
+    "size": [
+      1120,
+      780
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\amplitudes-with-zero-phase.hkl"
+  },
+  "06-synthetic-single-crystal-derived-significance": {
+    "size": [
+      1120,
+      900
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\amplitudes-with-zero-phase.hkl",
+    "visible_bin_rows": 7,
+    "table_size": [
+      1100,
+      208
+    ]
+  },
+  "07-synthetic-variable-fwhm": {
+    "size": [
+      1120,
+      900
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\variable-width-powder.hkl",
+    "visible_bin_rows": 7,
+    "table_size": [
+      1100,
+      208
+    ]
+  },
+  "08-synthetic-estimated-overlap": {
+    "size": [
+      1120,
+      900
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\known-unit-overlap-powder.hkl",
+    "visible_bin_rows": 3,
+    "table_size": [
+      1100,
+      120
+    ]
+  },
+  "09-synthetic-symmetry-warnings": {
+    "size": [
+      1120,
+      900
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\symmetry-duplicates-invalid-values.hkl"
+  },
+  "10-real-2int3total-validation": {
+    "size": [
+      1120,
+      800
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\2int3total\\2int3total_embedded_reflections.hkl"
+  },
+  "11-real-2int3total-completeness": {
+    "size": [
+      1120,
+      900
+    ],
+    "dpi": 1.5,
+    "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\2int3total\\2int3total_embedded_reflections.hkl",
+    "visible_bin_rows": 7,
+    "table_size": [
+      1100,
+      208
+    ]
+  }
+}

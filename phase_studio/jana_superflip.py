@@ -1121,9 +1121,9 @@ class _JanaWorkflowWizard:
     # to the screen that is actually available, so 1366x768 and smaller stay
     # usable.
     WIZARD_MIN_WIDTH = 720
-    WIZARD_PREFERRED_WIDTH = 821
-    WIZARD_MAX_WIDTH = 900
-    WIZARD_PREFERRED_HEIGHT = 780
+    WIZARD_PREFERRED_WIDTH = 1000
+    WIZARD_MAX_WIDTH = 1040
+    WIZARD_PREFERRED_HEIGHT = 760
     WIZARD_MAX_SCREEN_FRACTION = 0.92
 
     def _available_screen_width(self) -> int:
@@ -1168,6 +1168,12 @@ class _JanaWorkflowWizard:
         """Keep the main page stable; size configuration to its visible content."""
         page = self.stack.currentWidget()
         target = self.WIZARD_PREFERRED_HEIGHT
+        if page is self.page1:
+            width = self._preferred_dialog_width()
+            footer = self.chrome_holder.get("footer")
+            chrome = self.brand_header.sizeHint().height() + self.context_banner.sizeHint().height()
+            chrome += footer.sizeHint().height() if footer is not None else 0
+            target = min(target, max(580, self._content_height_for_width(width) + chrome + 24))
         if page is not self.page1:
             width = self._preferred_dialog_width()
             self._size_stack_to_current_page(width)
@@ -1939,6 +1945,7 @@ class _JanaWorkflowWizard:
             summary_layout.setVerticalSpacing(3)
             summary_layout.setHorizontalSpacing(10)
             summary_layout.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            summary_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.reflections_value = QLabel("Not available")
         self.format_value = QLabel("Not available")
         self.cell_value = QLabel("Not available")
@@ -1946,7 +1953,7 @@ class _JanaWorkflowWizard:
         self.composition_value = QLabel("Not available")
         for summary_label in (self.reflections_value, self.format_value, self.cell_value, self.spacegroup_value, self.composition_value):
             summary_label.setWordWrap(True)
-        self.reflections_value.setWordWrap(False)
+        self.reflections_value.setWordWrap(True)
         self.input_summary_layout.addRow("Reflections", self.reflections_value)
         self.input_summary_layout.addRow("Format", self.format_value)
         self.input_summary_right_layout.addRow("Cell", self.cell_value)
@@ -2005,7 +2012,6 @@ class _JanaWorkflowWizard:
                 from phase_studio.app import (
                     build_hkl_analysis_request_from_inflip,
                     build_hkl_load_result,
-                    compact_spacegroup_symbol,
                     format_reflection_data_mode,
                     parse_inflip_settings,
                 )
@@ -2072,7 +2078,7 @@ class _JanaWorkflowWizard:
                 # Analyze completeness themselves if the reflection block truly
                 # cannot be analyzed.
                 return
-            self.reflections_value.setText(f"{len(result.reflections):,} parsed · {len(result.unique_reflections):,} unique")
+            self.reflections_value.setText(f"{len(result.reflections):,} parsed · {len(result.unique_reflections):,} literal unique HKL")
             self.input_reflections = result.reflections
             if hasattr(self, "intensity_group"):
                 self._sync_page3_for_data_type()
@@ -2082,7 +2088,10 @@ class _JanaWorkflowWizard:
                 f"{rcell.a:.5g} × {rcell.b:.5g} × {rcell.c:.5g} Å\n"
                 f"{rcell.alpha:.4g}° × {rcell.beta:.4g}° × {rcell.gamma:.4g}°"
             )
-            self.spacegroup_value.setText(f"{compact_spacegroup_symbol(result.spacegroup)} (#{result.spacegroup.number})")
+            from phase_studio.hkl_diagnostics_ui import _spacegroup_display
+            symbol, setting = _spacegroup_display(result.spacegroup.xhm())
+            self.spacegroup_value.setText(symbol)
+            self.spacegroup_value.setToolTip(setting)
             metadata = request.metadata
             composition = metadata.composition if metadata is not None and metadata.composition else "—"
             self.composition_value.setText(composition.translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")))
@@ -2258,7 +2267,7 @@ class _JanaWorkflowWizard:
         # Expanding changes only the scroll area's contents; the Wizard's
         # stable outer geometry remains fixed.
         QStyle = self.qt["QStyle"]
-        self.files_toggle = QPushButton("Optional reference and initial model")
+        self.files_toggle = QPushButton("Advanced input options (optional)")
         self.files_toggle.setObjectName("compactDisclosureButton")
         self.files_toggle.setCheckable(True)
         self.files_toggle.setChecked(False)
@@ -2365,13 +2374,16 @@ class _JanaWorkflowWizard:
                 self.setAttribute(Qt.WA_Hover, True)
                 self.setFocusPolicy(Qt.StrongFocus)
                 self.setProperty("pressed", False)
+                self._last_activation = 0.0
+                self.setAccessibleName(title)
+                self.setAccessibleDescription(subtitle)
                 self.setProperty("workflowTier", tier)
                 self.setProperty("recommended", secondary == "Recommended")
                 if icon_source.startswith("workflow_"):
-                    self.setMinimumHeight(88 if tier == "primary" else 96)
+                    self.setMinimumHeight(76 if tier == "primary" else 94)
                     # Recommendation is a label, not a permanent selection.
                     self.setStyleSheet(
-                        'QFrame#actionTile[recommended="true"] { background:#ffffff; border-color:#cbd7ea; }'
+                        'QFrame#actionTile[recommended="true"] { background:#f3f8ff; border-color:#8fa9cc; }'
                         'QFrame#actionTile[recommended="true"]:hover { background:#edf3fa; border-color:#2264b8; }'
                         'QFrame#actionTile[recommended="true"]:focus { background:#f5f9ff; border:2px solid #2264b8; }'
                     )
@@ -2453,8 +2465,12 @@ class _JanaWorkflowWizard:
                     )
                     outer.addWidget(self.chevron_label, 0, Qt.AlignVCenter)
 
-            def _trigger(self) -> None:
-                if self.isEnabled():
+            def _trigger(self, *, pointer: bool = False) -> None:
+                # A double click / repeated key event must not dispatch twice.
+                now = time.monotonic()
+                if self.isEnabled() and (not pointer or now - self._last_activation >= 0.35):
+                    if pointer:
+                        self._last_activation = now
                     self._on_click()
 
             def resizeEvent(self, event) -> None:
@@ -2486,7 +2502,7 @@ class _JanaWorkflowWizard:
                 was_pressed = bool(self.property("pressed"))
                 self._set_pressed(False)
                 if was_pressed and self.rect().contains(event.pos()):
-                    self._trigger()
+                    self._trigger(pointer=True)
 
             def leaveEvent(self, event) -> None:  # noqa: N802 - Qt override
                 super().leaveEvent(event)
@@ -2494,7 +2510,8 @@ class _JanaWorkflowWizard:
 
             def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt override
                 if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
-                    self._trigger()
+                    if not event.isAutoRepeat():
+                        self._trigger()
                     return
                 super().keyPressEvent(event)
 
@@ -2567,7 +2584,7 @@ class _JanaWorkflowWizard:
             secondary="Experimental",
             icon_source="workflow_autosolve",
             tier="secondary",
-            runtime="Typically around 15 min",
+            runtime="Runtime depends on data and server load",
         )
         self.workflow_body.addWidget(self.original_superflip_tile)
         self.workflow_body.addWidget(self.superflip_sharped_tile)
@@ -3489,6 +3506,9 @@ class _JanaWorkflowWizard:
         self.primary_button.setObjectName("primaryButton")
         self.primary_button.setDefault(True)
         self.button_row.addWidget(self.back_button)
+        from phase_studio.update_ui import wizard_update_menu
+        self.update_menu = wizard_update_menu(self.dialog)
+        self.button_row.addWidget(self.update_menu)
         self.button_row.addStretch(1)
         self.button_row.addWidget(self.cancel_button)
         self.button_row.addWidget(self.primary_button)
@@ -3916,6 +3936,7 @@ def launch_phase_studio_from_jana(
                     subsystem="Jana2020",
                 )
         win.setWindowTitle(f"Phase Studio {__version__} for Jana2020")
+        win._phase_studio_distribution = 'jana'
         return win
 
     if auto_start:

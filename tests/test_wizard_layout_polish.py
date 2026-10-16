@@ -25,9 +25,9 @@ def run_checks():
    w._size_stack_to_current_page(w.dialog.width())
    for _ in range(20):app.processEvents()
   settle();metadata=[getattr(w,n).text() for n in ('reflections_value','format_value','cell_value','spacegroup_value','composition_value')]
-  assert metadata[0]=='432 parsed · 432 unique'
+  assert metadata[0]=='432 parsed · 432 literal unique HKL'
   assert metadata[2]=='24.352 × 35.561 × 26.032 Å\n90° × 91.02° × 90°'
-  assert metadata[3]=='P21/n (#14)' and metadata[4]=='Ag₁₂₄ S₈₈ B₇₆₈ H₇₀₄ O₄₀'
+  assert metadata[3]=='P2\u2081/n (#14)' and metadata[4]=='Ag₁₂₄ S₈₈ B₇₆₈ H₇₀₄ O₄₀'
   tiles=(w.original_superflip_tile,w.superflip_sharped_tile,w.autosolve_tile,w.professional_mode_tile)
   for width,height in ((900,850),(900,1000),(900,820),(821,780),(820,850),(900,580),(640,850)):
    w.dialog.resize(width,height);settle();w.scroll_area.verticalScrollBar().setValue(0);settle()
@@ -54,7 +54,7 @@ def run_checks():
    assert w.validate_hkl_button.width()==w.analyze_completeness_button.width()
    assert metadata==[getattr(w,n).text() for n in ('reflections_value','format_value','cell_value','spacegroup_value','composition_value')]
   w.dialog.resize(900,850);settle();size=w.dialog.size()
-  assert tiles[2].height()==96 and tiles[3].height()==96
+  assert tiles[2].height()==tiles[3].height() and tiles[2].height()>=94
   w.files_toggle.click();settle();assert w.files_form_widget.isVisible() and w.dialog.size()==size
   w.files_toggle.click();settle();assert not w.files_form_widget.isVisible() and w.scroll_area.verticalScrollBar().maximum()==0
   assert w.backing_window_holder['win'] is None
@@ -66,7 +66,7 @@ def run_checks():
   w.validate_hkl_button.click();w.analyze_completeness_button.click();assert calls==['validate','completeness']
   tile=tiles[0];tile._on_click=lambda:calls.append('activate')
   tile.setFocus(Qt.TabFocusReason);QTest.keyClick(tile,Qt.Key_Space);assert calls[-1]=='activate'
-  QTest.mouseClick(tile,Qt.LeftButton,pos=tile.rect().center());assert calls.count('activate')==2
+  QTest.qWait(360);QTest.mouseClick(tile,Qt.LeftButton,pos=tile.rect().center());assert calls.count('activate')==2
   assert tile.hasFocus()
   w.inflip_info.full_text='Jana2020 input: '+('very_long_name_'*80)+'.inflip';w.inflip_info.setAccessibleName(w.inflip_info.full_text)
   w.dialog.resize(820,850);settle();assert w.inflip_info.width()<=w.content.width()

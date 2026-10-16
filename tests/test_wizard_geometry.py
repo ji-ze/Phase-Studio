@@ -83,8 +83,8 @@ def main():
         wizard_cls.WIZARD_PREFERRED_WIDTH >= OLD_NARROW_WIDTH + 60,
     )
     check(
-        "preferred width is in the intended 800-860 px desktop band",
-        800 <= wizard_cls.WIZARD_PREFERRED_WIDTH <= 860,
+        "preferred width is in the intended 960-1040 px desktop band",
+        960 <= wizard_cls.WIZARD_PREFERRED_WIDTH <= 1040,
     )
     check(
         "minimum practical width is wider than the old narrow layout",

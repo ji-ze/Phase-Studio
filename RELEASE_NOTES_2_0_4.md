@@ -1,47 +1,55 @@
-# Phase Studio 2.0.4 — development only
+# Phase Studio 2.0.4
 
-Not published; OAuth production acceptance is pending.
+Windows feature and reliability release, closing the 2.0.4 development cycle.
 
-- Added system-browser Jana2020 Authorization Code + PKCE S256 sign-in for
-  the supplied public `phase-studio` client, without a client secret.
-- Added a temporary IPv4 loopback callback and process-only one-hour access.
-  Expiration uses browser reauthorization; no refresh or ID tokens are requested.
-- Resume protected status/download requests after renewal without a new upload.
-  Preserve the secure manual access-key fallback and all scientific workflows.
-- Added local mock-provider regressions, scaled UI evidence and opt-in frozen
-  callback diagnostics for standalone and Jana ONEDIR builds.
+## Highlights
 
-See `docs/auth/JANA2020_OAUTH_2_0_4.md`. Mocked and frozen diagnostic successes
-are not production API acceptance. Do not publish before real acceptance passes.
+- Sign in with your existing Jana2020 account using the system browser and
+  OAuth 2.0 Authorization Code + PKCE. Secure manual access keys remain available.
+- Preserve protected job status/download requests across reauthentication;
+  retain secure Windows credential storage and redacted diagnostics.
+- Compact Jana2020 Workflow Selection, scientific SVG icons, clear recommended
+  workflow and keyboard navigation, including high-DPI resource packaging.
+- Improved HKL validation, completeness and structured advanced diagnostics.
+  Distinguish amplitudes, intensities, uncertainties and powder FWHM explicitly.
+- Powder overlap analysis uses documented Superflip FWHM conventions and
+  experimental wavelength; missing wavelength never produces invented results.
+- Clearer map-feedback effects, execution/result readiness and candidate-specific
+  EDMA selection. Preserve scientific maps, candidate identity and Jana context.
+- Optional GitHub release notifications distinguish standalone and Jana installs.
+- About cites the runtime version. Manual-key instructions correctly describe
+  session-only access when secure storage is unavailable.
 
-## HKL and powder diagnostic acceptance
+## Windows download
 
-- Final execution consistency: replace idle log placeholder on real start,
-  preserve shared GUI logging, count completed-cycle events, validate active
-  handoff candidates before confirmation and retain sealed threshold identity.
-- Show ineffective Feedback settings explicitly without changing their values;
-  label the existing powder no-σ correction mode and fit Wizard pages to content.
-- Use consistent visible atom marker areas in the shared viewers. Ranking,
-  canonical coordinates, periodic connectivity and scientific defaults remain
-  unchanged. Historical ochlor artifacts replace synthetic execution geometry
-  in the ten-window acceptance set.
-- Final distributions will be rebuilt from the selected committed revision in
-  a separate clean worktree. Build manifest records source SHA and artifact hashes.
+Download **PhaseStudio-2.0.4-x64.exe** below. Only the standalone EXE is attached.
+The Jana2020 integration needs its complete ONEDIR runtime; replacing a Jana
+integration executable with this standalone download is not an update procedure.
+Superflip/EDMA remain external programs. SharpED service terms and entitlement
+are separate from the MIT-licensed Phase Studio application.
 
-- Verified standard Superflip FWHM as degrees 2θ from local documentation,
-  source and installed-executable comparisons. Resolve wavelength from the
-  incoming input or matching Jana `.m90`; never invent an experimental value.
-- Add read-only, transitive peak-overlap diagnostics with the verified inclusive
-  boundary and default separation 0.2. Complete ochlor group membership matches
-  the installed Superflip: 91 groups, 193/631 affected records (30.59%).
-- If wavelength is missing, hide dependent overlap results and ask the user to
-  supply it. Keep wavelength-independent d_min, d98 and HKL coverage available.
-- Preserve direct F/σ(F), optional derived intensity significance, adaptive
-  charts, full-precision exports and stable structured nonmodal details.
-- Add ten actual current Wizard acceptance screenshots, with offline scientific
-  and UI fixtures explicitly identified. Physical-monitor and real Jana GUI
-  acceptance remain separate from automated tests and frozen startup checks.
+## Validation and known limitations
 
-See `docs/ui/POWDER_OVERLAP_2_0_4.md` and
-`docs/screenshots/2.0.4/wizard/README.md`. This is release preparation, not a
-GitHub Release or automatic artifact publication.
+- Complete regression run: 355 passed, 1 skipped, 37 subtests passed.
+  The subsequently added runtime-citation test passed separately.
+- Scientific golden checks: 46 passed. Wizard model-catalog checks: 44 passed.
+  Overall-progress checks: 18 passed. Real ochlor input-metadata check passed.
+- Earlier production OAuth acceptance recorded a real browser return and a
+  three-cycle ochlor job (3 uploads, 22 status requests, 3 downloads).
+  This is historical evidence, not a new live run for this release commit.
+- Native Jana2020 handoff/overlay, physical-monitor DPI/fullscreen checks and
+  all long-running authentication-expiry scenarios are not fully accepted.
+  Automated/offscreen screenshots do not establish those checks.
+- Further presentation improvements from the supplied review remain open;
+  see [review status](docs/ui/REVIEW_CORRECTIONS_2_0_4_CS.md).
+
+## Screenshots
+
+These are reproducible offscreen UI captures, not evidence of a live calculation.
+
+![Jana2020 Wizard](docs/screenshots/2.0.4-release/wizard.png)
+
+See the [Wizard implementation](docs/ui/JANA_WIZARD_SCIENTIFIC_ICONS_2_0_4.md),
+[HKL diagnostics](docs/ui/HKL_ADVANCED_DIAGNOSTICS_2_0_4.md),
+[sign-in design](docs/auth/SHARPED_SIGN_IN_FINAL_UX_2_0_4.md) and
+[review status](docs/ui/REVIEW_CORRECTIONS_2_0_4_CS.md).

@@ -1,0 +1,10 @@
+{
+  "mocked": true,
+  "provider": "local mock OAuth",
+  "scale": 1.5,
+  "size": [
+    504,
+    499
+  ],
+  "dpr": 1.5
+}

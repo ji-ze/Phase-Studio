@@ -2056,6 +2056,11 @@ class AutosolveWindow(QMainWindow):
         # Initial keyboard focus on the structure view (the primary content),
         # not on whichever toolbar button happens to come first.
         QTimer.singleShot(0, lambda: self.structure_canvas.setFocus(Qt.OtherFocusReason))
+        if not getattr(self, '_updates_attached', False):
+            self._updates_attached = True
+            from phase_studio.update_ui import update_service
+            jana = bool(self._launch_inflip_path) or self.backend.autosolve_is_jana()
+            update_service().attach(self, mode='jana' if jana else None)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         try:

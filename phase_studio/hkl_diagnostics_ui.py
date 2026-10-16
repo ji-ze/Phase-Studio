@@ -3,10 +3,11 @@ import math
 from dataclasses import replace
 from pathlib import Path
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QSize
+from PySide6.QtCore import Qt, QTimer, QSize, QSettings
 from PySide6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QWidget,QLabel,
     QPushButton,QLineEdit,QTableWidget,QTableWidgetItem,QHeaderView,QSplitter,QScrollArea,QTabWidget,
-    QFormLayout,QCheckBox,QComboBox,QSizePolicy,QDoubleSpinBox)
+    QFormLayout,QCheckBox,QComboBox,QSizePolicy,QDoubleSpinBox,QGridLayout,QToolButton,
+    QAbstractItemView)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from .hkl_diagnostics import build_diagnostics, export_shell_csv
@@ -170,96 +171,370 @@ def _details(layout, dialog, report):
     button.toggled.connect(toggle)
 
 
+class _DiagnosticRows(QWidget):
+    """A compact, top-aligned information table shared by all detail pages."""
+    def __init__(self, rows, parent=None):
+        super().__init__(parent)
+        grid = QGridLayout(self)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(7)
+        grid.setColumnStretch(1, 1)
+        self.values = {}
+        for row, (key, value) in enumerate(rows):
+            label = QLabel(str(key))
+            label.setWordWrap(True)
+            label.setFixedWidth(230)
+            label.setStyleSheet('font-weight:600; color:#33456e;')
+            text = value if isinstance(value, QWidget) else QLabel(str(value))
+            if isinstance(text, QLabel):
+                text.setTextFormat(Qt.PlainText)
+                text.setWordWrap(True)
+                text.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+                text.setFocusPolicy(Qt.StrongFocus)
+                text.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+            text.setAccessibleName(str(key))
+            grid.addWidget(label, row, 0, Qt.AlignTop)
+            grid.addWidget(text, row, 1)
+            self.values[key] = text
+
+
+def _disclosure(layout, title, content):
+    button = QToolButton()
+    button.setText(title)
+    button.setCheckable(True)
+    button.setAutoRaise(True)
+    button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+    button.setArrowType(Qt.RightArrow)
+    content.setVisible(False)
+    def expand(checked):
+        content.setVisible(checked)
+        button.setArrowType(Qt.DownArrow if checked else Qt.RightArrow)
+    button.toggled.connect(expand)
+    layout.addWidget(button, 0, Qt.AlignLeft)
+    layout.addWidget(content)
+    return button
+
+
+def _spacegroup_display(raw):
+    """Shorten only a setting Gemmi can verify; retain the exact setting."""
+    import gemmi
+    try:
+        group = gemmi.find_spacegroup_by_name(raw)
+        if group is None:
+            return raw, raw
+        symbol = group.short_name().replace('21', '2₁').replace('31', '3₁').replace('32', '3₂')
+        symbol = symbol.replace('41', '4₁').replace('42', '4₂').replace('43', '4₃')
+        symbol = symbol.replace('61', '6₁').replace('62', '6₂').replace('63', '6₃').replace('64', '6₄').replace('65', '6₅')
+        return f'{symbol} (#{group.number})', f'Original setting: {raw}\nHall: {group.hall}\nFull Hermann–Mauguin: {group.xhm()}'
+    except (ValueError, RuntimeError):
+        return raw, raw
+
+
+def _cell_display(cell):
+    if len(cell) != 6:
+        return 'Not supplied'
+    return (f'a = {cell[0]:.4f}, b = {cell[1]:.4f}, c = {cell[2]:.4f} Å\n'
+            f'α = {cell[3]:.3f}°, β = {cell[4]:.3f}°, γ = {cell[5]:.3f}°')
+
+
+def _file_provenance(report):
+    note = report.source_note
+    if 'fbegin/endf block exported from ' in note:
+        return 'Jana2020 / Superflip input', 'Jana2020 / Superflip export'
+    if 'synthetic' in note.lower() or 'fixture' in note.lower():
+        return 'Controlled test fixture', 'Test fixture'
+    if Path(report.source).suffix.lower() == '.inflip':
+        return 'Superflip input', 'Not independently documented'
+    return 'External HKL file', 'Not documented in the available input'
+
+
+class _AdvancedDiagnosticsDialog(QDialog):
+    def done(self, result):
+        self.hkl_settings.setValue('hklAdvanced/geometry', self.saveGeometry())
+        self.hkl_settings.setValue('hklAdvanced/size', self.size())
+        self.hkl_settings.setValue('hklAdvanced/tab', self.hkl_details_tabs.currentIndex())
+        self.hkl_settings.sync()
+        super().done(result)
+
+
 def _detail_dialog(parent, report):
-    """Owned, nonmodal detail pages never participate in the main layout."""
+    """Read-only presentation: reports, counters and export schemas are untouched."""
     from . import app as a
-    detail = QDialog(parent)
+    from .ui_branding import clamp_window_to_available_screen
+    detail = _AdvancedDiagnosticsDialog(parent)
     detail.setWindowTitle('HKL advanced diagnostics and definitions')
     detail.setObjectName('hklAdvancedDiagnostics')
     detail.setModal(False)
+    detail.hkl_settings = QSettings(QSettings.defaultFormat(), QSettings.UserScope, 'PhaseStudio', 'PhaseStudio')
     root = QVBoxLayout(detail)
+    root.setContentsMargins(12, 10, 12, 10)
+    root.setSpacing(8)
     tabs = QTabWidget()
-    root.addWidget(tabs,1)
-    def page(title, rows):
+    tabs.setUsesScrollButtons(True)
+    tabs.setElideMode(Qt.ElideNone)
+    tabs.tabBar().setAccessibleName('Diagnostic categories')
+    root.addWidget(tabs, 1)
+    detail.hkl_detail_rows = {}
+    detail.hkl_disclosures = {}
+    def page(title):
         content = QWidget()
-        form = QFormLayout(content)
-        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
-        for key,value in rows:
-            label = QLabel(str(key))
-            label.setStyleSheet('font-weight:600; color:#33456e;')
-            text = QLabel(str(value))
-            text.setWordWrap(True)
-            text.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            form.addRow(label,text)
+        body = QVBoxLayout(content)
+        body.setContentsMargins(12, 12, 12, 12)
+        body.setSpacing(12)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setWidget(content)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setFrameShape(QScrollArea.NoFrame)
-        tabs.addTab(scroll,title)
+        scroll.setWidget(content)
+        tabs.addTab(scroll, title)
+        return body
+    def rows(body, values, section=None):
+        if section:
+            label = QLabel(section)
+            label.setStyleSheet('font-weight:600; color:#33456e; padding-top:3px;')
+            body.addWidget(label)
+        widget = _DiagnosticRows(values)
+        body.addWidget(widget)
+        detail.hkl_detail_rows.update(widget.values)
+        return widget
+    def explanation(text):
+        label = QLabel(text)
+        label.setTextFormat(Qt.PlainText)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        return label
+    def disclose(body, title, values):
+        widget = _DiagnosticRows(values)
+        detail.hkl_disclosures[title] = _disclosure(body, title, widget)
     counts = dict(report.counts)
-    labels = {'parsed_records':'Parsed records','literal_unique':'Literal unique HKL',
-              'symmetry_orbits':'Symmetry-independent orbits','systematic_absent_entries':'Systematically absent entries',
-              'exact_duplicate_entries':'Exact duplicate entries','conflicting_duplicate_groups':'Conflicting duplicate groups',
-              'equivalent_repeated_entries':'Symmetry-equivalent repeated entries','zero_000':'Protocol (0,0,0) records',
-              'valid_widths_or_sigmas':'Positive finite auxiliary fields','phase_finite':'Finite phase fields',
-              'absent_significant_3sigma':'Absent entries with derived/intensity significance ≥3'}
+    labels = {'parsed_records':'Parsed input records', 'literal_unique':'Literally unique HKL triplets',
+              'symmetry_orbits':'Symmetry-independent reflection orbits',
+              'systematic_absent_entries':'Systematically absent entries',
+              'exact_duplicate_entries':'Exact duplicate entries', 'conflicting_duplicate_groups':'Conflicting duplicate groups',
+              'equivalent_repeated_entries':'Symmetry-equivalent repeated entries', 'zero_000':'Protocol (0,0,0) records',
+              'absent_nonzero_values':'Nonzero systematically absent values',
+              'phase_finite':'Finite phase fields', 'phase_missing':'Missing phase values', 'phase_nonfinite':'Nonfinite phase values',
+              'absent_significant_3sigma':'Absent reflections with significance ≥3'}
     def count_rows(keys):
-        return [(labels.get(key,key.replace('_',' ').capitalize()),'n/a' if counts.get(key) is None else f'{counts[key]:,}') for key in keys]
-    page('Input', [('Source',report.source),('Provenance',report.source_note),('Data type',report.data_type),
-                   ('Declared format',report.data_mode),('Observation provenance',report.observation_kind),('Phase fields',report.phase_status)])
-    page('Counts & symmetry',count_rows(['parsed_records','literal_unique','symmetry_orbits','zero_000','excluded_000'])+
-         [('Space group',report.spacegroup),('Unit cell',' · '.join(number(v) for v in report.cell)),('Counting convention',report.methods[0])])
-    page('Absences & duplicates',count_rows(['systematic_absent_entries','absent_nonzero_values','absent_significant_3sigma',
-         'exact_duplicate_entries','equivalent_repeated_entries','conflicting_duplicate_groups'])+
-         [('Forbidden HKL examples',report.absence_examples or 'None'),('Conflicting HKL examples',report.duplicate_examples or 'None'),
-          ('Interpretation','Small nonzero forbidden values alone are not proof of experimental error. Repeated HKL alone does not establish unmerged observations.')])
-    value_rows = (count_rows(['invalid_values','zero_values','negative_values','missing_auxiliary','invalid_auxiliary',
-         'rejected_records','invalid_indices','invalid_reciprocal_values','phase_finite','phase_missing','phase_nonfinite'])+
-         [(severity,message) for severity,message in report.warnings])
-    value_rows += [('Mean input value',number(report.statistic('mean_value'))),('Median input value',number(report.statistic('median_value')))]
-    if report.statistic('median_auxiliary') is not None:
-        kind = 'FWHM ('+report.fwhm_units.replace('degrees_2theta','degrees 2θ')+')' if report.data_type.startswith('Powder') else 'positive finite auxiliary field'
-        value_rows += [('Median '+kind,number(report.statistic('median_auxiliary'))),
-                       ('Range of '+kind,number(report.statistic('minimum_auxiliary'))+' – '+number(report.statistic('maximum_auxiliary')))]
-    page('Values',value_rows)
-    resolution = [('Coverage definition',report.methods[0]),('d98 definition',report.methods[1])]
-    if report.statistic('mean_f_over_sigma') is not None:
-        resolution += [('Mean F/σ(F)',number(report.statistic('mean_f_over_sigma'))),
-                       ('Median F/σ(F)',number(report.statistic('median_f_over_sigma'))),('Amplitude convention',SIGNED_CONVENTION)]
+        return [(labels.get(key, key.replace('_', ' ').capitalize()),
+                 'N/A — no genuine measurement uncertainties' if key == 'absent_significant_3sigma' and not report.available('significance')
+                 else 'N/A' if counts.get(key) is None else f'{counts[key]:,}') for key in keys]
+    sg, raw_sg = _spacegroup_display(report.spacegroup)
+    group = explanation(sg)
+    group.setToolTip(raw_sg)
+    file_kind, application = _file_provenance(report)
+    phase_defined = a.reflection_mode_has_phase(report.data_mode) and report.available('column_semantics')
+    phases = ('Not supplied (expected for this format)' if not a.reflection_mode_has_phase(report.data_mode)
+              and report.available('column_semantics') else report.phase_status)
+    body = page('&Input')
+    filename = QWidget()
+    filename_row = QHBoxLayout(filename)
+    filename_row.setContentsMargins(0, 0, 0, 0)
+    name = explanation(Path(report.source).name or 'Not supplied')
+    name.setToolTip(report.source)
+    filename_row.addWidget(name, 1)
+    copy_path = QPushButton('Copy full path')
+    copy_path.setAccessibleName('Copy full input path')
+    copy_path.clicked.connect(lambda: QApplication.clipboard().setText(report.source))
+    filename_row.addWidget(copy_path)
+    detail.hkl_copy_path = copy_path
+    detail.full_source_path = report.source
+    rows(body, [('Input filename', filename), ('Data type', report.data_type), ('Declared data format', report.data_mode),
+                ('Space group', group), ('Unit cell', _cell_display(report.cell)), ('Phases', phases),
+                ('File provenance', file_kind), ('Source application', application),
+                ('Observation-processing provenance', 'Not documented in the available input' if report.observation_kind == 'unknown' else report.observation_kind)])
+    disclose(body, 'Detailed source provenance', [('Full input path', report.source), ('Source details', report.source_note),
+                                                ('Exact symmetry setting', raw_sg)])
+    body.addStretch(1)
+
+    body = page('Counts && &symmetry')
+    table = rows(body, count_rows(['parsed_records','literal_unique','symmetry_orbits','zero_000','excluded_000']) +
+                 [('Space group', sg), ('Unit cell', _cell_display(report.cell))])
+    table.values['Space group'].setToolTip(raw_sg)
+    for key, tip in [('Parsed input records','Parsed original records, including any retained protocol 000 record; not necessarily independent measurements.'),
+                     ('Literally unique HKL triplets','Distinct integer (h,k,l) triplets, before symmetry equivalence.'),
+                     ('Symmetry-independent reflection orbits','Non-000 equivalence classes under the actual input symmetry and established Friedel convention.')]:
+        table.values[key].setToolTip(tip)
+    disclose(body, 'Counting methodology', [('Coverage and Friedel convention', report.methods[0]), ('Exact symmetry setting', raw_sg)])
+    body.addStretch(1)
+
+    body = page('Absences && &duplicates')
+    issue_keys = ['systematic_absent_entries','absent_nonzero_values','absent_significant_3sigma',
+                  'exact_duplicate_entries','equivalent_repeated_entries','conflicting_duplicate_groups',
+                  'invalid_indices','rejected_records','invalid_values','invalid_auxiliary','invalid_reciprocal_values',
+                  'missing_auxiliary','phase_missing','phase_nonfinite']
+    if not any(counts.get(key) for key in issue_keys) and not any(severity == 'WARNING' for severity, _ in report.warnings):
+        body.addWidget(explanation('No reflection-index, systematic-absence or duplication issues detected.'))
+    rows(body, count_rows(issue_keys[:6]) + [('Forbidden HKL examples', report.absence_examples or 'None'),
+                                           ('Conflicting HKL examples', report.duplicate_examples or 'None')])
+    body.addWidget(explanation('Small nonzero forbidden values alone are not proof of experimental error. Repeated HKL alone does not establish unmerged observations.'))
+    body.addStretch(1)
+
+    body = page('&Values')
+    integrity = count_rows(['invalid_values','zero_values','negative_values','missing_auxiliary','invalid_auxiliary',
+                           'rejected_records','invalid_indices','invalid_reciprocal_values'])
+    if phase_defined:
+        integrity += count_rows(['phase_finite','phase_missing','phase_nonfinite'])
+    else:
+        integrity += [('Phase diagnostics', 'N/A — phase column not supplied' if report.available('column_semantics')
+                       else 'N/A — phase-column meaning unverified')]
+    rows(body, integrity, 'Input integrity')
+    powder = report.data_type.startswith('Powder')
+    amplitude = a.reflection_mode_is_amplitude(report.data_mode)
+    value_kind = ('value (column meaning unverified)' if not report.available('column_semantics')
+                  else 'intensity' if powder or not amplitude else 'amplitude')
+    statistics = [('Mean input '+value_kind, number(report.statistic('mean_value'))),
+                  ('Median input '+value_kind, number(report.statistic('median_value')))]
+    if powder:
+        units = '° 2θ' if report.fwhm_units == 'degrees_2theta' else report.fwhm_units
+        statistics += [(f'Median FWHM ({units})', number(report.statistic('median_auxiliary'))),
+                       (f'FWHM range ({units})', number(report.statistic('minimum_auxiliary'))+' – '+number(report.statistic('maximum_auxiliary'))),
+                       ('Verified FWHM units', 'degrees 2θ' if report.fwhm_units == 'degrees_2theta' else 'Not verified; '+report.fwhm_units)]
+    elif report.available('significance'):
+        statistics += [('Median measurement uncertainty', number(report.statistic('median_auxiliary'))),
+                       ('Measurement uncertainty range', number(report.statistic('minimum_auxiliary'))+' – '+number(report.statistic('maximum_auxiliary')))]
+    elif report.statistic('median_auxiliary') is not None:
+        statistics += [('Median auxiliary (not measurement uncertainty)', number(report.statistic('median_auxiliary'))),
+                       ('Auxiliary range', number(report.statistic('minimum_auxiliary'))+' – '+number(report.statistic('maximum_auxiliary')))]
+    rows(body, statistics, 'Intensity and width statistics' if powder else 'Value and uncertainty statistics')
+    if report.warnings:
+        disclose(body, 'Input diagnostic notes', report.warnings)
+    body.addStretch(1)
+
+    body = page('&Resolution')
+    rows(body, [('HKL coverage', 'Fraction of symmetry-allowed reflection orbits represented in the input within the analyzed resolution range.'),
+                ('d98', 'Highest-resolution boundary where cumulative HKL coverage reaches at least 98% within the analyzed domain.')])
+    if powder:
+        body.addWidget(explanation('HKL coverage does not establish that overlapping powder reflections were independently measured or experimentally resolved.'))
+    significance = []
+    direct = report.statistic('mean_f_over_sigma') is not None
+    if direct:
+        significance += [('Mean F/σ(F)', number(report.statistic('mean_f_over_sigma'))),
+                         ('Median F/σ(F)', number(report.statistic('median_f_over_sigma')))]
     if report.available('significance'):
-        resolution += [(('Secondary ' if report.statistic('mean_f_over_sigma') is not None else 'Mean ')+report.significance_label,number(report.statistic('mean_significance')))]
-        resolution += [('Median '+report.significance_label,number(report.statistic('median_significance')))]
-        for key,val in report.statistics:
+        significance += [('Mean '+report.significance_label, number(report.statistic('mean_significance'))),
+                         ('Median '+report.significance_label, number(report.statistic('median_significance')))]
+        for key, value in report.statistics:
             if key.startswith('weak_fraction_below_'):
-                ratio = 'derived I/σ(I)' if report.statistic('mean_f_over_sigma') is not None else 'I/σ(I)'
-                resolution.append((f'Fraction with {ratio} < {key.removeprefix("weak_fraction_below_")}',f'{100*val:.3f}%'))
-        if report.statistic('mean_f_over_sigma') is not None:
-            resolution += [('Approximation','I ≈ F², σ(I) ≈ 2|F|σ(F). The approximation is unreliable near zero and is not directly measured I/σ(I).')]
-    page('Resolution',resolution)
+                significance.append((f'Fraction with {"derived I/σ(I)" if direct else "I/σ(I)"} < {key.removeprefix("weak_fraction_below_")}', f'{100*value:.3f}%'))
+    if significance:
+        rows(body, significance, 'Measurement significance')
+    methodology = [('Full HKL coverage definition', report.methods[0]), ('Full d98 definition', report.methods[1])]
+    if direct:
+        methodology += [('Amplitude convention', SIGNED_CONVENTION), ('Approximation', 'I ≈ F², σ(I) ≈ 2|F|σ(F). Unreliable near zero; not directly measured I/σ(I).')]
+    disclose(body, 'Resolution methodology', methodology)
+    body.addStretch(1)
+
+    body = page('Peak &overlap')
     overlap = dict(report.overlap)
-    overlap_rows = [('Status','Estimated geometric overlap' if overlap.get('estimated') else 'Authoritative supplied groups' if overlap['available'] else 'Unavailable'),
-                    ('Method and metadata',overlap['reason'])]
+    body.addWidget(explanation('Estimated geometric overlap' if overlap.get('estimated') else 'Authoritative supplied groups' if overlap['available'] else 'Peak overlap unavailable'))
     if overlap['available']:
-        overlap_rows += [('Indexed reflections',report.count('parsed_records')-report.count('zero_000')),
-                         ('Total groups including singletons',overlap.get('total_groups',overlap['geometric_group_count'])),
-                         ('Non-overlapping groups',overlap.get('non_overlapping_groups',0)),
-                         ('Overlapping groups',overlap['group_count']),('Affected reflections',overlap['affected']),
-                         ('Affected fraction',f'{100*overlap["fraction"]:.2f}%'),('Largest group',overlap['largest']),
-                         ('Group-size distribution',', '.join(f'{size} HKL: {count} groups' for size,count in overlap['size_distribution']))]
-        overlap_rows += [('Denominators','Affected fraction: original non-000 input records. Group sizes count records, not symmetry orbits or independently measured powder peaks.')]
-        if 'integrated_intensity_fraction' in overlap:
-            overlap_rows += [('Intensity in overlapping groups',f'{100*overlap["integrated_intensity_fraction"]:.3f}% of finite nonnegative physical input intensity')]
-    overlap_rows.append(('Limitation','Geometric groups are not experimentally verified independent observations. No intensity repartitioning is performed.'))
-    page('Peak overlap',overlap_rows)
-    page('Limitations',[(cap.name.replace('_',' ').capitalize(),('Available. ' if cap.available else 'Unavailable. ')+cap.reason) for cap in report.capabilities]+
-         [('Phase provenance',report.phase_status)]+[('Method',text) for text in report.methods[2:]])
-    close = QPushButton('Close')
+        metrics = QWidget()
+        metric_grid = QGridLayout(metrics)
+        metric_grid.setContentsMargins(0, 0, 0, 0)
+        fraction = overlap.get('fraction')
+        intensity = overlap.get('integrated_intensity_fraction')
+        for col, (label, value) in enumerate([
+            ('Overlapping groups', f'{overlap["group_count"]:,}'), ('Affected HKL', f'{100*fraction:.2f}%' if fraction is not None else 'N/A'),
+            ('Intensity in overlapping groups', f'{100*intensity:.3f}%' if intensity is not None else 'N/A'), ('Largest group size', str(overlap['largest']))]):
+            heading = explanation(label)
+            metric_grid.addWidget(heading, 0, col)
+            metric = explanation(value)
+            metric.setStyleSheet('font-size:17pt; font-weight:600; color:#001170;')
+            metric_grid.addWidget(metric, 1, col)
+            metric_grid.setColumnStretch(col, 1)
+        body.addWidget(metrics)
+        rows(body, [('Indexed reflections', f'{report.count("parsed_records")-report.count("zero_000"):,}'),
+                    ('Total groups', f'{overlap.get("total_groups", overlap["geometric_group_count"]):,}'),
+                    ('Non-overlapping groups', f'{overlap.get("non_overlapping_groups", 0):,}'),
+                    ('Overlapping groups', f'{overlap["group_count"]:,}'), ('Affected reflections', f'{overlap["affected"]:,}'),
+                    ('Affected HKL fraction', f'{100*fraction:.3f}%' if fraction is not None else 'N/A'),
+                    ('Intensity fraction', f'{100*intensity:.3f}%' if intensity is not None else 'N/A — finite nonnegative physical intensity required'),
+                    ('Largest group', str(overlap['largest'])),
+                    ('Group-size distribution', ' · '.join(f'{size} reflections: {count} groups' for size, count in overlap['size_distribution']) or 'No overlapping groups')])
+    else:
+        body.addWidget(explanation(overlap['reason']))
+    disclose(body, 'Overlap methodology', [('Method and metadata', overlap['reason']),
+        ('Wavelength (Å)', number(overlap.get('wavelength'))), ('Wavelength source', overlap.get('wavelength_source') or 'Not supplied'),
+        ('FWHM units', report.fwhm_units.replace('degrees_2theta','degrees 2θ')),
+        ('Separation factor', number(overlap.get('separation_factor'))),
+        ('Denominators', 'Fractions and group sizes count original non-000 input records, not symmetry orbits or independently measured powder peaks. Intensity fraction uses finite nonnegative physical input intensity.')])
+    body.addWidget(explanation('Geometric grouping does not establish experimentally independent observations. No intensity repartitioning is performed.'))
+    body.addStretch(1)
+
+    body = page('&Availability && limitations')
+    capabilities = QTableWidget(len(report.capabilities), 3)
+    capabilities.setObjectName('hklCapabilityTable')
+    capabilities.setHorizontalHeaderLabels(['Analysis', 'Status', 'Reason'])
+    capabilities.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    capabilities.setSelectionBehavior(QAbstractItemView.SelectRows)
+    capabilities.setSelectionMode(QAbstractItemView.SingleSelection)
+    capabilities.setWordWrap(True)
+    capabilities.verticalHeader().hide()
+    capabilities.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+    capabilities.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+    capabilities.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+    capabilities.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    names = {'column_semantics':'Column semantics', 'overlap':'Peak overlap', 'significance':'Significance',
+             'merging_statistics':'Merging statistics', 'profile_statistics':'Profile statistics',
+             'anomalous_completeness':'Anomalous completeness', 'wilson':'Wilson analysis'}
+    reasons = {'column_semantics': 'Declared or explicitly selected input format' if report.available('column_semantics') else 'Column layout not verified',
+               'overlap': ('Estimated geometry; wavelength and FWHM verified' if overlap.get('estimated')
+                           else 'Explicit supplied groups' if overlap['available']
+                           else 'Measured wavelength required' if 'Wavelength missing' in overlap['reason']
+                           else 'Compatible widths and overlap metadata required'),
+               'significance': 'Positive finite measurement uncertainties' if report.available('significance') else 'No verified genuine measurement uncertainties',
+               'merging_statistics':'No verified unmerged, consistently scaled observations',
+               'profile_statistics':'Profiles, weights and refinement information required',
+               'anomalous_completeness':'Friedel policy and observation provenance insufficient',
+               'wilson':'Scaled intensities, composition and model assumptions required'}
+    for row, cap in enumerate(report.capabilities):
+        limited = cap.available and ((cap.name == 'overlap' and overlap.get('estimated')) or
+                  (cap.name == 'significance' and any(counts.get(key) for key in ('missing_auxiliary','invalid_auxiliary','invalid_values'))))
+        status = 'Limited' if limited else 'Available' if cap.available else 'Unavailable'
+        for col, text in enumerate((names.get(cap.name,cap.name.replace('_',' ').capitalize()), status, reasons.get(cap.name,cap.reason))):
+            item = QTableWidgetItem(text)
+            item.setToolTip(cap.reason)
+            capabilities.setItem(row, col, item)
+    capabilities.verticalHeader().setDefaultSectionSize(30)
+    capabilities.setFixedHeight(len(report.capabilities)*30 + capabilities.horizontalHeader().sizeHint().height() + 4)
+    body.addWidget(capabilities)
+    reason = explanation('')
+    reason.setMinimumHeight(48)
+    reason.setAccessibleName('Selected analysis scientific explanation')
+    body.addWidget(reason)
+    def selected_reason(row, _column, *_previous):
+        if row >= 0:
+            cap = report.capabilities[row]
+            reason.setText(names.get(cap.name, cap.name)+': '+cap.reason)
+    capabilities.currentCellChanged.connect(selected_reason)
+    capabilities.setCurrentCell(0, 0)
+    detail.hkl_capability_table = capabilities
+    detail.hkl_capability_reason = reason
+    disclose(body, 'Methodology and data provenance', [('Phase provenance', report.phase_status)]+
+             [('Method', text) for text in report.methods[2:]])
+    body.addStretch(1)
+    close = QPushButton('&Close')
     close.clicked.connect(detail.close)
-    root.addWidget(close,0,Qt.AlignRight)
+    root.addWidget(close, 0, Qt.AlignRight)
+    detail.hkl_close_button = close
     detail.hkl_details_tabs = tabs
-    a.fit_dialog_to_available_screen(detail,QSize(900,650))
+    a.fit_dialog_to_available_screen(detail, QSize(1000, 570))
+    saved = detail.hkl_settings.value('hklAdvanced/geometry')
+    if saved:
+        detail.restoreGeometry(saved)
+        saved_size = detail.hkl_settings.value('hklAdvanced/size')
+        if isinstance(saved_size, QSize) and saved_size.isValid():
+            detail.resize(saved_size)
+        clamp_window_to_available_screen(detail)
+    try:
+        tabs.setCurrentIndex(max(0, min(tabs.count()-1, int(detail.hkl_settings.value('hklAdvanced/tab', 0)))))
+    except (TypeError, ValueError):
+        pass
     return detail
+
 
 
 def _footer(win, layout, dialog, report, analysis=None, figure=None):

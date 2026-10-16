@@ -1,0 +1,26 @@
+{
+  "01-default": {
+    "mocked": true,
+    "size_logical": [
+      604,
+      380
+    ],
+    "dpr": 1.25,
+    "scroll_maximum": 0,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": false,
+    "manual_connect_in_footer": true
+  },
+  "02-existing-key-default": {
+    "mocked": true,
+    "size_logical": [
+      604,
+      597
+    ],
+    "dpr": 1.25,
+    "scroll_maximum": 224,
+    "horizontal_scroll_maximum": 0,
+    "manual_visible": true,
+    "manual_connect_in_footer": true
+  }
+}

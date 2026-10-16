@@ -42,7 +42,7 @@ def check_ui():
         settle()
         browses = w.files_form_widget.findChildren(QPushButton, 'optionalFileBrowse')
         tiles = [w.original_superflip_tile, w.superflip_sharped_tile, w.autosolve_tile, w.professional_mode_tile]
-        assert w.files_toggle.text() == 'Optional reference and initial model'
+        assert w.files_toggle.text() == 'Advanced input options (optional)'
         assert not w.files_form_widget.isVisible()
         paths = [str(Path(tmp)/'reference-long-name.cif'), str(Path(tmp)/'initial-model.xplor')]
         for edit, value in zip([w.reference_file, w.model_file], paths):
@@ -66,7 +66,7 @@ def check_ui():
             assert icon == w.dialog.style().standardIcon(QStyle.SP_ArrowRight).pixmap(16,16).toImage()
             w.files_toggle.setChecked(True)
             settle()
-            assert w.files_toggle.text() == 'Optional reference and initial model'
+            assert w.files_toggle.text() == 'Advanced input options (optional)'
             assert w.files_form_widget.isVisible()
             assert all(button.isVisible() for button in browses)
             assert w.page1.minimumSizeHint().height() > collapsed_hint

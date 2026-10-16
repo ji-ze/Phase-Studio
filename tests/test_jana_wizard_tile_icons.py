@@ -38,7 +38,7 @@ APPROVED_ICON_SOURCES = {
     # Wizard tiles -- approved explicitly; never custom artwork.
     "qt_media_play", "qt_media_seek_forward", "qt_file_dialog_detailed_view", "qt_file_dialog_list_view",
 }
-APPROVED_ASSET_FILES = {"phase_studio.ico", "phase_studio_splash.png"}
+APPROVED_ASSET_FILES = {"phase_studio.ico", "phase_studio_splash.png", "workflow_superflip.svg", "workflow_sharped.svg", "workflow_autosolve.svg", "workflow_settings.svg"}
 # Every function/method in the package whose name marks it as icon/glyph
 # artwork. Anything else matching ICON_FUNCTION_PATTERN is new artwork.
 APPROVED_ICON_FUNCTIONS = {
@@ -95,6 +95,7 @@ def main():
 
     def build():
         wizard = js._JanaWorkflowWizard([], None)
+        wizard._ensure_models_loaded = lambda **kwargs: None
         wizard.run()
         wizard._ensure_workflow_requirements = lambda **_kwargs: True
         wizard.dialog.show()
@@ -109,7 +110,7 @@ def main():
         set(branding.ESTABLISHED_ICON_INVENTORY) == APPROVED_ICON_SOURCES,
     )
     assets = {p.name for p in (ROOT / "phase_studio" / "assets").iterdir() if p.is_file()}
-    check("no new image/icon asset files were added to phase_studio/assets", assets == APPROVED_ASSET_FILES)
+    check("only approved application and scientific SVG assets are present", assets == APPROVED_ASSET_FILES)
     stray_images = [
         p for p in (ROOT / "phase_studio").rglob("*")
         if p.suffix.lower() in {".svg", ".png", ".ico", ".qrc", ".bmp", ".jpg"} and p.parent.name != "assets"
@@ -297,6 +298,7 @@ def main():
     # A genuine simulated click (QTest.mouseClick presses+releases at the
     # widget's center) must also trigger it.
     press_calls.clear()
+    QTest.qWait(360)
     QTest.mouseClick(tile, Qt.LeftButton)
     check("a real simulated mouse click triggers the action", press_calls == [True])
 
@@ -305,10 +307,12 @@ def main():
     # =====================================================================
     press_calls.clear()
     tile.setFocus()
+    QTest.qWait(360)
     QTest.keyClick(tile, Qt.Key_Return)
     check("Enter activates the focused tile", press_calls == [True])
 
     press_calls.clear()
+    QTest.qWait(360)
     QTest.keyClick(tile, Qt.Key_Space)
     check("Space activates the focused tile", press_calls == [True])
 

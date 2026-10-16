@@ -57,6 +57,7 @@ def check_gui():
         main_geometry=(dialog.hkl_plot_panel.geometry(),table.geometry(),dialog.hkl_canvas.size())
         dialog.hkl_advanced_button.click();settle()
         assert dialog.hkl_advanced.isVisible()
+        dialog.hkl_advanced.hkl_capability_table.setCurrentCell(3,0);settle()
         assert any('CC1/2' in label.text() for label in dialog.hkl_advanced.findChildren(QLabel))
         assert main_geometry==(dialog.hkl_plot_panel.geometry(),table.geometry(),dialog.hkl_canvas.size())
         dialog.resize(760,800);settle()

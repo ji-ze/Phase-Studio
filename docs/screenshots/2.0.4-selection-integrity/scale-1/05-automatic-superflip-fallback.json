@@ -1,0 +1,31 @@
+{
+  "synthetic": true,
+  "real_jana_gui_acceptance": false,
+  "logical_size": [
+    1500,
+    900
+  ],
+  "dpr": 1.0,
+  "source": "superflip",
+  "selected_cycle": 3,
+  "recommended_cycle": 3,
+  "row": 2,
+  "identity": [
+    "",
+    "superflip",
+    3,
+    "superflip:c003:t0.50:3a8d12043ed1",
+    "826de4719300e9a33e4e5103c4f5e81229041bb7ce5338e78dade2daa335b1cc",
+    0.5,
+    "3a8d12043ed1b4b790c084b041af4b6902c463c8570674580fdbd448518b9f16",
+    "ab3aa1662acc7c4062e2fb9a870c8d9ed7006aed699d33fdb86a5756d9270136"
+  ],
+  "ready": true,
+  "geometry": true,
+  "pending": false,
+  "reason": "Ready for handoff.",
+  "preview_id": "superflip:c003:t0.50:3a8d12043ed1",
+  "summary": "<b>Selected for Jana2020:</b> Charge-flipping solution \u00b7 Cycle 3 \u00b7 EDMA 0.50 \u03c3 \u00b7 Original measured reflection data \u00b7 Jana model: 2 atomic sites<br>Scientific map + corresponding Jana model will be passed to Jana2020.",
+  "edma_sites": 2,
+  "jana_sites": 2
+}

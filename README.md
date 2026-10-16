@@ -5,14 +5,15 @@ crystallographic structure solution. It integrates external Superflip charge
 flipping and EDMA peak extraction, optional SharpED map prediction, and
 candidate-specific map/model transfer to Jana2020.
 
-**Current release: 2.0.3.** [Release notes](RELEASE_NOTES_2_0_3.md) show the updated Wizard, execution, result review and setup interfaces. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
+**Current release: 2.0.4.** [Release notes](RELEASE_NOTES_2_0_4.md) describe Jana2020 sign-in, improved scientific diagnostics and the updated Wizard. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
 
 ## Features and workflows
 
-Development 2.0.4 adds [Sign in with Jana2020](docs/auth/SHARPED_SIGN_IN_2_0_4.md)
+Version 2.0.4 adds [Sign in with Jana2020](docs/auth/SHARPED_SIGN_IN_2_0_4.md)
 using browser-based OAuth code + PKCE, with the existing manual-key fallback.
 See the [implementation and acceptance status](docs/auth/JANA2020_OAUTH_2_0_4.md).
-This development build is not a new published release.
+Native Jana2020 handoff/overlay and physical-monitor acceptance limitations are
+listed in the release notes; automated previews do not establish those checks.
 
 - **Superflip only:** original charge flipping without SharpED access.
 - **Superflip + SharpED:** iterative phasing and model prediction, retaining

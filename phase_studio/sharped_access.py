@@ -198,7 +198,12 @@ class SharpEDAccessDialog(QDialog):
         management = QVBoxLayout(self.management_panel)
         management.setContentsMargins(0, 0, 0, 0)
         management.addWidget(self.remember)
-        paragraph("Uncheck Remember for this session only. Use Remove saved access to delete a stored key.", target=management)
+        paragraph(
+            "Uncheck Remember for this session only. Use Remove saved access to delete a stored key."
+            if self.store.persistent_available else
+            "Secure storage is unavailable. Your access key will be used for this session only.",
+            target=management,
+        )
         if not self.store.persistent_available:
             paragraph("Your access key will be used for this session only.", target=manual)
         manage_row = QHBoxLayout()

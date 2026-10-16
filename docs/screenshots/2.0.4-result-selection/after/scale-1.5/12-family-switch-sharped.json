@@ -1,0 +1,19 @@
+{
+  "logical_size": [
+    1500,
+    900
+  ],
+  "device_pixel_ratio": 1.5,
+  "source": "deblurred",
+  "cycle": 1,
+  "threshold": 0.4,
+  "edma_sites": 44,
+  "jana_sites": 2,
+  "map_sha256": "a227b563cc2480ccca0ad565917dfb4f3d7a28bc4b7b029736b9d308375754b2",
+  "model_sha256": "e2bbbc8662d86d623f9aee0b74605e4a4d80b241374884996eca3b0537d42831",
+  "canvas": [
+    1028,
+    355
+  ],
+  "projected_fill": 0.7800000000000005
+}

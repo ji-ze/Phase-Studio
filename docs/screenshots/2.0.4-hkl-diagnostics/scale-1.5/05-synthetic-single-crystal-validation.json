@@ -1,0 +1,221 @@
+{
+  "source": "C:\\Users\\honzi\\Documents\\GitHub\\Phase-Studio\\build\\hkl-modernization\\capture\\amplitudes-with-zero-phase.hkl",
+  "source_note": "SYNTHETIC CONTROLLED FIXTURE — amplitudes-with-zero-phase",
+  "data_type": "Amplitude HKL list",
+  "data_mode": "hkl F phase sigma",
+  "fwhm_units": "input units",
+  "observation_kind": "unknown",
+  "phase_status": "Phase fields: 48 finite (0° is populated); provenance unverified, not evidence of experimentally solved phases.",
+  "significance_label": "Derived I/σ(I) ≈ |F|/(2σ(F))",
+  "capabilities": [
+    {
+      "name": "column_semantics",
+      "available": true,
+      "reason": "Declared Jana dataformat or explicitly selected external column layout required; AUTO filename/default guesses are not measurement provenance."
+    },
+    {
+      "name": "significance",
+      "available": true,
+      "reason": "Finite positive genuine uncertainty column required; FWHM and dummy sigmas excluded."
+    },
+    {
+      "name": "overlap",
+      "available": false,
+      "reason": "Overlap analysis unavailable — peak-width units or profile metadata are insufficient."
+    },
+    {
+      "name": "merging_statistics",
+      "available": false,
+      "reason": "CC1/2, R_int, R_merge, R_meas, R_pim and measurement multiplicity require verified unmerged, consistently scaled repeated observations; duplicate text HKL alone is insufficient."
+    },
+    {
+      "name": "profile_statistics",
+      "available": false,
+      "reason": "Rp, Rwp, Rexp and goodness of fit require observed/calculated profiles, weights and refinement degrees of freedom."
+    },
+    {
+      "name": "anomalous_completeness",
+      "available": false,
+      "reason": "Requires an explicit anomalous/Friedel policy and verified observation provenance; current coverage combines Friedel mates."
+    },
+    {
+      "name": "wilson",
+      "available": false,
+      "reason": "Requires suitable scaled intensities, composition and model assumptions; no physical B estimate from arbitrary values."
+    }
+  ],
+  "cell": [
+    10.0,
+    12.0,
+    14.0,
+    90.0,
+    96.0,
+    90.0
+  ],
+  "spacegroup": "P 1 21/n 1",
+  "counts": [
+    [
+      "parsed_records",
+      48
+    ],
+    [
+      "literal_unique",
+      48
+    ],
+    [
+      "symmetry_orbits",
+      48
+    ],
+    [
+      "exact_duplicate_entries",
+      0
+    ],
+    [
+      "conflicting_duplicate_groups",
+      0
+    ],
+    [
+      "equivalent_repeated_entries",
+      0
+    ],
+    [
+      "systematic_absent_entries",
+      0
+    ],
+    [
+      "absent_nonzero_values",
+      0
+    ],
+    [
+      "absent_significant_3sigma",
+      0
+    ],
+    [
+      "invalid_values",
+      0
+    ],
+    [
+      "zero_values",
+      0
+    ],
+    [
+      "negative_values",
+      0
+    ],
+    [
+      "valid_widths_or_sigmas",
+      48
+    ],
+    [
+      "missing_auxiliary",
+      0
+    ],
+    [
+      "invalid_auxiliary",
+      0
+    ],
+    [
+      "phase_finite",
+      48
+    ],
+    [
+      "phase_missing",
+      0
+    ],
+    [
+      "phase_nonfinite",
+      0
+    ],
+    [
+      "zero_000",
+      0
+    ],
+    [
+      "rejected_records",
+      0
+    ],
+    [
+      "invalid_indices",
+      0
+    ],
+    [
+      "excluded_000",
+      0
+    ],
+    [
+      "invalid_reciprocal_values",
+      0
+    ]
+  ],
+  "statistics": [
+    [
+      "mean_value",
+      17.75
+    ],
+    [
+      "median_value",
+      14.0
+    ],
+    [
+      "median_auxiliary",
+      1.2
+    ],
+    [
+      "minimum_auxiliary",
+      1.2
+    ],
+    [
+      "maximum_auxiliary",
+      1.2
+    ],
+    [
+      "constant_fwhm",
+      null
+    ],
+    [
+      "mean_significance",
+      7.395833333333333
+    ],
+    [
+      "median_significance",
+      5.833333333333334
+    ],
+    [
+      "weak_fraction_below_1",
+      0.0
+    ],
+    [
+      "weak_fraction_below_2",
+      0.0625
+    ],
+    [
+      "weak_fraction_below_3",
+      0.20833333333333334
+    ]
+  ],
+  "warnings": [
+    [
+      "INFO",
+      "Intensity significance is derived using I≈F² and σ(I)≈2|F|σ(F), a first-order approximation unreliable near zero; F/σ(F) remains available in the sample table."
+    ]
+  ],
+  "methods": [
+    "Distinct input HKL orbits intersected with theoretical symmetry-allowed orbits, divided by all allowed orbits from infinite d to the input d_min; 000 and systematic absences excluded. Friedel pairs are combined by the existing coverage convention; this does not merge or modify input values. The d_min boundary is inclusive with relative reciprocal tolerance 1e-12 (at least 8 floating-point ULPs).",
+    "d98 is the highest-resolution theoretical boundary at which cumulative allowed-HKL coverage from sin(theta)/lambda = 0 reaches at least 98%. It need not stay above 98% at every preceding boundary, depends on the input d_min domain, and is not an independent experimental quality cutoff.",
+    "Statistics use finite non-000 original per-record values. FWHM units: input units.",
+    "Presence of duplicates does not prove unmerged observations. Current text input merging/scaling provenance is unknown."
+  ],
+  "absence_examples": [],
+  "duplicate_examples": [],
+  "overlap": [
+    [
+      "available",
+      false
+    ],
+    [
+      "reason",
+      "Overlap analysis unavailable — peak-width units or profile metadata are insufficient."
+    ]
+  ],
+  "shells": []
+}
