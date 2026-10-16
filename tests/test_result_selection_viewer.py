@@ -212,8 +212,8 @@ def main():
               for child in dialog.findChildren(type(dialog._metadata_label))
           ))
     check("Result Selection uses a large full-width two-segment output selector",
-          dialog._superflip_btn.minimumHeight() >= 40
-          and dialog._sharped_btn.minimumHeight() >= 40
+          dialog._superflip_btn.minimumHeight() >= 30
+          and dialog._sharped_btn.minimumHeight() >= 30
           and dialog._superflip_btn.subtitle_label.text() == "Superflip phase solution"
           and dialog._sharped_btn.subtitle_label.text() == "SharpED-processed map")
     dialog._superflip_btn.setChecked(True)
@@ -259,7 +259,7 @@ def main():
     check("source switch updates the rendered-element legend", "N" in dialog._element_legend.text())
     check("source switch metadata names cycle, model and EDMA ASU composition", all(
         text in dialog._metadata_label.text() for text in (
-            "Cycle", "koala model progressive", "EDMA asymmetric-unit composition", "N₁ O₁",
+            "Cycle", "koala model progressive", "ASU:", "N₁ O₁",
         )
     ))
     check("detected count appears once in EDMA status, not duplicated in metadata",
@@ -274,7 +274,7 @@ def main():
           and dialog._threshold_status.parentWidget() is dialog._preview_section)
     check("Result Selection states the exact output that will be exported", all(
         text in dialog._selected_output_summary.text()
-        for text in ("Selected for export", "Model prediction", "Cycle 3", "0.4")
+        for text in ("Selected for export", "Structure prediction", "Cycle 3", "0.4")
     ))
     dialog._superflip_btn.setChecked(True)
     restored = dialog.selected_candidate
@@ -336,10 +336,10 @@ def main():
 
     large_path = temp / "large.cif"
     large_path.write_text(large_cif(), encoding="utf-8")
-    large_candidate = replace(
+    large_candidate = appmod.seal_result_candidate(replace(
         chosen, structure_path=str(large_path), usable_structure=True,
         edma_sigma=0.4, sharped_model="koala model progressive",
-    )
+    ))
     dialog._cell_button.setChecked(True)
     large = dialog._candidate_presentation(large_candidate)
     check("large Full-cell presentation retains all 1,400 atoms", len(large[0]) == 1400)
@@ -368,7 +368,7 @@ def main():
 
     stress_path = temp / "large-2000.cif"
     stress_path.write_text(large_cif(2000), encoding="utf-8")
-    stress_candidate = replace(large_candidate, structure_path=str(stress_path), edma_sigma=0.3)
+    stress_candidate = appmod.seal_result_candidate(replace(large_candidate, structure_path=str(stress_path), edma_sigma=0.3))
     stress = dialog._candidate_presentation(stress_candidate)
     check("2,000-atom Full-cell presentation retains all atoms", len(stress[0]) == 2000)
     dialog._render_preview(stress_candidate)

@@ -127,6 +127,11 @@ def build_error_report(
             title = "SharpED account access"
             summary = "The SharpED access key is missing or was not accepted."
             guidance = "Connect using your existing Jana2020 account and check its SharpED access key."
+        elif "http header" in lower and "invalid sharped" in lower:
+            category = "sharped_configuration"
+            title = "Invalid SharpED request configuration"
+            summary = "A configured HTTP header cannot be sent safely."
+            guidance = "Check the client header configuration. Unicode metadata must remain in the UTF-8 request body."
         elif any(token in lower for token in ("certificate_verify_failed", "certificate verify failed", "could not verify", "tls certificate chain")):
             category = "sharped_tls_certificate"
             title = "SharpED secure connection failed"

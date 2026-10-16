@@ -306,10 +306,10 @@ QTableWidget, QTreeWidget, QListWidget {
     border: 1px solid #cbd7ea;
 }
 QToolTip {
-    background-color: #f2f4f9;
-    color: #001170;
-    border: 1px solid #2264b8;
-    padding: 4px;
+    background-color: #f7f7f7;
+    color: #263344;
+    border: 1px solid #b8c0cb;
+    padding: 2px 4px;
 }
 QProgressBar {
     border: none;

@@ -1,4 +1,4 @@
-"""Session credentials and optional Windows Credential Manager persistence.
+"""Manual keys persist by default in Windows Credential Manager.
 
 No credentials are written to QSettings. Headless/offscreen processes use
 session-only access unless a storage backend is explicitly supplied.
@@ -8,6 +8,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import os
+import threading
 from ctypes import wintypes
 from urllib.parse import urlsplit
 
@@ -93,17 +94,114 @@ class CredentialStore:
         self.backend = backend
         self._session: dict[str, str] = {}
         self._remember: dict[str, bool] = {}
+        self._oauth = None
+        self._oauth_selected = False
+        self._oauth_fingerprints: set[str] = set()
+        self._oauth_renew_lock = threading.Lock()
+        self._oauth_state_lock = threading.RLock()
+        self.reauthorize = None
+        self._bindings = []
+
+    @staticmethod
+    def _oauth_origin(base_url):
+        try:
+            return credential_origin(base_url) in {
+                "https://jana.fzu.cz:443", "https://sharped.fzu.cz:443",
+            }
+        except ValueError:
+            return False
+
+    def is_oauth(self, token):
+        return bool(token) and hashlib.sha256(token.encode("utf8")).hexdigest() in self._oauth_fingerprints
+
+    def activate_oauth(self, credential):
+        self._redact(credential.access_token)
+        with self._oauth_state_lock:
+            self._oauth_fingerprints.add(hashlib.sha256(credential.access_token.encode("utf8")).hexdigest())
+            self._oauth = credential
+            self._oauth_selected = True
+        self._notify()
+
+    def sign_out_oauth(self):
+        with self._oauth_state_lock:
+            self._oauth_selected = False
+            self._oauth = None
+        self._notify()
+
+    def bind_input(self, widget, base_url=lambda: DEFAULT_SERVER_URL):
+        """Keep live Qt credential fields synchronized without persisting text edits."""
+        import weakref
+        from PySide6.QtCore import QObject, Signal, Slot
+        store = self
+
+        class Binding(QObject):
+            refresh = Signal()
+
+            @Slot()
+            def update(self):
+                widget.setText(store.get(base_url()))
+
+        binding = Binding(widget)
+        binding.refresh.connect(binding.update)
+        self._bindings.append(weakref.ref(binding))
+        # Retain the Python wrapper until the owning field is destroyed.
+        widget._credential_binding = binding
+
+    def _notify(self):
+        live = []
+        for reference in self._bindings:
+            binding = reference()
+            if binding is not None:
+                try:
+                    binding.refresh.emit()
+                    live.append(reference)
+                except RuntimeError:
+                    pass  # Qt owner has already been destroyed.
+        self._bindings = live
+
+    def authentication_method(self, base_url=DEFAULT_SERVER_URL):
+        with self._oauth_state_lock:
+            return "oauth" if self._oauth_selected and self._oauth_origin(base_url) else "manual"
+
+    def oauth_for_request(self, token, *, force=False, cancel_event=None):
+        """Serialized browser renewal; retired tokens identify the same session.
+
+        No OAuth credential ever goes through the persistent manual-key backend.
+        Reauthorization is a Qt-mediated callback installed by the account UI.
+        """
+        from phase_studio.oauth import OAuthError
+        with self._oauth_renew_lock:
+            if cancel_event is not None and cancel_event.is_set():
+                raise OAuthError("cancelled")
+            with self._oauth_state_lock:
+                credential = self._oauth
+                if not self._oauth_selected or credential is None:
+                    raise OAuthError("cancelled")
+                if credential.usable() and (not force or token != credential.access_token):
+                    return credential.access_token
+            if self.reauthorize is None:
+                raise OAuthError("exchange")
+            credential = self.reauthorize() if cancel_event is None else self.reauthorize(cancel_event)
+            with self._oauth_state_lock:
+                if (credential is None or not self._oauth_selected or
+                        cancel_event is not None and cancel_event.is_set()):
+                    raise OAuthError("cancelled")
+                self.activate_oauth(credential)
+                return credential.access_token
 
     @property
     def persistent_available(self) -> bool:
         return self.backend is not None
 
     def get(self, base_url: str = DEFAULT_SERVER_URL) -> str:
+        with self._oauth_state_lock:
+            if self._oauth_selected and self._oauth_origin(base_url):
+                return self._oauth.access_token
         try:
             origin = credential_origin(base_url)
         except ValueError:
             return ""  # Invalid saved server settings must remain repairable.
-        if origin not in self._session:
+        if not self._session.get(origin):
             value = ""
             if self.backend is not None:
                 try:
@@ -116,6 +214,8 @@ class CredentialStore:
         return self._session[origin]
 
     def remembered(self, base_url: str = DEFAULT_SERVER_URL) -> bool:
+        if self.authentication_method(base_url) == "oauth":
+            return False
         self.get(base_url)
         try:
             return self._remember.get(credential_origin(base_url), False)
@@ -128,23 +228,36 @@ class CredentialStore:
             from phase_studio.error_reporting import register_private_value
             register_private_value(token)
 
-    def set(self, token: str, *, remember: bool = False, base_url: str = DEFAULT_SERVER_URL) -> None:
-        token = str(token or "").strip()
+    def set(self, token: str, *, remember: bool | None = None, base_url: str = DEFAULT_SERVER_URL) -> None:
+        token = str(token or "")
+        if not token:
+            return  # Empty configuration is not an explicit removal request.
+        from phase_studio.sharped_server_client import SharpEDServerClient
+        SharpEDServerClient._validate_request_headers({"Authorization": "Bearer " + token})
+        if self.is_oauth(token):
+            raise ValueError("OAuth access is session-only.")
         origin = credential_origin(base_url)
         self._redact(token)
+        if remember is None:
+            remember = self.persistent_available
         if remember and token:
             if self.backend is None:
                 raise OSError("Secure storage is unavailable. Use access for this session only.")
             self.backend.write(origin, token)
-        elif self.backend is not None and self.remembered(base_url):
-            self.backend.delete(origin)
         self._session[origin] = token
         self._remember[origin] = bool(remember and token)
+        if self._oauth_origin(base_url):
+            self.sign_out_oauth()
+        self._notify()
 
     def save_input(self, token: str, base_url: str = DEFAULT_SERVER_URL) -> None:
+        if not token:
+            return
+        if self.is_oauth(str(token or "").strip()):
+            return  # A scientific config may retain the previous session token.
         if str(token or "").strip() == self.get(base_url):
             return
-        self.set(token, remember=self.remembered(base_url), base_url=base_url)
+        self.set(token, base_url=base_url)
 
     def remove(self, base_url: str = DEFAULT_SERVER_URL) -> None:
         origin = credential_origin(base_url)
@@ -152,12 +265,13 @@ class CredentialStore:
             self.backend.delete(origin)
         self._session[origin] = ""
         self._remember[origin] = False
+        self._notify()
 
     def load_settings(self, shared, legacy=None, base_url: str = DEFAULT_SERVER_URL) -> str:
-        """Retain old plaintext access for this session, then remove old copies.
+        """Migrate legacy keys securely before removing their old copies.
 
-        Persistence now requires the user's explicit Remember choice. Migration
-        never silently writes a private key into a new persistent backend.
+        If secure storage fails, retain the legacy copy for a future retry.
+        Never create a new plaintext copy or destroy the only surviving key.
         """
         value = self.get(base_url)
         previous = str(shared.value("inputs/sharped_api_token", "") or "").strip()
@@ -165,15 +279,18 @@ class CredentialStore:
             previous = previous or str(legacy.value("api_token", "") or "").strip()
         if previous and not value:
             try:
-                self.set(previous, base_url=base_url)
-            except ValueError:
+                self.set(previous, remember=True, base_url=base_url)
+            except (OSError, ValueError, RuntimeError):
                 self._redact(previous)  # Return only to the current UI session.
             value = previous
-        shared.remove("inputs/sharped_api_token")
-        shared.sync()
-        if legacy is not None:
-            legacy.remove("api_token")
-            legacy.sync()
+        # Do not discard a different legacy key silently, even if a secure
+        # credential already exists for this origin.
+        if self.remembered(base_url) and (not previous or previous == value == self.get(base_url)):
+            shared.remove("inputs/sharped_api_token")
+            shared.sync()
+            if legacy is not None and str(legacy.value("api_token", "") or "").strip() in ("", value):
+                legacy.remove("api_token")
+                legacy.sync()
         return value
 
 

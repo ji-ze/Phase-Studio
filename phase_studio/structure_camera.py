@@ -8,6 +8,12 @@ from typing import Callable, Iterable, Optional
 import numpy as np
 
 
+def structure_marker_sizes(atom_count: int):
+    """Shared display-only marker areas; isolated sites stay clearly visible."""
+    scale = min(1.0, (320.0 / max(1, atom_count)) ** .32)
+    return np.full(atom_count, max(24.0, 130.0 * scale), dtype=np.float64)
+
+
 def set_structure_viewport_clip(axis) -> None:
     """Clip to this panel rectangle rather than Axes3D's artificial square."""
     viewport = axis.get_position(original=True).transformed(axis.figure.transFigure)

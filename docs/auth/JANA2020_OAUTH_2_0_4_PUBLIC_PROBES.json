@@ -1,0 +1,137 @@
+{
+  "date": "2026-10-14",
+  "method": "Unauthenticated GET; no cookie jar; redirects not followed; TLS verification enabled; body/cookie values not retained",
+  "results": [
+    {
+      "url": "https://jana.fzu.cz/.well-known/openid-configuration",
+      "status": 200,
+      "content_type": "application/json",
+      "location": null,
+      "cookie_names": [
+        "laravel_session",
+        "XSRF-TOKEN",
+        "XSRF-TOKEN",
+        "laravel_session"
+      ],
+      "html_form_actions": [],
+      "oauth_metadata": {
+        "issuer": "https://jana.fzu.cz",
+        "authorization_endpoint": "https://jana.fzu.cz/oauth/authorize",
+        "token_endpoint": "https://jana.fzu.cz/oauth/token",
+        "userinfo_endpoint": "https://jana.fzu.cz/oauth/userinfo",
+        "response_types_supported": [
+          "code"
+        ],
+        "grant_types_supported": [
+          "authorization_code"
+        ],
+        "code_challenge_methods_supported": [
+          "S256"
+        ],
+        "subject_types_supported": [
+          "public"
+        ],
+        "id_token_signing_alg_values_supported": [
+          "HS256"
+        ],
+        "scopes_supported": [
+          "openid",
+          "profile",
+          "email"
+        ],
+        "token_endpoint_auth_methods_supported": [
+          "client_secret_post",
+          "client_secret_basic"
+        ]
+      }
+    },
+    {
+      "url": "https://jana.fzu.cz/.well-known/oauth-authorization-server",
+      "status": 404,
+      "content_type": "text/html; charset=UTF-8",
+      "location": null,
+      "cookie_names": [],
+      "html_form_actions": [],
+      "oauth_metadata": null
+    },
+    {
+      "url": "https://sharped.fzu.cz/.well-known/openid-configuration",
+      "status": 404,
+      "content_type": "text/html; charset=utf-8",
+      "location": null,
+      "cookie_names": [],
+      "html_form_actions": [],
+      "oauth_metadata": null
+    },
+    {
+      "url": "https://sharped.fzu.cz/.well-known/oauth-authorization-server",
+      "status": 404,
+      "content_type": "text/html; charset=utf-8",
+      "location": null,
+      "cookie_names": [],
+      "html_form_actions": [],
+      "oauth_metadata": null
+    },
+    {
+      "url": "https://sharped.fzu.cz/sharp-ed",
+      "status": 302,
+      "content_type": "text/html; charset=utf-8",
+      "location": "https://sharped.fzu.cz/login",
+      "cookie_names": [
+        "XSRF-TOKEN",
+        "laravel_session"
+      ],
+      "html_form_actions": [],
+      "oauth_metadata": null
+    },
+    {
+      "url": "https://jana.fzu.cz/login",
+      "status": 200,
+      "content_type": "text/html; charset=UTF-8",
+      "location": null,
+      "cookie_names": [
+        "laravel_session",
+        "XSRF-TOKEN",
+        "XSRF-TOKEN",
+        "laravel_session"
+      ],
+      "html_form_actions": [
+        "https://jana.fzu.cz/login"
+      ],
+      "oauth_metadata": null
+    }
+  ],
+  "follow_up_results": [
+    {
+      "url": "https://sharped.fzu.cz/login",
+      "status": 302,
+      "content_type": "text/html; charset=utf-8",
+      "form_actions": [],
+      "authorization_endpoint": "https://jana.fzu.cz/oauth/authorize",
+      "authorization_parameters": {
+        "response_type": "code",
+        "client_id": "sharped",
+        "redirect_uri": "https://sharped.fzu.cz/oauth/callback",
+        "scope": "openid profile email",
+        "state": "[per-request value omitted]",
+        "nonce": "[per-request value omitted]",
+        "code_challenge": "[per-request value omitted]",
+        "code_challenge_method": "S256"
+      }
+    },
+    {
+      "url": "https://jana.fzu.cz/oauth/authorize",
+      "status": 400,
+      "location": null,
+      "content_type": "text/plain; charset=UTF-8",
+      "form_actions": []
+    },
+    {
+      "url": "https://jana.fzu.cz/oauth/userinfo",
+      "status": 401,
+      "location": null,
+      "content_type": "application/json",
+      "form_actions": []
+    }
+  ]
+}

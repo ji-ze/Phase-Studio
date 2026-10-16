@@ -1,0 +1,13 @@
+# Jana2020 Wizard scientific icons and compact layout — 2.0.4
+
+The existing Workflow Selection design now uses four coordinated 48×48 SVG resources through `ui_branding.established_icon`: charge-flipping density profile, broad-to-sharp density peaks, the approved four-atom focus-frame Autosolve design (Variant B), and three scientific parameter sliders. QLabel icon pixmaps account for device pixel ratio. No icon fonts, downloaded artwork, gradients or raster source assets were added.
+
+The populated default window is approximately 1000×755 logical pixels. The content-driven height is capped to available screen geometry; constrained screens scroll while Cancel stays fixed. Equal primary cards remain above the equal secondary pair. Recommended receives a restrained blue tint without changing selection or dispatch. Autosolve runtime text is qualified by data and server load. Advanced input options retain existing reference/model file behavior and values when collapsed. Summary labels align at the top, long counts wrap, literal unique HKL counts are explicitly named, and the existing verified space-group presentation supplies screw-axis typography and the exact-setting tooltip.
+
+Whole-card and chevron clicks share their destination. Rapid duplicate pointer activation is suppressed for 350 ms; distinct Enter/Space presses remain valid and keyboard auto-repeat is ignored. Existing navigation, requirements checks, native foreground handling and scientific workflows are retained. Branding fonts and wordmarks remain unchanged; body labels are checked against accidental Science Gothic fallback.
+
+Both authoritative freezing specs explicitly include QtSvg and already collect the assets directory. Local QA built and ran the actual Wizard in temporary ONEFILE and ONEDIR smoke applications at 100%, 125% and 150%, verifying all four SVGs, device ratios, footer and horizontal-scroll bounds. These are isolated test bundles, not official release EXEs.
+
+Evidence: `build/acceptance-wizard-icons-2.0.4/index.html`, `manifest.json`, 27 development and six frozen Qt screenshots, plus an archived-before comparison. The two comparison inputs differ; no scientific comparison is intended. Native Jana foreground acceptance still needs a physical Windows/Jana desktop; no focus/ownership code was changed.
+
+Validation: 354 pytest tests passed, one skipped, 37 subtests passed; 46 scientific golden checks passed. Additional standalone runners passed 58 tile/icon, 75 geometry, 44 redesign/navigation, 21 hierarchy and 18 text-clipping checks. No scientific algorithm, SharpED API/OAuth behavior, EDMA calculation, Map Feedback, ranking, export or Jana handoff logic changed. Version remains 2.0.4. No commit, push, tag or release publication.

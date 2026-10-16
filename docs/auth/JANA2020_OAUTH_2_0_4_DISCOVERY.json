@@ -1,0 +1,32 @@
+{
+  "issuer": "https://jana.fzu.cz",
+  "authorization_endpoint": "https://jana.fzu.cz/oauth/authorize",
+  "token_endpoint": "https://jana.fzu.cz/oauth/token",
+  "userinfo_endpoint": "https://jana.fzu.cz/oauth/userinfo",
+  "response_types_supported": [
+    "code"
+  ],
+  "grant_types_supported": [
+    "authorization_code"
+  ],
+  "code_challenge_methods_supported": [
+    "S256"
+  ],
+  "subject_types_supported": [
+    "public"
+  ],
+  "id_token_signing_alg_values_supported": [
+    "HS256"
+  ],
+  "scopes_supported": [
+    "openid",
+    "profile",
+    "email",
+    "sharped"
+  ],
+  "token_endpoint_auth_methods_supported": [
+    "client_secret_post",
+    "client_secret_basic",
+    "none"
+  ]
+}

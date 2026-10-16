@@ -5,9 +5,15 @@ crystallographic structure solution. It integrates external Superflip charge
 flipping and EDMA peak extraction, optional SharpED map prediction, and
 candidate-specific map/model transfer to Jana2020.
 
-**Current release: 2.0.3.** [Release notes](RELEASE_NOTES_2_0_3.md) show the updated Wizard, execution, result review and setup interfaces. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
+**Current release: 2.0.4.** [Release notes](RELEASE_NOTES_2_0_4.md) describe Jana2020 sign-in, improved scientific diagnostics and the updated Wizard. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
 
 ## Features and workflows
+
+Version 2.0.4 adds [Sign in with Jana2020](docs/auth/SHARPED_SIGN_IN_2_0_4.md)
+using browser-based OAuth code + PKCE, with the existing manual-key fallback.
+See the [implementation and acceptance status](docs/auth/JANA2020_OAUTH_2_0_4.md).
+Native Jana2020 handoff/overlay and physical-monitor acceptance limitations are
+listed in the release notes; automated previews do not establish those checks.
 
 - **Superflip only:** original charge flipping without SharpED access.
 - **Superflip + SharpED:** iterative phasing and model prediction, retaining
@@ -60,8 +66,10 @@ its server code, architecture and model weights are not distributed here.
 4. Expand **API tokens for desktop application** using **Show**. Enter a
    **New token name** and click **Create token**.
 5. Paste the access key into Phase Studio's masked **SharpED access key** field
-   and choose **Connect to SharpED**. Access is session-only unless you choose
-   secure device storage in Windows Credential Manager; keys are not saved in QSettings.
+   and choose **Connect using access key**. Phase Studio 2.0.4 remembers manual keys in
+   Windows Credential Manager by default; keys are not written to QSettings.
+   Uncheck **Remember access on this device** for session-only use, or use
+   **Remove saved access** to explicitly delete a saved key.
 
 The documented Public API is **https://jana.fzu.cz/**. The client uses that
 single host for model discovery, authenticated upload, status and download.
@@ -108,14 +116,14 @@ Scientific publications reporting work performed with Phase Studio should cite
 the software. This is the project's scientific-attribution policy, separate
 from the standard MIT license; it adds no license restriction.
 
-> Zelenka, Jiří. *Phase Studio*, version 2.0.3. Institute of Physics of the
+> Zelenka, Jiří. *Phase Studio*, version 2.0.4. Institute of Physics of the
 > Czech Academy of Sciences. https://github.com/ji-ze/Phase-Studio
 
 ```bibtex
-@software{zelenka_phase_studio_203,
+@software{zelenka_phase_studio_204,
   author  = {Zelenka, Jiří},
   title   = {Phase Studio},
-  version = {2.0.3},
+  version = {2.0.4},
   url     = {https://github.com/ji-ze/Phase-Studio}
 }
 ```

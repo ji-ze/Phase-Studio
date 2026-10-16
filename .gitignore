@@ -58,3 +58,14 @@ packaging/msix/store_identity.json
 # logo) by packaging/generate_store_assets.py, not hand-authored -- keep the
 # generator, not its regenerable binary output. See packaging/msix/Assets/README.md.
 packaging/msix/Assets/*.png
+
+# Generated 2.0.4 DPI inventories stay local; curated tracked samples remain public.
+/docs/screenshots/2.0.4-hkl-diagnostics/
+/docs/screenshots/2.0.4-hkl-presentation/
+/docs/screenshots/2.0.4-oauth/
+/docs/screenshots/2.0.4-result-selection/
+/docs/screenshots/2.0.4-selection-integrity/
+/docs/screenshots/2.0.4-sign-in-final/
+/docs/screenshots/2.0.4-sign-in-polish/
+/docs/screenshots/2.0.4-wizard-final/
+/docs/screenshots/2.0.4-wizard-polish/

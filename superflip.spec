@@ -23,7 +23,7 @@ from windows_version import version_resource
 
 qt_report = portable_runtime.validate_pyside6_installation()
 
-hiddenimports = [
+hiddenimports = ["PySide6.QtSvg",
     "phase_studio",
     "phase_studio.app",
     "phase_studio.jana_superflip",

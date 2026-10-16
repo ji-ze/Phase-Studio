@@ -120,6 +120,24 @@ class FeedbackTests(unittest.TestCase):
         for _ in range(10): self.qtapp.processEvents()
         return w
 
+    def test_feedback_noop_messages_keep_original_values(self):
+        w=self.wizard(powder=False)
+        w.intensity_enabled_checkbox.setChecked(True)
+        self.assertEqual(w.intensity_damping_spin.value(),0)
+        self.assertIn('No intensity correction',w.intensity_effective_note.text())
+        w.intensity_damping_spin.setValue(.3)
+        self.assertIn('positive damping',w.intensity_effective_note.text())
+        w.missing_enabled_checkbox.setChecked(True)
+        self.assertIn('No additions',w.missing_form.labelForField(w.missing_percent_spin).text())
+        w.missing_percent_spin.setValue(5)
+        self.assertNotIn('No additions',w.missing_form.labelForField(w.missing_percent_spin).text())
+        powder=self.wizard()
+        self.assertTrue(powder.intensity_enabled_checkbox.isEnabled())
+        self.assertIn('no σ filter',powder.intensity_enabled_checkbox.text())
+        powder.powder_enabled_checkbox.setChecked(True)
+        powder.powder_mix_spin.setValue(0)
+        self.assertIn('No repartitioning',powder.powder_form.labelForField(powder.powder_mix_spin).text())
+
     def test_powder_panels_independent_and_no_fake_sigma(self):
         w = self.wizard()
         self.assertTrue(w.intensity_group.isVisible() and w.powder_group.isVisible())

@@ -77,7 +77,7 @@ from phase_studio.map_quality import ResultCandidate, recommend_best_result
 from phase_studio import autosolve_review as guided
 from phase_studio.ui_branding import create_phase_studio_app_icon, create_phase_studio_brand_header
 from phase_studio.fullscreen_viewer import show_single_structure_viewer
-from phase_studio.structure_camera import StructureCameraController, fit_projected_structure, set_structure_viewport_clip
+from phase_studio.structure_camera import StructureCameraController, fit_projected_structure, set_structure_viewport_clip, structure_marker_sizes
 from phase_studio.version import VERSION as __version__
 
 # Idle rotation: slow enough to read the structure while it turns, fast
@@ -107,7 +107,7 @@ HANDOFF_STATE_HEADLINES = {
 CANCEL_TOOLTIP = "Stop the calculation without passing a result to Jana2020."
 RETRY_TOOLTIP = (
     "Retry the failed step. Completed stages are reused: a failed prediction generates only the "
-    "Model prediction again; a failed cycle resumes at its first incomplete stage."
+    "Structure prediction again; a failed cycle resumes at its first incomplete stage."
 )
 ADD_ATOMS_TOOLTIP = (
     "Lower this panel's EDMA threshold by the configured step to extract more atoms from the SAME map "
@@ -123,7 +123,7 @@ RECALCULATE_TOOLTIP = (
     "3 cycles follow automatically only while the selected source's ranking strictly improves."
 )
 REFINE_TOOLTIP = (
-    "Use the Model prediction at its current threshold as the Superflip initial model and run "
+    "Use the Structure prediction at its current threshold as the Superflip initial model and run "
     "3 refinement cycles with SharpED '" + guided.PREDICTION_MODEL + "'. Both results can be "
     "tuned, recalculated and passed afterwards."
 )
@@ -1299,7 +1299,7 @@ class AutosolveWindow(QMainWindow):
         )
         family = (
             "Charge-flipping solution" if self._ordinary_dual_workflow and role == guided.ROLE_OBSERVED else
-            "Model prediction" if self._ordinary_dual_workflow else panel.title
+            "Structure prediction" if self._ordinary_dual_workflow else panel.title
         )
         source = "Superflip" if role == guided.ROLE_OBSERVED else "SharpED"
         model = f" · {panel.sharped_model}" if panel.sharped_model else ""
@@ -1327,7 +1327,7 @@ class AutosolveWindow(QMainWindow):
             return
         family = (
             "Charge-flipping solution" if self._ordinary_dual_workflow and role == guided.ROLE_OBSERVED else
-            "Model prediction" if self._ordinary_dual_workflow else panel.title
+            "Structure prediction" if self._ordinary_dual_workflow else panel.title
         )
         combo = self._cycle_combos.get(role)
         panel_axis = next((axis for axis, axis_role in self._axis_roles.items() if axis_role == role), None)
@@ -1661,7 +1661,7 @@ class AutosolveWindow(QMainWindow):
             button.setToolTip(
                 "Run the existing automatic Map Feedback correction on the measured reflection data "
                 "from the next cycle, continue the phase search on the corrected data, and generate "
-                "a new Model prediction. The modified data are recorded in the provenance."
+                "a new Structure prediction. The modified data are recorded in the provenance."
             )
             button.clicked.connect(lambda _=False, k=kind: self._on_correction(k))
             button.setVisible(False)
@@ -1712,7 +1712,7 @@ class AutosolveWindow(QMainWindow):
             )
 
     def _sync_review_controls(self) -> None:
-        """Initial tuning: Model prediction + atoms / - atoms / Refine 3
+        """Initial tuning: Structure prediction + atoms / - atoms / Refine 3
         cycles only; Charge-flipping solution read-only; nothing can be passed. Final
         Review: both panels, + atoms / - atoms / Recalculate / Pass. One EDMA
         at a time: while any panel recalculates, every panel action waits
@@ -1861,16 +1861,24 @@ class AutosolveWindow(QMainWindow):
 
     # ----- Actions -----
 
+    def _completed_handoff_candidates(self, *, verify=False):
+        active = str(getattr(self.backend, '_active_run_id', '') or '')
+        candidates = [c for c in self.backend._result_candidates()
+                      if (not active or c.run_id == active)
+                      and c.usable_map and (not c.edma_enabled or c.usable_structure)]
+        if verify:
+            from phase_studio.result_selection import candidate_selection
+            candidates = [c for c in candidates if candidate_selection(c,jana=self.backend.autosolve_is_jana()).ready]
+        return candidates
+
     def _on_pass_now(self) -> None:
         """Early handoff stops unfinished jobs only after explicit confirmation."""
-        candidates = self.backend._result_candidates()
+        candidates = self._completed_handoff_candidates(verify=True)
+        if not candidates:
+            return
         if any(self.backend.review_edma_executor.is_busy(self.backend._review_candidate_key(c)) for c in candidates):
             return
         if str(getattr(self.backend, "_run_status", "")).upper() == "RUNNING":
-            candidates = [c for c in self.backend._result_candidates()
-                          if c.usable_map and (not c.edma_enabled or c.usable_structure)]
-            if not candidates:
-                return
             descriptions = []
             for role in (guided.ROLE_OBSERVED, guided.ROLE_PREDICTED):
                 panel = self._last_panels.get(role)
@@ -2048,6 +2056,11 @@ class AutosolveWindow(QMainWindow):
         # Initial keyboard focus on the structure view (the primary content),
         # not on whichever toolbar button happens to come first.
         QTimer.singleShot(0, lambda: self.structure_canvas.setFocus(Qt.OtherFocusReason))
+        if not getattr(self, '_updates_attached', False):
+            self._updates_attached = True
+            from phase_studio.update_ui import update_service
+            jana = bool(self._launch_inflip_path) or self.backend.autosolve_is_jana()
+            update_service().attach(self, mode='jana' if jana else None)
 
     def closeEvent(self, event) -> None:  # noqa: N802 - Qt override
         try:
@@ -2303,11 +2316,7 @@ class AutosolveWindow(QMainWindow):
             self._toggle_log_expanded()
 
         candidates = backend._result_candidates()
-        candidates_available = any(
-            candidate.usable_map
-            and (not candidate.edma_enabled or candidate.usable_structure)
-            for candidate in candidates
-        )
+        candidates_available = bool(self._completed_handoff_candidates())
         interactive_pending = any(backend.review_edma_executor.is_busy(backend._review_candidate_key(candidate))
                                   for candidate in candidates)
         handing_off_now = str(getattr(backend, "autosolve_handoff_state", "idle")) in {
@@ -2354,7 +2363,7 @@ class AutosolveWindow(QMainWindow):
         if stage == guided.STAGE_PREDICTING:
             cycle_stage_text = "Generating predicted structure…"
         elif stage == guided.STAGE_PREDICTION_FAILED and run_status != "CANCELLED":
-            cycle_stage_text = "Model prediction failed · Retry generates only the prediction"
+            cycle_stage_text = "Structure prediction failed · Retry generates only the prediction"
         elif waiting and run_status == "REVIEW":
             base = "Predicted-model tuning" if stage == guided.STAGE_TUNING else "Final Review"
             activity = str(getattr(backend, "autosolve_activity", "") or "")
@@ -2548,7 +2557,7 @@ class AutosolveWindow(QMainWindow):
 
         coords = view.coords
         atom_base_colors = np.asarray([to_rgb(self._element_color(a.element)) for a in view.atoms], dtype=np.float64)
-        sizes = np.full(len(view.atoms), MOLECULE_ATOM_MARKER_SIZE, dtype=np.float64)
+        sizes = structure_marker_sizes(len(view.atoms))
         scatter = axis.scatter(
             coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=atom_base_colors,
             alpha=1.0, edgecolors="#ffffff", linewidths=0.3, depthshade=False,
@@ -2644,7 +2653,7 @@ class AutosolveWindow(QMainWindow):
         return path if path.is_file() else None
 
     def _render_structures(self, observed_panel, predicted_panel) -> None:
-        """Charge-flipping solution (left) and Model prediction (right). Each panel
+        """Charge-flipping solution (left) and Structure prediction (right). Each panel
         shows exactly the structure its ReviewPanel names -- in Review the
         user-tuned threshold's structure, otherwise the best COMPLETED
         candidate's recorded structure."""
@@ -2707,7 +2716,7 @@ class AutosolveWindow(QMainWindow):
             else guided.ROLE_TITLE[guided.ROLE_OBSERVED]
         )
         predicted_title = (
-            "Model prediction" if self._ordinary_dual_workflow
+            "Structure prediction" if self._ordinary_dual_workflow
             else guided.ROLE_TITLE[guided.ROLE_PREDICTED]
         )
 
@@ -2742,7 +2751,7 @@ class AutosolveWindow(QMainWindow):
                                  "Waiting for the Superflip map…")
         if self.backend._run_status in {"CANCELLED", "STOPPED", "ERROR"}:
             observed_waiting = f"{self.backend._run_status.title()} · no completed Charge-flipping structure"
-            predicted_waiting = f"{self.backend._run_status.title()} · no completed Model prediction"
+            predicted_waiting = f"{self.backend._run_status.title()} · no completed Structure prediction"
 
         superflip_best = best_caption(guided.ROLE_OBSERVED, observed_panel)
         deblurred_best = best_caption(guided.ROLE_PREDICTED, predicted_panel)
@@ -2761,7 +2770,7 @@ class AutosolveWindow(QMainWindow):
         ))
         panels.append((
             predicted_title, deblurred_atoms,
-            (("Generating Model prediction…" if predicting else predicted_waiting)
+            (("Generating Structure prediction…" if predicting else predicted_waiting)
              if self._ordinary_dual_workflow
              else (PREDICTING_PLACEHOLDER if predicting else PREDICTED_PLACEHOLDER)),
             deblurred_best, self._panel_path(predicted_panel), guided.ROLE_PREDICTED,
@@ -2898,7 +2907,7 @@ class AutosolveWindow(QMainWindow):
             display_composition = text.translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")) if self._ordinary_dual_workflow else text
             column["formula"].setText(f"{composition_label}: {display_composition}" if text else "")
             display_title = (
-                ("Charge-flipping solution" if role == guided.ROLE_OBSERVED else "Model prediction")
+                ("Charge-flipping solution" if role == guided.ROLE_OBSERVED else "Structure prediction")
                 if self._ordinary_dual_workflow else guided.ROLE_TITLE[role]
             )
             column["formula"].setToolTip(f"{display_title} EDMA asymmetric-unit composition" if text else "")

@@ -1,0 +1,13 @@
+﻿# Phase Studio 2.0.4 OAuth implementation and acceptance
+
+Implemented Jana2020 Authorization Code + PKCE S256 for public client `phase-studio`, scope `sharped`, exact ephemeral IPv4 loopback callback `/callback`. Verified HTTPS discovery/authorization/token endpoints remain pinned to jana.fzu.cz. Protected scientific API requests use sharped.fzu.cz. No client secret, ID token, refresh token, or OAuth token persistence. Existing manual-key authentication and secure storage remain available.
+
+Real acceptance on 2026-10-14: the user confirmed browser sign-in and automatic return. A separately authorized ordinary ochlor calculation completed three Superflip + SharpED cycles using SEED (cyclic CF): three successful uploads, 22 successful status requests, three successful downloads. Generated inputs use repeatmode 30, 1, 1. Scientific XPLOR maps, EDMA CIF and m40 files exist; their hashes and exact paths are recorded in JANA2020_OAUTH_2_0_4_PRODUCTION_ACCEPTANCE.json. Every original project file hash remained unchanged. No Jana handoff was executed. These are real scientific outputs, not mock-provider outputs. Scientific validity still requires normal crystallographic assessment; API acceptance does not establish a correct structure.
+
+Validation: complete pytest suite 213 passed, one skipped, 37 subtests; focused authentication 58 passed, 32 subtests. Scientific golden checks 46; Jana density-alignment checks 41; Jana completion checks 192. Additional direct regression suites and corrected visible-control scaling guards passed. Screenshot coverage includes 100%, 125%, 150% scaling, manual fallback, cancellation, expiry and preserved Wizard settings. Screenshot error/expiry states use a mock provider and are labelled accordingly.
+
+Both final frozen distribution profiles passed native loopback/mock-exchange self-checks and packaging boundaries. Archived authentication bytecode matches current source. Hashes are recorded in JANA2020_OAUTH_2_0_4_FROZEN_CHECKS.json. The real browser/API acceptance ran the source application; real browser sign-in was not separately repeated inside each frozen profile.
+
+Remaining acceptance limitation: real one-hour token expiry and subsequent browser reauthorization have not been waited for in production. Expiry, cancellation, concurrent renewal, retry limits, same-job GET continuation and prevention of duplicate POST are covered by automated tests. Real Jana2020 scientific import was not executed during this authentication acceptance run.
+
+No commit, push, tag, publication, installed-tool replacement, or changes to licensing/citation/service terms. Existing 2.0.3 release artifacts remain unchanged.

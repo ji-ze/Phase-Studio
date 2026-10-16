@@ -1,0 +1,28 @@
+[
+  {
+    "file": "PhaseStudio-2.0.4-x64.exe",
+    "source_matches": {
+      "oauth": true,
+      "oauth_ui": true,
+      "oauth_diagnostics": true,
+      "credentials": true,
+      "sharped_access": true,
+      "sharped_server_client": true
+    },
+    "bytes": 79730340,
+    "sha256": "100492fdc423b1763b2a258a07c3007234f5ad3b7767b77e8a63785bda49f359"
+  },
+  {
+    "file": "Phase_studio.exe",
+    "source_matches": {
+      "oauth": true,
+      "oauth_ui": true,
+      "oauth_diagnostics": true,
+      "credentials": true,
+      "sharped_access": true,
+      "sharped_server_client": true
+    },
+    "bytes": 10022844,
+    "sha256": "fa596e34d1cf93f4ae284125f504bde39174f0c5356f80e7d2792a22a5f1d24d"
+  }
+]

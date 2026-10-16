@@ -30,11 +30,19 @@ problems = []
 def inspect(dialog):
     dialog.show()
     app.processEvents()
+    if hasattr(dialog, "manual_button"):
+        # The manual fallback is intentionally collapsed on first use. Measure
+        # its controls only after expansion, and never treat hidden actions as
+        # clipped widgets. The primary state is guarded by authentication_geometry.
+        dialog.manual_button.setChecked(True)
+        app.processEvents()
     screen = dialog.screen().availableGeometry()
     frame = dialog.frameGeometry()
     if not screen.contains(frame):
         problems.append("dialog frame leaves available screen")
     for button in dialog.findChildren(QPushButton):
+        if not button.isVisible():
+            continue
         scroll = getattr(dialog, "_scroll", None)
         if scroll is not None and scroll.widget().isAncestorOf(button):
             scroll.ensureWidgetVisible(button)

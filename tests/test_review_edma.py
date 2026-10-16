@@ -220,8 +220,8 @@ def main():
         gui_review_logs = [message for message, kwargs in review_logs if kwargs.get("level") != "DETAIL"]
         detailed_review_logs = [message for message, kwargs in review_logs if kwargs.get("level") == "DETAIL"]
         check("review EDMA GUI logging is concise start/completion progress",
-              any("Model prediction · EDMA recalculation started · 0.40" in message for message in gui_review_logs)
-              and any("Model prediction · EDMA updated · 1 detected sites · 0.40" in message for message in gui_review_logs))
+              any("Structure prediction · EDMA recalculation started · 0.40" in message for message in gui_review_logs)
+              and any("Structure prediction · EDMA updated · 1 detected sites · 0.40" in message for message in gui_review_logs))
         check("review EDMA diagnostics prove request/candidate/map/paths/hash/duration",
               any(all(token in message for token in (
                   "Review EDMA request", candidate.candidate_id, "source map SHA-256 map-hash",
