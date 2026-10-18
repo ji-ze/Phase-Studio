@@ -53,6 +53,17 @@ def main():
     def model(name):
         path = tmp / name
         path.write_text(tjc.CIF, encoding="utf-8")
+        # A ready Jana candidate requires its corresponding validated model.
+        path.with_suffix(".m40").write_text(
+            "    2    0    0    0\n"
+            " 1.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+            " 0.000000\n"
+            " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+            " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
+            "C1        1  1     1.000000 0.100000 0.100000 0.100000\n"
+            "   1.0000   1.0000\n"
+            "O1        2  1     1.000000 0.500000 0.400000 0.350000\n"
+            "   1.0000   1.0000\n", encoding="utf-8")
         return path
 
     def map_file(name):
@@ -290,8 +301,8 @@ def main():
     check("Correction: Powder repartitioning stays off for the non-FWHM branch", win4.last_run_config.redistribute_overlaps is False)
     check("Correction: a fresh three-cycle adaptive budget started (8 completed + 3 = 11)", win4._autosolve_policy.state.current_cycle_limit == 11)
     check("Correction: cycles widget bumped for the new stage", win4._spin_value("cycles") == 11)
-    check("Correction: the phase search continues with 'koala phase boost 2'",
-          win4.last_run_config.sharped_model == "koala phase boost 2" and win4._autosolve_stage == "map_feedback")
+    check("Correction: the phase search continues with 'UNIVERSAL'",
+          win4.last_run_config.sharped_model == "UNIVERSAL" and win4._autosolve_stage == "map_feedback")
     check("Correction: continue_run() was called to start the corrected-data stage", len(continue_calls_b) == 1)
 
     # =====================================================================

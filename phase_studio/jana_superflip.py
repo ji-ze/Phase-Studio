@@ -4198,7 +4198,7 @@ def launch_autosolve_from_jana(
     # this (undamped feed-forward of the latest SharpED map, EDMA every
     # cycle for both sources, an initial five-cycle fixed budget).
     # Both historical goals share one phase search -- Superflip + SharpED
-    # "koala phase boost 2", feeding the SharpED map's EDMA STRUCTURE forward
+    # UNIVERSAL, feeding the SharpED map's EDMA STRUCTURE forward
     # as the next Superflip model (the existing deblurred_edma_cif mode),
     # EDMA at 1.0 sigma on BOTH sides (Superflip / Charge-flipping solution and the
     # SharpED structure fed forward). See phase_studio/autosolve_review.py.
@@ -4294,6 +4294,15 @@ def launch_autosolve_from_jana(
         splash.set_status("Loading Jana2020 workflow…")
         app.processEvents()
         backend = build_backend()
+        splash.close()
+        backend._autosolve_stage = "search"
+        backend._autosolve_policy = AdaptiveCyclePolicy(
+            backend._active_validation_profile(), initial=5, block_size=3,
+        )
+        backend.start_run()
+        if str(getattr(backend, "_run_status", "")).upper() != "RUNNING":
+            backend.close()
+            return 1
         splash.set_status("Finalizing workspace…")
         app.processEvents()
         autosolve_win = AutosolveWindow(backend, autosolve_option, inflip_path=inflip_path)
@@ -4321,11 +4330,6 @@ def launch_autosolve_from_jana(
         show_phase_studio_error(None, report)
         return 1
 
-    backend._autosolve_stage = "search"
-    backend._autosolve_policy = AdaptiveCyclePolicy(
-        backend._active_validation_profile(), initial=5, block_size=3,
-    )
-    backend.start_run()
     return int(app.exec())
 
 

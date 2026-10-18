@@ -1071,6 +1071,16 @@ class AutosolveWindow(QMainWindow):
             toggle_auto_rotate=lambda: self.auto_rotate_button.toggle(),
         )
         root.addWidget(self.structure_canvas, 14)
+        self.search_placeholder = QLabel(
+            "<b>Searching for a solution</b><br><br>"
+            "Superflip and SharpED are searching the electron-density maps.<br>"
+            "The first structure will appear when EDMA analysis finishes."
+        )
+        self.search_placeholder.setAlignment(Qt.AlignCenter)
+        self.search_placeholder.setWordWrap(True)
+        self.search_placeholder.setStyleSheet("font-size: 12pt; color: #52658b; padding: 24px;")
+        self.search_placeholder.hide()
+        root.addWidget(self.search_placeholder, 14)
 
         # One column per panel under it (equal stretch, matching the
         # equal-width subplot grid): composition, technical origin, and in
@@ -1946,6 +1956,9 @@ class AutosolveWindow(QMainWindow):
         self.backend.request_autosolve_pass_now()
 
     def _on_cancel(self) -> None:
+        if str(getattr(self.backend, "_run_status", "")).upper() in {"ERROR", "CANCELLED", "STOPPED", "COMPLETE"}:
+            self.close()
+            return
         self.backend.autosolve_cancel()
 
     def _on_correction(self, kind: str) -> None:
@@ -2454,6 +2467,25 @@ class AutosolveWindow(QMainWindow):
                 backend.current_cycle_progress.setRange(0, 1)
                 backend.current_cycle_progress.setValue(0)
         self.status_headline.setText(f"{self.workflow_name} · {cycle_stage_text}")
+        if not self._ordinary_dual_workflow:
+            stage_label = {
+                guided.STAGE_SEARCH: "Phase search",
+                guided.STAGE_PREDICTING: "Creating structure prediction",
+                guided.STAGE_REFINEMENT: "Refinement",
+                guided.STAGE_CORRECTION: "Map feedback",
+                guided.STAGE_TUNING: "Review",
+                guided.STAGE_REVIEW: "Review",
+            }.get(stage, "Preparing")
+            if progress_state is None and not waiting:
+                stage_label = "Preparing" if running else "Not started"
+                cycle_stage_text = ""
+            if run_status in {"ERROR", "CANCELLED", "STOPPED", "COMPLETE"}:
+                stage_label = {"ERROR": "Failed", "COMPLETE": "Completed"}.get(run_status, run_status.title())
+            self.setWindowTitle(f"SharpED Autosolve — {stage_label}")
+            self.status_headline.setText(f"SharpED Autosolve — {stage_label}" + (f" · {cycle_stage_text}" if cycle_stage_text else ""))
+            if not running and not waiting:
+                backend.current_cycle_progress.setRange(0, 1)
+                backend.current_cycle_progress.setValue(0)
         # Item 25: the cycle-loop progress bars (Overall / stage) are
         # meaningless once the workflow is idle in Predicted-model tuning
         # or Final Review -- they just sit at their last completed value,
@@ -2467,9 +2499,25 @@ class AutosolveWindow(QMainWindow):
 
         failed = run_status == "ERROR" or (stage == guided.STAGE_PREDICTION_FAILED and run_status != "CANCELLED")
         self.retry_button.setVisible(failed)
+        terminal = run_status in {"ERROR", "CANCELLED", "STOPPED", "COMPLETE"}
+        self.cancel_button.setText("Close" if terminal else "Cancel")
+        self.cancel_button.setToolTip("Close this window; completed results remain on disk." if terminal else CANCEL_TOOLTIP)
 
         observed = self._display_panel(guided.ROLE_OBSERVED)
         predicted = self._display_panel(guided.ROLE_PREDICTED)
+        empty_search = not self._ordinary_dual_workflow and observed is None and predicted is None
+        self.search_placeholder.setVisible(empty_search)
+        self.structure_canvas.setVisible(not empty_search)
+        self.formula_row_widget.setVisible(not empty_search)
+        if empty_search:
+            terminal = {"ERROR": "Calculation failed", "CANCELLED": "Operation cancelled", "STOPPED": "Workflow stopped"}.get(run_status)
+            self.search_placeholder.setText(
+                f"<b>{terminal}</b><br><br>No completed structure is available."
+                if terminal else "<b>Searching for a solution</b><br><br>"
+                "Superflip and SharpED are searching the electron-density maps.<br>"
+                "The first structure will appear when EDMA analysis finishes."
+            )
+            self._rotate_timer.stop()
         # Reference atoms populate asynchronously, part-way through cycle 1,
         # independently of either recommendation -- its own arrival must
         # trigger a re-render too.
@@ -2808,6 +2856,33 @@ class AutosolveWindow(QMainWindow):
         if self.backend._run_status in {"CANCELLED", "STOPPED", "ERROR"}:
             observed_waiting = f"{self.backend._run_status.title()} · no completed Charge-flipping structure"
             predicted_waiting = f"{self.backend._run_status.title()} · no completed Structure prediction"
+        elif self._ordinary_dual_workflow and (
+            self.backend._operation_states
+            or any(job.status in {"queued", "running"} for job in self.backend._structure_jobs.values())
+        ):
+            observed_waiting = (
+                'Superflip map ready — EDMA analysis running.\nExtracting the charge-flipping structure.'
+                if any(job.source == 'superflip' and job.status in {'queued', 'running'} for job in self.backend._structure_jobs.values()) else
+                'Running Superflip\nGenerating the charge-flipping electron-density map.'
+                if any(name == 'Superflip' and status == 'running' for name, _cycle, status in self.backend._operation_states.values()) else
+                'Preparing Superflip\nWaiting for the charge-flipping map.'
+            )
+            predicted_waiting = (
+                'Structure ready — EDMA analysis running.\nExtracting the predicted structure.'
+                if any(job.source == 'deblurred' and job.status in {'queued', 'running'} for job in self.backend._structure_jobs.values()) else
+                'SharpED processing\nWaiting for the completed server result.'
+                if any(name == 'SharpED' and status == 'running' for name, _cycle, status in self.backend._operation_states.values()) else
+                'Waiting for Superflip\nStructure prediction will start when its\nrequired input map is available.'
+            )
+            sharped_jobs = [cycle for name, cycle, status in self.backend._operation_states.values()
+                            if name == 'SharpED' and status == 'running']
+            if sharped_jobs and not any(job.source == 'deblurred' and job.status in {'queued', 'running'} for job in self.backend._structure_jobs.values()):
+                phase = self.backend._sharped_display_phases.get(max(sharped_jobs), 'Processing')
+                predicted_waiting = {
+                    'Uploading': 'SharpED uploading\nSending the required electron-density map.',
+                    'Downloading': 'SharpED downloading result\nReceiving the predicted electron-density map.',
+                    'Result received': 'Structure ready\nPreparing EDMA analysis.',
+                }.get(phase, predicted_waiting)
 
         superflip_best = best_caption(guided.ROLE_OBSERVED, observed_panel)
         deblurred_best = best_caption(guided.ROLE_PREDICTED, predicted_panel)
@@ -2832,6 +2907,14 @@ class AutosolveWindow(QMainWindow):
             deblurred_best, self._panel_path(predicted_panel), guided.ROLE_PREDICTED,
             predicted_panel.cycle if predicted_panel is not None else None,
         ))
+
+        if not self._ordinary_dual_workflow and predicted_panel is None and not predicting:
+            panels = [panel for panel in panels if panel[5] != guided.ROLE_PREDICTED]
+            if observed_panel is None:
+                panels = [(title, atoms,
+                           "Searching for a solution\nThe first structure will appear when EDMA analysis finishes.",
+                           best, path, role, cycle)
+                          for title, atoms, empty, best, path, role, cycle in panels]
 
         self.structure_figure.clear()
         self.structure_axes = []
@@ -2957,6 +3040,10 @@ class AutosolveWindow(QMainWindow):
             (guided.ROLE_PREDICTED, deblurred_atoms, predicted_panel),
         ):
             column = self.review_columns[role]
+            column["column"].setVisible(
+                self._ordinary_dual_workflow or role != guided.ROLE_PREDICTED
+                or predicted_panel is not None or predicting
+            )
             path = self._panel_path(panel)
             composition_label = "ASU composition" if self._ordinary_dual_workflow else "EDMA asymmetric-unit composition"
             text = panel.edma_asu_composition if panel is not None and path is not None else ""

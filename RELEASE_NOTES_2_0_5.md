@@ -7,6 +7,20 @@ release, tag or binary has been produced by this version change.
 
 ## Changes since 2.0.4
 
+- Autosolve explicitly uses the live UNIVERSAL API model for search,
+  prediction, refinement and correction. This is an intentional change to its
+  neural-network predictions; normal Wizard PEAK A/SEED recommendations and
+  Professional manual selections remain unchanged.
+- Autosolve checks requirements before opening Execution, supports cancellable
+  catalogue probing and prevents duplicate starts. Missing models are server
+  compatibility failures, with no silent model fallback.
+- Visible configuration recovery, separate authentication/authorization errors,
+  safe OAuth download failures and additional diagnostic redaction.
+- Stage-aware Autosolve presentation, adaptive comparison panels, explicit
+  terminal Close and preserved scientific candidate/provenance safeguards.
+- Shared trackball camera, persistent optional inversion, coalesced motion,
+  geometry reuse, compact metric help and measured full-cell rendering checks.
+
 - Stable Jana2020 Wizard geometry across all three pages, disclosure changes,
   asynchronous model-list updates and validation warnings. Preserve user resize
   and position; clamp restored windows to the available screen.

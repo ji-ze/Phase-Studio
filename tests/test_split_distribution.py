@@ -322,6 +322,11 @@ class SplitDistributionTests(unittest.TestCase):
                         "apply_map_feedback_to_reflections", "compute_rfree", "atom_recall_precision",
                         # Explicit profile-aware per-cycle/source reporting.
                         "write_metrics_csv"}
+            if filename == "jana_superflip.py":
+                # 2.0.5 moves the existing launcher preflight before window
+                # creation. Numerical writers and Jana protocol stay pinned.
+                # test_autosolve_window_routing and remediation tests cover it.
+                excluded.add("launch_autosolve_from_jana")
             if filename == "app.py":
                 # 2.0.4 explicitly modernizes only the HKL diagnostic load and
                 # coverage analysis: shared cached parsing, invalid-index

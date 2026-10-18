@@ -13,13 +13,14 @@ except Exception:
 
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(\b(?:api[_ -]?token|access[_ -]?token|authorization[_ -]?token|"
-    r"bearer[_ -]?token|job[_ -]?token|download[_ -]?token|token)\b[\"']?\s*[:=]\s*)"
+    r"bearer[_ -]?token|job[_ -]?token|download[_ -]?token|api[_ -]?key|access[_ -]?key|"
+    r"authorization[_ -]?code|code[_ -]?verifier|pkce[_ -]?verifier|token)\b[\"']?\s*[:=]\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[^\s,;]+")
 _TOKEN_URL_RE = re.compile(r"(?i)(/api/user/sharp-ed/(?:status|download)/)[^\s/?#]+")
 _TOKEN_QUERY_RE = re.compile(
-    r"(?i)([?&](?:token|access_token|api_token|job_token|download_token)=)[^&#\s]+"
+    r"(?i)([?&](?:code|code_verifier|token|access_token|api_token|job_token|download_token)=)[^&#\s]+"
 )
 
 _PRIVATE_VALUES: set[str] = set()
@@ -122,7 +123,13 @@ def build_error_report(
         guidance = "Repair the Phase Studio integration for this Jana2020 installation and try again."
     elif "sharped" in lower or resolved_subsystem == "SharpED":
         resolved_subsystem = "SharpED"
-        if any(token in lower for token in ("missing sharped api token", "api token is required", "http error 401", "http error 403", "authentication", "unauthorized", "forbidden")):
+        if (getattr(error, "code", None) == 403 or "http error 403" in lower
+                or "http 403" in lower or getattr(error, "category", "") == "authorization"):
+            category = "sharped_access_denied"
+            title = "SharpED access unavailable"
+            summary = "SharpED denied this request."
+            guidance = "Check the account's access with the SharpED administrator. The response does not by itself establish a billing problem."
+        elif any(token in lower for token in ("missing sharped api token", "api token is required", "http error 401", "authentication", "unauthorized")):
             category = "sharped_authentication"
             title = "SharpED account access"
             summary = "The SharpED access key is missing or was not accepted."
@@ -295,6 +302,17 @@ def build_error_report(
         title = "Crystal metadata unavailable"
         summary = "The selected crystal metadata source is incomplete or unavailable."
         guidance = "Select a readable metadata source or complete the Manual metadata fields."
+
+    # Prefer transport classifications over translated/variable server text.
+    if resolved_subsystem == "SharpED":
+        classified = {
+            "authentication": ("sharped_authentication", "Sign in to SharpED again", "SharpED authentication could not be completed.", "Sign in with Jana2020 or use an access key, then retry the unfinished operation."),
+            "authorization": ("sharped_access_denied", "SharpED access unavailable", "SharpED denied this request.", "Check account access with the SharpED administrator; this response alone does not establish a billing problem."),
+            "malformed_catalog": ("sharped_catalogue", "Cannot check available models", "The SharpED catalogue response could not be read.", "Check the catalogue again. Its availability is unknown; no model removal is inferred."),
+            "tls_certificate": ("sharped_tls_certificate", "Secure connection could not be verified", "The configured SharpED server certificate could not be verified.", "Check the Windows trust store and system date/time. Do not disable certificate verification."),
+        }.get(getattr(error, "category", ""))
+        if classified:
+            category, title, summary, guidance = classified
 
     path_lines = [f"Path: {Path(path)}" for path in paths if str(path).strip()]
     error_type = type(error).__name__ if isinstance(error, BaseException) else "Error"
@@ -497,6 +515,11 @@ def show_phase_studio_error(
     if chosen:
         for action in actions:
             if action.label == chosen:
-                action.callback()
+                try:
+                    action.callback()
+                except Exception as exc:
+                    show_phase_studio_error(parent, build_error_report(
+                        exc, subsystem=report.subsystem, operation=f"Recovery: {action.label}",
+                    ))
                 break
     return chosen

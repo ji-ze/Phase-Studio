@@ -44,8 +44,8 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 results_log = []
 
-PHASE_BOOST = "koala phase boost 2"
-PROGRESSIVE = "koala model progressive"
+PHASE_BOOST = "UNIVERSAL"
+PROGRESSIVE = "UNIVERSAL"
 SUPERFLIP_SIGMA = 2.0
 SHARPED_SIGMA = 4.0
 
@@ -140,7 +140,7 @@ class Fakes:
             body = bytes(data or b"")
             model = re.search(rb'name="model"\r\n\r\n(.*?)\r\n', body, re.S).group(1).decode("utf-8")
             filename = re.search(rb'filename="([^"]+)"', body).group(1).decode("utf-8")
-            if self.fail_model and model == self.fail_model:
+            if self.fail_model and model == self.fail_model and len(self.requests) >= 5:
                 raise RuntimeError("SharpED server unavailable (test)")
             self.requests.append((filename, model))
             self._tokens += 1
@@ -259,6 +259,12 @@ def main():
             self.blocks = []
             self.progress_values = []
             self.logs = []
+            original_queue_event = win._queue_run_event
+            def record_event(kind, payload, *args, **kwargs):
+                if kind == "log":
+                    self.logs.append(getattr(payload, "text", str(payload)))
+                return original_queue_event(kind, payload, *args, **kwargs)
+            win._queue_run_event = record_event
             win.continue_run = self._request
 
         def _request(self):
@@ -273,7 +279,7 @@ def main():
                 if isinstance(payload, appmod.RunScopedPayload):
                     payload = payload.payload
                 if kind == "log":
-                    self.logs.append(getattr(payload, "text", str(payload)))
+                    pass  # captured before Qt can consume the queued event
                 elif kind == "progress":
                     self.win._set_overall_progress_value(int(payload))
                     self.progress_values.append(self.win.progress_bar.value())
@@ -431,22 +437,19 @@ def main():
     status = reqs.check_sharped_api("https://example.invalid", "token", client_factory=FakeClient)
     check("preflight keeps the catalog's exact model names from its one request",
           status.ok and PHASE_BOOST in status.sharped_models and PROGRESSIVE in status.sharped_models)
-    check("exact model match only ('koala phase boost' does not satisfy 'koala phase boost 2')",
-          guided.missing_required_models(["koala phase boost", PROGRESSIVE]) == [PHASE_BOOST])
+    check("exact UNIVERSAL identifier is required", guided.missing_required_models(["koala phase boost"]) == ["UNIVERSAL"])
     win, _state = build()
-    win._sharped_catalog_models = ("koala phase boost", PROGRESSIVE)
-    check("preflight fails clearly when 'koala phase boost 2' is unavailable, naming it",
-          win._autosolve_models_available() is False and "'koala phase boost 2'" in str(vars(win.errors[-1])))
-    win._sharped_catalog_models = (PHASE_BOOST,)
-    check("preflight fails when 'koala model progressive' is unavailable", win._autosolve_models_available() is False)
-    win._sharped_catalog_models = (PHASE_BOOST, PROGRESSIVE)
-    check("preflight passes when both exact models are listed", win._autosolve_models_available() is True)
+    win._sharped_catalog_models = ("koala phase boost",)
+    check("missing UNIVERSAL is a model compatibility error",
+          win._autosolve_models_available() is False and win.errors[-1].category == "sharped_model_missing")
+    win._sharped_catalog_models = ("UNIVERSAL",)
+    check("UNIVERSAL alone satisfies Autosolve preflight", win._autosolve_models_available() is True)
     win.close()
 
     # =====================================================================
     # 2. Threshold policy: 1.0 / 1.0 defaults, 0.1-3.0, variable step.
     # =====================================================================
-    check("defaults: Charge-flipping solution 1.0 sigma, Model prediction 1.0 sigma",
+    check("defaults: Charge-flipping solution 1.0 sigma, Structure prediction 1.0 sigma",
           guided.OBSERVED_THRESHOLD_SIGMA == 1.0 and guided.PREDICTED_THRESHOLD_SIGMA == 1.0)
     down, value = [1.2], 1.2
     while (nxt := guided.stepped_threshold(value, True)) is not None:
@@ -475,7 +478,7 @@ def main():
         win._run_pipeline_cycles(state)
         win.results = list(state.all_results)
         driver._drain()
-        check("during the search there is no Model prediction (phase-boost output is not one)",
+        check("during the search there is no Structure prediction (phase-boost output is not one)",
               win.autosolve_display_panel("predicted") is None and win.autosolve_predicted_candidates() == [])
         search_requests = list(fakes.requests)
         search_edma = list(fakes.edma)
@@ -483,10 +486,10 @@ def main():
         driver.wait_tasks()
     check("shared search: the fixed 5-cycle budget ran before prediction",
           state.completed_cycles == 5 and len(fakes.superflip_inputs) == 5)
-    check("search: every SharpED REQUEST sent carries model exactly 'koala phase boost 2'",
+    check("search: every SharpED REQUEST sent carries model exactly 'UNIVERSAL'",
           len(search_requests) == 5 and all(model == PHASE_BOOST for _file, model in search_requests))
-    check("search: zero requests use 'koala phase boost' (without 2) or 'koala model progressive'",
-          not any(model in {"koala phase boost", PROGRESSIVE} for _file, model in search_requests))
+    check("search: obsolete koala models are never submitted",
+          not any(model in {"koala phase boost", "koala model progressive"} for _file, model in search_requests))
     sf_inputs = [e for e in search_edma if e["kind"] == "sf"]
     db_inputs = [e for e in search_edma if e["kind"] == "db"]
     check("search EDMA input: Superflip maps at exactly 1.0 sigma (generated plimit = 1.0 x map sigma)",
@@ -495,26 +498,26 @@ def main():
           len(db_inputs) == 5 and all(e["multiplier"] == 1.0 and abs(e["plimit"] - SHARPED_SIGMA) < 1e-6 for e in db_inputs))
     check("search EDMA input files literally say 'plimit 2' / 'plimit 4' (1.0 x sigma)",
           all("plimit 2\n" in e["inp"] for e in sf_inputs) and all("plimit 4\n" in e["inp"] for e in db_inputs))
-    check("results carry exact provenance ('koala phase boost 2', EDMA 1.0 / 1.0 sigma)",
+    check("results carry exact provenance ('UNIVERSAL', EDMA 1.0 / 1.0 sigma)",
           all(r.sharped_model == PHASE_BOOST and r.superflip_edma_sigma == 1.0 and r.deblur_edma_sigma == 1.0
               for r in state.all_results))
-    check("log: '[SharpED] Model: koala phase boost 2' before each search submission",
-          sum(1 for line in driver.logs if line == f"[SharpED] Model: {PHASE_BOOST}") == 5)
+    check("log: '[SharpED] Model: UNIVERSAL' before each search submission",
+          sum(1 for line in driver.logs if line == f"[SharpED] Model: {PHASE_BOOST}") == len(fakes.requests))
     model2, ident2 = superflip_model(fakes.superflip_inputs[1])
     check("search feedback: cycle 2's generated Superflip input names a CIF model (a STRUCTURE)",
           model2 is not None and model2.suffix.lower() == ".cif")
     check("search feedback: that model is cycle 1's SharpED map -> EDMA(1.0) structure",
           ident2 == ("sharped", 1, peaks_for(1.0)))
     prediction_requests = fakes.requests[len(search_requests):]
-    check("first prediction: exactly ONE SharpED request, model exactly 'koala model progressive'",
+    check("first prediction: exactly ONE SharpED request, model exactly 'UNIVERSAL'",
           prediction_requests == [("cycle_004_superflip.xplor", PROGRESSIVE)])
     pred_edma = [e for e in fakes.edma if e["kind"] == "pred"]
     check("first prediction: EDMA on the progressive map at exactly 1.0 sigma (generated input)",
           len(pred_edma) == 1 and pred_edma[0]["multiplier"] == 1.0)
-    check("log: '[SharpED] Model: koala model progressive' before the prediction",
+    check("log: '[SharpED] Model: UNIVERSAL' before the prediction",
           f"[SharpED] Model: {PROGRESSIVE}" in driver.logs)
-    check("log: the prediction's EDMA is labelled as the Model prediction map, not a Superflip map",
-          any(line.strip().startswith("[EDMA] Model prediction map · threshold 1 σ") for line in driver.logs)
+    check("log: the prediction's EDMA is labelled as the Structure prediction map, not a Superflip map",
+          any(line.strip().startswith("[EDMA] Structure prediction map · threshold 1 σ") for line in driver.logs)
           and not any(line.startswith("[EDMA] Superflip map") and "prediction" in line for line in driver.logs))
     check("after the first prediction: INITIAL Predicted-model tuning, not the Final Review",
           win._autosolve_stage == "tuning" and str(win._run_status).upper() == "REVIEW")
@@ -529,7 +532,7 @@ def main():
     check("tuning: Charge-flipping solution = best Superflip cycle 4 at 1.0 sigma; Predicted = cycle 4 at 1.0 sigma",
           observed.cycle == 4 and observed.threshold_sigma == 1.0 and predicted.cycle == 4 and predicted.threshold_sigma == 1.0)
     check("tuning: technical labels", observed.technical_label() == "Superflip · EDMA 1.00 σ"
-          and predicted.technical_label() == "SharpED · koala model progressive · EDMA 1.00 σ")
+          and predicted.technical_label() == "SharpED · UNIVERSAL · EDMA 1.00 σ")
     before = fakes.counts()
     check("tuning: Charge-flipping solution is read-only (+/- refused, nothing runs)",
           win.autosolve_adjust_threshold("observed", True) is False and fakes.counts() == before)
@@ -538,7 +541,7 @@ def main():
           win.autosolve_pass_panel("observed") is False and win.autosolve_pass_panel("predicted") is False)
     check("tuning: no measured-data correction yet", win.autosolve_request_correction("intensity") is False)
 
-    # + atoms / - atoms on the Model prediction: EDMA only, same map.
+    # + atoms / - atoms on the Structure prediction: EDMA only, same map.
     edma_log_start = len(driver.logs)
     with Patches(fakes):
         for add_atoms, expected in ((True, 0.8), (True, 0.7), (False, 0.8), (True, 0.7)):
@@ -561,22 +564,22 @@ def main():
             check(f"{label}: activity cleared afterwards (no stale progress)", win.current_cycle_detail.text() == "Review")
         driver._drain()
     threshold_logs = driver.logs[edma_log_start:]
-    check("threshold EDMA log names the Model prediction map (never 'Superflip map')",
-          any(line.strip().startswith("[EDMA] Model prediction map · threshold 0.7 σ") for line in threshold_logs)
+    check("threshold EDMA log names the Structure prediction map (never 'Superflip map')",
+          any(line.strip().startswith("[EDMA] Structure prediction map · threshold 0.7 σ") for line in threshold_logs)
           and not any(line.strip().startswith("[EDMA] Superflip map") for line in threshold_logs))
     check("tuning: Charge-flipping solution threshold untouched (1.0 sigma)", win.autosolve_panels["observed"].threshold_sigma == 1.0)
 
     # =====================================================================
-    # 4. Refine 3 cycles from the tuned Model prediction (0.7 sigma).
+    # 4. Refine 3 cycles from the tuned Structure prediction (0.7 sigma).
     # =====================================================================
     seed_identity = identity(Path(win.autosolve_panels["predicted"].current_cif))
     n_sf, n_req, n_edma = fakes.counts()
     started = refine(win, driver, fakes, "predicted", flat_block(6))
     inputs = {p.parent.name: p for p in fakes.superflip_inputs}
-    check("Refine starts refinement from the Model prediction", started)
+    check("Refine starts refinement from the Structure prediction", started)
     check("refinement: exactly 3 cycles before the improvement decision", driver.blocks[-1] == (6, 8))
     model6, ident6 = superflip_model(inputs["cycle_006"])
-    check("seed: cycle 6's generated current_modelfile.cif is the tuned 0.7-sigma Model prediction",
+    check("seed: cycle 6's generated current_modelfile.cif is the tuned 0.7-sigma Structure prediction",
           model6 is not None and model6.name == "current_modelfile.cif" and ident6 == seed_identity
           and seed_identity == ("sharped", 4, peaks_for(0.7)))
     check("seed: NOT cycle 5's default-threshold SharpED structure", ident6 != ("sharped", 5, peaks_for(1.0)))
@@ -584,7 +587,7 @@ def main():
     check("topology: cycle 7's model is cycle 6's progressive map -> EDMA(0.7) structure",
           ident7 == ("sharped", 6, peaks_for(0.7)))
     block_requests = fakes.requests[n_req:]
-    check("refinement: every SharpED request carries exactly 'koala model progressive'",
+    check("refinement: every SharpED request carries exactly 'UNIVERSAL'",
           len(block_requests) == 3 and all(model == PROGRESSIVE for _file, model in block_requests))
     check("refinement: SharpED runs on each refinement cycle's own Superflip map",
           [file for file, _m in block_requests] == [f"cycle_{c:03d}_superflip.xplor" for c in range(6, 9)])
@@ -593,14 +596,14 @@ def main():
           len(block_db) == 3 and all(e["multiplier"] == 0.7 for e in block_db))
     block_sf = [e for e in fakes.edma[n_edma:] if e["kind"] == "sf"]
     check("refinement: Observed-data EDMA stays at 1.0 sigma", len(block_sf) == 3 and all(e["multiplier"] == 1.0 for e in block_sf))
-    check("log: '[Refinement seed] Model prediction · Cycle 4 · EDMA 0.7 σ' for the first cycle",
-          any(line.startswith("[Refinement seed] Model prediction · Cycle 4 · EDMA 0.70 σ") for line in driver.logs))
+    check("log: '[Refinement seed] Structure prediction · Cycle 4 · EDMA 0.7 σ' for the first cycle",
+          any(line.startswith("[Refinement seed] Structure prediction · Cycle 4 · EDMA 0.70 σ") for line in driver.logs))
     check("log: the first refinement cycle does NOT claim its model came 'from cycle 5'",
           not any("[Cycle 6] Next-cycle model" in line for line in driver.logs))
     check("log: later cycles keep the usual previous-cycle description",
           any("[Cycle 7] Next-cycle model" in line and "(from cycle 6)" in line for line in driver.logs))
-    check("log: every refinement submission is preceded by '[SharpED] Model: koala model progressive'",
-          sum(1 for line in driver.logs if line == f"[SharpED] Model: {PROGRESSIVE}") == 4)
+    check("log: every refinement submission is preceded by '[SharpED] Model: UNIVERSAL'",
+          sum(1 for line in driver.logs if line == f"[SharpED] Model: {PROGRESSIVE}") == len(fakes.requests))
     check("after the block: Final Review (not tuning)", win._autosolve_stage == "review")
     check("after the block: the Predicted threshold is still 0.7 sigma (no hidden reset)",
           win.autosolve_panels["predicted"].threshold_sigma == 0.7)
@@ -621,7 +624,7 @@ def main():
     seed_win, seed_state, seed_driver, seed_fakes = session("A")
     with Patches(seed_fakes):
         tuned = tune(seed_win, seed_driver, "predicted", 0.6)
-    check("seed display: Model prediction tunable to 0.6 sigma", tuned)
+    check("seed display: Structure prediction tunable to 0.6 sigma", tuned)
     seed_panel_before = seed_win.autosolve_panels["predicted"]
     seed_identity_before = identity(Path(seed_panel_before.current_cif))
     check("seed display: before refinement starts, no seed-display state yet",
@@ -637,7 +640,7 @@ def main():
           and seed_win.autosolve_panels["predicted"].threshold_sigma == 0.6
           and identity(Path(seed_win.autosolve_panels["predicted"].current_cif)) == seed_identity_before)
     check("seed display: the seed note names the tuned 0.6-sigma structure, not a default threshold",
-          seed_win.autosolve_refinement["seed_note"] == f"Model prediction · Cycle 4 · EDMA {guided.format_sigma(0.6)}")
+          seed_win.autosolve_refinement["seed_note"] == f"Structure prediction · Cycle 4 · EDMA {guided.format_sigma(0.6)}")
 
     # Cycle 7's score (0.20) genuinely beats the pre-refinement best (cycle
     # 4, 0.28), so the post-block "best" is a real new candidate, not just
@@ -703,7 +706,7 @@ def main():
         check("Observed selector: no Superflip/SharpED rerun", f.counts()[:2] == before[:2])
         w.autosolve_handoff_state = "idle"
         handoffs.clear()
-        check("Final Review: Model prediction can be passed", w.autosolve_pass_panel("predicted"))
+        check("Final Review: Structure prediction can be passed", w.autosolve_pass_panel("predicted"))
         pred = w.autosolve_panels["predicted"]
         result = w._autosolve_result_for_panel(pred)
         check("Predicted selector: SharpED source, canonical progressive map, current threshold, exact model",
@@ -808,9 +811,9 @@ def main():
     check("correction runs the existing Map Feedback stage (weak-intensity, from the next cycle)",
           started and st.cfg.map_feedback_intensity_enabled and st.cfg.map_feedback_intensity_from_cycle == 9)
     correction_models = [model for file, model in f.requests[n_req:] if file.startswith("cycle_")]
-    check("correction: the phase search continues with 'koala phase boost 2'",
+    check("correction: the phase search continues with 'UNIVERSAL'",
           correction_models and all(model == PHASE_BOOST for model in correction_models))
-    check("correction: afterwards a new Model prediction is tuned (tuning stage again)", w._autosolve_stage == "tuning")
+    check("correction: afterwards a new Structure prediction is tuned (tuning stage again)", w._autosolve_stage == "tuning")
     check("correction: the ORIGINAL measured reflection file is untouched", guided.file_sha256(original) == original_hash)
     provenance = json.loads((Path(st.cfg.work_dir) / "autosolve_result_provenance.json").read_text(encoding="utf-8"))
     entry = next((e for e in provenance["entries"] if e.get("action") == "measured_data_correction"), None)
@@ -839,11 +842,11 @@ def main():
     aw._refresh_tick()
     app.processEvents()
     captions = [t.get_text() for t in aw._panel_captions]
-    check("window tuning: panels titled 'Charge-flipping solution' / 'Model prediction', 'Best · Cycle 4' on both",
-          "Charge-flipping solution" in captions and "Model prediction" in captions and captions.count("Best · Cycle 4") == 2)
+    check("window tuning: panels titled 'Charge-flipping solution' / 'Structure prediction', 'Best · Cycle 4' on both",
+          "Charge-flipping solution" in captions and "Structure prediction" in captions and captions.count("Best · Cycle 4") == 2)
     check("window tuning: Charge-flipping solution shows NO actions (comparison only)",
           texts(aw, "observed") == [] and not aw.review_columns["observed"]["actions"].isVisibleTo(aw))
-    check("window tuning: Model prediction shows exactly '+ atoms', '- atoms', 'Refine 3 cycles'",
+    check("window tuning: Structure prediction shows exactly '+ atoms', '- atoms', 'Refine 3 cycles'",
           texts(aw, "predicted") == ["+ atoms", "- atoms", "Refine 3 cycles"])
     check("window tuning: early Pass to Jana2020 is available for completed results",
           len(visible_pass_buttons(aw)) == 1 and aw.pass_now_button.isEnabled())
@@ -854,7 +857,7 @@ def main():
           "at their last completed value", not w.run_status_panel.isVisible())
     check("window tuning: no measured-data correction offered yet", not aw.correction_row_widget.isVisibleTo(aw))
     w.autosolve_panels["predicted"].busy_sigma = 0.7
-    w.autosolve_activity = "Model prediction · EDMA 0.70 σ · recalculating structure"
+    w.autosolve_activity = "Structure prediction · EDMA 0.70 σ · recalculating structure"
     aw._refresh_tick()
     check("window busy: one consistent busy state (all Predicted actions disabled) + status text",
           not any(aw.review_columns["predicted"][k].isEnabled() for k in ("add", "remove", "recalc"))
@@ -867,7 +870,7 @@ def main():
 
     w._autosolve_stage = "refinement"
     w.autosolve_refinement = {"role": "predicted", "cycle": 4, "threshold_sigma": 0.7, "block": 1, "block_start": 6,
-                              "seed_note": "Model prediction · Cycle 4 · EDMA 0.70 σ"}
+                              "seed_note": "Structure prediction · Cycle 4 · EDMA 0.70 σ"}
     w._cycle_progress_state = appmod.CycleProgressState(cycle_index=6, cycle_total=8, stage_name="Superflip", stage_index=1, stage_total=5)
     w._set_run_status("Running")
     aw = AutosolveWindow(w, "A")
@@ -967,8 +970,8 @@ def main():
     aw.show()
     aw._refresh_tick()
     fig_texts = [t.get_text() for t in aw.structure_figure.findobj(lambda a: hasattr(a, "get_text"))]
-    check("window search: Predicted panel waits ('Generated after the phase search')",
-          any("Generated after the phase search" in t for t in fig_texts))
+    check("window search: no empty prediction subplot before prediction",
+          len(aw.structure_axes) == 1)
     check("window search: completed results enable early Pass while panel actions remain hidden",
           texts(aw, "observed") == [] and texts(aw, "predicted") == []
           and len(visible_pass_buttons(aw)) == 1 and aw.pass_now_button.isEnabled())

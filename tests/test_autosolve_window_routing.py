@@ -38,7 +38,7 @@ def main():
 
     appmod.IterativeSuperflipPipelineQtGUI.save_settings = lambda self: None
     appmod.IterativeSuperflipPipelineQtGUI.load_settings = lambda self: None
-    appmod.IterativeSuperflipPipelineQtGUI.start_run = lambda self: None
+    appmod.IterativeSuperflipPipelineQtGUI.start_run = lambda self: self._set_run_status("RUNNING")
     QApplication.exec = lambda self: 0
 
     tmp = Path(tempfile.mkdtemp())
@@ -88,6 +88,17 @@ def main():
             app.processEvents()
 
         return shown, restore
+
+    successful_start = appmod.IterativeSuperflipPipelineQtGUI.start_run
+    appmod.IterativeSuperflipPipelineQtGUI.start_run = lambda self: None
+    shown, restore = track_shown()
+    try:
+        code = js.launch_autosolve_from_jana(inflip, js.JanaRunOptions(action="autosolve", autosolve_option="A"))
+        check("failed preflight never creates an Autosolve execution window", code == 1 and not shown["autosolve"])
+        check("failed preflight never exposes the hidden backend", not shown["full_gui"])
+    finally:
+        restore()
+        appmod.IterativeSuperflipPipelineQtGUI.start_run = successful_start
 
     # =====================================================================
     # Item 25: Autosolve (Option A and Option B) must show AutosolveWindow
@@ -196,7 +207,7 @@ def main():
     # backend each launch actually starts.
     # =====================================================================
     started = []
-    appmod.IterativeSuperflipPipelineQtGUI.start_run = lambda self: started.append(self)
+    appmod.IterativeSuperflipPipelineQtGUI.start_run = lambda self: (started.append(self), self._set_run_status("RUNNING"))
     import phase_studio.autosolve_review as js_guided
 
     def started_mode(window):
@@ -250,7 +261,7 @@ def main():
                       started[0]._combo_value("sharped_model") == js_guided.PHASE_SEARCH_MODEL)
         finally:
             restore()
-    appmod.IterativeSuperflipPipelineQtGUI.start_run = lambda self: None
+    appmod.IterativeSuperflipPipelineQtGUI.start_run = lambda self: self._set_run_status("RUNNING")
 
     failures = [name for name, ok in results_log if not ok]
     print()
