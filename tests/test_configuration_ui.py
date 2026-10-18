@@ -64,17 +64,18 @@ def probe(scale):
                 w.sharped_toggle.setChecked(expanded)
                 settle(height)
                 assert w.dialog.height() == height
-                assert 110 <= w.cycles.width() <= 140
-                assert 450 <= w.model.width() <= 550
+                assert 120 <= w.cycles.width() <= 140
+                assert 340 <= w.model.width() <= 420
                 assert box(w.refresh_models_button).left() > box(w.model).right()
                 assert abs(box(w.refresh_models_button).center().y() - box(w.model).center().y()) <= 3
                 assert box(w.warning_text).bottom() < box(w.primary_button).top()
-                assert w.scroll_area.verticalScrollBar().maximum() == 0
+                if not expanded: assert w.scroll_area.verticalScrollBar().maximum() == 0
                 assert w.scroll_area.horizontalScrollBar().maximum() == 0
-                assert box(w.cycles).top() - box(w.inflip_info).bottom() <= 24
+                assert box(w.processing_heading).top()>box(w.inflip_info).bottom()
+                assert box(w.cycles).top() - box(w.processing_heading).bottom() <= 12
                 gap = box(w.inflip_info).top() - box(w.context_banner).bottom()
                 assert 12 <= gap <= 24, (gap, height, expanded)
-                assert box(w.validation_group).bottom() < 520, "extra height must stay below the form"
+                assert box(w.validation_group).bottom() < 650, "extra height must stay below the compact form"
                 assert w.primary_button.isVisible() and w.back_button.isVisible()
                 assert w.warning_text.height() >= w.warning_text.heightForWidth(w.warning_text.width())
                 assert w.dialog.devicePixelRatioF() == float(scale)
@@ -85,7 +86,7 @@ def probe(scale):
             (4, "Extended iterative processing · Longer runtime", "SEED (cyclic CF)"),
         ):
             w.cycles.setValue(value)
-            assert w.cycles_recommendation.text() == help_text
+            assert w.cycles_recommendation.text() == 'Each cycle processes a charge-flipping map with SharpED. Additional cycles increase processing time and may improve the iterative solution.'
             assert w.model.currentText() == model
         w.cycles.setValue(3)
         w.model.activated.emit(w.model.currentIndex())

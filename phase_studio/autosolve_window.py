@@ -79,6 +79,7 @@ from phase_studio.ui_branding import create_phase_studio_app_icon, create_phase_
 from phase_studio.fullscreen_viewer import show_single_structure_viewer
 from phase_studio.structure_camera import StructureCameraController, fit_projected_structure, set_structure_viewport_clip, structure_marker_sizes
 from phase_studio.version import VERSION as __version__
+from phase_studio.structure_camera import camera_settings_button
 
 # Idle rotation: slow enough to read the structure while it turns, fast
 # enough that it visibly reads as "live" rather than static.
@@ -87,7 +88,7 @@ AUTO_ROTATE_DEGREES_PER_TICK = 0.4
 # Resume delay after a manual interaction (drag/scroll/reset) ends, so
 # rotation does not snap back on immediately -- a short pause reads as
 # intentional, not broken.
-AUTO_ROTATE_RESUME_DELAY_SECONDS = 1.2
+AUTO_ROTATE_RESUME_DELAY_SECONDS = 2.0
 # Status/recommendation polling. The backend's own internal QTimer (50ms)
 # already drains its message queue and mutates self.results/_resume_state/
 # _autosolve_policy on its own -- this timer only re-reads that already-
@@ -409,23 +410,29 @@ def periodic_connectivity_unwrap(
     radii = np.asarray([_covalent_radius(a.element) for a in atoms], dtype=np.float64)
     adjacency: List[List[Tuple[int, np.ndarray]]] = [[] for _ in atoms]
     bonds: List[Tuple[int, int]] = []
+    neighbors = np.asarray([(dx,dy,dz) for dx in (-1,0,1)
+                            for dy in (-1,0,1) for dz in (-1,0,1)],dtype=np.int64)
     for i in range(len(atoms) - 1):
-        for j in range(i + 1, len(atoms)):
-            base = np.round(frac[i] - frac[j]).astype(np.int64)
-            best_shift = base
-            best_distance = float("inf")
-            # Rounding each fractional axis is insufficient in a skewed
-            # cell; the 27 neighboring integer translations are exact for
-            # the local crystallographic minimum-image search used here.
-            for dx in (-1, 0, 1):
-                for dy in (-1, 0, 1):
-                    for dz in (-1, 0, 1):
-                        shift = base + np.asarray((dx, dy, dz), dtype=np.int64)
-                        delta = frac[j] + shift - frac[i]
-                        distance = float(np.linalg.norm(delta @ orth.T))
-                        if distance < best_distance:
-                            best_distance, best_shift = distance, shift
-            limit = min(max_length, tolerance * (radii[i] + radii[j]))
+        # Same 27 images and original iteration/tie order, evaluated in batches.
+        # Working memory is O(N); no all-pairs tensor or scientific simplification.
+        base = np.round(frac[i]-frac[i+1:]).astype(np.int64)
+        shifts = base[:,None,:]+neighbors[None,:,:]
+        deltas = frac[i+1:,None,:]+shifts-frac[i]
+        distances = np.linalg.norm(deltas@orth.T,axis=2)
+        choices = np.argmin(distances,axis=1)
+        minima = np.partition(distances,1,axis=1)[:,:2]
+        limits = np.minimum(max_length,tolerance*(radii[i]+radii[i+1:]))
+        for offset, choice in enumerate(choices):
+            j=i+1+offset
+            best_distance=float(distances[offset,choice]);best_shift=shifts[offset,choice]
+            limit=float(limits[offset])
+            ordered=minima[offset]
+            if abs(ordered[1]-ordered[0])<1e-12 or abs(best_distance-limit)<1e-12 or abs(best_distance-1e-3)<1e-12:
+                # Preserve scalar floating-point decisions at ties and cutoffs.
+                best_distance=float('inf')
+                for shift in shifts[offset]:
+                    distance=float(np.linalg.norm((frac[j]+shift-frac[i])@orth.T))
+                    if distance<best_distance:best_distance,best_shift=distance,shift
             if 1.0e-3 < best_distance <= limit:
                 shift = np.asarray(best_shift, dtype=np.int64)
                 adjacency[i].append((j, shift))
@@ -1020,6 +1027,8 @@ class AutosolveWindow(QMainWindow):
         # 2.0.1: what each panel currently shows (ReviewPanel or None) and the
         # signature it was rendered from.
         self._last_panels: dict = {guided.ROLE_OBSERVED: None, guided.ROLE_PREDICTED: None}
+        self._completed_panel_cache = {}
+        self._panel_cache_run_id = str(getattr(backend, '_active_run_id', '') or '')
         self._render_signature = None
         self._panel_atom_counts: dict = {}
         self._panel_retune_errors: dict = {}
@@ -1182,6 +1191,7 @@ class AutosolveWindow(QMainWindow):
         layout.addWidget(fit_button)
         layout.addWidget(reset_button)
         layout.addWidget(self.auto_rotate_button)
+        layout.addWidget(camera_settings_button(self))
         if self._ordinary_dual_workflow:
             fit_button.setToolTip("Fit both displayed structures. Use the panel Fit action to fit only one.")
             reset_button.setToolTip("Reset both viewers. Press R over the active viewer to reset only that view.")
@@ -1258,9 +1268,25 @@ class AutosolveWindow(QMainWindow):
         )
 
     def _sync_cycle_browsers(self) -> None:
+        run_id = str(getattr(self.backend, '_active_run_id', '') or '')
+        if run_id != self._panel_cache_run_id:
+            self._completed_panel_cache.clear()
+            self._panel_cache_run_id = run_id
+            for combo in self._cycle_combos.values():
+                combo.setCurrentIndex(0)
         for role, combo in self._cycle_combos.items():
+            for key, panel in list(self._completed_panel_cache.items()):
+                if not Path(panel.current_cif).is_file():
+                    del self._completed_panel_cache[key]
             selected = combo.currentData()
-            cycles = [int(candidate.cycle) for candidate in self._cycle_candidates(role)]
+            for candidate in self._cycle_candidates(role):
+                panel = self.backend._autosolve_panel_for_candidate(role, candidate)
+                if panel is not None and Path(panel.current_cif).is_file():
+                    self._completed_panel_cache[(role, int(panel.cycle))] = panel
+            live = self.backend.autosolve_display_panel(role)
+            if live is not None and Path(live.current_cif).is_file():
+                self._completed_panel_cache[(role, int(live.cycle))] = live
+            cycles = sorted(cycle for source, cycle in self._completed_panel_cache if source == role)
             combo.setEnabled(bool(cycles))
             existing = [combo.itemData(index) for index in range(combo.count())]
             wanted = [None, *cycles]
@@ -1355,7 +1381,8 @@ class AutosolveWindow(QMainWindow):
         if cycle is None:
             return self.backend.autosolve_display_panel(role)
         candidate = next((item for item in self._cycle_candidates(role) if int(item.cycle) == int(cycle)), None)
-        return self.backend._autosolve_panel_for_candidate(role, candidate)
+        return (self.backend._autosolve_panel_for_candidate(role, candidate) if candidate is not None else
+                self._completed_panel_cache.get((role, int(cycle))))
 
     def _sync_view_controls(self) -> None:
         has_structure = bool(self._structure_interactive_axes)
@@ -1544,6 +1571,8 @@ class AutosolveWindow(QMainWindow):
             if self._ordinary_dual_workflow:
                 cycle_combo = QComboBox()
                 cycle_combo.addItem("Latest", None)
+                cycle_combo.setSizeAdjustPolicy(QComboBox.AdjustToContents)
+                cycle_combo.setMinimumContentsLength(9)
                 cycle_combo.setToolTip("Follow the latest completed cycle, or pin a completed cycle for inspection.")
                 cycle_combo.currentIndexChanged.connect(lambda _index, r=role: self._cycle_selection_changed(r))
                 self._cycle_combos[role] = cycle_combo
@@ -1748,14 +1777,14 @@ class AutosolveWindow(QMainWindow):
             column["fit"].setEnabled(has_structure)
             combo = column.get("cycle_combo")
             if combo is not None:
-                combo.setEnabled(bool(self._cycle_candidates(role)))
+                combo.setEnabled(combo.count() > 1)
                 index = combo.currentIndex()
                 column["previous"].setEnabled(combo.count() > 2 and (index == 0 or index > 1))
                 column["following"].setEnabled(0 < index < combo.count()-1)
             tunable = (
                 panel is not None and (
                     (waiting and backend.autosolve_panel_tunable(role))
-                    or self._ordinary_dual_workflow
+                    or (self._ordinary_dual_workflow and review_candidate is not None)
                 )
             )
             column["actions"].setVisible(tunable or self._ordinary_dual_workflow)
@@ -1873,8 +1902,14 @@ class AutosolveWindow(QMainWindow):
 
     def _on_pass_now(self) -> None:
         """Early handoff stops unfinished jobs only after explicit confirmation."""
+        if self._ordinary_dual_workflow and str(getattr(self.backend, '_run_status', '')).upper() == 'RUNNING':
+            return  # No mutable active-run publication from this execution UI.
         candidates = self._completed_handoff_candidates(verify=True)
         if not candidates:
+            self.backend._append_execution_log(
+                'No coherent completed map/model is ready for handoff. Check the completed candidate artifacts before trying again.',
+                level='WARNING', subsystem='Jana2020',
+            )
             return
         if any(self.backend.review_edma_executor.is_busy(self.backend._review_candidate_key(c)) for c in candidates):
             return
@@ -2193,8 +2228,6 @@ class AutosolveWindow(QMainWindow):
             if role is not None:
                 self._manual_camera_roles.add(role)
                 self._pending_fit_roles.discard(role)
-        if (kind == "rotate" or self._ordinary_dual_workflow and kind in {"pan", "zoom"}) and self.auto_rotate_button.isChecked():
-            self.auto_rotate_button.setChecked(False)
 
     def _on_canvas_button_press(self, event) -> None:
         if getattr(event, "dblclick", False):
@@ -2294,7 +2327,7 @@ class AutosolveWindow(QMainWindow):
     # ----- Live status / structure refresh -----
 
     def _auto_rotate_tick(self) -> None:
-        if not self._auto_rotate_enabled:
+        if not self._auto_rotate_enabled or not self._camera.allow_auto_rotation():
             return
         if self._structure_view_drag_source is not None or self._camera._drag is not None:
             return
@@ -2325,7 +2358,14 @@ class AutosolveWindow(QMainWindow):
         self.pass_now_button.setText(
             "Pass to Jana2020" if backend.autosolve_is_jana() else "Save map and model"
         )
-        self.pass_now_button.setEnabled(candidates_available and not handing_off_now and not interactive_pending)
+        active_handoff_blocked = self._ordinary_dual_workflow and str(getattr(backend, '_run_status', '')).upper() == 'RUNNING'
+        self.pass_now_button.setEnabled(candidates_available and not handing_off_now and not interactive_pending and not active_handoff_blocked)
+        self.pass_now_button.setToolTip(
+            'Wait for completion, or stop the workflow before choosing a completed result.' if active_handoff_blocked else
+            'Wait for a completed candidate.' if not candidates_available else
+            'Wait for the requested EDMA analysis to finish.' if interactive_pending else
+            'Open Result Selection to choose the exact completed map and corresponding model.'
+        )
 
         handoff_state = str(getattr(backend, "autosolve_handoff_state", "idle"))
         busy_headline = HANDOFF_STATE_HEADLINES.get(handoff_state)
@@ -2382,6 +2422,10 @@ class AutosolveWindow(QMainWindow):
             cycle_stage_text = "Stopped · no result passed to Jana2020"
         if self._ordinary_dual_workflow:
             operations = backend.active_workflow_operations()
+            if run_status in {'RUNNING', 'COMPLETE', 'COMPLETED'} and backend.progress_bar.maximum() > 0:
+                backend._set_overall_progress_text(
+                    f'{max(0, backend.progress_bar.value())} of {backend.progress_bar.maximum()} cycles completed'
+                )
             cycle_text = (
                 f"Cycle {progress_state.cycle_index} of {progress_state.cycle_total}"
                 if progress_state is not None else self._preparing_text
@@ -2439,8 +2483,9 @@ class AutosolveWindow(QMainWindow):
         progress_stage = str(getattr(progress_state, "stage_name", "") or "")
         signature = (
             key(observed), key(predicted), reference_available,
-            stage == guided.STAGE_PREDICTING, progress_stage,
-            (tuple(operations), run_status) if self._ordinary_dual_workflow else (),
+            stage == guided.STAGE_PREDICTING, progress_stage if observed is None or predicted is None else '',
+            ((tuple(operations) if observed is None or predicted is None else ()), run_status,
+             getattr(progress_state,'cycle_index',None)) if self._ordinary_dual_workflow else (),
         )
         if not self._rendered_once or signature != self._render_signature:
             self._rendered_once = True
@@ -2482,6 +2527,9 @@ class AutosolveWindow(QMainWindow):
         the bounding sphere of the cell frame and every drawn atom, so the
         complete cell context always stays in view at any rotation."""
         metadata = self._plot_structure_atoms(axis, atoms, empty_text)
+        if self._ordinary_dual_workflow and not metadata:
+            for text in axis.texts:
+                text.set_fontsize(10)
         self._configure_axes_controls(axis)
         if not metadata or not self._structure_depth_artists:
             return False
@@ -2503,7 +2551,7 @@ class AutosolveWindow(QMainWindow):
         a global cell box would dominate it."""
         if len(view.atoms) == 0:
             axis.set_axis_off()
-            axis.text2D(0.5, 0.50, empty_text, ha="center", va="center", fontsize=8, color="#5d6b86", transform=axis.transAxes)
+            axis.text2D(0.5, 0.50, empty_text, ha="center", va="center", fontsize=10 if self._ordinary_dual_workflow else 8, color="#5d6b86", transform=axis.transAxes)
             self._configure_axes_controls(axis)
             return False
         axis.set_axis_on()
@@ -2636,6 +2684,7 @@ class AutosolveWindow(QMainWindow):
         band_pt = (
             PANEL_CAPTION_TOP_PAD_PT + PANEL_TITLE_FONT_PT * 1.25 + PANEL_CAPTION_LINE_GAP_PT
             + PANEL_SUBTITLE_FONT_PT * 1.25 + PANEL_CAPTION_BOTTOM_PAD_PT
+            + (PANEL_SUBTITLE_FONT_PT * 1.25 if self._ordinary_dual_workflow else 0)
         )
         top = max(0.5, 1.0 - band_pt / height_pt)
         figure.subplots_adjust(left=0.005, right=0.995, bottom=0.005, top=top, wspace=0.02)
@@ -2659,7 +2708,7 @@ class AutosolveWindow(QMainWindow):
         candidate's recorded structure."""
         previous_cameras = {
             role: (axis.elev, axis.azim, self._structure_axis_limits(axis),
-                   getattr(axis, "_phase_fit_zoom", None))
+                   getattr(axis, "_phase_fit_zoom", None), axis.roll)
             for axis, role in self._axis_roles.items() if axis in self._structure_interactive_axes
         } if self._ordinary_dual_workflow else {}
         self._last_panels = {guided.ROLE_OBSERVED: observed_panel, guided.ROLE_PREDICTED: predicted_panel}
@@ -2701,13 +2750,20 @@ class AutosolveWindow(QMainWindow):
                 ]
                 if pending:
                     next_cycle = max(int(update.cycle) for update in pending)
-                    return f"{source} · Cycle {panel.cycle}{model} · Latest · Cycle {next_cycle} EDMA updating…"
+                    lineage = (f" · {panel.superflip_initialization}" if role == guided.ROLE_OBSERVED
+                               and getattr(panel, 'superflip_initialization', '') else model)
+                    return f"{source} · Cycle {panel.cycle}{lineage}\nCompleted result · Cycle {next_cycle} EDMA updating…"
+                state = getattr(self.backend, '_cycle_progress_state', None)
+                completed_note = (
+                    f'\nCompleted result · Workflow currently running Cycle {state.cycle_index}'
+                    if state is not None and self.backend._run_status == 'RUNNING' else '\nCompleted result'
+                )
                 if role == guided.ROLE_OBSERVED:
                     initialization = getattr(panel, "superflip_initialization", "")
                     return f"{source} · Cycle {panel.cycle}" + (
                         f" · {initialization}" if initialization else ""
-                    )
-                return f"{source} · Cycle {panel.cycle}{model}"
+                    ) + completed_note
+                return f"{source} · Cycle {panel.cycle}{model}" + completed_note
             prefix = "Seed" if self.backend.autosolve_panel_shows_refinement_seed(role) else "Best"
             return f"{prefix} · Cycle {panel.cycle}"
 
@@ -2841,8 +2897,8 @@ class AutosolveWindow(QMainWindow):
                     self._pending_fit_roles.add(role)
                     self._manual_camera_roles.discard(role)
             if self._ordinary_dual_workflow and role in previous_cameras:
-                elev, azim, limits, zoom = previous_cameras[role]
-                axis.view_init(elev=elev, azim=azim)
+                elev, azim, limits, zoom, roll = previous_cameras[role]
+                axis.view_init(elev=elev, azim=azim, roll=roll)
                 if role not in self._pending_fit_roles:
                     self._apply_structure_axis_limits(axis, limits)
                     if zoom is not None:

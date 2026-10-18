@@ -109,11 +109,11 @@ def main():
     check("SharpED configuration form uses the available page width",
           wizard.model.width() >= int(wizard.page2.width() * 0.50))
     check("SharpED model selector has a readable responsive maximum width",
-          450 <= wizard.model.minimumWidth() <= wizard.model.maximumWidth() <= 550)
+          240 <= wizard.model.minimumWidth() <= wizard.model.maximumWidth() <= 420)
     check("cycle control has a practical responsive width",
           110 <= wizard.cycles.width() <= 140)
     check("cycle control stays in the compact 110-140 px band",
-          wizard.cycles.minimumWidth() == 110 and wizard.cycles.maximumWidth() == 140)
+          wizard.cycles.minimumWidth() == 120 and wizard.cycles.maximumWidth() == 140)
     wizard._ensure_models_loaded()
     pump(app, wizard)
     check("Superflip + SharpED: models are fetched automatically", calls["n"] == 1)
@@ -143,13 +143,13 @@ def main():
           wizard.model.currentText() == "PEAK A (model prediction)")
     check("one-cycle helper describes automatic selection without duplicating the model",
           wizard.model_recommendation.text() ==
-          "Automatically selected · Recommended for 1 cycle")
+          "Automatically selected for 1 cycle")
     wizard.cycles.setValue(5)
     check("returning to multiple cycles restores its recommendation while unlocked",
           wizard.model.currentText() == "SEED (cyclic CF)")
     check("multi-cycle helper describes automatic selection without duplicating the model",
           wizard.model_recommendation.text() ==
-          "Automatically selected · Recommended for 5 cycles")
+          "Automatically selected for 5 cycles")
     check(
         "Refresh models stays available as an explicit manual control",
         wizard.refresh_models_button.isEnabled(),
@@ -202,17 +202,19 @@ def main():
     pump(app, wizard)
     check("normal Wizard traffic remains fixed to one server authority", calls["n"] == 2)
 
-    # A removed manual choice explicitly returns to automatic policy.
+    # A removed manual choice requires an explicit replacement or restore.
     wizard.model.setCurrentText("PEAK B (model prediction)")
     wizard.model.activated.emit(wizard.model.currentIndex())
     calls["models"] = ["PEAK A (model prediction)", "UNIVERSAL", "SEED (cyclic CF)"]
     wizard.refresh_models_button.click()
     pump(app, wizard)
-    check("an unavailable manual override restores automatic selection",
-          not wizard.model_user_picked["value"]
-          and wizard.model.currentText() == "PEAK A (model prediction)")
+    check("an unavailable manual override never substitutes another model",
+          wizard.model_user_picked["value"] and wizard.model.currentIndex() == -1)
     check("manual-removal warning is explicit",
           "no longer available" in wizard.model_status.text())
+    check("manual-removal blocks execution until explicitly resolved", bool(wizard.model_policy_error))
+    wizard.restore_automatic_model_button.click()
+    check("explicit restore resolves missing manual selection", wizard.model.currentText()=='PEAK A (model prediction)' and not wizard.model_policy_error)
 
     # A required policy model may never fall back to the server default.
     calls["models"] = ["UNIVERSAL", "SEED (cyclic CF)", "PEAK B (model prediction)"]
@@ -255,7 +257,7 @@ def main():
     check("a failed model request is reported", calls["n"] == 1)
     check(
         "the failure state is concise and names the retry",
-        "failed" in status.lower() and "refresh" in status.lower(),
+        "unavailable" in status.lower() and "refresh" in status.lower(),
     )
     check(
         "Refresh models is still available after a failure",
@@ -298,8 +300,8 @@ def main():
     wizard = build(js.WORKFLOW_SUPERFLIP_SHARPED)
     wizard._ensure_models_loaded()
     pump(app, wizard)
-    check("invalid saved manual preference returns to automatic",
-          not wizard.model_user_picked["value"])
+    check("invalid saved manual preference requires an explicit replacement",
+          wizard.model_user_picked["value"] and wizard.model.currentIndex() == -1 and bool(wizard.model_policy_error))
     settings.clear()
     js._qt_imports = original_imports
     settings_dir.cleanup()

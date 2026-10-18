@@ -73,7 +73,8 @@ def check():
                 assert rows['Observation-processing provenance'].text() == 'Not documented in the available input'
                 assert rows['Phases'].text() == 'Not supplied (expected for this format)'
                 assert rows['Absent reflections with significance ≥3'].text() == 'N/A — no genuine measurement uncertainties'
-                assert rows['Verified FWHM units'].text() == 'degrees 2θ'
+                from phase_studio.scientific_typography import scientific_text
+                assert rows['Verified FWHM units'].text() == scientific_text('degrees 2θ')
                 assert rows['Group-size distribution'].text()
                 assert rows['Space group'].text() == 'P2₁/n (#14)'
                 assert 'P 1 21/n 1' in rows['Space group'].toolTip()
@@ -81,14 +82,22 @@ def check():
                 assert rows['Input filename'].findChildren(QLabel)[0].text() == 'input.hkl'
                 dialog.hkl_copy_path.click(); assert QApplication.clipboard().text() == source
                 table=dialog.hkl_capability_table
+                previous=dialog.hkl_details_tabs.currentIndex()
+                dialog.hkl_details_tabs.setCurrentIndex(6);settle()
+                assert '#e8f0fa' in table.styleSheet() and '#153c70' in table.styleSheet()
+                width=table.viewport().width()
+                assert abs(table.columnWidth(0)-width*.25)<=2
+                assert abs(table.columnWidth(1)-width*.18)<=2
+                assert any('font-weight:400' in label.styleSheet() for label in dialog.findChildren(QLabel))
+                dialog.hkl_details_tabs.setCurrentIndex(previous);settle()
                 statuses={table.item(i,0).text():table.item(i,1).text() for i in range(table.rowCount())}
                 assert statuses['Significance']=='Unavailable' and statuses['Peak overlap']=='Limited'
-                table.setCurrentCell(3,0); assert 'CC1/2' in dialog.hkl_capability_reason.text()
+                table.setCurrentCell(3,0); assert scientific_text('CC1/2') in dialog.hkl_capability_reason.text()
                 assert '98%' in rows['d98'].text()
                 dialog.hkl_disclosures['Resolution methodology'].click(); settle()
                 assert any('ULPs' in label.text() for label in dialog.findChildren(QLabel))
                 initial = dialog.size()
-                assert 950<=initial.width()<=1050 and 500<=initial.height()<=600, initial.toTuple()
+                assert 950<=initial.width()<=1050 and 520<=initial.height()<=540, initial.toTuple()
                 for index in range(7):
                     dialog.hkl_details_tabs.setCurrentIndex(index); settle()
                     assert dialog.size()==initial
@@ -96,6 +105,15 @@ def check():
                     assert scroll.horizontalScrollBar().maximum()==0
                     assert dialog.hkl_close_button.isVisible()
                     assert dialog.rect().contains(dialog.hkl_close_button.geometry())
+                dialog.hkl_details_tabs.setCurrentIndex(5)
+                dialog.hkl_disclosures['Overlap methodology'].click()
+                dialog.hkl_disclosures['Group details'].click();settle()
+                assert dialog.size()==initial
+                assert dialog.hkl_details_tabs.widget(5).verticalScrollBar().maximum()>0
+                assert dialog.hkl_group_distribution.isVisible()
+                dialog.hkl_disclosures['Overlap methodology'].click()
+                dialog.hkl_disclosures['Group details'].click();settle()
+                assert dialog.size()==initial
                 assert all('Science Gothic' not in label.font().family() for label in dialog.findChildren(QLabel))
                 report.export_json(Path(tmp)/'after.json')
                 assert before_path.read_bytes()==(Path(tmp)/'after.json').read_bytes()
@@ -136,6 +154,12 @@ def check():
                 assert 'Affected reflections' not in missing_view.hkl_detail_rows
                 missing_view.close()
                 assert _spacegroup_display('invalid setting')==('invalid setting','invalid setting')
+                literal=replace(optional.diagnostics,source='C:/project/lambda/alpha.hkl')
+                path_view=_detail_dialog(parent,literal);path_view.show();settle()
+                assert path_view.hkl_detail_rows['Input filename'].findChildren(QLabel)[0].text()=='alpha.hkl'
+                assert path_view.hkl_detail_rows['Full input path'].text()=='C:/project/lambda/alpha.hkl'
+                path_view.hkl_copy_path.click();assert QApplication.clipboard().text()=='C:/project/lambda/alpha.hkl'
+                path_view.close()
             # Stored oversized geometry must clamp, with Close outside the scrolling body.
             with patch.object(QScreen,'availableGeometry',return_value=QRect(0,0,640,420)):
                 small=view(load)

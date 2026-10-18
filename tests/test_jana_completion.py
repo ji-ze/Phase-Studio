@@ -1,6 +1,7 @@
 """Shared Jana2020/standalone profile-aware result-selection tests."""
 import csv
 import dataclasses
+import json
 import os
 import sys
 import tempfile
@@ -8,6 +9,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from phase_studio.version import VERSION
 
 results_log = []
 
@@ -651,8 +653,8 @@ def main():
           ).resolve() == canonical_m50.resolve())
     (alternate_integration / "EDMA.exe").write_bytes(b"alternate edma")
     (alternate_root / "phase_studio_integration.json").write_text(
-        '{"product":"Phase Studio","version":"2.0.4","wrapper":"superflip.exe",'
-        '"original_superflip":"superflip_original.exe","payload_hash":"test"}',
+        json.dumps(dict(product='Phase Studio',version=VERSION,wrapper='superflip.exe',
+                        original_superflip='superflip_original.exe',payload_hash='test')),
         encoding="utf-8",
     )
     original_application_dir_for_identity = jana_superflip.application_dir
@@ -669,7 +671,7 @@ def main():
         identity_log = []
         jana_superflip.log_wrapper_runtime_identity(identity_log.append)
         check("wrapper diagnostics record version, integration root and original executable",
-              any("Phase Studio version: 2.0.4" in line for line in identity_log)
+              any(f"Phase Studio version: {VERSION}" in line for line in identity_log)
               and any(str(alternate_root) in line for line in identity_log)
               and any(str(alternate_superflip.resolve()) in line for line in identity_log))
         (alternate_root / "phase_studio_integration.json").write_text(
@@ -818,7 +820,7 @@ def main():
               "project-local wrapper log" in project_log_path.read_text(encoding="utf-8")
               and not (wrapper_bin / "log.txt").exists())
         check("wrapper log has a session separator and millisecond timestamp",
-              "Phase Studio 2.0.4 session" in project_log_path.read_text(encoding="utf-8")
+              f"Phase Studio {VERSION} session" in project_log_path.read_text(encoding="utf-8")
               and "============================================================" in project_log_path.read_text(encoding="utf-8"))
         unicode_project = wrapper_dir / "Test User" / "Jana projekt Žluťoučký"
         unicode_inflip = unicode_project / "job with spaces.inflip"

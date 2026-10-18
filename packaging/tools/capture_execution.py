@@ -137,12 +137,11 @@ if not (len(sys.argv)>1 and sys.argv[1]=="before"):
     result.superflip_edma_sigma = .4
     backend._structure_jobs[("superflip",1)] = replace(job,status="complete",structure_path=completed)
     capture("10-interactive-edma-completed")
-    def capture_confirmation():
-        box = window._last_early_handoff_dialog
-        assert box.grab().save(str(out/"13-early-handoff-confirmation.png"))
-        box.reject()
-    QTimer.singleShot(0,capture_confirmation)
+    # Ordinary running workflows now refuse early handoff explicitly.
+    window._refresh_tick()
+    assert not window.pass_now_button.isEnabled()
     window._on_pass_now()
+    capture("13-early-handoff-disabled")
 capture("14-reduced-height",height=760)
 capture("laptop-1280x720",height=720,width=1280)
 backend._set_run_status("COMPLETED")

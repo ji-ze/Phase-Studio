@@ -232,32 +232,22 @@ class ExecutionRedesign(unittest.TestCase):
         self.assertEqual(backend.current_cycle_progress.maximum(),1)
         self.assertFalse(backend.superflip_repeat_group.isVisible())
 
-    def test_early_pass_requires_explicit_confirmation_and_identifies_candidates(self):
+    def test_ordinary_early_pass_is_refused_until_workflow_stops(self):
         result = self.structures()
         self._write_handoff_metadata_fixture(result)
         self.backend._set_run_status("RUNNING")
-        from PySide6.QtWidgets import QMessageBox
-        with patch.object(self.backend,"request_autosolve_pass_now") as request:
-            with patch.object(QMessageBox,"exec",return_value=QMessageBox.Rejected):
-                self.window._on_pass_now()
-            request.assert_not_called()
-            dialog = self.window._last_early_handoff_dialog
-            self.assertIn("Cycle 1",dialog.informativeText())
-            self.assertIn("0.50",dialog.informativeText())
-            self.assertIn("remaining calculations",dialog.text())
-            native_exec = QMessageBox.exec
-            def accept(box):
-                from PySide6.QtCore import QTimer
-                button = next(item for item in box.buttons() if box.buttonRole(item) == QMessageBox.AcceptRole)
-                QTimer.singleShot(0,button.click)
-                return native_exec(box)
-            with patch.object(QMessageBox,"exec",accept):
-                self.window._on_pass_now()
-            request.assert_called_once()
-        self.backend._set_run_status("COMPLETED")
-        with patch.object(self.backend,"request_autosolve_pass_now") as request, patch.object(QMessageBox,"exec") as confirm:
+        self.window._refresh_tick()
+        self.assertFalse(self.window.pass_now_button.isEnabled())
+        self.assertIn('stop the workflow', self.window.pass_now_button.toolTip())
+        with patch.object(self.backend, "request_autosolve_pass_now") as request:
             self.window._on_pass_now()
-            request.assert_called_once();confirm.assert_not_called()
+            request.assert_not_called()
+        self.backend._set_run_status("COMPLETE")
+        self.window._refresh_tick()
+        self.assertTrue(self.window.pass_now_button.isEnabled())
+        with patch.object(self.backend, "request_autosolve_pass_now") as request:
+            self.window._on_pass_now()
+            request.assert_called_once()
 
     def test_interactive_edma_pending_completion_and_exact_map_identity(self):
         import threading
@@ -302,6 +292,9 @@ class ExecutionRedesign(unittest.TestCase):
             self.assertTrue(self.window.edma_threshold_labels[0].text().startswith("EDMA 0.40"))
             self.assertEqual(result.deblur_edma_cif,other_model)
             self.assertEqual(result.superflip_map.read_bytes(),original_map)
+            self.assertFalse(self.window.pass_now_button.isEnabled())
+            self.backend._set_run_status('STOPPED')
+            self.window._refresh_tick()
             self.assertTrue(self.window.pass_now_button.isEnabled())
 
         # A failed next extraction must also end its job lifetime, preserve the
@@ -339,20 +332,59 @@ class ExecutionRedesign(unittest.TestCase):
                                    text=True,capture_output=True,timeout=60)
             self.assertEqual(child.returncode,0,child.stdout+child.stderr)
 
-    def test_early_confirmation_never_names_ineligible_live_cycle(self):
-        from dataclasses import replace
+    def test_completed_captions_distinguish_running_cycle_and_manual_selection(self):
         from phase_studio import autosolve_review as guided
-        from PySide6.QtWidgets import QMessageBox
-        result=self.structures()
-        self._write_handoff_metadata_fixture(result)
-        self.backend._set_run_status("RUNNING")
-        panel=self.window._last_panels[guided.ROLE_OBSERVED]
-        self.window._last_panels[guided.ROLE_OBSERVED]=replace(panel,cycle=2)
-        with patch.object(QMessageBox,"exec",return_value=QMessageBox.Rejected):
-            self.window._on_pass_now()
-        text=self.window._last_early_handoff_dialog.informativeText()
-        self.assertIn("completed Cycle 1",text)
-        self.assertNotIn("Cycle 2",text)
+        from dataclasses import replace
+        result = self.structures()
+        self.backend._set_run_status('RUNNING')
+        self.backend._apply_cycle_progress_state(self.engine.CycleProgressState(3,3,'Superflip',1,7,busy=True))
+        self.window._refresh_tick()
+        self.assertTrue(any('Completed result' in text.get_text() and 'Cycle 3' in text.get_text()
+                            for text in self.window._panel_captions))
+        combo = self.window._cycle_combos[guided.ROLE_OBSERVED]
+        combo.setCurrentIndex(combo.findData(1))
+        self.backend.results.append(replace(result,cycle=2))
+        self.window._refresh_tick()
+        self.assertEqual(self.window._last_panels[guided.ROLE_OBSERVED].cycle,1)
+        self.assertEqual(self.window._last_panels[guided.ROLE_PREDICTED].cycle,2)
+        self.assertFalse(self.window.pass_now_button.isEnabled())
+
+    def test_sharped_phases_are_actual_progress_and_unknown_duration(self):
+        self.backend._set_run_status('RUNNING')
+        self.backend._operation_states['request'] = ('SharpED',1,'running')
+        for detail in ('uploading','processing','downloading'):
+            self.backend._apply_cycle_progress_state(self.engine.CycleProgressState(1,3,'SharpED',2,7,detail=detail,busy=True))
+            self.window._refresh_tick()
+            self.assertIn(detail.split('ing')[0].lower(), ' '.join(self.backend.active_workflow_operations()).lower())
+            self.assertEqual(self.backend.current_cycle_progress.maximum(),0)
+
+    def test_independent_live_completion_is_browsable_before_cycle_recording(self):
+        from phase_studio import autosolve_review as guided
+        result = self.structures()
+        self.backend.results.clear()
+        self.backend._set_run_status('RUNNING')
+        state = SimpleNamespace(run_id='current-test-run')
+        job = self.backend._new_structure_job(state,'superflip',1,result.superflip_map,.5)
+        self.backend._structure_job_status(job,'complete',result.superflip_edma_cif)
+        self.backend._poll_queue()
+        self.window._refresh_tick()
+        combo = self.window._cycle_combos[guided.ROLE_OBSERVED]
+        self.assertTrue(combo.isEnabled())
+        self.assertGreater(combo.findData(1),0)
+        combo.setCurrentIndex(combo.findData(1))
+        newer = self.backend._new_structure_job(state,'superflip',2,result.superflip_map,.4)
+        self.backend._structure_job_status(newer,'complete',result.superflip_edma_cif)
+        self.backend._poll_queue()
+        self.window._refresh_tick()
+        self.assertEqual(self.window._last_panels[guided.ROLE_OBSERVED].cycle,1)
+        combo.setCurrentIndex(0)
+        self.assertEqual(self.window._last_panels[guided.ROLE_OBSERVED].cycle,2)
+        self.backend._active_run_id = 'next-run'
+        self.backend._live_structures.clear()
+        self.backend._structure_jobs.clear()
+        self.window._refresh_tick()
+        self.assertEqual(combo.count(),1)
+        self.assertIsNone(self.window._last_panels[guided.ROLE_OBSERVED])
 
     def _write_handoff_metadata_fixture(self,result):
         # File-backed UI eligibility fixture only. Actual m40 publication is

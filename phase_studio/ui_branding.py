@@ -393,6 +393,50 @@ def clamp_window_to_available_screen(
     return QRect(available)
 
 
+def jana_launch_parent_rect() -> Optional[QRect]:
+    """Read a verified Jana launch window's frame; never change native focus."""
+    active=QApplication.activeWindow()
+    if active is not None and active.windowTitle().casefold().startswith('jana2020'):
+        return QRect(active.frameGeometry())
+    if sys.platform!='win32' or QApplication.platformName()=='offscreen':
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32=ctypes.windll.user32
+        user32.GetForegroundWindow.restype=wintypes.HWND
+        user32.GetAncestor.argtypes=[wintypes.HWND,wintypes.UINT]
+        user32.GetAncestor.restype=wintypes.HWND
+        user32.GetWindowTextW.argtypes=[wintypes.HWND,wintypes.LPWSTR,ctypes.c_int]
+        user32.GetWindowRect.argtypes=[wintypes.HWND,ctypes.POINTER(wintypes.RECT)]
+        hwnd=user32.GetForegroundWindow()
+        for candidate in (hwnd,user32.GetAncestor(hwnd,3)):
+            title=ctypes.create_unicode_buffer(512)
+            user32.GetWindowTextW(candidate,title,len(title))
+            if title.value.casefold().startswith('jana2020'):
+                hwnd=candidate;break
+        else:
+            return None
+        rect=wintypes.RECT()
+        if not user32.GetWindowRect(hwnd,ctypes.byref(rect)):return None
+        class MonitorInfo(ctypes.Structure):
+            _fields_=[('size',wintypes.DWORD),('monitor',wintypes.RECT),('work',wintypes.RECT),
+                      ('flags',wintypes.DWORD),('device',wintypes.WCHAR*32)]
+        user32.MonitorFromWindow.argtypes=[wintypes.HWND,wintypes.DWORD]
+        user32.MonitorFromWindow.restype=wintypes.HANDLE
+        user32.GetMonitorInfoW.argtypes=[wintypes.HANDLE,ctypes.POINTER(MonitorInfo)]
+        info=MonitorInfo();info.size=ctypes.sizeof(info)
+        if not user32.GetMonitorInfoW(user32.MonitorFromWindow(hwnd,2),ctypes.byref(info)):return None
+        screen=next((s for s in QGuiApplication.screens() if s.name().casefold()==info.device.casefold()),None)
+        if screen is None:return None
+        dpr=screen.devicePixelRatio();origin=screen.geometry().topLeft()
+        result=QRect(origin.x()+round((rect.left-info.monitor.left)/dpr),
+            origin.y()+round((rect.top-info.monitor.top)/dpr),round((rect.right-rect.left)/dpr),round((rect.bottom-rect.top)/dpr))
+        return result if result.isValid() else None
+    except (AttributeError,OSError,ValueError):
+        return None
+
+
 def install_screen_geometry_guard(window: QWidget) -> None:
     """Re-clamp only when a monitor change leaves part of the window inaccessible."""
     if getattr(window, "_phase_studio_screen_guard", False):

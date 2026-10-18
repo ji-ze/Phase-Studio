@@ -8250,6 +8250,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_now = threading.Event()
         self.results: List[CycleResult] = []
         self._operation_states: dict = {}
+        self._sharped_display_phases: dict = {}
         self.result_recommendation: Optional[ResultRecommendation] = None
         self.current_validation_profile = ValidationProfile.REFERENCE_FREE
         self.last_run_config: Optional[RunConfig] = None
@@ -8628,7 +8629,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         left_layout.setSpacing(8)
         self.main_splitter.addWidget(left)
 
-        left_layout.addWidget(create_phase_studio_brand_header())
+        brand_header=create_phase_studio_brand_header()
+        from phase_studio.update_ui import wizard_update_menu
+        self.version_menu=wizard_update_menu(self,mode=None,automatic=False)
+        self.version_menu.setText(__version__)
+        self.version_menu.setToolTip('Version and updates')
+        self.version_menu.setAccessibleName('Version '+__version__+', updates')
+        badge=brand_header.findChild(QLabel,'versionBadge')
+        if badge is not None:
+            badge.parentWidget().layout().replaceWidget(badge,self.version_menu)
+            badge.hide()
+        self.version_menu.menu().addSeparator()
+        self.version_menu.menu().addAction('About Phase Studio').triggered.connect(lambda:self._open_help_section('about'))
+        left_layout.addWidget(brand_header)
 
         category_tabs = QTabWidget()
         category_tabs.setObjectName("categoryTabs")
@@ -9404,6 +9417,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         controls.addWidget(self.structure_molecule_view_button)
         controls.addWidget(self.structure_full_cell_view_button)
+        from phase_studio.structure_camera import camera_settings_button
+        controls.addWidget(camera_settings_button(self))
         self._classic_detached_viewers = {}
         self.structure_fullscreen_buttons = {}
         structure_layout.addLayout(controls)
@@ -11447,7 +11462,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
         dialog = self._build_hkl_completeness_dialog(analysis)
-        QTimer.singleShot(0, lambda: fit_dialog_to_available_screen(dialog))
+        # The builder fits the work area, then restores and clamps the
+        # user's saved geometry. A deferred second fit would overwrite it.
         dialog.exec()
 
     def save_settings(self) -> None:
@@ -11863,7 +11879,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """GUI-thread lifecycle state, including independent EDMA branches."""
         if str(getattr(self, "_run_status", "")).upper() not in {"RUNNING", "REVIEW"}:
             return []
-        labels = [f"{name} · Cycle {cycle} · {'Processing' if name == 'SharpED' else 'Running'}"
+        labels = [f"{name} · Cycle {cycle} · {self._sharped_display_phases.get(cycle, 'Processing') if name == 'SharpED' else 'Running'}"
                   for name, cycle, status in self._operation_states.values() if status == "running"]
         for update in self._structure_jobs.values():
             if update.status in {"queued", "running"}:
@@ -11942,6 +11958,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ))
 
     def _apply_cycle_progress_state(self, state: CycleProgressState) -> None:
+        if state.cycle_index == 1 and state.stage_name == 'Superflip' and self._cycle_progress_state is None:
+            self._sharped_display_phases.clear()
+        if state.stage_name == 'SharpED':
+            detail = state.detail.casefold()
+            # Server-completed may describe one tile, not the reconstructed map.
+            for token, label in (('uploading', 'Uploading'), ('downloading', 'Downloading'), ('processing', 'Server processing'), ('completed', 'Processing')):
+                if token in detail:
+                    self._sharped_display_phases[state.cycle_index] = label
+                    break
         self._cycle_progress_state = state
         if state.complete:
             self._set_overall_progress_value(state.cycle_index)
@@ -14768,8 +14793,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _classic_camera_orientation_changed(self, elev: float, azim: float, _source_axis) -> None:
         self.structure_elev, self.structure_azim = float(elev), float(azim)
-        for axis in self._structure_interactive_axes:
-            axis.view_init(elev=elev, azim=azim)
+        _source_axis.view_init(elev=elev, azim=azim, roll=_source_axis.roll)
         self._update_structure_depth_cue(elev, azim)
 
     def _fit_classic_structure_view(self) -> None:

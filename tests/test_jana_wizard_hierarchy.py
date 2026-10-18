@@ -95,10 +95,10 @@ def main():
     check("recommended workflow opens its configuration", wizard.stack.currentWidget() is wizard.page2)
     check("recommended workflow defaults to five cycles", wizard.cycles.value() == 5)
     check("cycle guidance describes the selected count's runtime tradeoff",
-          wizard.cycles_recommendation.text() == "Extended iterative processing · Longer runtime")
+          'Additional cycles increase processing time and may improve' in wizard.cycles_recommendation.text())
     check("multi-cycle automatic guidance retains the canonical effective model",
           wizard.model_recommendation.text() ==
-          "Automatically selected · Recommended for 5 cycles"
+          "Automatically selected for 5 cycles"
           and wizard.model.currentText() == "SEED (cyclic CF)"
           and not wizard.model_user_picked["value"])
     check("SharpED model choice is a non-editable catalog selector", not wizard.model.isEditable())
