@@ -30,6 +30,26 @@ def connection_status(store, base_url=DEFAULT_SERVER_URL):
     if verification and verification[0] == fingerprint:
         return verification[1]
     return 'Credentials available — not yet verified'
+
+
+def account_state(store, base_url=DEFAULT_SERVER_URL, *, entered_token=None):
+    """Independent credential/connection presentation; never consult the catalogue."""
+    saved = store.get(base_url)
+    token = saved if entered_token is None else entered_token
+    status = connection_status(store, base_url) if token == saved else 'Credentials available — not yet verified'
+    credentials = ('Not configured' if not token else
+                   'Securely stored' if token == saved and store.remembered(base_url) else
+                   'Available for the current session')
+    connection = {
+        'Not connected': 'Not checked',
+        'Connected': 'Connected · Authorization verified',
+        'Authentication expired': 'Authentication rejected or expired',
+        'Connection unavailable': 'Unavailable',
+        'Checking': 'Checking',
+    }.get(status, 'Not checked')
+    if status == 'Authentication expired':
+        credentials = 'Invalid or rejected'
+    return credentials, connection, status
 from phase_studio.ui_branding import (
     activate_owned_dialog, apply_safe_dialog_geometry, create_phase_studio_brand_header,
 )

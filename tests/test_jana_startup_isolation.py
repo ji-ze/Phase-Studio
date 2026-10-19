@@ -20,6 +20,9 @@ def main() -> int:
     settings_dir = tempfile.TemporaryDirectory()
     QSettings.setDefaultFormat(QSettings.IniFormat)
     QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, settings_dir.name)
+    imports = js._qt_imports
+    js._qt_imports = lambda: imports() | {'QSettings': lambda org, name:
+        QSettings(str(Path(settings_dir.name)/(name+'.ini')), QSettings.IniFormat)}
     app = QApplication.instance() or QApplication([sys.argv[0]])
     apply_phase_studio_style(app)
     original_dialog_exec = QDialog.exec
@@ -67,6 +70,7 @@ def main() -> int:
         wizard._ensure_workflow_requirements = lambda **_kwargs: True
         wizard._ensure_models_loaded = lambda: None
         wizard.model_cache["loaded"] = True
+        wizard.model_catalog["provenance"] = "offline"
         wizard.superflip_sharped_tile._on_click()
         app.processEvents()
         check("Superflip + SharpED configuration does not construct Professional mode", not constructed)

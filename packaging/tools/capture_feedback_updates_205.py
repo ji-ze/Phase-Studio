@@ -70,6 +70,7 @@ with tempfile.TemporaryDirectory() as temporary:
             w.superflip_sharped_tile._trigger()
             w.cycles.setValue(3)
             w.model_cache['loaded'] = True
+            w.model_catalog['provenance'] = 'offline'
             w.model.clear()
             w.model.addItems([js.SHARPED_ONE_CYCLE_MODEL, js.SHARPED_ITERATIVE_MODEL])
             w.model_policy_error = ''
@@ -116,6 +117,7 @@ with tempfile.TemporaryDirectory() as temporary:
             settle()
             w.cycles.setValue(3)
             w.model_cache['loaded'] = True
+            w.model_catalog['provenance'] = 'offline'
             w.model_catalog['values'] = (js.SHARPED_ONE_CYCLE_MODEL, js.SHARPED_ITERATIVE_MODEL)
             w.model.clear()
             w.model.addItems(list(w.model_catalog['values']))

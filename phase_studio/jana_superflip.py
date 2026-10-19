@@ -63,6 +63,10 @@ SHARPED_ONE_CYCLE_MODEL = "PEAK A (model prediction)"
 SHARPED_ITERATIVE_MODEL = "SEED (cyclic CF)"
 
 
+def cycle_count_text(count: int) -> str:
+    return f"{count} {'cycle' if count == 1 else 'cycles'}"
+
+
 def sharped_model_for_cycles(cycles: int) -> str:
     """Return Phase Studio's exact, server-independent workflow policy."""
     return SHARPED_ONE_CYCLE_MODEL if int(cycles) == 1 else SHARPED_ITERATIVE_MODEL
@@ -2938,10 +2942,12 @@ class _JanaWorkflowWizard:
         connection_layout.addWidget(self.sharped_account_button)
         def update_account_presentation(_text=None):
             # A stored key alone does not establish an authenticated session.
-            from phase_studio.sharped_access import connection_status
-            self.connection_status.setText('Credentials available — not yet verified'
-                if self.api_token.text() and self.api_token.text()!=credential_store.get(DEFAULT_SERVER_URL)
-                else connection_status(credential_store,DEFAULT_SERVER_URL))
+            from phase_studio.sharped_access import account_state
+            credentials, connection, status = account_state(
+                credential_store, DEFAULT_SERVER_URL, entered_token=self.api_token.text())
+            self.account_state = {'credentials': credentials, 'connection': connection}
+            self.connection_status.setText(connection if status == 'Connected' else status)
+            self.connection_status.setToolTip(f'Credentials: {credentials}\nServer connection: {connection}')
         self._update_account_presentation = update_account_presentation
         self.api_token.textChanged.connect(update_account_presentation)
         update_account_presentation()
@@ -2972,13 +2978,19 @@ class _JanaWorkflowWizard:
         # One successful list is reused for the Wizard session.
         self.model_cache = {"loaded": False, "inflight": False, "key": None}
 
-        self.model_catalog = {"values": tuple()}
+        self.model_catalog = {"values": tuple(), "provenance": "unavailable"}
         self.missing_manual_model = ''
         self.model_policy_error = ""
 
+        def catalogue_status() -> str:
+            count = len(self.model_catalog['values'])
+            origin = {'live': 'Live server catalogue', 'offline': 'Controlled offline catalogue',
+                      'cached': 'Cached catalogue · Entries not reverified',
+                      'unavailable': 'Catalogue unavailable'}[self.model_catalog['provenance']]
+            return f"{count} {'model' if count == 1 else 'models'} · {origin}"
+
         def update_model_recommendation(_value: int = 0) -> None:
             self.manual_model_row.setVisible(self.model_user_picked["value"])
-            one_cycle = self.cycles.value() == 1
             recommended = sharped_model_for_cycles(self.cycles.value())
             manual = self.model_user_picked["value"]
             self.model_recommendation.setVisible(not manual)
@@ -2987,8 +2999,7 @@ class _JanaWorkflowWizard:
                 if manual and self.model.currentText() == recommended else "Manually selected · Different from recommendation"
             )
             self.model_recommendation.setText(
-                f"Automatically selected for {self.cycles.value()} "
-                f"{'cycle' if one_cycle else 'cycles'}"
+                "Automatically selected for " + cycle_count_text(self.cycles.value())
             )
             self.model_policy_error = ""
             if manual and self.model.currentIndex()<0 and self.model_cache['loaded']:
@@ -3003,11 +3014,10 @@ class _JanaWorkflowWizard:
                     self.model.setCurrentIndex(-1)
                     self.model_policy_error = f"Required automatic model is unavailable: {recommended}."
                     self.model_status.setText(self.model_policy_error)
-            if self.model_cache.get('last_error'):
+            if self.model_cache.get('last_error') or self.model_catalog['provenance'] == 'unavailable' and self.model_cache['loaded']:
                 self.model_policy_error = 'The live SharpED model catalogue is unavailable. Use Refresh models to retry.'
             elif self.model_cache['loaded'] and not self.model_policy_error:
-                count = len(self.model_catalog['values'])
-                self.model_status.setText(f"{count} {'model' if count==1 else 'models'} available")
+                self.model_status.setText(catalogue_status())
                 self.model_status.setToolTip('Public model catalogue; account authentication is checked separately.')
 
         def restore_automatic_model() -> None:
@@ -3058,11 +3068,12 @@ class _JanaWorkflowWizard:
             self.model_cache["inflight"] = False
             if state == "error":
                 self.model_cache['last_error'] = True
+                self.model_catalog['provenance'] = 'cached' if self.model_cache['loaded'] else 'unavailable'
                 report = build_error_report(
                     payload, subsystem="SharpED", operation="Load model catalog",
                 )
                 self.model_policy_error = "The live SharpED model catalogue is unavailable. Use Refresh models to retry."
-                self.model_status.setText(f"Cached: {len(self.model_catalog['values'])} models · Live catalogue unavailable"
+                self.model_status.setText(catalogue_status() + " · Live catalogue unavailable"
                                           if self.model_cache['loaded'] else "Model list unavailable — Refresh to retry")
                 self.model_status.setToolTip(
                     ('Previously loaded entries have not been reverified.\n\n' if self.model_cache['loaded'] else '') +
@@ -3090,16 +3101,18 @@ class _JanaWorkflowWizard:
                 self.model.setCurrentText(current)
             self.model.blockSignals(False)
             self.model_catalog["values"] = tuple(values)
+            # Actual client responses originate from HTTP; controlled offline
+            # providers identify themselves explicitly rather than impersonating it.
+            provenance = getattr(models_result, 'provenance', 'live')
+            self.model_catalog['provenance'] = provenance if provenance in ('live', 'cached', 'offline') else 'unavailable'
             self._sharped_server_default = default_model
             self.model_cache["loaded"] = True
             update_model_recommendation()
             self._fit_model_popup_width()
-            model_count = len(values)
-            noun = "model" if model_count == 1 else "models"
             if self.model_policy_error:
                 self.model_status.setText(self.model_policy_error)
             else:
-                self.model_status.setText(f"{model_count} {noun} available")
+                self.model_status.setText(catalogue_status())
                 self.model_status.setToolTip('Public model catalogue; account authentication is checked separately.')
 
         self.refresh_models_button.clicked.connect(lambda _checked=False: refresh_available_models(manual=True))
@@ -3532,7 +3545,7 @@ class _JanaWorkflowWizard:
                         active.append((title, start.value() + 1))
             if active:
                 text = ('<b>Map Feedback enabled</b> · '+ ' → '.join(name for name, _ in active)+
-                        '<br>Scientific warning: Map Feedback can modify the reflection data supplied to subsequent cycles. '
+                        '<br>Scientific warning: Map Feedback uses derived reflection data for subsequent cycles. '
                         'Validate the resulting structure against the original measured diffraction data.')
                 icon = QStyle.SP_MessageBoxWarning
             elif selected and total > 1:
@@ -3548,7 +3561,7 @@ class _JanaWorkflowWizard:
                 text += '<br>This setting currently has no effect: ' + ', '.join(noops) + '.'
             self.map_feedback_warning_text.setText(text)
             self.map_feedback_warning_icon.setPixmap(self.dialog.style().standardIcon(icon).pixmap(20, 20))
-            cycle_text = f'{total} cycles configured'
+            cycle_text = cycle_count_text(total) + ' configured'
             if active:
                 # These are the existing engine's eligible subsequent cycles, not a promise of changed values.
                 for name, first in active:
@@ -3665,9 +3678,9 @@ class _JanaWorkflowWizard:
         self.primary_button.setDefault(True)
         self.button_row.addWidget(self.back_button)
         from phase_studio.update_ui import install_application_header_menu
+        from phase_studio.about_ui import show_about_dialog
         self.header_controls = install_application_header_menu(self.brand_header, self.dialog,
-            about=lambda: qt['QMessageBox'].about(self.dialog, 'About Phase Studio',
-                'Phase Studio ' + __version__ + '<br>Crystallographic phasing with Superflip and SharpED.'))
+            about=lambda: show_about_dialog(self.dialog, jana=True))
         self.update_menu = self.header_controls.menu_button
         self.button_row.addStretch(1)
         self.button_row.addWidget(self.cancel_button)
@@ -3755,6 +3768,20 @@ class _JanaWorkflowWizard:
             scroll_to_page_top()
             self._adjust_dialog_size()
 
+        def skip_map_feedback() -> bool:
+            return self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED and self.cycles.value() == 1
+
+        def sync_processing_navigation(_value=None) -> None:
+            skip = skip_map_feedback()
+            self.processing_progress.setText('Choose workflow → <b>Configure processing</b>' +
+                ('' if skip else ' → Map feedback'))
+            if self.stack.currentWidget() is self.page2:
+                self.primary_button.setText('Run phasing' if skip else
+                    ('Next: Map feedback →' if self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED else 'Next ›'))
+                self.primary_button.setToolTip('Start the configured phasing workflow.' if skip else 'Continue to Map Feedback.')
+
+        self.cycles.valueChanged.connect(sync_processing_navigation)
+
         def go_to_page2() -> None:
             self.content_layout.setContentsMargins(14, 16, 14, 10)
             self.stack.setCurrentWidget(self.page2)
@@ -3765,8 +3792,7 @@ class _JanaWorkflowWizard:
             # until they find the Refresh button. No-op for Superflip only, and
             # cached for the rest of the session.
             self._ensure_models_loaded()
-            self.primary_button.setText("Next: Map feedback →" if self._current_workflow()==WORKFLOW_SUPERFLIP_SHARPED else "Next ›")
-            self.primary_button.setToolTip("Continue to Map Feedback.")
+            sync_processing_navigation()
             banner_title, banner_subtitle = self.PAGE2_BANNER_TEXT.get(
                 self._current_workflow(), ("JANA2020 WORKFLOW", "")
             )
@@ -3928,10 +3954,14 @@ class _JanaWorkflowWizard:
                 self.result["action"] = "autosolve"
                 self.dialog.accept()
                 return
-            if self.stack.currentWidget() is self.page3:
+            if self.stack.currentWidget() is self.page3 or (
+                self.stack.currentWidget() is self.page2 and skip_map_feedback()
+            ):
                 validation_message = self._check_page3_validity()
                 if validation_message:
                     self._refresh_page3_validation_message()
+                    if self.stack.currentWidget() is self.page2:
+                        self.model_status.setText(validation_message)
                     return
                 if not self._ensure_workflow_requirements(needs_sharped=True):
                     return

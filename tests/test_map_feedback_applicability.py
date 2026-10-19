@@ -113,6 +113,7 @@ class FeedbackTests(unittest.TestCase):
         w.model_cache['loaded'] = True
         models = ['PEAK A (model prediction)','SEED (cyclic CF)']
         w.model_catalog['values'] = tuple(models)
+        w.model_catalog['provenance'] = 'offline'
         w.model.addItems(models)
         w.model_policy_error = ''
         w._go_to_map_feedback()

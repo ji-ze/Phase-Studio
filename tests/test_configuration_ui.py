@@ -108,6 +108,12 @@ def probe(scale):
         assert w.model.currentText() == "PEAK A (model prediction)"
         w.model.setCurrentText("Extra API model")
         w.model.activated.emit(w.model.currentIndex())
+        preflight = []
+        w._ensure_workflow_requirements = lambda **kw: preflight.append(kw) or False
+        w.primary_button.click()
+        assert w.stack.currentWidget() is w.page2
+        assert preflight == [{'needs_sharped': True}]
+        w.cycles.setValue(3)
         w.primary_button.click()
         assert w.stack.currentWidget() is w.page3
         w.back_button.click()

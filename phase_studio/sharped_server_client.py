@@ -80,6 +80,7 @@ class ModelsResult:
     default_model: str
     models: list[str]
     raw_json: str
+    provenance: str = "live"
 
 
 def reconcile_model_selection(

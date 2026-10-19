@@ -23,6 +23,7 @@ from phase_studio.credentials import CredentialStore
 from phase_studio.update_checker import Release, CheckResult, CHECK_INTERVAL
 from phase_studio.version import VERSION
 from phase_studio.ui_branding import create_phase_studio_brand_header
+from phase_studio.about_ui import AboutDialog
 from test_wizard_text_clipping import write_inflip
 
 scale = float(os.environ.get('QT_SCALE_FACTOR', '1'))
@@ -177,11 +178,10 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
         # Inspect the actual existing modal About, then dismiss its nested loop.
         def inspect_about():
             dialog=app.activeModalWidget()
-            assert isinstance(dialog,QMessageBox) and dialog.parentWidget() is w.dialog
-            assert VERSION in dialog.text() and dialog.isVisible()
+            assert isinstance(dialog,AboutDialog) and dialog.parentWidget() is w.dialog
+            assert VERSION in dialog.version_label.text() and dialog.isVisible()
             capture('09-about-dialog',dialog);dialog.accept()
-        QTimer.singleShot(80,inspect_about)
-        menu.actions()[-1].trigger();settle()
+        menu.actions()[-1].trigger();settle();inspect_about()
         assert w.dialog.geometry()==initial
         w.dialog.close();w.dialog.deleteLater();settle()
         # Standalone/Professional reuse exactly the same component.
@@ -191,8 +191,10 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
             main=engine.IterativeSuperflipPipelineQtGUI();main.show();settle()
             assert main.header_controls.version_label.text()=='v'+VERSION
             assert main.version_menu.accessibleName()=='Phase Studio menu'
-            about=Mock();main._open_help_section=about
-            main.version_menu.menu().actions()[-1].trigger();about.assert_called_once_with('about')
+            main.version_menu.menu().actions()[-1].trigger();settle()
+            assert isinstance(main._phase_studio_about,AboutDialog)
+            assert main._phase_studio_about.mode_label.text()=='Standalone application'
+            main._phase_studio_about.accept();settle()
             capture('06-standalone-header',main.header_controls)
             main.timer.stop();main.close();main.deleteLater();settle()
         plain=create_phase_studio_brand_header()

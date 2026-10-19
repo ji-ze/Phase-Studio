@@ -8638,8 +8638,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         brand_header=create_phase_studio_brand_header()
         from phase_studio.update_ui import install_application_header_menu
+        from phase_studio.about_ui import show_about_dialog
         self.header_controls = install_application_header_menu(brand_header, self,
-            mode=None, automatic=False, about=lambda: self._open_help_section('about'))
+            mode=None, automatic=False, about=lambda: show_about_dialog(
+                self, jana=self.jana_wizard_context.launched_from_jana_wizard))
         self.version_menu = self.header_controls.menu_button
         left_layout.addWidget(brand_header)
 
