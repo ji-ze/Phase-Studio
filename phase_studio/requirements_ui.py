@@ -13,6 +13,54 @@ from PySide6.QtWidgets import (
 from phase_studio import requirements as reqs
 
 
+def check_requirements_responsively(check: Callable[[], reqs.PreflightResult], parent=None):
+    """Run a bounded read-only probe off the GUI thread; cancellation discards it.
+
+    The worker owns only its local result queue, never a widget or workflow.
+    A cancelled request cannot launch work or overwrite a later request.
+    """
+    import queue
+    import threading
+    from PySide6.QtCore import QTimer, Qt
+    from PySide6.QtWidgets import QDialog, QProgressDialog
+
+    result_queue = queue.Queue()
+    dialog = QProgressDialog("Checking input, local tools and SharpED catalogue…", "Cancel", 0, 0, parent)
+    dialog.setWindowTitle("SharpED Autosolve — Checking requirements")
+    dialog.setWindowModality(Qt.ApplicationModal)
+    dialog.setAutoClose(False)
+    outcome = []
+
+    def probe():
+        try:
+            result_queue.put((True, check()))
+        except Exception as exc:
+            result_queue.put((False, exc))
+
+    def poll():
+        try:
+            item = result_queue.get_nowait()
+        except queue.Empty:
+            return
+        outcome.append(item)
+        dialog.accept()
+
+    timer = QTimer(dialog)
+    timer.setInterval(25)
+    timer.timeout.connect(poll)
+    threading.Thread(target=probe, daemon=True, name="Autosolve-preflight").start()
+    timer.start()
+    accepted = dialog.exec() == QDialog.Accepted
+    timer.stop()
+    dialog.deleteLater()
+    if not accepted or not outcome:
+        return None
+    ok, value = outcome[0]
+    if not ok:
+        raise value
+    return value
+
+
 def confirm_third_party_download(parent: QWidget, label: str, *, licence_url: Optional[str] = None) -> bool:
     """Require an explicit license decision before downloading a tool."""
     confirmation = QMessageBox(parent)

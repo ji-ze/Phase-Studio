@@ -26,9 +26,10 @@ from typing import Iterable, List, Optional, Sequence
 from phase_studio.map_quality import MapQualityMetrics, ResultCandidate
 
 # ----- Exact SharpED models (authoritative names, exact match only) -------
-PHASE_SEARCH_MODEL = "koala phase boost 2"
-PREDICTION_MODEL = "koala model progressive"
-REQUIRED_SHARPED_MODELS = (PHASE_SEARCH_MODEL, PREDICTION_MODEL)
+AUTOSOLVE_MODEL = "UNIVERSAL"
+PHASE_SEARCH_MODEL = AUTOSOLVE_MODEL
+PREDICTION_MODEL = AUTOSOLVE_MODEL
+REQUIRED_SHARPED_MODELS = (AUTOSOLVE_MODEL,)
 
 # ----- EDMA thresholds (multiples of the map sigma) -----------------------
 # Guided Autosolve defaults: 1.0 sigma on BOTH sides -- Superflip /

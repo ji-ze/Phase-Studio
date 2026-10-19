@@ -15,6 +15,15 @@ def test_numeric_comparison(latest, expected):
     assert u.is_newer(u.Release(u.parse_version(latest)), '2.0.4') is expected
 
 
+@pytest.mark.parametrize('installed,expected', [
+    ('2.0.5-rc.1', True), ('v2.0.5-beta.10+build.9', True),
+    ('2.0.4-rc.10', True), ('2.0.10-rc.1', False),
+    ('2.0.5-rc.01', False), ('2.0.5-', False), ('2.0.5+build.9', False),
+])
+def test_stable_update_from_installed_prerelease(installed, expected):
+    assert u.is_newer(u.Release((2, 0, 5)), installed) is expected
+
+
 @pytest.mark.parametrize('tag', ['',None,12,'dev','development/2.0.5','2.0','2.0.5rc1',
     '2.0.5-rc.1','2.0.05','2.00.5',' 2.0.5','2.0.5\n','<b>2.0.5</b>','9'*130])
 def test_invalid_and_prerelease_tags(tag):
@@ -32,13 +41,13 @@ def test_schema_and_untrusted_body():
         assert u.release_from_json(value) is None
     release=u.release_from_json(dict(tag_name='v2.0.5',draft=False,prerelease=False,
         body='<script>evil()</script>',html_url='https://untrusted.example/install.exe'))
-    assert release.label=='2.0.5' and vars(release)=={'version':(2,0,5)}
+    assert release.label=='2.0.5' and release.url==u.RELEASES_URL
     assert u.RELEASES_URL=='https://github.com/ji-ze/Phase-Studio/releases'
 
 
 class Connection:
     status=200
-    raw=json.dumps(dict(tag_name='v2.0.5',draft=False,prerelease=False)).encode()
+    raw=json.dumps([dict(tag_name='v2.0.5',draft=False,prerelease=False,published_at='2026-10-17T12:00:00Z')]).encode()
     error=None
     instances=[]
 
@@ -65,7 +74,7 @@ def test_public_request_has_no_auth_or_scientific_data():
     assert connection.options['timeout']==4
     context=connection.options['context']
     assert context.check_hostname and context.verify_mode==ssl.CERT_REQUIRED
-    assert connection.requests==[(('GET','/repos/ji-ze/Phase-Studio/releases/latest'),
+    assert connection.requests==[(('GET',u.API_PATH+'&page=1'),
         {'headers':{'User-Agent':f'PhaseStudio/{u.VERSION}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}})]
     assert connection.closed and connection.read_limit==u.MAX_RESPONSE_BYTES+1
 
@@ -87,7 +96,7 @@ def test_offline_timeout_tls_fail_safely(error):
     assert Failed.instances[-1].closed
 
 
-@pytest.mark.parametrize('raw',[b'invalid JSON',b'\xff',b'[]',b'{}',b'x'*(u.MAX_RESPONSE_BYTES+1)],
+@pytest.mark.parametrize('raw',[b'invalid JSON',b'\xff',b'[{}]',b'{}',b'x'*(u.MAX_RESPONSE_BYTES+1)],
     ids=['malformed-json','invalid-encoding','array-schema','empty-schema','oversized'])
 def test_invalid_or_oversized_response(raw):
     class Invalid(Connection): pass

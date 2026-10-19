@@ -39,7 +39,7 @@ class SplitDistributionTests(unittest.TestCase):
         return {str(p.relative_to(self.target)): p.read_bytes() for p in self.target.rglob("*") if p.is_file()}
 
     def test_canonical_version(self):
-        self.assertEqual(VERSION, "2.0.4")
+        self.assertEqual(VERSION, "2.0.5")
         self.assertEqual(ji.bundled_integration_version(), VERSION)
         import phase_studio.app as app, phase_studio.jana_superflip as wizard
         self.assertEqual(app.__version__, VERSION)
@@ -311,8 +311,23 @@ class SplitDistributionTests(unittest.TestCase):
             baseline = subprocess.check_output([git, "show", f"{baseline_ref}:phase_studio/{filename}"], cwd=ROOT).decode()
             current = (ROOT / "phase_studio" / filename).read_text(encoding="utf-8")
             def functions(text):
-                return {node.name: ast.dump(node, include_attributes=False) for node in ast.parse(text).body
-                        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                result = {}
+                for node in ast.parse(text).body:
+                    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        continue
+                    if filename == "app.py" and node.name == "element_color" and text == current:
+                        # Permit only the opt-in visual palette prelude. Keep
+                        # the entire original default color calculation pinned
+                        # to the released AST; do not exempt this function.
+                        prelude = ast.parse("application = QApplication.instance()\n"
+                            "if application is not None and getattr(application, '_phase_color_palette', 'phase') == 'cpk':\n"
+                            "    pass\n").body
+                        self.assertEqual(ast.dump(node.body[1]), ast.dump(prelude[0]))
+                        self.assertIsInstance(node.body[2], ast.If)
+                        self.assertEqual(ast.dump(node.body[2].test), ast.dump(prelude[1].test))
+                        del node.body[1:3]
+                    result[node.name] = ast.dump(node, include_attributes=False)
+                return result
             old, new = functions(baseline), functions(current)
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
@@ -322,6 +337,11 @@ class SplitDistributionTests(unittest.TestCase):
                         "apply_map_feedback_to_reflections", "compute_rfree", "atom_recall_precision",
                         # Explicit profile-aware per-cycle/source reporting.
                         "write_metrics_csv"}
+            if filename == "jana_superflip.py":
+                # 2.0.5 moves the existing launcher preflight before window
+                # creation. Numerical writers and Jana protocol stay pinned.
+                # test_autosolve_window_routing and remediation tests cover it.
+                excluded.add("launch_autosolve_from_jana")
             if filename == "app.py":
                 # 2.0.4 explicitly modernizes only the HKL diagnostic load and
                 # coverage analysis: shared cached parsing, invalid-index

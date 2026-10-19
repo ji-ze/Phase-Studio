@@ -121,12 +121,14 @@ def main():
             superflip_quality=sf_quality, deblur_quality=db_quality,
             # 2.0.1: a SharpED result is a Model prediction only when it
             # came from the prediction model (refinement cycles do).
-            sharped_model="koala model progressive",
+            sharped_model="UNIVERSAL",
         )
 
     def make_window(option="A"):
         backend = appmod.IterativeSuperflipPipelineQtGUI()
         backend.current_validation_profile = ValidationProfile.REFERENCE_AND_HOLDOUT
+        backend._autosolve_prediction_cycles = set(range(1, 1000))
+        backend._show_error_report = lambda *_args, **_kwargs: None
         win = AutosolveWindow(backend, option)
         return win, backend
 
@@ -171,7 +173,7 @@ def main():
     # No reference -> exactly 2 tiles; reference available -> exactly 3.
     # =====================================================================
     win, backend = make_window("A")
-    check("no reference: exactly 2 structure tiles", len(win.structure_axes) == 2)
+    check("initial search has one solution tile and no empty prediction tile", len(win.structure_axes) == 1)
     win.close()
 
     win, backend = make_window("A")
@@ -180,7 +182,7 @@ def main():
         appmod.AtomSite(label="O1", element="O", frac=np.array([0.5, 0.4, 0.35])),
     ]
     win._refresh_tick()
-    check("reference available: exactly 3 structure tiles", len(win.structure_axes) == 3)
+    check("initial search with reference has two tiles", len(win.structure_axes) == 2)
     win.close()
 
     # =====================================================================
@@ -362,7 +364,7 @@ def main():
     win._refresh_tick()
     check(
         "the compact status line uses the neutral workflow name",
-        win.status_headline.text().startswith("SharpED Autosolve ·")
+        win.status_headline.text().startswith("SharpED Autosolve —")
         and "Predict the structure model" not in win.status_headline.text(),
     )
     figure_texts = [t.get_text() for t in win.structure_figure.texts]
@@ -428,7 +430,7 @@ def main():
     # =====================================================================
     win, backend = make_window("A")
     check("before any cycle event: the header is neutral SharpED Autosolve preparation",
-          win.status_headline.text() == "SharpED Autosolve · Preparing Autosolve…")
+          win.status_headline.text() == "SharpED Autosolve — Not started")
     check("before any cycle event: 'Cycle 0' is never shown", "Cycle 0" not in win.status_headline.text())
 
     ordinary = AutosolveWindow(backend, "A", workflow_name="Superflip + SharpED")
@@ -565,6 +567,10 @@ def main():
     win, backend = make_window("A")
     backend.results = [make_result(1, 0.7, 0.7)]
     win._refresh_tick()
+    win.show()
+    win.activateWindow()
+    app.processEvents()
+    win._camera._last_input = 0.0
     before = win.structure_azim
     win._auto_rotate_tick()
     check("idle: auto-rotation advances azim", win.structure_azim != before)
@@ -576,6 +582,7 @@ def main():
 
     from phase_studio.autosolve_window import AUTO_ROTATE_RESUME_DELAY_SECONDS
     win._last_interaction_time = time.monotonic() - (AUTO_ROTATE_RESUME_DELAY_SECONDS + 0.5)
+    win._camera._last_input = win._last_interaction_time
     win._auto_rotate_tick()
     check("after the idle delay has passed: rotation resumes from its current angle (no snap)", win.structure_azim != frozen)
 

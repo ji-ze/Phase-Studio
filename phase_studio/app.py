@@ -6547,6 +6547,13 @@ def element_color(element: str) -> str:
     """The one element-colour authority for every structure view and legend.
     Deterministic: the same element always gets the same colour; anything
     that does not resolve to a real element gets UNKNOWN_ELEMENT_COLOR."""
+    application = QApplication.instance()
+    if application is not None and getattr(application,'_phase_color_palette','phase')=='cpk':
+        conventional = {'H':'#FFFFFF','C':'#808080','N':'#3050F8','O':'#FF0D0D','F':'#90E050',
+                        'Cl':'#1FF01F','Br':'#A62929','I':'#940094','S':'#FFFF30','P':'#FF8000',
+                        'B':'#FFB5B5','Si':'#F0C8A0','Fe':'#E06633','Cu':'#C88033','Zn':'#7D80B0'}
+        color=conventional.get(clean_element_symbol(element))
+        if color is not None:return color
     placement = element_period_position(element_atomic_number(element))
     if placement is None:
         return UNKNOWN_ELEMENT_COLOR
@@ -8250,6 +8257,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.stop_now = threading.Event()
         self.results: List[CycleResult] = []
         self._operation_states: dict = {}
+        self._sharped_display_phases: dict = {}
         self.result_recommendation: Optional[ResultRecommendation] = None
         self.current_validation_profile = ValidationProfile.REFERENCE_FREE
         self.last_run_config: Optional[RunConfig] = None
@@ -8628,7 +8636,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         left_layout.setSpacing(8)
         self.main_splitter.addWidget(left)
 
-        left_layout.addWidget(create_phase_studio_brand_header())
+        brand_header=create_phase_studio_brand_header()
+        from phase_studio.update_ui import wizard_update_menu
+        self.version_menu=wizard_update_menu(self,mode=None,automatic=False)
+        self.version_menu.setText(__version__)
+        self.version_menu.setToolTip('Version and updates')
+        self.version_menu.setAccessibleName('Version '+__version__+', updates')
+        badge=brand_header.findChild(QLabel,'versionBadge')
+        if badge is not None:
+            badge.parentWidget().layout().replaceWidget(badge,self.version_menu)
+            badge.hide()
+        self.version_menu.menu().addSeparator()
+        self.version_menu.menu().addAction('About Phase Studio').triggered.connect(lambda:self._open_help_section('about'))
+        left_layout.addWidget(brand_header)
 
         category_tabs = QTabWidget()
         category_tabs.setObjectName("categoryTabs")
@@ -9404,6 +9424,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         controls.addWidget(self.structure_molecule_view_button)
         controls.addWidget(self.structure_full_cell_view_button)
+        from phase_studio.structure_camera import camera_settings_button
+        controls.addWidget(camera_settings_button(self))
         self._classic_detached_viewers = {}
         self.structure_fullscreen_buttons = {}
         structure_layout.addLayout(controls)
@@ -11447,7 +11469,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
         dialog = self._build_hkl_completeness_dialog(analysis)
-        QTimer.singleShot(0, lambda: fit_dialog_to_available_screen(dialog))
+        # The builder fits the work area, then restores and clamps the
+        # user's saved geometry. A deferred second fit would overwrite it.
         dialog.exec()
 
     def save_settings(self) -> None:
@@ -11607,6 +11630,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _begin_fresh_run_context(self, cfg: RunConfig) -> None:
         """Give a top-level Run its own artifacts and clean scientific state."""
+        self._autosolve_prediction_cycles = set()
         self.review_edma_executor.cancel_all()
         run_id, run_dir = allocate_run_directory(cfg.work_dir)
         cfg.run_id = run_id
@@ -11863,7 +11887,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """GUI-thread lifecycle state, including independent EDMA branches."""
         if str(getattr(self, "_run_status", "")).upper() not in {"RUNNING", "REVIEW"}:
             return []
-        labels = [f"{name} · Cycle {cycle} · {'Processing' if name == 'SharpED' else 'Running'}"
+        labels = [f"{name} · Cycle {cycle} · {self._sharped_display_phases.get(cycle, 'Processing') if name == 'SharpED' else 'Running'}"
                   for name, cycle, status in self._operation_states.values() if status == "running"]
         for update in self._structure_jobs.values():
             if update.status in {"queued", "running"}:
@@ -11942,6 +11966,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         ))
 
     def _apply_cycle_progress_state(self, state: CycleProgressState) -> None:
+        if state.cycle_index == 1 and state.stage_name == 'Superflip' and self._cycle_progress_state is None:
+            self._sharped_display_phases.clear()
+        if state.stage_name == 'SharpED':
+            detail = state.detail.casefold()
+            # Server-completed may describe one tile, not the reconstructed map.
+            for token, label in (('uploading', 'Uploading'), ('downloading', 'Downloading'), ('processing', 'Server processing'), ('completed', 'Processing')):
+                if token in detail:
+                    self._sharped_display_phases[state.cycle_index] = label
+                    break
         self._cycle_progress_state = state
         if state.complete:
             self._set_overall_progress_value(state.cycle_index)
@@ -12468,6 +12501,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             if tabs.tabText(index) == name:
                 tabs.setCurrentIndex(index)
                 break
+        else:
+            raise ValueError(f"Configuration page is unavailable: {name}")
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        tabs.currentWidget().setFocus()
 
     def _error_actions(self, report: ErrorReport) -> List[ErrorAction]:
         category = report.category
@@ -12492,8 +12531,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return [ErrorAction("Choose folder…", row.browse, True)] if isinstance(row, PathRow) else []
         if category == "sharped_authentication":
             return [ErrorAction("Account access…", self._manage_sharped_access, True)]
+        if category in {"sharped_model_missing", "sharped_catalogue"}:
+            return [ErrorAction("Try again", lambda: (
+                setattr(self, "_retry_model_preflight", True)
+                if getattr(self, "_start_request_active", False) else self.refresh_sharped_models()
+            ), True)]
         if category.startswith("sharped_"):
-            return [ErrorAction("Open SharpED settings", lambda: self._open_configuration_page("SharpED", advanced=True), True)]
+            return []
         if category == "input_validation":
             summary = report.summary.casefold()
             actions: List[ErrorAction] = []
@@ -12915,7 +12959,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return "superflip" if self.jana_wizard_context.autosolve_option == "A" else "deblurred"
 
     def _autosolve_models_available(self) -> bool:
-        """2.0.1 preflight: both exact SharpED models must be in the live
+        """Preflight: the exact UNIVERSAL API identifier must be in the live
         catalog that the SharpED requirement check just fetched (no second
         request, no fuzzy match, no fallback to another model)."""
         missing = guided.missing_required_models(self._sharped_catalog_models)
@@ -12926,14 +12970,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 level="DETAIL", subsystem="SharpED",
             )
             return True
-        self._show_error_report(build_validation_report([
-            "Autosolve requires the SharpED model"
-            + ("s " if len(missing) > 1 else " ")
-            + ", ".join(f"'{name}'" for name in missing)
-            + ", which the SharpED server does not currently offer. Autosolve cannot start "
-            "without "
-            + ("them." if len(missing) > 1 else "it.")
-        ]))
+        self._show_error_report(ErrorReport(
+            category="sharped_model_missing", subsystem="SharpED",
+            title="Required SharpED model is unavailable",
+            summary="Autosolve requires UNIVERSAL, but it is not in the current live SharpED catalogue.",
+            guidance="Check the catalogue again or close this message and return to your workflow.",
+            technical_details="Required explicit API model: UNIVERSAL. No fallback was selected.",
+            operation="Autosolve preflight",
+        ))
         return False
 
     def _autosolve_on_run_done(self) -> None:
@@ -12981,6 +13025,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 decision = "stop"
             else:
                 if refining and self.autosolve_refinement is not None:
+                    self._autosolve_prediction_cycles = set(getattr(self, "_autosolve_prediction_cycles", ()))
+                    self._autosolve_prediction_cycles.update(range(completed + 1, new_limit + 1))
                     self.autosolve_refinement["block"] = int(self.autosolve_refinement["block"]) + 1
                     self.autosolve_refinement["block_start"] = completed + 1
                     self._append_execution_log(
@@ -13051,10 +13097,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # adaptive Autosolve, where phase-boost maps are internal search aids.
         if self.jana_wizard_context.launch_mode == "phase_recycling":
             return [candidate for candidate in self._result_candidates() if candidate.source == "deblurred"]
-        progressive_cycles = {
-            int(result.cycle) for result in self.results
-            if getattr(result, "sharped_model", "") == guided.PREDICTION_MODEL
-        }
+        # Search and prediction now use the same network. Stage provenance,
+        # rather than model identity, distinguishes refinement from search.
+        progressive_cycles = set(getattr(self, "_autosolve_prediction_cycles", ()))
         candidates = [
             candidate for candidate in self._result_candidates()
             if candidate.source == "deblurred" and int(candidate.cycle) in progressive_cycles
@@ -13580,6 +13625,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         cfg = state.cfg
         threshold = guided.normalize_sigma(panel.threshold_sigma)
         cfg.sharped_model = guided.PREDICTION_MODEL
+        self._autosolve_prediction_cycles = set(getattr(self, "_autosolve_prediction_cycles", ()))
+        self._autosolve_prediction_cycles.update(range(completed + 1, new_limit + 1))
         cfg.plimit_deblur = threshold
         cfg.run_sharped = True
         cfg.run_edma_deblurred = True
@@ -14768,8 +14815,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _classic_camera_orientation_changed(self, elev: float, azim: float, _source_axis) -> None:
         self.structure_elev, self.structure_azim = float(elev), float(azim)
-        for axis in self._structure_interactive_axes:
-            axis.view_init(elev=elev, azim=azim)
+        _source_axis.view_init(elev=elev, azim=azim, roll=_source_axis.roll)
         self._update_structure_depth_cue(elev, azim)
 
     def _fit_classic_structure_view(self) -> None:
@@ -15195,9 +15241,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 ):
                     cfg.sharped_model = checked.sharped_default_model
 
+        effective_check = check
+        if self.jana_wizard_context.launch_mode == "autosolve":
+            from phase_studio.requirements_ui import check_requirements_responsively
+
+            def effective_check():
+                result = check_requirements_responsively(check, self if self.isVisible() else None)
+                if result is None:
+                    raise InterruptedError("Autosolve preflight cancelled")
+                return result
+
         return run_remediation_loop(
             self,
-            check,
+            effective_check,
             current_value,
             lambda kind, value, detected: self._apply_requirement_value(
                 cfg, kind, value, detected=detected,
@@ -15213,6 +15269,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
 
     def start_run(self) -> None:
+        if getattr(self, "_start_request_active", False):
+            return
+        self._start_request_active = True
+        try:
+            self._start_run_checked()
+        except InterruptedError:
+            self._append_execution_log("Requirements check cancelled; no calculation started.", subsystem="Workflow")
+        finally:
+            self._start_request_active = False
+
+    def _start_run_checked(self) -> None:
         if self.worker and self.worker.is_alive():
             self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Workflow")
             return
@@ -15225,11 +15292,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if issues:
             self._show_error_report(build_validation_report(issues, technical_details=technical_details))
             return
-        if not self._ensure_workflow_requirements(cfg):
-            return
-        if self.jana_wizard_context.launch_mode == "autosolve":
-            if not self._autosolve_models_available():
+        while True:
+            if not self._ensure_workflow_requirements(cfg):
                 return
+            if self.jana_wizard_context.launch_mode != "autosolve":
+                break
+            self._retry_model_preflight = False
+            if self._autosolve_models_available():
+                break
+            if not self._retry_model_preflight:
+                return
+        if self.jana_wizard_context.launch_mode == "autosolve":
+            cfg.sharped_model = guided.AUTOSOLVE_MODEL
             # The internal phase-boost feed-forward threshold (the established
             # SharpED-side value), kept for any later search continuation.
             self._autosolve_search_deblur_sigma = float(cfg.plimit_deblur)
@@ -15307,6 +15381,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         state.cfg.sharped_poll_seconds = self._spin_value("sharped_poll_seconds")
         state.cfg.sharped_max_polls = self._spin_value("sharped_max_polls")
         self.last_run_config = state.cfg
+        if self.jana_wizard_context.launch_mode == "autosolve":
+            state.cfg.sharped_model = guided.AUTOSOLVE_MODEL
         self.stop_after_cycle.clear()
         self.stop_now.clear()
         self._jana_auto_selector_shown = False
@@ -15763,13 +15839,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self, state: PipelineState, cycle: int, progress_stages: Sequence[str],
     ) -> bool:
         """Checkpoint one valid cycle and apply terminal-intent precedence."""
-        self.log(f"Cycle {cycle} complete.", level="SUCCESS")
+        state.completed_cycles = cycle
+        self._queue_run_event("progress", state.completed_cycles, state.run_id)
         self._emit_cycle_progress(
             cycle, state.cfg.cycles, progress_stages, "Finalizing cycle",
             detail="completed", complete=True,
         )
-        state.completed_cycles = cycle
-        self._queue_run_event("progress", state.completed_cycles, state.run_id)
+        self.log(f"Cycle {cycle} complete.", level="SUCCESS")
         return self._emit_requested_workflow_stop(state.completed_cycles)
 
     def _run_configured_sharped_stage(
@@ -16726,7 +16802,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 effective_damping = effective_xplor_damping_factor(cfg.damping_factor)
                 if state.current_model is not None and effective_damping > 1.0:
                     damped_model = cycle_dir / f"cycle_{cyc:03d}_damped_modelfile.xplor"
-                    state.current_model = blend_xplor_maps(state.current_model, next_xplor_model, damped_model, effective_damping, self.log)
+                    state.current_model = blend_xplor_maps(state.current_model, next_xplor_model, damped_model, effective_damping,
+                        lambda message:self.log(message,level='DETAIL'))
                 else:
                     state.current_model = next_xplor_model
                 state.current_model_metric = sf_metric if use_superflip_xplor_modelfile else deblur_metric

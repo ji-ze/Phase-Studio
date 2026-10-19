@@ -58,7 +58,8 @@ def check_gui():
         dialog.hkl_advanced_button.click();settle()
         assert dialog.hkl_advanced.isVisible()
         dialog.hkl_advanced.hkl_capability_table.setCurrentCell(3,0);settle()
-        assert any('CC1/2' in label.text() for label in dialog.hkl_advanced.findChildren(QLabel))
+        from phase_studio.scientific_typography import scientific_text
+        assert any(scientific_text('CC1/2') in label.text() for label in dialog.hkl_advanced.findChildren(QLabel))
         assert main_geometry==(dialog.hkl_plot_panel.geometry(),table.geometry(),dialog.hkl_canvas.size())
         dialog.resize(760,800);settle()
         assert dialog.hkl_content_splitter.height()>0
@@ -75,19 +76,35 @@ def check_gui():
         overlap_view.hkl_plot_tabs.setCurrentIndex(1)
         settle()
         assert overlap_view.hkl_plot_tabs.tabText(1)=='Peak overlap'
+        assert [key for key,_ in overlap_view.hkl_bin_columns] == ['lo','hi','input','affected','percent','intensity_percent']
+        assert sum(int(overlap_view.hkl_bins_table.item(i,3).text()) for i in range(overlap_view.hkl_bins_table.rowCount())) == 2
+        assert sum(int(overlap_view.hkl_bins_table.item(i,2).text()) for i in range(overlap_view.hkl_bins_table.rowCount())) == 3
+        for i,row in enumerate(overlap_view.hkl_overlap_bin_rows):
+            assert '<' not in overlap_view.hkl_bins_table.item(i,0).text()
+            if not row['input']:
+                assert overlap_view.hkl_bins_table.item(i,4).text() == 'N/A'
+                assert overlap_view.hkl_bins_table.item(i,5).text() == 'N/A'
+        assert [tick.get_text() for tick in overlap_view.hkl_overlap_figure.axes[0].get_xticklabels()] == ['2 HKL']
         assert overlap_geometry==(overlap_view.hkl_plot_panel.geometry(),overlap_view.hkl_bins_table.geometry())
         overlap_view.hkl_advanced_button.click();settle()
         assert overlap_geometry==(overlap_view.hkl_plot_panel.geometry(),overlap_view.hkl_bins_table.geometry())
         expected=[dict(row)['overlap_fraction'] for row in overlap_analysis.diagnostics.shells]
         plotted=np.asarray(overlap_view.hkl_overlap_figure.axes[1].lines[0].get_ydata(),dtype=float)
-        assert np.allclose(plotted,np.asarray(expected,dtype=float),equal_nan=True)
+        assert np.allclose(plotted,100*np.asarray(expected,dtype=float),equal_nan=True)
         plot_path=Path(tmp)/'overlap.svg'
         with patch.object(a.QFileDialog,'getSaveFileName',return_value=(str(plot_path),'SVG')):
             next(button for button in overlap_view.findChildren(a.QPushButton) if button.text()=='Export plot').click()
-        assert 'HKL overlap fraction' in plot_path.read_text(encoding='utf8')
+        assert 'Input HKL records in overlapping groups (%)' in plot_path.read_text(encoding='utf8')
         pdf_path=Path(tmp)/'main.pdf';overlap_view.hkl_figure.savefig(pdf_path)
         assert pdf_path.read_bytes().startswith(b'%PDF')
         overlap_view.close()
+        # Invalid/origin-only input must retain access to Advanced Diagnostics.
+        origin=fixture.load('0 0 0 10 .0527\n')
+        invalid_view=win._build_hkl_validation_dialog(origin)
+        invalid_view.show();settle();invalid_view.hkl_advanced_button.click();settle()
+        assert invalid_view.hkl_advanced.isVisible()
+        assert any('N/A' in value.text() for value in invalid_view.hkl_advanced.hkl_resolution_values.values())
+        invalid_view.close()
         validation=win._build_hkl_validation_dialog(load)
         validation.show();validation.resize(1060,800);settle()
         headers=[validation.hkl_table.horizontalHeaderItem(i).text() for i in range(validation.hkl_table.columnCount())]
@@ -96,6 +113,18 @@ def check_gui():
         assert validation.hkl_table.rowCount()==1
         assert [validation.hkl_table.item(0,i).text() for i in range(3)]==['2','2','1']
         validation.close()
+        duplicates=fixture.load('1 2 1 10 .1\n1 2 1 20 .1\n2 2 1 30 .1\n')
+        duplicate_view=win._build_hkl_validation_dialog(duplicates)
+        duplicate_view.show();settle()
+        duplicate_view.hkl_search.setText('1 2 1')
+        QTest.keyClick(duplicate_view.hkl_search,Qt.Key_Return);settle()
+        assert duplicate_view.isVisible() and duplicate_view.hkl_advanced is None
+        assert duplicate_view.hkl_table.rowCount()==2
+        assert [duplicate_view.hkl_table.item(i,3).numeric_value for i in range(2)]==[10,20]
+        assert '3 total' in duplicate_view.hkl_preview_label.text()
+        duplicate_view.hkl_table.selectRow(0);duplicate_view.hkl_copy_selected_button.click()
+        assert '10.0' in QApplication.clipboard().text()
+        duplicate_view.close()
         missing=fixture.load('1 2 1 10\n',a.REFLECTION_DATA_MODE_INTENSITY)
         v=win._build_hkl_validation_dialog(missing)
         assert v.hkl_table.item(0,4).text()=='n/a'
@@ -141,8 +170,8 @@ def check_gui():
             loops=0
             while time.monotonic()<limit:
                 app.processEvents();time.sleep(.005);loops+=1
-                if '432 parsed' in wizard.reflections_value.text():break
-            assert '432 parsed' in wizard.reflections_value.text(),wizard.reflections_value.text()
+                if '432 HKL records' in wizard.reflections_value.text():break
+            assert '432 HKL records' in wizard.reflections_value.text(),wizard.reflections_value.text()
             assert thread_ids and all(t!=threading.get_ident() for t in thread_ids)
             assert loops>=5
             wizard.dialog.close()

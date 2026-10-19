@@ -49,6 +49,10 @@ def _run_catalog_check(output_path):
 
 
 def main():
+    if "--release-ui-check" in sys.argv:
+        index = sys.argv.index("--release-ui-check")
+        from phase_studio.release_diagnostics import run_release_ui_check
+        return run_release_ui_check(sys.argv[index + 1])
     if "--credential-self-check" in sys.argv:
         index = sys.argv.index("--credential-self-check")
         from phase_studio.oauth_diagnostics import run_credential_check

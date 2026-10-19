@@ -58,64 +58,59 @@ Get-ChildItem tests/test_*.py | ForEach-Object {
 ## 3. Two independent Windows products
 
 Use a plain CPython x64 virtual environment with the PyPI PySide6 wheel,
-not a Conda Qt installation. The interpreter must include its matching Tcl/Tk
-runtime and library scripts; PyInstaller uses them for the early ONEFILE launch
-splash shown while the archive is extracted. Install the build dependencies in
-that environment:
+not a Conda Qt installation. Install the app and build dependencies:
 
 ```powershell
 python -m pip install -e ".[dev]"
-```
-
-Activate it, then run from the repository root:
-
-```powershell
-# Both products, including the authoritative Jana wrapper
+# Standalone ONEFILE plus complete Jana developer ONEDIR/ZIP
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target All
-# Standalone only; does not build or stage the Jana installer payload
+# Individual supported products
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target Standalone
-# Installer and its complete authoritative wrapper payload
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target JanaInstaller
-# Wrapper alone
-powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target JanaWrapper
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging/build_windows.ps1 -Target JanaDeveloper
 ```
 
-Outputs:
+For version 2.0.5 the outputs are:
 
 ```text
-dist/release/PhaseStudio-2.0.0-x64.exe
-dist/release/PhaseStudio-Jana2020-Installer-2.0.0-x64.exe
-dist/superflip/superflip.exe            internal authoritative wrapper build
-dist/superflip/_internal/               internal wrapper runtime
+dist/release/PhaseStudio-2.0.5-x64.exe
+dist/release/PhaseStudio-Jana2020-2.0.5.zip
+dist/release/SHA256SUMS.txt
+dist/release/RELEASE_NOTES_2_0_5.md
+dist/PhaseStudio-Jana2020-2.0.5/Phase_studio.exe
+dist/PhaseStudio-Jana2020-2.0.5/_internal/
 ```
 
-`dist/release` is the complete public release and must contain exactly the two
-EXEs above. Both are PyInstaller ONEFILE applications and can be copied or
-downloaded independently. The installer embeds the complete `dist/superflip`
-tree and uses PyInstaller's private extraction directory at runtime; it needs no
-adjacent payload. Standalone contains no installation-management UI or wrapper.
-`dist/superflip` remains an internal build input and is not a third download.
+Standalone is PyInstaller ONEFILE. The Jana ONEDIR executable requires its
+complete adjacent `_internal` directory and is distributed as a ZIP. Neither
+product bundles scientific Superflip or EDMA executables. No obsolete Jana
+installer is produced by `-Target All`. See
+[developer integration](docs/JANA_DEVELOPER_INTEGRATION.md).
 
-`packaging/pyinstaller/PhaseStudio.spec` implements the two direct ONEFILE profiles.
-`PhaseStudioJanaInstaller.spec` selects the installer entry point; the root
-`PhaseStudio.spec` forwards to the standalone spec. `PhaseStudioStore.spec`
-selects a standalone-only ONEDIR profile for MSIX staging. The root
-`superflip.spec` remains the authoritative ONEDIR wrapper specification and is
-built with `python -m PyInstaller --clean --noconfirm superflip.spec`.
+`packaging/pyinstaller/PhaseStudio.spec` builds standalone;
+`PhaseStudioJanaDeveloper.spec` selects the developer ONEDIR profile using the
+shared root `superflip.spec`. The historical `-Target JanaWrapper` remains an
+explicit separate option. `PhaseStudioStore.spec` uses standalone ONEDIR for
+MSIX staging; see [Store packaging](packaging/README_STORE.md).
 
-The shared portable-runtime helper and DLL-isolation hook are used by every
-profile. The build inspects each frozen archive, enforces product boundaries,
-and compares every embedded Jana wrapper file byte-for-byte with the
-authoritative ONEDIR build.
+The portable-runtime helper and DLL-isolation hook are shared by the profiles.
+The build audits native imports and distribution boundaries, validates the
+extracted ZIP byte-for-byte and creates SHA-256 checksums. Legal resources and
+Science Gothic notices are included. A Tcl/Tk splash is used only when that
+matching runtime is available; otherwise the built-in Qt splash remains.
 
-Close a release executable before rebuilding it. `-DistRoot` remains restricted
-to a subdirectory of the repository's `dist`; builds never terminate processes.
+Close release executables before rebuilding. `-DistRoot` must stay inside the
+repository's `dist`; builds never terminate processes. For versioned outputs,
+pass `-DistRoot <RepoRoot>/dist/2.0.5`. Version displays, package metadata and
+Windows resources derive from `phase_studio/version.py`.
 
-Version strings in windows, Wizard, installer, integration marker, Python
-metadata and Windows EXE resources derive from `phase_studio/version.py`.
-Store packaging derives its fourth `.0` component from the same source.
+Both products accept `--version`, `--brand-font-check <output.json>` and
+`--release-ui-check <output.json>`. The last is an explicit offline UI smoke
+check with isolated synthetic input, credential and program-path fixtures; it
+never submits inference or proves native Jana scientific acceptance.
 
-For Microsoft Store packaging, see [packaging/README_STORE.md](packaging/README_STORE.md).
+Final release artifacts must be built from the exact reviewed, committed tree.
+Record the commit, interpreter/PyInstaller versions, commands, hashes and smoke
+results. Keep generated binaries and raw acceptance captures out of source Git.
 
 ---
 

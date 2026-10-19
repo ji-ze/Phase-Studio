@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from phase_studio.app import ExecutionLogRecord, RunDiagnosticLog, classify_log_record
 from phase_studio.error_reporting import build_error_report
+from phase_studio.version import VERSION
 from phase_studio.jana_superflip import jana_project_log_path, safe_wrapper_log_dir
 
 
@@ -62,13 +63,13 @@ def main():
     check("run diagnostic log is anchored inside the isolated run directory",
           (run_dir / "log.txt").is_file())
     check("project-level log indexes the GUI run and its run diagnostic path",
-          "Phase Studio 2.0.4 · run_0003" in (project / "log.txt").read_text(encoding="utf-8")
+          f"Phase Studio {VERSION} · run_0003" in (project / "log.txt").read_text(encoding="utf-8")
           and f"Run log: {(run_dir / 'log.txt').resolve()}" in (project / "log.txt").read_text(encoding="utf-8"))
     check("run log identifies project, input, run and program locations",
           all(token in text for token in (
               str(project.resolve()), str(inflip.resolve()), "Run: run_0003",
               str(sf), str(edma), str(run_dir.resolve()),
-              "Phase Studio version: 2.0.4", "Project log:", "Run log:",
+              f"Phase Studio version: {VERSION}", "Project log:", "Run log:",
               "Input .inflip:", "Phase Studio integration root:",
               "SharpED endpoint: https://sharped.example.test",
           )))

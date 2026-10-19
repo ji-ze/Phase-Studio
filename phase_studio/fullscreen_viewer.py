@@ -16,7 +16,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
 
-from phase_studio.structure_camera import StructureCameraController, fit_projected_structure
+from phase_studio.structure_camera import StructureCameraController, fit_projected_structure, camera_settings_button
 
 
 class DetachedViewerWindow(QDialog):
@@ -37,6 +37,7 @@ class DetachedViewerWindow(QDialog):
         root.setSpacing(4)
         bar = QHBoxLayout()
         label = QLabel(title)
+        self.title_label = label
         font = label.font()
         font.setBold(True)
         label.setFont(font)
@@ -147,6 +148,7 @@ class SingleStructureViewerWindow(QDialog):
         next_cycle: Optional[Callable[[], None]] = None,
         latest_cycle: Optional[Callable[[], None]] = None,
         elev: float = 20.0, azim: float = 35.0,
+        roll: float = 0.0, camera_limits=None, camera_zoom=None,
     ) -> None:
         super().__init__(parent, Qt.Window)
         self.setObjectName("singleStructureViewer")
@@ -154,6 +156,8 @@ class SingleStructureViewerWindow(QDialog):
         self._presentation = presentation
         self._color_for = color_for
         self._elev, self._azim = float(elev), float(azim)
+        self._roll = float(roll)
+        self._initial_camera = (camera_limits,camera_zoom) if camera_limits is not None else None
         self._auto_rotate = False
         self._user_camera_interacted = False
         self._fit = None
@@ -194,6 +198,7 @@ class SingleStructureViewerWindow(QDialog):
         if previous_cycle is not None or next_cycle is not None or latest_cycle is not None:
             primary_controls.addSpacing(8)
         primary_controls.addStretch(1)
+        primary_controls.addWidget(camera_settings_button(self))
         action(primary_controls, "Fit", self.fit)
         action(primary_controls, "Reset view", self.reset_view)
         self.auto_rotate_button = action(primary_controls, "Auto rotate: Off", self._toggle_auto_rotate)
@@ -202,14 +207,14 @@ class SingleStructureViewerWindow(QDialog):
         root.addLayout(bar)
 
         if adjust_threshold is not None:
-            action(secondary_controls, "+ atoms", lambda: self._change(lambda: adjust_threshold(True)))
-            action(secondary_controls, "- atoms", lambda: self._change(lambda: adjust_threshold(False)))
+            self.add_atoms_button=action(secondary_controls, "+ atoms", lambda: self._change(lambda: adjust_threshold(True)))
+            self.remove_atoms_button=action(secondary_controls, "- atoms", lambda: self._change(lambda: adjust_threshold(False)))
         secondary_controls.addStretch(1)
         if set_mode is not None:
             action(secondary_controls, "Complete molecules", lambda: self._change(lambda: set_mode("molecule")))
             action(secondary_controls, "Full cell", lambda: self._change(lambda: set_mode("cell")))
         secondary_controls.addSpacing(8)
-        self.fullscreen_button = action(secondary_controls, "Enter fullscreen", self.toggle_fullscreen)
+        self.fullscreen_button = action(primary_controls, "Enter fullscreen", self.toggle_fullscreen)
         self.fullscreen_button.setObjectName("fullscreenToggle")
         self.close_button = action(secondary_controls, "Close viewer", self.close)
         self.metadata_label = QLabel("")
@@ -259,13 +264,42 @@ class SingleStructureViewerWindow(QDialog):
             toggle_auto_rotate=lambda: self.auto_rotate_button.click(),
         )
         self.render()
+        if self._initial_camera is not None and self.figure.axes:
+            limits,zoom=self._initial_camera
+            axis=self.figure.axes[0]
+            axis.set_xlim3d(*limits[0]);axis.set_ylim3d(*limits[1]);axis.set_zlim3d(*limits[2])
+            if zoom is not None:
+                axis.set_box_aspect((1,1,1),zoom=zoom);axis._phase_fit_zoom=zoom
+            self._user_camera_interacted=True
 
     def _change(self, callback: Callable[[], None]) -> None:
         callback()
         self.render()
 
+    def _refresh_viewer_palette(self):
+        self._geometry_signature=None
+        self.render()
+
     def render(self) -> None:
         data = self._presentation() or {}
+        self.candidate_identity=data.get('candidate_identity')
+        for name,key in (('add_atoms_button','add_atoms'),('remove_atoms_button','remove_atoms')):
+            button=getattr(self,name,None)
+            if button is not None:
+                button.setEnabled(data.get(key+'_available',True))
+                button.setToolTip(data.get(key+'_reason',''))
+        atoms = list(data.get('atoms', ()))
+        coords = np.asarray(data.get('coords', ()), dtype=np.float64).reshape(-1,3)
+        geometry_signature = (coords.tobytes(), tuple(tuple(bond) for bond in data.get('bonds',())),
+            np.asarray(data.get('cell_segments',())).tobytes(), data.get('atom_size',34.),
+            tuple((getattr(atom,'label',''),getattr(atom,'element','')) for atom in atoms))
+        if geometry_signature == getattr(self,'_geometry_signature',None):
+            title = str(data.get('title','')).strip()
+            if title:
+                self.setWindowTitle(title); self.title_label.setText(title)
+            self.metadata_label.setText(str(data.get('metadata','')))
+            return  # Reuse persistent collections and the exact camera.
+        self._geometry_signature = geometry_signature
         previous_limits = None
         previous_zoom = None
         if self.figure.axes:
@@ -274,6 +308,7 @@ class SingleStructureViewerWindow(QDialog):
             previous_zoom = getattr(old_axis, "_phase_fit_zoom", None)
             self._elev = float(self.figure.axes[0].elev)
             self._azim = float(self.figure.axes[0].azim)
+            self._roll = float(self.figure.axes[0].roll)
         self.figure.clear()
         axis = self.figure.add_subplot(1, 1, 1, projection="3d")
         atoms = list(data.get("atoms", ()))
@@ -284,7 +319,7 @@ class SingleStructureViewerWindow(QDialog):
         self._presentation_signature = signature
         if len(atoms) and len(coords):
             axis.set_proj_type("ortho")
-            axis.view_init(elev=self._elev, azim=self._azim)
+            axis.view_init(elev=self._elev, azim=self._azim, roll=getattr(self,'_roll',0.))
             colors = [self._color_for(str(getattr(atom, "element", "C"))) for atom in atoms]
             count_scale = max(0.20, min(1.0, (320.0 / max(1, len(atoms))) ** 0.32))
             sizes = np.asarray([
@@ -354,11 +389,6 @@ class SingleStructureViewerWindow(QDialog):
     def _camera_interaction(self, kind: str) -> None:
         if kind in {"rotate", "pan", "zoom"}:
             self._user_camera_interacted = True
-        if kind == "rotate" and self.auto_rotate_button.isChecked():
-            self.auto_rotate_button.setChecked(False)
-            self._auto_rotate = False
-            self._rotation_timer.stop()
-            self.auto_rotate_button.setText("Auto rotate: Off")
 
     def fit(self) -> None:
         if self._fit is None or not self.figure.axes:
@@ -386,12 +416,12 @@ class SingleStructureViewerWindow(QDialog):
 
     def _rotate_camera(self) -> None:
         """Advance only the current camera; prepared geometry stays untouched."""
-        if not self.figure.axes:
+        if not self.figure.axes or not self._camera.allow_auto_rotation():
             return
         axis = self.figure.axes[0]
         self._elev = float(axis.elev)
         self._azim = (float(axis.azim) + 0.6) % 360.0
-        axis.view_init(elev=self._elev, azim=self._azim)
+        axis.view_init(elev=self._elev, azim=self._azim, roll=axis.roll)
         self.canvas.draw_idle()
 
     def open_maximized(self) -> None:
@@ -400,7 +430,9 @@ class SingleStructureViewerWindow(QDialog):
         fit_dialog_to_available_screen(
             self, QSize(1400, 860), width_fraction=0.92, height_fraction=0.90,
         )
-        self.show(); self.raise_(); self.activateWindow()
+        self.show()
+        self.raise_()
+        self.activateWindow()
         self._fit_timer.start()
 
     def toggle_fullscreen(self) -> None:

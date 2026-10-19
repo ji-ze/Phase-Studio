@@ -1,6 +1,7 @@
 """Shared Jana2020/standalone profile-aware result-selection tests."""
 import csv
 import dataclasses
+import json
 import os
 import sys
 import tempfile
@@ -8,6 +9,7 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from phase_studio.version import VERSION
 
 results_log = []
 
@@ -467,7 +469,17 @@ def main():
     jana.results = jana_results
     jana.open_result_selector("jana")
     standalone.results = jana_results
-    standalone.open_result_selector("standalone")
+    # Keep this selector live for the subsequent row-interaction assertions.
+    def inspect_live_dialog(dialog):
+        opened.append(dialog)
+        dialog.show()
+        app.processEvents()
+        return QDialog.Rejected
+    QDialog.exec = inspect_live_dialog
+    try:
+        standalone.open_result_selector("standalone")
+    finally:
+        QDialog.exec = reject_dialog
     check(
         "Jana and standalone recommend the same cycle/source",
         jana.result_recommendation.recommended_candidate == standalone.result_recommendation.recommended_candidate,
@@ -651,8 +663,8 @@ def main():
           ).resolve() == canonical_m50.resolve())
     (alternate_integration / "EDMA.exe").write_bytes(b"alternate edma")
     (alternate_root / "phase_studio_integration.json").write_text(
-        '{"product":"Phase Studio","version":"2.0.4","wrapper":"superflip.exe",'
-        '"original_superflip":"superflip_original.exe","payload_hash":"test"}',
+        json.dumps(dict(product='Phase Studio',version=VERSION,wrapper='superflip.exe',
+                        original_superflip='superflip_original.exe',payload_hash='test')),
         encoding="utf-8",
     )
     original_application_dir_for_identity = jana_superflip.application_dir
@@ -669,7 +681,7 @@ def main():
         identity_log = []
         jana_superflip.log_wrapper_runtime_identity(identity_log.append)
         check("wrapper diagnostics record version, integration root and original executable",
-              any("Phase Studio version: 2.0.4" in line for line in identity_log)
+              any(f"Phase Studio version: {VERSION}" in line for line in identity_log)
               and any(str(alternate_root) in line for line in identity_log)
               and any(str(alternate_superflip.resolve()) in line for line in identity_log))
         (alternate_root / "phase_studio_integration.json").write_text(
@@ -818,7 +830,7 @@ def main():
               "project-local wrapper log" in project_log_path.read_text(encoding="utf-8")
               and not (wrapper_bin / "log.txt").exists())
         check("wrapper log has a session separator and millisecond timestamp",
-              "Phase Studio 2.0.4 session" in project_log_path.read_text(encoding="utf-8")
+              f"Phase Studio {VERSION} session" in project_log_path.read_text(encoding="utf-8")
               and "============================================================" in project_log_path.read_text(encoding="utf-8"))
         unicode_project = wrapper_dir / "Test User" / "Jana projekt Žluťoučký"
         unicode_inflip = unicode_project / "job with spaces.inflip"
@@ -1070,6 +1082,30 @@ def main():
               and appmod.file_sha256(override_model) == override_choice.structure_sha256)
         check("manual override: no preview substitution, duplicate handoff, or scientific recomputation",
               override_target.read_bytes() != override_preview.read_bytes() and len(gui_handoff_calls) == 1)
+
+        # Cycle 2 remains the exact handoff authority while Cycle 3 exists,
+        # including a late table-selection signal after pressing Pass.
+        m50_before=appmod.file_sha256(override_inflip.parent/'job.m50')
+        choose_second=accept_candidate(lambda c:c.cycle==2 and c.source=='deblurred')
+        def accept_second_then_late_third(dialog):
+            choose_second(dialog)
+            dialog.accept()
+            dialog._views['deblurred'].table.selectRow(2)
+            return dialog.result()
+        QDialog.exec=accept_second_then_late_third
+        gui_handoff_calls.clear()
+        override.open_result_selector('jana')
+        chosen=override.result_recommendation.selected_candidate
+        check('frozen handoff: selected SharpED Cycle 2 is preserved while Cycle 3 is latest',
+              chosen is not None and chosen.source=='deblurred' and chosen.cycle==2 and len(override_results)==3)
+        check('frozen handoff: exact Cycle 2 map and threshold-specific model, no preview or recomputation',
+              (override_inflip.parent/'job-deb.xplor').read_bytes()==Path(chosen.map_path).read_bytes()
+              and chosen.map_sha256==appmod.file_sha256(override_results[1].deblur_map)
+              and chosen.structure_sha256==appmod.file_sha256(override_results[1].deblur_edma_cif)
+              and len(gui_handoff_calls)==1)
+        check('frozen handoff: valid nonzero original m50 context is preserved',
+              appmod.file_sha256(override_inflip.parent/'job.m50')==m50_before
+              and (override_inflip.parent/'job.m50').stat().st_size>0)
 
         # A custom-threshold candidate is a new immutable structure identity.
         # Handoff performs no workflow Superflip, SharpED or EDMA work; its two

@@ -38,7 +38,8 @@ def check_ui():
         view=win._build_hkl_completeness_dialog(original)
         view.show();view.resize(1120,950);settle()
         assert visible_rows(view.hkl_bins_table)>=6
-        assert view.hkl_axes['significance'].get_title()=='Mean F/σ(F) vs resolution'
+        from phase_studio.scientific_typography import scientific_text
+        assert view.hkl_axes['significance'].get_title()==scientific_text('Mean F/σ(F) vs resolution', 'plot')
         assert 'Mean F/σ(F)' in [view.hkl_bins_table.horizontalHeaderItem(j).text() for j in range(view.hkl_bins_table.columnCount())]
         rows=[dict(row) for row in view.diagnostics.shells]
         expected=np.asarray([row['mean_f_over_sigma'] for row in rows],dtype=float)

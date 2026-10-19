@@ -23,12 +23,13 @@ from matplotlib.colors import to_rgb
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSettings, QEvent, QPoint
 from PySide6.QtWidgets import (
+    QApplication,
     QAbstractItemView, QButtonGroup, QDialog, QFormLayout, QGridLayout, QHBoxLayout,
     QHeaderView, QLabel, QPushButton, QSizePolicy, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
-    QToolButton,
+    QToolButton, QToolTip, QMessageBox,
 )
 
 from phase_studio.map_quality import (
@@ -43,7 +44,7 @@ from phase_studio.ui_branding import (
 from phase_studio.fullscreen_viewer import show_detached_viewer
 from phase_studio.structure_camera import (
     StructureCameraController, fit_projected_structure, set_structure_viewport_clip,
-    structure_marker_sizes,
+    structure_marker_sizes, camera_settings_button,
 )
 
 
@@ -58,6 +59,35 @@ _COMPACT_METRIC_COLUMNS = {
     "amplitude_cc": ("Amplitude CC ↑", "Pearson correlation of original measured amplitudes and map FFT amplitudes; imposed input amplitudes can give unity without validating phases."),
     "triplet_c3": ("C3 ↑", "Weighted triplet C3"),
 }
+
+
+class _MetricHeader(QHeaderView):
+    """Keep scientific hover help inside the supporting table's width."""
+    def __init__(self, table):
+        super().__init__(Qt.Horizontal, table)
+        self.sectionDoubleClicked.connect(self._details)
+
+    def _details(self, section):
+        item = self.parentWidget().horizontalHeaderItem(section)
+        if item is not None:
+            text = item.data(Qt.AccessibleDescriptionRole) or item.toolTip()
+            QMessageBox.information(self.window(), item.text(), str(text))
+
+    def viewportEvent(self, event):
+        if event.type() == QEvent.ToolTip:
+            index = self.logicalIndexAt(event.pos())
+            item = self.parentWidget().horizontalHeaderItem(index) if index >= 0 else None
+            if item is not None:
+                full = str(item.data(Qt.AccessibleDescriptionRole) or item.toolTip())
+                brief = full.split('. ')[0]
+                if len(brief)>140: brief=brief[:137]+'…'
+                width = max(100,min(220,self.width()-16))
+                text = f'<p style="width:{width}px">{html.escape(brief)}<br>Double-click header for details.</p>'
+                QToolTip.showText(self.mapToGlobal(QPoint(4,self.height())),text,self)
+                return True
+            QToolTip.hideText()
+            return True
+        return super().viewportEvent(event)
 
 _MAP_FEEDBACK_COLUMN_LABEL = "Feedback Δ"
 _MAP_FEEDBACK_COLUMN_TOOLTIP = (
@@ -85,6 +115,23 @@ class CandidateSelection:
         c = self.candidate
         return () if c is None else (c.run_id, c.source, c.cycle, c.candidate_id,
             c.map_sha256, c.edma_sigma, c.structure_sha256, c.jana_model_sha256)
+
+
+@dataclass(frozen=True)
+class ResolvedCandidateSnapshot:
+    """One sealed candidate and its immutable, representation-specific geometry."""
+    selection: CandidateSelection
+    representation: str
+    atoms: tuple
+    coordinates: tuple
+    bonds: tuple
+    composition: str
+    detected_count: int
+    cell_segments: tuple
+
+    @property
+    def identity(self):
+        return self.selection.identity
 
 
 def candidate_selection(candidate, *, jana=True, pending=False) -> CandidateSelection:
@@ -266,6 +313,7 @@ def _build_candidate_table(
     if show_feedback_column:
         headers.append(_MAP_FEEDBACK_COLUMN_LABEL)
     table = QTableWidget(len(ordered), len(headers))
+    table.setHorizontalHeader(_MetricHeader(table))
     table.setObjectName("diagnosticTable")
     table.setHorizontalHeaderLabels(headers)
     table.setAlternatingRowColors(True)
@@ -344,7 +392,7 @@ def _build_candidate_table(
             elif 2 <= column < 2 + len(metric_columns):
                 _heading, definition, key = metric_columns[column - 2]
                 raw = candidate.metrics.value(key)
-                item.setToolTip(definition + "\nUnrounded value: " + (
+                item.setToolTip("Unrounded value: " + (
                     f"{float(raw):.12g}" if raw is not None and math.isfinite(float(raw)) else "unavailable"))
             table.setItem(row, column, item)
     # One result must not reserve six empty table rows and starve the preview.
@@ -628,6 +676,9 @@ class ResultSelectionDialog(QDialog):
         preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_host.structure_canvas = preview_canvas
         self._preview_canvas = preview_canvas
+        # Detaching reparents the canvas without resizing this dialog. Refit
+        # against its actual viewport, unless the user has set their camera.
+        preview_canvas.mpl_connect("resize_event", self._on_preview_resize)
 
         action_button = QPushButton("Pass to Jana2020" if jana_context else "Save map and model")
         action_button.setObjectName("primaryButton")
@@ -701,6 +752,7 @@ class ResultSelectionDialog(QDialog):
             button.setCursor(Qt.PointingHandCursor)
             view_toolbar.addWidget(button)
         view_toolbar.addStretch(1)
+        view_toolbar.addWidget(camera_settings_button(self))
         view_toolbar.addWidget(QLabel("View:"))
         for button in (self._molecule_button, self._cell_button, self._auto_rotate_button):
             button.setCursor(Qt.PointingHandCursor)
@@ -869,11 +921,15 @@ class ResultSelectionDialog(QDialog):
     def _open_fullscreen(self) -> None:
         family = "Charge-flipping solution" if self._active_source == "superflip" else "Structure prediction"
         self._fullscreen_button.setVisible(False)
+        previous = self._detached_viewer
         self._detached_viewer = show_detached_viewer(
-            self, self._preview_section, f"{family} structure", self._detached_viewer,
+            self, self._preview_section, f"{family} — Cycle {self.selected_candidate.cycle}" if self.selected_candidate else family, self._detached_viewer,
         )
-        self._detached_viewer.finished.connect(self._restore_fullscreen_action)
-        QTimer.singleShot(0, self._fit_preview)
+        if self._detached_viewer is not previous:
+            self._detached_viewer.finished.connect(self._restore_fullscreen_action)
+        self._sync_detached_identity(self.selected_candidate)
+        # Detach the existing view without replacing its selected candidate,
+        # threshold, representation or deliberately chosen camera.
 
     def _restore_fullscreen_action(self, _result: int = 0) -> None:
         self._fullscreen_button.setVisible(True)
@@ -963,6 +1019,9 @@ class ResultSelectionDialog(QDialog):
 
     def done(self, result: int) -> None:
         self._closed = True
+        detached = getattr(self,'_detached_viewer',None)
+        if detached is not None and not detached._restored:
+            detached.close()
         super().done(result)
 
     def _set_initial_splitter_sizes(self) -> None:
@@ -985,8 +1044,12 @@ class ResultSelectionDialog(QDialog):
         # The candidate table is supporting evidence; the scientific viewer
         # remains the dominant 66-70% of the dialog while retaining enough room
         # for every compact heading.
-        upper_share = 0.33
-        table_width = min(max(table_width, int(available * 0.30)), int(available * upper_share))
+        try:
+            share = float(QSettings('PhaseStudio','PhaseStudio').value('viewer/resultSelectionTableShare', .28))
+            share = max(.20,min(.50,share)) if math.isfinite(share) else .28
+        except (ValueError,TypeError):
+            share = .28
+        table_width = int(available * share)
         table_width = max(table_width, required_width + 48)
         table_width = min(table_width, max(1, available - minimum_preview))
         self._setting_splitter_sizes = True
@@ -998,9 +1061,17 @@ class ResultSelectionDialog(QDialog):
     def _on_splitter_moved(self, *_args) -> None:
         if not self._setting_splitter_sizes:
             self._splitter_user_resized = True
+            sizes = self._splitter.sizes()
+            if sum(sizes)>0:
+                settings = QSettings('PhaseStudio','PhaseStudio')
+                settings.setValue('viewer/resultSelectionTableShare', sizes[0]/sum(sizes))
+                settings.sync()
 
     @property
     def selected_candidate(self) -> Optional[ResultCandidate]:
+        accepted = getattr(self, '_accepted_selection', None)
+        if accepted is not None:
+            return accepted.candidate
         view = self._views.get(self._active_source)
         return view.selected if view is not None else None
 
@@ -1011,9 +1082,16 @@ class ResultSelectionDialog(QDialog):
             pending=candidate is not None and self._threshold_key(candidate) in self._pending_thresholds)
 
     def accept(self) -> None:
-        if not self.selection_snapshot.ready:
+        snapshot = self.selection_snapshot
+        rendered = getattr(self, '_resolved_preview', None)
+        if not snapshot.ready:
             self._sync_action_button()
             return  # Keep the explanation visible; never substitute another row.
+        if snapshot.geometry and (rendered is None or rendered.identity != snapshot.identity):
+            self._selected_output_summary.setText('Selected scientific structure is inconsistent with the preview. Reselect the candidate before passing it to Jana2020.')
+            self._action_button.setEnabled(False)
+            return
+        self._accepted_selection = snapshot
         super().accept()
 
     def selection_state(self) -> dict:
@@ -1056,6 +1134,8 @@ class ResultSelectionDialog(QDialog):
 
     def _show_empty_preview(self, candidate=None, reason="") -> None:
         self._current_candidate = candidate
+        self._resolved_preview = None
+        self._sync_detached_identity(candidate)
         self.preview_candidate_id = ""
         self.preview_structure_hash = ""
         self._preview_fit = None
@@ -1135,6 +1215,8 @@ class ResultSelectionDialog(QDialog):
         self._sync_action_button()
 
     def _on_source_table_selection_changed(self, source: str) -> None:
+        if self._closed:
+            return
         view = self._views.get(source)
         if view is None:
             return
@@ -1249,6 +1331,10 @@ class ResultSelectionDialog(QDialog):
         """Fit after Qt resolves the canvas, coalescing resize bursts."""
         self._preview_fit_timer.start()
 
+    def _on_preview_resize(self, _event) -> None:
+        if not self._closed and not self._preview_user_interacted:
+            self._schedule_preview_fit()
+
     def _fit_preview(self) -> None:
         if self._preview_user_interacted:
             return
@@ -1266,7 +1352,7 @@ class ResultSelectionDialog(QDialog):
         host = self._preview_host
         host.structure_elev, host.structure_azim = 20.0, 35.0
         for axis in host._structure_interactive_axes:
-            axis.view_init(elev=host.structure_elev, azim=host.structure_azim)
+            axis.view_init(elev=host.structure_elev, azim=host.structure_azim, roll=0.)
         self._preview_user_interacted = False
         self._fit_preview()
 
@@ -1284,17 +1370,28 @@ class ResultSelectionDialog(QDialog):
     def _preview_camera_interaction(self, kind: str) -> None:
         if kind in {"rotate", "pan", "zoom"}:
             self._preview_user_interacted = True
-        if kind in {"rotate", "pan", "zoom"} and self._auto_rotate_button.isChecked():
-            self._auto_rotate_button.setChecked(False)
 
     def _auto_rotate_tick(self) -> None:
         host = self._preview_host
-        if not self._auto_rotate_enabled or not host._structure_interactive_axes:
+        if not self._auto_rotate_enabled or not host._structure_interactive_axes or not self._camera.allow_auto_rotation():
             return
         host.structure_azim = (float(host.structure_azim) + 0.4) % 360.0
         for axis in host._structure_interactive_axes:
-            axis.view_init(elev=host.structure_elev, azim=host.structure_azim)
-        self._fit_preview()
+            axis.view_init(elev=host.structure_elev, azim=host.structure_azim, roll=axis.roll)
+        host._update_structure_depth_cue(host.structure_elev,host.structure_azim)
+        self._rotation_fit_tick = getattr(self,'_rotation_fit_tick',0)+1
+        if not self._preview_user_interacted and self._rotation_fit_tick % 8 == 0:
+            # Refit only at a real clipping risk, rather than solve a fit every frame.
+            from mpl_toolkits.mplot3d import proj3d
+            points = getattr(self,'_preview_fit_coords',None)
+            if points is not None and len(points):
+                for axis in host._structure_interactive_axes:
+                    x,y,_ = proj3d.proj_transform(*np.asarray(points).T,axis.get_proj())
+                    pixels = axis.transData.transform(np.column_stack((x,y)))
+                    box = axis.get_position(original=True).transformed(axis.figure.transFigure)
+                    if (pixels[:,0].min()<box.x0+4 or pixels[:,0].max()>box.x1-4 or
+                        pixels[:,1].min()<box.y0+4 or pixels[:,1].max()>box.y1-4):
+                        self._fit_preview()
         self._preview_canvas.draw_idle()
 
     def _on_preview_scroll(self, event) -> None:
@@ -1317,6 +1414,9 @@ class ResultSelectionDialog(QDialog):
         path = Path(candidate.structure_path)
         stat = path.stat() if path.is_file() else None
         cache_key = (
+            candidate.run_id, candidate.source, candidate.cycle, candidate.candidate_id,
+            candidate.map_sha256, candidate.structure_sha256, candidate.edma_sigma,
+            candidate.jana_model_sha256, candidate.unit_cell, candidate.space_group,
             str(path), getattr(stat, "st_mtime_ns", 0), getattr(stat, "st_size", 0),
             self._view_mode, candidate.edma_asu_composition,
         )
@@ -1335,12 +1435,27 @@ class ResultSelectionDialog(QDialog):
         self._presentation_cache[cache_key] = result
         return result
 
+    def _sync_detached_identity(self, candidate):
+        detached = getattr(self, '_detached_viewer', None)
+        if detached is not None and not detached._restored:
+            family = ('Charge-flipping solution' if candidate.source == 'superflip' else 'Structure prediction') if candidate else 'Structure unavailable'
+            title = f'{family} — Cycle {candidate.cycle}' if candidate else family
+            detached.setWindowTitle(title)
+            detached.title_label.setText(title)
+            detached.candidate_identity = CandidateSelection(candidate,False,False,'').identity
+
     def _render_preview(self, candidate: ResultCandidate) -> None:
         status = candidate_selection(candidate, jana=self._jana_context)
         if not status.geometry:
             self._show_empty_preview(candidate, status.reason)
             return
         previous = self._current_candidate
+        palette=getattr(QApplication.instance(),'_phase_color_palette','phase')
+        if (previous == candidate and getattr(self,'_rendered_view_mode',None)==self._view_mode
+                and getattr(self,'_rendered_palette',None)==palette
+                and getattr(self,'_resolved_preview',None) is not None):
+            self._sync_detached_identity(candidate)
+            return  # Identical immutable data: keep artists, camera and geometry.
         same_candidate = previous is not None and (
             previous.run_id, previous.source, previous.cycle, previous.map_sha256,
             self._view_mode
@@ -1358,7 +1473,9 @@ class ResultSelectionDialog(QDialog):
         if not same_candidate:
             self._preview_user_interacted = False
         self._rendered_view_mode = self._view_mode
+        self._rendered_palette = palette
         self._current_candidate = candidate
+        self._sync_detached_identity(candidate)
         self.preview_candidate_id = candidate.candidate_id
         self.preview_structure_hash = candidate.structure_sha256
         figure = self._preview_figure
@@ -1370,8 +1487,13 @@ class ResultSelectionDialog(QDialog):
         host._structure_depth_artists = []
         try:
             atoms, coords, bonds, composition, detected_count, fit, cell_segments = self._candidate_presentation(candidate)
+            self._resolved_preview = ResolvedCandidateSnapshot(status,self._view_mode,
+                tuple((str(a.label),str(a.element),tuple(float(v) for v in a.frac)) for a in atoms),
+                tuple(tuple(float(v) for v in row) for row in coords),tuple(tuple(b) for b in bonds),
+                composition,int(detected_count),tuple(tuple(tuple(float(v) for v in row) for row in segment) for segment in cell_segments))
             composition_label = "EDMA asymmetric-unit composition"
         except Exception:
+            self._resolved_preview = None
             atoms, coords, bonds, composition, detected_count, fit, cell_segments = [], np.zeros((0, 3)), [], "", 0, None, []
             composition_label = "Composition"
         self._current_formula = composition
@@ -1390,7 +1512,8 @@ class ResultSelectionDialog(QDialog):
         else:
             axis.set_proj_type("ortho")
             axis.set_xticks([]); axis.set_yticks([]); axis.set_zticks([])
-            axis.view_init(elev=host.structure_elev, azim=host.structure_azim)
+            axis.view_init(elev=host.structure_elev, azim=host.structure_azim,
+                           roll=float(old_axis.roll) if old_axis is not None else 0.)
             colors = [host._element_color(atom.element) for atom in atoms]
             count_scale = max(0.30, min(1.0, (320.0 / max(1, len(atoms))) ** 0.32))
             sizes = structure_marker_sizes(len(atoms))
@@ -1479,3 +1602,7 @@ class ResultSelectionDialog(QDialog):
         self._preview_canvas.draw_idle()
         QTimer.singleShot(0, self._fit_preview)
         self._schedule_preview_fit()
+
+    def _refresh_viewer_palette(self):
+        if self._current_candidate is not None:
+            self._render_preview(self._current_candidate)

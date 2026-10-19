@@ -158,6 +158,9 @@ class SharpEDServerClient:
         with profile_stage(self.performance_profiler, "SharpED model discovery", "external"):
             body = self._request_text("GET", self._url("/sharp-ed/models"))
         data = self._loads_json(body, "Models")
+        if (not isinstance(data, dict) or not isinstance(data.get("models"), list)
+                or any(not isinstance(item, str) or not item.strip() for item in data["models"])):
+            raise SharpEDServerError("SharpED catalogue has an invalid models list.", category="malformed_catalog")
         return ModelsResult(
             default_model=str(data.get("default") or ""),
             models=[str(item) for item in data.get("models", []) if isinstance(item, str)],
@@ -376,7 +379,7 @@ class SharpEDServerClient:
             )
         except SharpEDServerError as exc:
             from phase_studio.credentials import credential_store
-            if credential_store.is_oauth(bearer_token) and exc.category == "authentication":
+            if credential_store.is_oauth(bearer_token) and exc.category in {"authentication", "authorization"}:
                 raise  # Do not hide repeated login/permission failure in polling.
             return None
         return body if self._looks_like_map_payload(body) else None
@@ -460,7 +463,8 @@ class SharpEDServerClient:
                 return self._request_bytes(method, url, data=data,
                     headers={**(headers or {}), "Authorization": "Bearer " + renewed}, _oauth_retry=True)
             body = exc.read().decode("utf-8", errors="replace")
-            category = "authentication" if exc.code in (401, 403) else ("server" if exc.code >= 500 else "http")
+            category = ("authentication" if exc.code == 401 else "authorization" if exc.code == 403
+                        else "server" if exc.code >= 500 else "http")
             raise SharpEDServerError(
                 f"SharpED HTTP error {exc.code} for {redact_server_diagnostic(url)}. "
                 f"Body: {redact_server_diagnostic(body)}",

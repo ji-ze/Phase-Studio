@@ -18,6 +18,8 @@ def run_checks():
   for name in ('superflip.exe','EDMA.exe'):(jana/'SUPERFLIP'/name).write_bytes(b'active scientific executable')
   js.application_dir=lambda:jana
   QSettings.setDefaultFormat(QSettings.IniFormat);QSettings.setPath(QSettings.IniFormat,QSettings.UserScope,tmp)
+  imports=js._qt_imports
+  js._qt_imports=lambda:imports()|{'QSettings':lambda org,name:QSettings(str(base/(name+'.ini')),QSettings.IniFormat)}
   QDialog.exec=lambda self:QDialog.Rejected
   w=js._JanaWorkflowWizard([str(source)],source);w.run();w._adjust_dialog_size=lambda:None;w.dialog.show()
   def settle():
@@ -25,8 +27,13 @@ def run_checks():
    w._size_stack_to_current_page(w.dialog.width())
    for _ in range(20):app.processEvents()
   settle();metadata=[getattr(w,n).text() for n in ('reflections_value','format_value','cell_value','spacegroup_value','composition_value')]
-  assert metadata[0]=='432 parsed · 432 literal unique HKL'
-  assert metadata[2]=='24.352 × 35.561 × 26.032 Å\n90° × 91.02° × 90°'
+  assert metadata[0]=='432 HKL records · 432 unique indices'
+  assert 'not symmetry-independent' in w.reflections_value.toolTip()
+  from phase_studio.scientific_typography import scientific_text
+  assert metadata[2].count('<td ')==6 and metadata[2].count('<tr>')==2
+  for text in ('a = 24.352 Å','b = 35.561 Å','c = 26.032 Å','alpha = 90°','beta = 91.02°','gamma = 90°'):
+   assert scientific_text(text).replace(' ','&nbsp;') in metadata[2]
+  assert w.data_type_value.text()=='Single crystal'
   assert metadata[3]=='P2\u2081/n (#14)' and metadata[4]=='Ag₁₂₄ S₈₈ B₇₆₈ H₇₀₄ O₄₀'
   tiles=(w.original_superflip_tile,w.superflip_sharped_tile,w.autosolve_tile,w.professional_mode_tile)
   for width,height in ((900,850),(900,1000),(900,820),(821,780),(820,850),(900,580),(640,850)):
@@ -44,7 +51,7 @@ def run_checks():
      assert label.height()>=need,(tile.title_label.text(),label.text(),label.size().toTuple(),need)
     assert tile.subtitle_label.alignment() & Qt.AlignTop
    if height>=780 and width>=820:
-    assert w.scroll_area.verticalScrollBar().maximum()==0
+    assert w.scroll_area.verticalScrollBar().maximum()==0,(width,height,w.scroll_area.verticalScrollBar().maximum(),w.input_summary_section.height(),w.input_summary_outer.direction(),w.input_summary_columns.direction(),w.summary_wide_minimum_width)
     for tile in tiles:
      p=tile.mapTo(viewport,QPoint());assert viewport.rect().contains(p) and viewport.rect().contains(p+QPoint(tile.width()-1,tile.height()-1))
    if height==580:

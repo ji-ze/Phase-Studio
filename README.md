@@ -5,7 +5,7 @@ crystallographic structure solution. It integrates external Superflip charge
 flipping and EDMA peak extraction, optional SharpED map prediction, and
 candidate-specific map/model transfer to Jana2020.
 
-**Current release: 2.0.4.** [Release notes](RELEASE_NOTES_2_0_4.md) describe Jana2020 sign-in, improved scientific diagnostics and the updated Wizard. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
+**Version 2.0.5.** [Release notes](RELEASE_NOTES_2_0_5.md) cover the refined Wizard, HKL diagnostics, UNIVERSAL Autosolve and candidate-specific viewer/handoff safeguards. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
 
 ## Features and workflows
 
@@ -31,9 +31,9 @@ This is a reproducible offscreen UI preview, not scientific workstation acceptan
 
 ## Standalone Windows installation
 
-Download **PhaseStudio-2.0.3-x64.exe** from
+Download **PhaseStudio-2.0.5-x64.exe** from
 [GitHub Releases](https://github.com/ji-ze/Phase-Studio/releases), verify it
-against the SHA-256 shown in the release notes, and launch it. The 2.0.3 release attaches only this EXE; notes and screenshots are in the release body. The Windows x64 ONEFILE download
+against `SHA256SUMS.txt`, and launch it. The Windows x64 ONEFILE download
 includes the Python/Qt runtime; no separate Python installation is required.
 Use Windows 10 1903 or newer, or Windows 11, on x64 hardware.
 
@@ -44,8 +44,8 @@ do not require Jana2020.
 
 ## Jana2020 integration
 
-Jana developers can build the complete ONEDIR integration from source, containing
-`PhaseStudio-Jana2020-2.0.3/Phase_studio.exe` and the complete `_internal` runtime. The 2.0.3 public release provides only the standalone EXE, without a Jana ZIP.
+Jana developers can download `PhaseStudio-Jana2020-2.0.5.zip`, containing
+`PhaseStudio-Jana2020-2.0.5/Phase_studio.exe` and the complete `_internal` runtime.
 Keep them together. This release has no separate Jana installer and does not
 replace the scientific Superflip executable.
 
@@ -116,14 +116,14 @@ Scientific publications reporting work performed with Phase Studio should cite
 the software. This is the project's scientific-attribution policy, separate
 from the standard MIT license; it adds no license restriction.
 
-> Zelenka, Jiří. *Phase Studio*, version 2.0.4. Institute of Physics of the
+> Zelenka, Jiří. *Phase Studio*, version 2.0.5. Institute of Physics of the
 > Czech Academy of Sciences. https://github.com/ji-ze/Phase-Studio
 
 ```bibtex
 @software{zelenka_phase_studio_204,
   author  = {Zelenka, Jiří},
   title   = {Phase Studio},
-  version = {2.0.4},
+  version = {2.0.5},
   url     = {https://github.com/ji-ze/Phase-Studio}
 }
 ```

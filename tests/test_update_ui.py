@@ -30,7 +30,11 @@ def check():
     qt=QApplication([]);a.apply_phase_studio_style(qt)
     now=[1_800_000_000.]
     calls=[];thread_ids=[];opens=[]
-    latest=[Release((2,0,5))]
+    from phase_studio.version import VERSION
+    parts=tuple(map(int,VERSION.split('.')))
+    future=parts[:2]+(parts[2]+1,)
+    future_label='.'.join(map(str,future))
+    latest=[Release(future)]
     def fetch():
         calls.append(True);thread_ids.append(threading.get_ident())
         return latest[0]
@@ -51,25 +55,26 @@ def check():
         store=state()
         assert store.enabled()
         assert store.claim_check(now[0])
+        store.cache(Release(future),now[0])
         assert not state().claim_check(now[0])
         assert not state().claim_check(now[0]+CHECK_INTERVAL-1)
         assert state().claim_check(now[0]+CHECK_INTERVAL)
-        store.cache(Release((2,0,5)),now[0])
-        assert state().cached(now[0]).version==(2,0,5)
+        store.cache(Release(future),now[0])
+        assert state().cached(now[0]).version==future
         assert state().cached(now[0]+CHECK_INTERVAL) is None
-        assert store.claim_notification(Release((2,0,5)))
-        assert not state().claim_notification(Release((2,0,5)))
+        assert store.claim_notification(Release(future))
+        assert not state().claim_notification(Release(future))
         read_only=Mock(wraps=settings)
         read_only.status.return_value=QSettings.AccessError
         assert not ui.UpdateState(read_only,root/'read-only.lock').claim_check(now[0]+2*CHECK_INTERVAL)
         assert state().claim_notification(Release((2,1,0)))
-        assert not state().claim_notification(Release((2,0,5)))
+        assert not state().claim_notification(Release(future))
         settings.remove('updates');settings.sync()
         service=ui.UpdateService(qt,state=state(),fetcher=fetch,clock=lambda:now[0],automatic_allowed=True,browser=lambda url:opens.append(url.toString()))
         qt._phase_studio_updates=service
         assert ui.update_service() is service
         quiet_parent=QDialog();quiet_parent.show()
-        for version in ((2,0,3),(2,0,4),(1,99,99)):
+        for version in ((2,0,3),(2,0,4),parts,(1,99,99)):
             key='-'.join(map(str,version))
             quiet=ui.UpdateService(qt,state=ui.UpdateState(QSettings(str(root/(key+'.ini')),QSettings.IniFormat),root/(key+'.lock')),
                 fetcher=lambda v=version:Release(v),clock=lambda:now[0],automatic_allowed=True)
@@ -79,10 +84,13 @@ def check():
         parent=QDialog();parent.setWindowTitle('Controlled fixture parent');parent.show();settle()
         other=QDialog();other.show();settle()
         service.attach(parent,automatic=False);service.attach(other,mode='jana',automatic=False)
+        version_button = ui.wizard_update_menu(parent, automatic=False)
+        assert not version_button.update_available
         service.check(parent);settle(service)
+        assert version_button.update_available
         assert calls and all(t!=threading.get_ident() for t in thread_ids)
         dialog=service.notice
-        assert dialog and '2.0.5' in dialog.message.text()
+        assert dialog and future_label in dialog.message.text()
         assert not dialog.isModal() and dialog.testAttribute(Qt.WA_ShowWithoutActivating)
         assert opens==[]
         assert dialog.rect().contains(dialog.later_button.geometry())
@@ -103,13 +111,15 @@ def check():
         service.notice.view_button.click();settle()
         assert opens==['https://github.com/ji-ze/Phase-Studio/releases']
         latest[0]=Release((2,0,3));service.check(parent,manual=True);settle(service)
-        assert service.notice.message.text()=='You are using the latest released version of Phase Studio.'
-        latest[0]=Release((2,0,5));service.check(parent,manual=True);settle(service)
-        assert service.notice.release.version==(2,0,5)
+        assert not version_button.update_available
+        assert service.notice.title.text()=='Phase Studio is up to date' and VERSION in service.notice.message.text()
+        latest[0]=Release(future);service.check(parent,manual=True);settle(service)
+        assert service.notice.release.version==future
         service.notice.close();settle()
         # Manual failures are generic, automatic failures stay silent and throttled.
         latest[0]=None;service.check(parent,manual=True);settle(service)
-        assert service.notice.message.text()=='Unable to check for updates. Please check your internet connection and try again.'
+        assert not version_button.update_available
+        assert service.notice.message.text()=='Check your internet connection and try again.'
         service.notice.close();settle();service.set_enabled(True)
         now[0]+=CHECK_INTERVAL;before=len(calls)
         service.check(parent);settle(service);assert service.notice is None and len(calls)==before+1
@@ -142,10 +152,10 @@ def check():
             win._phase_studio_distribution='jana'
             assert service.mode(win,None)=='jana'
             win._phase_studio_distribution='standalone'
-            latest[0]=Release((2,0,5));win.update_check_button.click();settle(service)
+            latest[0]=Release(future);win.update_check_button.click();settle(service)
             assert service.notice is not None
             service.notice.close();win.timer.stop();win.close();settle()
-        # Real Wizard footer uses the same service and supplies Jana distribution context.
+        # Real Wizard header uses the same service and supplies Jana distribution context.
         import phase_studio.jana_superflip as js
         from test_wizard_text_clipping import write_inflip
         jana=root/'Jana';(jana/'SUPERFLIP').mkdir(parents=True)
@@ -153,8 +163,12 @@ def check():
         inflip=write_inflip(root)
         with patch.object(js,'application_dir',lambda:jana),patch.object(QDialog,'exec',lambda self:QDialog.Rejected):
             wizard=js._JanaWorkflowWizard([],inflip);wizard.run();wizard.dialog.show();settle()
+            assert wizard.brand_header.isAncestorOf(wizard.update_menu)
+            assert not wizard.footer.isAncestorOf(wizard.update_menu)
             actions=wizard.update_menu.menu().actions()
             assert actions[0].text()=='Check for updates'
+            assert actions[-1].text()=='About Phase Studio'
+            assert 'Version and updates' in wizard.update_menu.toolTip()
             assert any(ref() is wizard.dialog and mode=='jana' for ref,mode in service._windows)
             actions[0].trigger();settle(service)
             assert any('Jana2020 software release' in label.text() for label in service.notice.findChildren(QLabel))

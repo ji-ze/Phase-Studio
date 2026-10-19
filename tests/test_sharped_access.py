@@ -205,6 +205,22 @@ class AccessDialogTests(unittest.TestCase):
         self.enter_and_connect()
         self.assertIn('temporarily unavailable',self.dialog.feedback.text())
         self.assertEqual(self.dialog.key_edit.text(),KEY)
+    def test_connection_status_requires_successful_probe_and_survives_retry(self):
+        from phase_studio.sharped_access import connection_status
+        self.assertEqual(connection_status(self.store),'Not connected')
+        self.store.set(KEY,remember=True)
+        self.assertEqual(connection_status(self.store),'Credentials available — not yet verified')
+        self.status=req._classify_sharped_error(SimpleNamespaceError(503))
+        self.enter_and_connect()
+        self.assertEqual(connection_status(self.store),'Connection unavailable')
+        self.assertEqual(self.store.get(),KEY)
+        self.status=req.RequirementStatus(req.RequirementKind.SHARPED,req.RequirementState.OK)
+        self.enter_and_connect()
+        self.assertEqual(connection_status(self.store),'Credentials available — not yet verified')
+        self.store.set(OTHER,remember=True)
+        self.assertEqual(connection_status(self.store),'Credentials available — not yet verified')
+        self.store.remove()
+        self.assertEqual(connection_status(self.store),'Not connected')
     def test_back_does_not_change_credential_or_start_workflow(self):
         self.dialog.key_edit.setText(KEY);self.dialog.back_button.click()
         self.assertIsNone(self.dialog.selected_key)

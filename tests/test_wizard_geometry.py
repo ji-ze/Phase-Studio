@@ -11,8 +11,7 @@ explanation all wrapped far more than necessary, which made the Phase Recycling
 page tall enough to need scrolling while leaving wide empty bands below the
 content -- a desktop dialog that read like a narrow mobile form.
 
-Width follows a stable policy; short configuration pages use content-aware
-height, clamped to the screen. Only page content scrolls; header/footer remain
+Width and height follow one stable content-independent policy, clamped to the screen. Only page content scrolls; header/footer remain
 outside the scrolling region.
 
 Nothing here asserts a fixed window position or a fixed pixel layout: the
@@ -244,8 +243,8 @@ def main():
         stable_sizes.append(wizard.dialog.size())
     check("main pages preserve the shared Wizard width",
           len({size.width() for size in stable_sizes}) == 1)
-    check("short configuration is initially smaller than the main workflow page",
-          stable_sizes[1].height() < stable_sizes[0].height())
+    check("all Wizard pages preserve the shared height",
+          len({size.height() for size in stable_sizes}) == 1)
     check("content-aware height remains inside the available desktop",
           wizard.dialog.height() <= int(wizard._available_screen_height()*wizard_cls.WIZARD_MAX_SCREEN_FRACTION))
 
