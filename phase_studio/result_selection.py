@@ -672,7 +672,9 @@ class ResultSelectionDialog(QDialog):
         # This is the flexible region.  A large canvas minimum used to force
         # the native dialog taller after its pre-layout screen clamp, placing
         # the handoff actions below the Windows work area on short monitors.
-        preview_canvas.setMinimumHeight(130)
+        # The actual viewport must shrink with a short screen. A taller canvas
+        # minimum paints a correctly fitted model outside the clipped panel.
+        preview_canvas.setMinimumHeight(40)
         preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_host.structure_canvas = preview_canvas
         self._preview_canvas = preview_canvas

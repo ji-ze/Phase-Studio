@@ -25,6 +25,10 @@ The shared Camera button paints a vector chevron in separately reserved space.
 The selector's control groups wrap instead of eliding camera/representation
 labels. Short candidate-family headings and a one-third default table share
 leave more readable evidence beside the viewer while preserving user settings.
+On short screens the canvas can shrink to its actual available height rather
+than extend below the panel and clip an otherwise correctly fitted model.
+The geometry regression checks the complete canvas lies inside its parent at
+1000 × 600 as well as larger window sizes.
 The EDMA composition tooltip is plain, concise explanatory text; an explicit
 Details dialog provides copyable candidate/source/cycle/threshold, site counts
 and output hashes. The execution window's ordinary Jana workflow says

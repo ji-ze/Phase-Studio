@@ -62,8 +62,9 @@ class ResultSelectionRedesignTests(unittest.TestCase):
     def test_projected_geometry_and_manual_camera(self):
         from mpl_toolkits.mplot3d import proj3d
         d=self.dialog
-        for width,height in ((1280,720),(1500,850),(1920,1080),(2560,1440)):
+        for width,height in ((1000,600),(1280,720),(1500,850),(1920,1080),(2560,1440)):
             d.resize(width,height);self.events();d._request_preview_fit();d._preview_canvas.draw()
+            self.assertTrue(d._preview_section.rect().contains(d._preview_canvas.geometry()))
             axis=d._preview_figure.axes[0]
             points=d._preview_fit_coords.copy()
             x,y,_=proj3d.proj_transform(*points.T,axis.get_proj())
