@@ -3664,23 +3664,11 @@ class _JanaWorkflowWizard:
         self.primary_button.setObjectName("primaryButton")
         self.primary_button.setDefault(True)
         self.button_row.addWidget(self.back_button)
-        from phase_studio.update_ui import wizard_update_menu
-        self.update_menu = wizard_update_menu(self.dialog)
-        self.update_menu.setText(__version__)
-        self.update_menu.setObjectName("wizardVersionMenu")
-        self.update_menu.setAccessibleName("Version " + __version__ + ", updates")
-        self.update_menu.setToolTip("Version and updates")
-        self.update_menu.menu().addSeparator()
-        about = self.update_menu.menu().addAction('About Phase Studio')
-        about.triggered.connect(lambda: qt['QMessageBox'].about(self.dialog, 'About Phase Studio',
-            'Phase Studio ' + __version__ + '<br>Crystallographic phasing with Superflip and SharpED.'))
-        self.update_menu.setMinimumHeight(24)
-        self.update_menu.setMinimumWidth(0)
-        badge = self.brand_header.findChild(qt["QLabel"], "versionBadge")
-        if badge is not None:
-            badge.parentWidget().layout().replaceWidget(badge, self.update_menu)
-            badge.hide()
-        self.update_menu.setStyleSheet("QToolButton { color:#52658b; background:transparent; border:0; padding:2px 6px; }")
+        from phase_studio.update_ui import install_application_header_menu
+        self.header_controls = install_application_header_menu(self.brand_header, self.dialog,
+            about=lambda: qt['QMessageBox'].about(self.dialog, 'About Phase Studio',
+                'Phase Studio ' + __version__ + '<br>Crystallographic phasing with Superflip and SharpED.'))
+        self.update_menu = self.header_controls.menu_button
         self.button_row.addStretch(1)
         self.button_row.addWidget(self.cancel_button)
         self.button_row.addWidget(self.primary_button)

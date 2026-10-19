@@ -7,11 +7,11 @@ import weakref
 import logging
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer, QSettings, QLockFile, QStandardPaths, QPoint
+from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer, QSettings, QLockFile, QStandardPaths, QPoint, QSize
 from PySide6.QtGui import QDesktopServices, QAction
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                              QPushButton, QCheckBox, QToolButton, QMenu)
+                              QPushButton, QCheckBox, QToolButton, QMenu, QWidget)
 
 from .update_checker import (Release, VERSION, RELEASES_URL, CHECK_INTERVAL, parse_version,
                              is_newer, fetch_latest_release, fetch_release_check, CheckResult,
@@ -282,6 +282,7 @@ class UpdateService(QObject):
         window = self._visible(reference)
         release=result.release
         self.known_release = release if not result.error and release is not None and is_newer(release) else None
+        self._verified_release_at = self.clock() if self.known_release is not None else None
         self.release_changed.emit(self.known_release)
         if not result.error:
             self.state.cache(release, self.clock())
@@ -352,11 +353,31 @@ class _VersionMenu(QMenu):
 
 
 class _VersionButton(QToolButton):
+    def __init__(self, window, service):
+        super().__init__(window)
+        self._service = service
+        self._indicator_expiry = QTimer(self)
+        self._indicator_expiry.setSingleShot(True)
+        self._indicator_expiry.timeout.connect(lambda: self.show_release(None))
+
     @Slot(object)
     def show_release(self, release):
-        self.update_available = release is not None
-        self.setToolTip('Version and updates' + (f' · Version {release.label} available' if release else ''))
+        verified_at = getattr(self._service, '_verified_release_at', None)
+        age = self._service.clock() - verified_at if verified_at is not None else CHECK_INTERVAL
+        self.update_available = release is not None and is_newer(release) and 0 <= age < CHECK_INTERVAL
+        self._indicator_expiry.stop()
+        if self.update_available:
+            self._indicator_expiry.start(max(1, int((CHECK_INTERVAL - age) * 1000)))
+        self.setToolTip('Updates and application information')
+        self.setAccessibleDescription(f'Version {release.label} available' if self.update_available else '')
         self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            event.accept()
+            self.showMenu()
+            return
+        super().keyPressEvent(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -366,7 +387,7 @@ class _VersionButton(QToolButton):
             painter.setRenderHint(QPainter.Antialiasing)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor('#2468cb'))
-            painter.drawEllipse(4, 4, 7, 7)
+            painter.drawEllipse(self.width() - 7, 3, 4, 4)
             painter.end()
 
 
@@ -392,13 +413,25 @@ def add_update_controls(layout, window):
 
 def wizard_update_menu(window, *, mode='jana', automatic=True):
     service = update_service()
-    button = _VersionButton(window)
+    button = _VersionButton(window, service)
     button.show_release(service.known_release)
     service.release_changed.connect(button.show_release)
-    button.setText('Updates')
+    from .ui_branding import apply_established_icon
+    apply_established_icon(button, 'application_menu', size=16)
+    button.setText('')
+    button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+    button.setIconSize(QSize(16, 16))
+    button.setArrowType(Qt.NoArrow)
+    button.setAccessibleName('Phase Studio menu')
+    button.setFocusPolicy(Qt.StrongFocus)
+    button.setCursor(Qt.PointingHandCursor)
     button.setPopupMode(QToolButton.InstantPopup)
-    button.setMinimumHeight(36)
-    button.setMinimumWidth(button.sizeHint().width() + 20)
+    button.setFixedSize(30, 30)
+    button.setStyleSheet('QToolButton { background:transparent; border:2px solid transparent; padding:0; }'
+        'QToolButton:hover { background:#eaf2ff; }'
+        'QToolButton:focus { border-color:#2264b8; }'
+        'QToolButton:pressed { background:#dceaf8; }'
+        'QToolButton::menu-indicator { image:none; width:0px; height:0px; }')
     menu = _VersionMenu(button)
     check = menu.addAction('Check for updates')
     check.triggered.connect(lambda: service.check(window, mode=mode, manual=True))
@@ -414,3 +447,34 @@ def wizard_update_menu(window, *, mode='jana', automatic=True):
     button.setMenu(menu)
     service.attach(window, mode=mode,automatic=automatic)
     return button
+
+
+def install_application_header_menu(header, window, *, about, mode='jana', automatic=True):
+    """Replace only an interactive header badge; other branded dialogs stay unchanged."""
+    badge = header.findChild(QLabel, 'versionBadge')
+    if badge is None:
+        raise ValueError('Application header has no version badge slot')
+    controls = QWidget(header)
+    controls.setObjectName('applicationHeaderControls')
+    controls.setStyleSheet('QWidget#applicationHeaderControls { background:transparent; border:0; }')
+    row = QHBoxLayout(controls)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(8)
+    row.setAlignment(Qt.AlignVCenter)
+    label = QLabel('v' + VERSION)
+    label.setObjectName('applicationVersionLabel')
+    label.setFont(QApplication.font())
+    label.setStyleSheet('color:#52658b; background:transparent; border:0; padding:0; font-size:13px; font-weight:400;')
+    label.setFocusPolicy(Qt.NoFocus)
+    label.setTextInteractionFlags(Qt.NoTextInteraction)
+    label.setAccessibleName('Phase Studio version ' + VERSION)
+    button = wizard_update_menu(window, mode=mode, automatic=automatic)
+    button.setObjectName('applicationMenuButton')
+    button.menu().addSeparator()
+    button.menu().addAction('About Phase Studio').triggered.connect(about)
+    row.addWidget(label, 0, Qt.AlignVCenter)
+    row.addWidget(button, 0, Qt.AlignVCenter)
+    badge.parentWidget().layout().replaceWidget(badge, controls)
+    badge.hide()
+    controls.version_label, controls.menu_button = label, button
+    return controls

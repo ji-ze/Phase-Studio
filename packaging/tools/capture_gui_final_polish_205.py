@@ -89,7 +89,7 @@ def capture():
                 wizard=js._JanaWorkflowWizard([],ROOT/'build/powder-final/wizard-input/ochlor_Superflip.inflip');wizard.run();wizard.dialog.show();settle()
                 assert wizard.data_type_value.text()=='Powder / polycrystalline'
                 assert '<i>a</i>' in wizard.cell_value.text()
-                assert 'Version and updates' in wizard.update_menu.toolTip()
+                assert 'Updates and application information' in wizard.update_menu.toolTip()
                 assert wizard.cancel_button.isVisible()
                 assert available.contains(QRect(wizard.cancel_button.mapToGlobal(QPoint()),wizard.cancel_button.size()))
                 assert wizard.scroll_area.horizontalScrollBar().maximum()==0

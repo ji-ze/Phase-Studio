@@ -168,7 +168,7 @@ def check():
             actions=wizard.update_menu.menu().actions()
             assert actions[0].text()=='Check for updates'
             assert actions[-1].text()=='About Phase Studio'
-            assert 'Version and updates' in wizard.update_menu.toolTip()
+            assert 'Updates and application information' in wizard.update_menu.toolTip()
             assert any(ref() is wizard.dialog and mode=='jana' for ref,mode in service._windows)
             actions[0].trigger();settle(service)
             assert any('Jana2020 software release' in label.text() for label in service.notice.findChildren(QLabel))

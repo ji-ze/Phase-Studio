@@ -8637,17 +8637,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.main_splitter.addWidget(left)
 
         brand_header=create_phase_studio_brand_header()
-        from phase_studio.update_ui import wizard_update_menu
-        self.version_menu=wizard_update_menu(self,mode=None,automatic=False)
-        self.version_menu.setText(__version__)
-        self.version_menu.setToolTip('Version and updates')
-        self.version_menu.setAccessibleName('Version '+__version__+', updates')
-        badge=brand_header.findChild(QLabel,'versionBadge')
-        if badge is not None:
-            badge.parentWidget().layout().replaceWidget(badge,self.version_menu)
-            badge.hide()
-        self.version_menu.menu().addSeparator()
-        self.version_menu.menu().addAction('About Phase Studio').triggered.connect(lambda:self._open_help_section('about'))
+        from phase_studio.update_ui import install_application_header_menu
+        self.header_controls = install_application_header_menu(brand_header, self,
+            mode=None, automatic=False, about=lambda: self._open_help_section('about'))
+        self.version_menu = self.header_controls.menu_button
         left_layout.addWidget(brand_header)
 
         category_tabs = QTabWidget()
