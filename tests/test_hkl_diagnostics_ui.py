@@ -94,7 +94,7 @@ def check_gui():
         plot_path=Path(tmp)/'overlap.svg'
         with patch.object(a.QFileDialog,'getSaveFileName',return_value=(str(plot_path),'SVG')):
             next(button for button in overlap_view.findChildren(a.QPushButton) if button.text()=='Export plot').click()
-        assert 'Reflections in overlapping groups (%)' in plot_path.read_text(encoding='utf8')
+        assert 'Input HKL records in overlapping groups (%)' in plot_path.read_text(encoding='utf8')
         pdf_path=Path(tmp)/'main.pdf';overlap_view.hkl_figure.savefig(pdf_path)
         assert pdf_path.read_bytes().startswith(b'%PDF')
         overlap_view.close()
@@ -113,6 +113,18 @@ def check_gui():
         assert validation.hkl_table.rowCount()==1
         assert [validation.hkl_table.item(0,i).text() for i in range(3)]==['2','2','1']
         validation.close()
+        duplicates=fixture.load('1 2 1 10 .1\n1 2 1 20 .1\n2 2 1 30 .1\n')
+        duplicate_view=win._build_hkl_validation_dialog(duplicates)
+        duplicate_view.show();settle()
+        duplicate_view.hkl_search.setText('1 2 1')
+        QTest.keyClick(duplicate_view.hkl_search,Qt.Key_Return);settle()
+        assert duplicate_view.isVisible() and duplicate_view.hkl_advanced is None
+        assert duplicate_view.hkl_table.rowCount()==2
+        assert [duplicate_view.hkl_table.item(i,3).numeric_value for i in range(2)]==[10,20]
+        assert '3 total' in duplicate_view.hkl_preview_label.text()
+        duplicate_view.hkl_table.selectRow(0);duplicate_view.hkl_copy_selected_button.click()
+        assert '10.0' in QApplication.clipboard().text()
+        duplicate_view.close()
         missing=fixture.load('1 2 1 10\n',a.REFLECTION_DATA_MODE_INTENSITY)
         v=win._build_hkl_validation_dialog(missing)
         assert v.hkl_table.item(0,4).text()=='n/a'
@@ -158,8 +170,8 @@ def check_gui():
             loops=0
             while time.monotonic()<limit:
                 app.processEvents();time.sleep(.005);loops+=1
-                if '432 parsed' in wizard.reflections_value.text():break
-            assert '432 parsed' in wizard.reflections_value.text(),wizard.reflections_value.text()
+                if '432 HKL records' in wizard.reflections_value.text():break
+            assert '432 HKL records' in wizard.reflections_value.text(),wizard.reflections_value.text()
             assert thread_ids and all(t!=threading.get_ident() for t in thread_ids)
             assert loops>=5
             wizard.dialog.close()

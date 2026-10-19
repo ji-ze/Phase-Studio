@@ -3,12 +3,12 @@ import math
 from dataclasses import replace
 from pathlib import Path
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QSize, QSettings, QRect
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtCore import Qt, QTimer, QSize, QSettings, QRect, QAbstractTableModel
+from PySide6.QtGui import QKeySequence, QShortcut, QCursor, QDoubleValidator
 from PySide6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QWidget,QLabel,
     QPushButton,QLineEdit,QTableWidget,QTableWidgetItem,QHeaderView,QSplitter,QScrollArea,QTabWidget,
     QFormLayout,QCheckBox,QComboBox,QSizePolicy,QDoubleSpinBox,QGridLayout,QToolButton,
-    QAbstractItemView)
+    QAbstractItemView,QTableView,QToolTip,QMenu)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from .hkl_diagnostics import build_diagnostics, export_shell_csv
@@ -33,6 +33,8 @@ def _report(result):
 DIRECT_LABEL = 'F/σ(F)'
 DERIVED_LABEL = 'Derived I/σ(I) ≈ |F|/(2σ(F))'
 D98_NOT_REACHED = 'Cumulative symmetry-allowed HKL coverage does not reach 98% within the analyzed resolution domain.'
+COVERAGE_HELP = ('Fraction of symmetry-allowed HKL orbits represented in the input. '
+                 'For powder data, this does not indicate that individual reflections were experimentally resolved.')
 SIGNED_CONVENTION = 'Direct F/σ(F) retains the sign of F. Negative amplitudes are not converted to absolute values. Only finite non-000 records with positive finite σ(F) contribute.'
 
 
@@ -108,7 +110,18 @@ def _top(win, dialog, result, report, completeness=False):
     for label in summary.findChildren(QLabel):
         if label.text() == symbol:
             label.setToolTip(symmetry_metadata)
-    body.addWidget(summary)
+    if completeness:
+        identity = QLabel(Path(result.hkl_path).name+' · '+symbol+' · '+report.data_mode)
+        identity.setWordWrap(True)
+        identity.setToolTip(str(result.hkl_path))
+        disclosure = _disclosure(body, 'Input details', summary)
+        body.removeWidget(disclosure)
+        identity_row = QHBoxLayout()
+        identity_row.addWidget(identity,1)
+        identity_row.addWidget(disclosure)
+        body.insertLayout(0,identity_row)
+    else:
+        body.addWidget(summary)
     issues = sum(report.count(key) for key in ('invalid_values','invalid_auxiliary','phase_nonfinite','invalid_reciprocal_values','rejected_records','exact_duplicate_entries','conflicting_duplicate_groups'))
     count = QLabel(f'Parsed records: {report.count("parsed_records"):,} · Literal unique HKL: {report.count("literal_unique"):,} · '
                    f'Input-integrity issues: {issues:,}')
@@ -121,6 +134,12 @@ def _top(win, dialog, result, report, completeness=False):
     interpretation.setWordWrap(True)
     interpretation.setToolTip('Open Advanced diagnostics and definitions for complete caveats and input provenance.')
     body.addWidget(interpretation)
+    if completeness:
+        count.hide()
+        interpretation.hide()
+        summary.layout().addWidget(count)
+        summary.layout().addWidget(interpretation)
+        count.setToolTip(count.toolTip()+'\n'+interpretation.text())
     layout.addWidget(top)
     dialog.hkl_input_summary = summary
     dialog.hkl_interpretation = interpretation
@@ -182,6 +201,7 @@ def _details(layout, dialog, report, result=None):
                     dialog.hkl_resolution_summary = [('Resolution summary', 'N/A — '+str(error))]
                 else:
                     dialog.hkl_resolution_summary = _resolution_summary(analyzed)
+                    dialog.hkl_inspection_analysis = analyzed
             dialog.hkl_advanced = _detail_dialog(dialog, report)
             dialog.hkl_advanced.finished.connect(lambda _result: button.setChecked(False))
             dialog.finished.connect(dialog.hkl_advanced.close)
@@ -195,19 +215,20 @@ def _details(layout, dialog, report, result=None):
 
 class _DiagnosticRows(QWidget):
     """A compact, top-aligned information table shared by all detail pages."""
-    def __init__(self, rows, parent=None):
+    def __init__(self, rows, parent=None, label_width=240):
         super().__init__(parent)
+        self.label_width = label_width
         grid = QGridLayout(self)
         grid.setContentsMargins(0, 0, 0, 0)
         grid.setHorizontalSpacing(18)
         grid.setVerticalSpacing(7)
-        grid.setColumnStretch(0, 2)
-        grid.setColumnStretch(1, 3)
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
         self.values = {}
         for row, (key, value) in enumerate(rows):
             label = QLabel(scientific_text(key))
             label.setWordWrap(True)
-            label.setMaximumWidth(280)
+            label.setMaximumWidth(240)
             label.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Preferred)
             label.setStyleSheet('font-weight:400; color:#33456e;')
             text = value if isinstance(value, QWidget) else QLabel(str(value))
@@ -224,8 +245,12 @@ class _DiagnosticRows(QWidget):
                 text.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
             text.setAccessibleName(str(key))
             grid.addWidget(label, row, 0, Qt.AlignTop)
-            grid.addWidget(text, row, 1)
+            grid.addWidget(text, row, 1, Qt.AlignTop)
             self.values[key] = text
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.layout().setColumnMinimumWidth(0, min(self.label_width, max(60, self.width()//2-18)))
 
 
 def _disclosure(layout, title, content):
@@ -263,7 +288,7 @@ def _spacegroup_display(raw):
 def _cell_display(cell):
     if len(cell) != 6:
         return 'Not supplied'
-    return (f'a = {cell[0]:.4f}, b = {cell[1]:.4f}, c = {cell[2]:.4f} Å\n'
+    return (f'a = {cell[0]:.4f} Å, b = {cell[1]:.4f} Å, c = {cell[2]:.4f} Å\n'
             f'α = {cell[3]:.3f}°, β = {cell[4]:.3f}°, γ = {cell[5]:.3f}°')
 
 
@@ -279,6 +304,19 @@ def _file_provenance(report):
 
 
 class _AdvancedDiagnosticsDialog(QDialog):
+    def copy_selected_value(self):
+        widget = QApplication.focusWidget()
+        if isinstance(widget, QLabel) and self.isAncestorOf(widget):
+            from PySide6.QtGui import QTextDocument
+            document = QTextDocument()
+            document.setHtml(widget.text())
+            QApplication.clipboard().setText(widget.selectedText() or (
+                widget.text() if widget.textFormat() == Qt.PlainText else document.toPlainText()))
+        elif isinstance(widget, QTableWidget) and self.isAncestorOf(widget):
+            QApplication.clipboard().setText('\n'.join(
+                '\t'.join(widget.item(row, col).text() for col in range(widget.columnCount()))
+                for row in sorted({item.row() for item in widget.selectedItems()})))
+
     def done(self, result):
         self.hkl_settings.setValue('hklAdvanced/geometry', self.saveGeometry())
         self.hkl_settings.setValue('hklAdvanced/size', self.size())
@@ -311,6 +349,9 @@ def _detail_dialog(parent, report):
     detail.setWindowTitle('HKL advanced diagnostics and definitions')
     detail.setObjectName('hklAdvancedDiagnostics')
     detail.setModal(False)
+    copy_shortcut = QShortcut(QKeySequence.Copy, detail)
+    copy_shortcut.activated.connect(detail.copy_selected_value)
+    detail.hkl_copy_shortcut = copy_shortcut
     detail.hkl_settings = QSettings(QSettings.defaultFormat(), QSettings.UserScope, 'PhaseStudio', 'PhaseStudio')
     root = QVBoxLayout(detail)
     root.setContentsMargins(12, 10, 12, 10)
@@ -334,12 +375,12 @@ def _detail_dialog(parent, report):
         scroll.setWidget(content)
         tabs.addTab(scroll, title)
         return body
-    def rows(body, values, section=None):
+    def rows(body, values, section=None, label_width=240):
         if section:
             label = QLabel(section)
             label.setStyleSheet('font-weight:600; color:#33456e; padding-top:3px;')
             body.addWidget(label)
-        widget = _DiagnosticRows(values)
+        widget = _DiagnosticRows(values, label_width=label_width)
         body.addWidget(widget)
         detail.hkl_detail_rows.update(widget.values)
         return widget
@@ -394,6 +435,18 @@ def _detail_dialog(parent, report):
     filename_row.addWidget(copy_path)
     detail.hkl_copy_path = copy_path
     detail.full_source_path = report.source
+    copy_summary = QPushButton('Copy input summary')
+    copy_summary.setAccessibleName('Copy complete input summary')
+    input_summary = [('Input filename', Path(report.source).name), ('Full input path', report.source),
+                     ('Data type', report.data_type), ('Declared data format', report.data_mode),
+                     ('Space group', sg), ('Unit cell', _cell_display(report.cell)), ('Phases', phases),
+                     ('File provenance', file_kind), ('Source application', application),
+                     ('Observation-processing provenance', report.observation_kind if report.observation_kind != 'unknown'
+                      else 'Not documented in the available input'), ('Source details', report.source_note),
+                     ('Exact symmetry setting', raw_sg)]
+    copy_summary.clicked.connect(lambda: QApplication.clipboard().setText(
+        '\n'.join(f'{key}: {value}' for key, value in input_summary)))
+    detail.hkl_copy_input_summary = copy_summary
     rows(body, [('Input filename', filename), ('Data type', report.data_type), ('Declared data format', report.data_mode)])
     rows(body, [('Space group', group), ('Unit cell', _cell_display(report.cell)), ('Phases', phases)])
     provenance = rows(body, [('File provenance', file_kind), ('Source application', application),
@@ -401,24 +454,29 @@ def _detail_dialog(parent, report):
     provenance.setStyleSheet('QLabel { color:#52627d; }')
     disclose(body, 'Detailed source provenance', [('Full input path', report.source), ('Source details', report.source_note),
                                                 ('Exact symmetry setting', raw_sg)])
+    body.addWidget(copy_summary, 0, Qt.AlignLeft)
     body.addStretch(1)
 
     body = page('Counts && &symmetry')
     sections = QHBoxLayout()
     left, right = QVBoxLayout(), QVBoxLayout()
+    left.setAlignment(Qt.AlignTop)
+    right.setAlignment(Qt.AlignTop)
     sections.addLayout(left, 1)
     sections.addLayout(right, 1)
     body.addLayout(sections)
-    table = rows(left, count_rows(['parsed_records','literal_unique','symmetry_orbits','zero_000','excluded_000']), 'Reflection counts')
+    table = rows(left, count_rows(['parsed_records','literal_unique','symmetry_orbits','zero_000','excluded_000']), 'Reflection counts', label_width=200)
     table.values['Parsed input records'].setStyleSheet('font-size:17pt; font-weight:600; color:#001170;')
     cell_rows = ([(name, f'{value:.4f} Å' if index<3 else f'{value:.3f}°')
                   for index,(name,value) in enumerate(zip(('a','b','c','α','β','γ'),report.cell))]
                  if len(report.cell)==6 else [('Unit cell', 'Not supplied')])
-    symmetry = rows(right, [('Space group', sg)]+cell_rows, 'Crystal symmetry')
+    symmetry = rows(right, [('Space group', sg)]+cell_rows, 'Crystal symmetry', label_width=100)
     symmetry.values['Space group'].setToolTip(raw_sg)
     for key, tip in [('Parsed input records','Parsed original records, including any retained protocol 000 record; not necessarily independent measurements.'),
                      ('Literally unique HKL triplets','Distinct integer (h,k,l) triplets, before symmetry equivalence.'),
-                     ('Symmetry-independent reflection orbits','Non-000 equivalence classes under the actual input symmetry and established Friedel convention.')]:
+                     ('Symmetry-independent reflection orbits','Non-000 equivalence classes under the actual input symmetry and established Friedel convention. '+report.methods[0]),
+                     ('Protocol (0,0,0) records','Protocol records at the reciprocal origin; not physical reflections.'),
+                     ('Excluded 000','Origin records excluded from the physical reflection domain.')]:
         table.values[key].setToolTip(tip)
     disclose(body, 'Counting methodology', [('Coverage and Friedel convention', report.methods[0]), ('Exact symmetry setting', raw_sg)])
     body.addStretch(1)
@@ -428,12 +486,18 @@ def _detail_dialog(parent, report):
                   'exact_duplicate_entries','equivalent_repeated_entries','conflicting_duplicate_groups',
                   'invalid_indices','rejected_records','invalid_values','invalid_auxiliary','invalid_reciprocal_values',
                   'missing_auxiliary','phase_missing','phase_nonfinite']
-    if not any(counts.get(key) for key in issue_keys) and not any(severity == 'WARNING' for severity, _ in report.warnings):
-        status = explanation('No reflection-index, systematic-absence or duplication issues detected.')
+    known_issue_keys = [key for key in issue_keys if key != 'absent_significant_3sigma'
+                        and (phase_defined or not key.startswith('phase_'))]
+    if all(counts.get(key) == 0 for key in known_issue_keys) and not any(severity == 'WARNING' for severity, _ in report.warnings):
+        status = explanation('No reflection-index, systematic-absence or duplication issues detected.'
+                             + (' Significance not assessed: no genuine measurement uncertainties.'
+                                if not report.available('significance') else ''))
         status.setStyleSheet('font-weight:600; color:#33456e;')
         body.addWidget(status)
     rows(body, count_rows(issue_keys[:6]) + [('Forbidden HKL examples', report.absence_examples or 'None'),
                                            ('Conflicting HKL examples', report.duplicate_examples or 'None')])
+    detail.hkl_detail_rows['Systematically absent entries'].setToolTip(
+        'Original input entries forbidden by the supplied space-group reflection conditions; not removed or merged.')
     body.addWidget(explanation('Small nonzero forbidden values alone are not proof of experimental error. Repeated HKL alone does not establish unmerged observations.', muted=True))
     body.addStretch(1)
 
@@ -505,7 +569,7 @@ def _detail_dialog(parent, report):
     overlap = dict(report.overlap)
     body.addWidget(explanation('Estimated geometric overlap' if overlap.get('estimated') else 'Authoritative supplied groups' if overlap['available'] else 'Peak overlap unavailable'))
     if overlap['available']:
-        metrics = _overlap_metrics(report)
+        metrics = _overlap_metrics(report, percentage_digits=3)
         body.addWidget(metrics)
         distribution = ' · '.join(f'{size} HKL: {count:,} '+('group' if count == 1 else 'groups') for size,count in overlap['size_distribution']) or 'No overlapping groups'
         detail.hkl_group_distribution = explanation('Group-size distribution: '+distribution)
@@ -517,6 +581,21 @@ def _detail_dialog(parent, report):
             ('Non-overlapping groups', str(overlap.get('non_overlapping_groups', 0))),
             ('Group-size distribution', 'Group size → Number of groups' if overlap['size_distribution'] else 'No overlapping groups')]
             + [(f'{size} reflections', f'{count:,} '+('group' if count == 1 else 'groups')) for size,count in overlap['size_distribution']])
+        analysis = getattr(parent, 'hkl_inspection_analysis', None)
+        if analysis is not None and overlap.get('groups'):
+            inspect = QPushButton('Inspect overlap groups')
+            inspect.setAccessibleName('Inspect original HKL records in overlap groups')
+            def inspect_groups():
+                viewer = overlap_group_dialog(detail, analysis, report)
+                detail.hkl_group_detail = viewer
+                try:
+                    viewer.exec()
+                finally:
+                    detail.hkl_group_detail = None
+                    viewer.deleteLater()
+            inspect.clicked.connect(inspect_groups)
+            body.addWidget(inspect, 0, Qt.AlignLeft)
+            detail.hkl_inspect_groups = inspect
     else:
         body.addWidget(explanation(overlap['reason']))
     disclose(body, 'Overlap methodology', [('Method and metadata', overlap['reason']),
@@ -584,7 +663,7 @@ def _detail_dialog(parent, report):
     root.addWidget(close, 0, Qt.AlignRight)
     detail.hkl_close_button = close
     detail.hkl_details_tabs = tabs
-    a.fit_dialog_to_available_screen(detail, QSize(1050, 530))
+    a.fit_dialog_to_available_screen(detail, QSize(1000, 600))
     saved = detail.hkl_settings.value('hklAdvanced/geometry')
     if saved:
         detail.restoreGeometry(saved)
@@ -657,7 +736,11 @@ def validation_dialog(win, result):
         f'Exact duplicate entries: {report.count("exact_duplicate_entries")} · '
         f'Conflicting groups: {report.count("conflicting_duplicate_groups")} · '
         f'Invalid values: {report.count("invalid_values")} · Rejected records: {report.count("rejected_records")}')
-    summary = QLabel(f'Systematically absent: {report.count("systematic_absent_entries")} · Exact duplicate entries: {report.count("exact_duplicate_entries")} · Conflicting groups: {report.count("conflicting_duplicate_groups")}')
+    integrity_keys = ('systematic_absent_entries','exact_duplicate_entries','conflicting_duplicate_groups',
+                      'invalid_values','invalid_auxiliary','rejected_records','invalid_indices','invalid_reciprocal_values',
+                      'phase_missing','phase_nonfinite','missing_auxiliary')
+    clean = all(report.count(key)==0 for key in integrity_keys)
+    summary = QLabel('Input integrity: No issues detected' if clean else detail_text)
     summary.setToolTip(detail_text+' · Counts are input diagnostics, not a declaration of scientific validity.')
     summary.setWordWrap(True)
     layout.addWidget(summary)
@@ -668,13 +751,16 @@ def validation_dialog(win, result):
     search.setAccessibleName('Find reflection in all parsed records')
     search.setToolTip('Enter one, two or three signed integer indices. Prefix searches are supported; at most 200 matches are displayed.')
     search.setStyleSheet('QLineEdit { background:white; border:1px solid #8fa9cc; padding:7px 10px; } QLineEdit:focus { border:2px solid #2264b8; padding:6px 9px; }')
-    layout.addWidget(search)
+    search.setMaximumWidth(450)
+    search.setMinimumWidth(350)
     phase = a.reflection_mode_has_phase(result.data_mode)
     sig = report.available('significance')
     amplitude = a.reflection_mode_is_amplitude(result.data_mode)
     verified = report.available('column_semantics')
     headers = ['h','k','l',a.reflection_value_label(result.data_mode) if verified else 'Input value (unverified)',
                a.reflection_sigma_label(result.data_mode) if verified else 'Auxiliary (unverified)']
+    if verified and report.data_type.startswith('Powder') and report.fwhm_units=='degrees_2theta':
+        headers[-1]='FWHM (degrees 2θ)'
     if result.data_mode == a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
         headers[-1] = 'Auxiliary (dummy σ)'
     if phase: headers.append('Phase (°)')
@@ -699,7 +785,9 @@ def validation_dialog(win, result):
     layout.addWidget(label)
     def populate():
         text = search.text().split()
-        rows = result.reflections
+        original_rows = getattr(result,'reflections_raw',None)
+        rows = original_rows if original_rows is not None else result.reflections
+        total_records = len(rows)
         if text:
             try:
                 keys = tuple(int(x) for x in text)
@@ -734,12 +822,14 @@ def validation_dialog(win, result):
                 table.setItem(row,col,item)
         table.setSortingEnabled(True)
         label.setText(f'Showing first {len(shown):,} of {len(rows):,} '+('matching records' if text else 'records')+
-                      (f' ({len(result.reflections):,} total)' if text else '')+' · Search covers all parsed records')
+                      (f' ({total_records:,} total)' if text else '')+' · Search covers all parsed records'+
+                      (' · No matching records' if text and not rows else ''))
     timer = QTimer(dialog)
     timer.setSingleShot(True)
     timer.setInterval(180)
     timer.timeout.connect(populate)
     search.textChanged.connect(lambda: timer.start())
+    search.returnPressed.connect(lambda: (timer.stop(),populate()))
     derived.toggled.connect(lambda _checked: populate())
     populate()
     layout.addWidget(table,1)
@@ -764,10 +854,24 @@ def validation_dialog(win, result):
     # Keep secondary actions alongside the summary, outside the scrolling table.
     layout.removeWidget(dialog.hkl_advanced_button)
     actions = QHBoxLayout()
-    actions.addWidget(copy_rows)
+    layout.removeWidget(summary)
+    actions.addWidget(summary,1)
     actions.addStretch(1)
     actions.addWidget(dialog.hkl_advanced_button)
     layout.insertLayout(2,actions)
+    layout.removeWidget(label)
+    reflection_toolbar = QHBoxLayout()
+    reflection_toolbar.addWidget(search)
+    reflection_toolbar.addWidget(label,1)
+    reflection_toolbar.addWidget(copy_rows)
+    layout.insertLayout(3,reflection_toolbar)
+    table.setContextMenuPolicy(Qt.CustomContextMenu)
+    def copy_menu(point):
+        menu = QMenu(table)
+        action = menu.addAction('Copy selected rows',copy_selected)
+        action.setEnabled(copy_rows.isEnabled())
+        menu.exec(table.viewport().mapToGlobal(point))
+    table.customContextMenuRequested.connect(copy_menu)
     dialog.hkl_copy_selected_button = copy_rows
     dialog.hkl_copy_selected = copy_selected
     dialog.summary_text = 'HKL VALIDATION\n'+report.summary()
@@ -778,6 +882,11 @@ def validation_dialog(win, result):
     dialog.hkl_derived_checkbox = derived
     dialog.diagnostics = report
     a.fit_dialog_to_available_screen(dialog,QSize(1060,760))
+    # Enter in Search applies the query only; QDialog must not also activate
+    # an unrelated auto-default diagnostics/export/Close button.
+    for button in dialog.findChildren(QPushButton):
+        button.setAutoDefault(False)
+        button.setDefault(False)
     for label in dialog.findChildren(QLabel):
         if label.textFormat() != Qt.RichText and '</' not in label.text():
             label.setText(scientific_text(label.text()))
@@ -796,6 +905,228 @@ def _display_number(value, digits=4):
     if value and (abs(value)>=1e7 or abs(value)<1e-4):
         return f'{value:.4e}'
     return f'{value:.{digits}f}'
+
+
+def resolution_coordinates(values, use_d=False):
+    """Display conversion only. Invalid reciprocal coordinates remain unavailable."""
+    values = np.asarray(values, dtype=float)
+    result = np.full(values.shape, np.nan)
+    valid = np.isfinite(values) & (values > 0)
+    result[valid] = 1 / (2 * values[valid]) if use_d else values[valid]
+    return result
+
+
+def resolution_interval(lo, hi, use_d=False):
+    if not use_d:
+        return f'({number(lo)}, {number(hi)}] sinθ/λ (Å⁻¹)'
+    bounds = resolution_coordinates([hi, lo], True)
+    upper = number(bounds[1]) if math.isfinite(bounds[1]) else ('∞' if lo == 0 else 'N/A')
+    return f'[{number(bounds[0])}, {upper}) d (Å)'
+
+
+def overlap_percent_limit(values):
+    finite = [float(v) for v in values if v is not None and math.isfinite(float(v))]
+    peak = max(finite, default=0)
+    return min(100., max(10., math.ceil(peak * 1.10 / 10) * 10))
+
+
+class _PlotLimitSpinBox(QDoubleSpinBox):
+    """Compact display without reducing the stored precision of plot limits."""
+    def textFromValue(self, value):
+        return self.locale().toString(value,'g',10)
+
+    def valueFromText(self, text):
+        return self.locale().toDouble(text)[0]
+
+    def validate(self, text, position):
+        validator=QDoubleValidator(self.minimum(),self.maximum(),15)
+        validator.setLocale(self.locale())
+        validator.setNotation(QDoubleValidator.ScientificNotation)
+        return validator.validate(text,position)
+
+
+class _PlotHover:
+    """Inspect existing plotted primitives, with no canvas redraw or raw-data scan."""
+    def __init__(self, canvas, entries):
+        self.canvas, self.entries, self.last = canvas, entries, None
+        self.connection = canvas.mpl_connect('motion_notify_event', self.motion)
+        self.leave = canvas.mpl_connect('figure_leave_event', lambda event: self.hide())
+
+    def hide(self):
+        if self.last is not None:
+            QToolTip.hideText()
+            self.last = None
+
+    def motion(self, event):
+        for key, axis, artist, text in self.entries:
+            if event.inaxes is axis and artist.get_visible() and artist.contains(event)[0]:
+                if key != self.last:
+                    QToolTip.showText(QCursor.pos(), scientific_tooltip(text()), self.canvas)
+                    self.last = key
+                return
+        self.hide()
+
+
+class _BinPoint:
+    """Hit-test one existing line point in display pixels without adding artists."""
+    def __init__(self, line, index): self.line,self.index = line,index
+    def get_visible(self): return self.line.get_visible()
+    def contains(self, event):
+        x,y = self.line.get_data()
+        point = np.asarray([x[self.index],y[self.index]],dtype=float)
+        if not np.all(np.isfinite(point)) or event.x is None or event.y is None: return False,{}
+        pixel = self.line.axes.transData.transform(point)
+        return bool(np.linalg.norm(pixel-np.asarray([event.x,event.y]))<=8),{}
+
+
+class _OverlapRecordsModel(QAbstractTableModel):
+    """Lazy cells over original records and authoritative group IDs; no regrouping."""
+    def __init__(self, analysis, report, parent=None):
+        super().__init__(parent)
+        from . import app as a
+        from collections import Counter
+        self.raw = analysis.reflections_raw
+        self.hkls = np.asarray([(r.h,r.k,r.l) for r in self.raw], dtype=np.int32).reshape(-1,3)
+        membership = dict(dict(report.overlap).get('groups', ()))
+        self.groups = np.asarray([membership.get(tuple(h),0) for h in self.hkls], dtype=np.int64)
+        sizes = Counter(self.groups[self.groups > 0])
+        self.sizes = np.asarray([sizes.get(g,0) for g in self.groups], dtype=np.int64)
+        self.stl = a.hkl_stl_array_from_metric(a.reciprocal_metric_tensor(analysis.cell), self.hkls)
+        self.d = resolution_coordinates(self.stl, True)
+        overlap = dict(report.overlap)
+        wavelength = overlap.get('wavelength')
+        self.angles = None
+        if wavelength and math.isfinite(wavelength) and wavelength > 0:
+            self.angles = np.asarray([a.bragg_two_theta_deg(d, wavelength) if math.isfinite(d) else np.nan for d in self.d], dtype=float)
+        self.widths_known = report.fwhm_units == 'degrees_2theta'
+        value_label = a.reflection_value_label(analysis.data_mode) if report.available('column_semantics') else 'input value'
+        self.columns = ['Group ID','h','k','l','Group size','Original '+value_label,'d (Å)']
+        if self.angles is not None: self.columns.append('2θ (degrees)')
+        if self.widths_known: self.columns.append('FWHM (degrees 2θ)')
+        self.sort_column,self.sort_order = -1,Qt.AscendingOrder
+        self.sort_values = {}
+        self.filter_records()
+
+    def filter_records(self, size=0, lo=None, hi=None):
+        mask = self.groups > 0
+        if size: mask &= self.sizes == size
+        if lo is not None: mask &= self.stl > lo
+        if hi is not None: mask &= self.stl <= hi
+        self.beginResetModel()
+        self.indices = np.flatnonzero(mask)
+        self._sort_indices()
+        self.endResetModel()
+
+    def _sort_indices(self):
+        column = self.sort_column
+        if column < 0: return
+        if column not in self.sort_values:
+            if column==0: values=self.groups
+            elif column in (1,2,3): values=self.hkls[:,column-1]
+            elif column==4: values=self.sizes
+            elif column==5: values=np.asarray([r.value for r in self.raw],dtype=float)
+            elif column==6: values=self.d
+            elif column==7 and self.angles is not None: values=self.angles
+            else: values=np.asarray([r.sigma if r.sigma is not None else np.nan for r in self.raw],dtype=float)
+            self.sort_values[column]=values
+        values=self.sort_values[column][self.indices]
+        finite=np.isfinite(values)
+        valid_indices=self.indices[finite]
+        order=np.argsort(values[finite] if self.sort_order==Qt.AscendingOrder else -values[finite],kind='stable')
+        self.indices=np.concatenate((valid_indices[order],self.indices[~finite]))
+
+    def sort(self,column,order=Qt.AscendingOrder):
+        self.beginResetModel()
+        self.sort_column,self.sort_order=column,order
+        if column<0: self.indices=np.sort(self.indices)
+        else: self._sort_indices()
+        self.endResetModel()
+
+    def rowCount(self, parent=None): return 0 if parent is not None and parent.isValid() else len(self.indices)
+    def columnCount(self, parent=None): return 0 if parent is not None and parent.isValid() else len(self.columns)
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole and orientation == Qt.Horizontal: return self.columns[section]
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid(): return None
+        if role == Qt.TextAlignmentRole: return int(Qt.AlignRight | Qt.AlignVCenter)
+        i = int(self.indices[index.row()])
+        record = self.raw[i]
+        vals = [int(self.groups[i]),record.h,record.k,record.l,int(self.sizes[i]),record.value,self.d[i]]
+        if self.angles is not None: vals.append(self.angles[i])
+        if self.widths_known: vals.append(record.sigma)
+        val = vals[index.column()]
+        valid = val is not None and math.isfinite(float(val))
+        if role == Qt.UserRole: return float(val) if valid else math.inf
+        if role == Qt.ToolTipRole: return str(val) if valid else 'N/A'
+        if role == Qt.DisplayRole:
+            return (str(val) if index.column()<5 else _display_number(val,6)) if valid else 'N/A'
+
+
+def overlap_group_dialog(parent, analysis, report, *, size=0, interval=None):
+    """Read-only inspection of exact existing membership, never peak repartitioning."""
+    dialog = QDialog(parent)
+    dialog.setWindowTitle('Inspect overlap groups')
+    layout = QVBoxLayout(dialog)
+    kind = 'Estimated geometric overlap' if dict(report.overlap).get('estimated') else 'Supplied overlap membership'
+    info = QLabel(kind+' uses the existing group assignments without regrouping. '
+                  'These are original input records, not experimentally resolved independent observations. '
+                  'Nearest-neighbor separations are not stored in this diagnostic and are not inferred here.')
+    info.setWordWrap(True)
+    layout.addWidget(info)
+    controls = QHBoxLayout()
+    sizes = QComboBox(); sizes.addItem('All group sizes',0)
+    for value, count in dict(report.overlap).get('size_distribution', ()):
+        sizes.addItem(f'{value} HKL ({count} groups)',int(value))
+    sizes.setCurrentIndex(max(0,sizes.findData(size)))
+    low, high = QDoubleSpinBox(), QDoubleSpinBox()
+    for field in (low,high): field.setDecimals(8); field.setRange(0,1e6)
+    low.setValue(interval[0] if interval else 0)
+    high.setValue(interval[1] if interval else 1e6)
+    initial_display_bounds = (low.value(),high.value())
+    if interval:
+        low.setToolTip('Exact canonical lower edge: '+repr(interval[0]))
+        high.setToolTip('Exact canonical upper edge: '+repr(interval[1]))
+    controls.addWidget(sizes)
+    controls.addWidget(QLabel(scientific_text('sinθ/λ bin min / max (Å⁻¹)')))
+    controls.addWidget(low); controls.addWidget(high)
+    apply = QPushButton('Apply filter'); controls.addWidget(apply)
+    layout.addLayout(controls)
+    model = _OverlapRecordsModel(analysis,report,dialog)
+    view = QTableView(); view.setModel(model)
+    install_scientific_headers(view)
+    view.horizontalHeader().setSortIndicator(-1,Qt.AscendingOrder)
+    view.setSortingEnabled(True)  # Keep original record order until a user requests sorting.
+    view.setSelectionBehavior(QAbstractItemView.SelectRows)
+    view.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    view.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+    layout.addWidget(view,1)
+    status = QLabel(); layout.addWidget(status)
+    def update():
+        if low.value() >= high.value():
+            status.setText('Bin min must be less than bin max.'); return
+        # Merely changing the group-size filter must not round canonical edges.
+        bounds = interval if interval and (low.value(),high.value())==initial_display_bounds else (low.value(),high.value())
+        model.filter_records(sizes.currentData(),*bounds)
+        status.setText(f'{model.rowCount():,} original input records shown · read-only')
+    apply.clicked.connect(update)
+    model.filter_records(size, *(interval or (None,None)))
+    status.setText(f'{model.rowCount():,} original input records shown · read-only')
+    row = QHBoxLayout(); copy = QPushButton('Copy selected rows'); close = QPushButton('Close')
+    def copy_rows():
+        rows = sorted({index.row() for index in view.selectionModel().selectedRows()})
+        text = '\t'.join(model.columns)+'\n'+'\n'.join('\t'.join(str(model.index(r,c).data(Qt.ToolTipRole)) for c in range(model.columnCount())) for r in rows)
+        QApplication.clipboard().setText(text)
+    copy.clicked.connect(copy_rows); close.clicked.connect(dialog.accept)
+    shortcut = QShortcut(QKeySequence.Copy, view); shortcut.activated.connect(copy_rows)
+    row.addWidget(copy); row.addStretch(); row.addWidget(close); layout.addLayout(row)
+    dialog.records_model,dialog.records_view = model,view
+    dialog.group_size_filter,dialog.range_min,dialog.range_max = sizes,low,high
+    dialog.apply_filter,dialog.copy_rows = apply,copy
+    from .ui_branding import fit_dialog_to_available_screen
+    fit_dialog_to_available_screen(dialog,QSize(1100,620))
+    return dialog
 
 
 class _NumericItem(QTableWidgetItem):
@@ -846,7 +1177,7 @@ def _resolution_summary(analysis):
     minimum = a.format_resolution_d(analysis.d_min).replace(' A',' Å')
     return [('d_min', minimum),
         ('d98', a.format_resolution_d(analysis.d_full_98).replace(' A',' Å') if analysis.d_full_98 is not None else 'N/A — '+D98_NOT_REACHED),
-        ('HKL coverage', number(100*numerator/denominator)+'%' if denominator else 'N/A — no theoretical reflections'),
+        ('Indexed HKL coverage' if a.reflection_mode_has_fwhm(analysis.data_mode) else 'HKL coverage', number(100*numerator/denominator)+'%' if denominator else 'N/A — no theoretical reflections'),
         ('Analyzed resolution range', 'd ≥ '+minimum)]
 
 
@@ -858,7 +1189,7 @@ def _overlap_metadata(report):
             if overlap.get('estimated') else overlap['reason'])
 
 
-def _overlap_metrics(report):
+def _overlap_metrics(report, percentage_digits=2):
     overlap = dict(report.overlap)
     physical = report.count('parsed_records')-report.count('zero_000')
     fraction, intensity = overlap.get('fraction'), overlap.get('integrated_intensity_fraction')
@@ -866,13 +1197,19 @@ def _overlap_metrics(report):
     layout = QGridLayout(widget)
     layout.setContentsMargins(4,4,4,4)
     metrics = [('Overlapping groups', f'{overlap["group_count"]:,}'),
-        ('Affected reflections', f'{overlap["affected"]:,} / {physical:,} ({100*fraction:.2f}%)' if fraction is not None else 'N/A'),
+        ('Affected input reflections', f'{overlap["affected"]:,} / {physical:,} ({100*fraction:.{percentage_digits}f}%)' if fraction is not None else 'N/A'),
         ('Input intensity in overlapping groups', f'{100*intensity:.3f}%' if intensity is not None else 'N/A'),
-        ('Largest group', f'{overlap["largest"]} reflections')]
+        ('Largest overlap group', f'{overlap["largest"]} reflections')]
     for column,(title,value) in enumerate(metrics):
         heading, metric = QLabel(title), QLabel(value)
+        if title=='Input intensity in overlapping groups':
+            tip = ('100 × finite nonnegative physical input intensity in overlapping groups / '
+                   'all finite nonnegative physical input intensity. Original input values; no repartitioning.')
+            heading.setToolTip(tip); metric.setToolTip(tip)
         heading.setWordWrap(True)
         metric.setWordWrap(True)
+        metric.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
+        metric.setFocusPolicy(Qt.StrongFocus)
         metric.setStyleSheet('font-size:13pt; font-weight:600; color:#001170;')
         layout.addWidget(heading,0,column)
         layout.addWidget(metric,1,column)
@@ -915,6 +1252,7 @@ def completeness_dialog(win, analysis):
     significance_key = 'mean_f_over_sigma' if direct else 'mean_significance'
     significance_label = DIRECT_LABEL if direct else report.significance_label
     dialog = _CompletenessDialog(win)
+    dialog.hkl_inspection_analysis = analysis
     dialog.setWindowFlag(Qt.WindowMaximizeButtonHint,True)
     dialog.setObjectName('hklCompletenessDialog')
     dialog.setWindowTitle('HKL Completeness')
@@ -928,9 +1266,17 @@ def completeness_dialog(win, analysis):
     if report.available('significance'):
         cards.append((number(report.statistic('median_f_over_sigma' if direct else 'median_significance')),'Median '+significance_label))
     metrics = win._diagnostic_metric_grid(cards,compact=True,row_columns=(len(cards),))
-    for label in metrics.findChildren(QLabel):
-        if label.text()==d98_text:
-            label.setToolTip(D98_NOT_REACHED if analysis.d_full_98 is None else report.methods[1])
+    for caption in metrics.findChildren(QLabel,'diagnosticMetricLabel'):
+        tip = ''
+        if caption.text().startswith('d98'):
+            tip = (D98_NOT_REACHED if analysis.d_full_98 is None else
+                'Highest-resolution cumulative boundary satisfying the existing ≥98% indexed-HKL coverage definition. '
+                'd_min and d98 can coincide when coverage remains at least 98% to the accepted boundary.\n'+report.methods[1])
+        if caption.text()=='d_min':
+            tip = 'Highest resolution represented by the accepted input domain. d_min and d98 may coincide; this is not an error.'
+        if tip:
+            caption.parentWidget().setToolTip(tip)
+            for child in caption.parentWidget().findChildren(QLabel): child.setToolTip(tip)
     layout.addWidget(metrics)
     rows = [dict(row) for row in report.shells]
     centers = [row['center'] for row in rows]
@@ -938,7 +1284,7 @@ def completeness_dialog(win, analysis):
     complete = bool(populated_coverage) and all(math.isclose(c,100,abs_tol=1e-9) for c in populated_coverage)
     compact = []
     if complete:
-        compact.append('Symmetry-allowed HKL coverage: 100% across the analyzed resolution domain')
+        compact.append(('Indexed HKL coverage' if powder else 'Symmetry-allowed HKL coverage')+': 100% across the analyzed resolution domain')
     if powder and report.statistic('constant_fwhm'):
         compact.append(f'FWHM constant: {number(report.statistic("median_auxiliary"))} ({units}), '
                        f'{report.count("valid_widths_or_sigmas"):,}/{report.count("parsed_records"):,} reflections')
@@ -947,9 +1293,11 @@ def completeness_dialog(win, analysis):
     if compact:
         compact_label = QLabel(' · '.join(compact))
         compact_label.setWordWrap(True)
-        compact_label.setToolTip('HKL coverage does not establish independently measured or resolved powder reflections. Full definitions are in Advanced diagnostics.')
+        compact_label.setToolTip(COVERAGE_HELP+' Full definitions are in Advanced diagnostics.')
         layout.addWidget(compact_label)
         dialog.hkl_compact_summary = compact_label
+        compact_label.hide()
+        metrics.setToolTip(compact_label.text()+'\n'+COVERAGE_HELP)
     _details(layout,dialog,report)
     layout.removeWidget(dialog.hkl_advanced_button)
     splitter = QSplitter(Qt.Vertical)
@@ -964,22 +1312,45 @@ def completeness_dialog(win, analysis):
     values = np.asarray([r.value for r in raw if (r.h,r.k,r.l)!=(0,0,0) and math.isfinite(r.value)])
     distribution_summary = QLabel(f'{value} distribution · zero: {np.count_nonzero(values==0):,} · negative: {np.count_nonzero(values<0):,} · full finite range retained')
     distribution_summary.setWordWrap(True)
-    toolbar.addWidget(distribution_summary,1)
+    main_layout.addWidget(distribution_summary)
+    distribution_summary.hide()
     scale = QComboBox()
     scale.addItems(['Log counts','Linear counts'])
     scale.setCurrentIndex(0 if a.reflection_mode_is_amplitude(analysis.data_mode) else 1)
     scale.setToolTip('Only the count axis changes. The amplitude/intensity axis includes zero, negative values and the entire high-value tail. Zero-count bins are masked on a log count axis.')
     toolbar.addWidget(scale)
     focus = QComboBox()
-    focus.addItems(['Full range','Focus on main distribution'])
+    focus.addItems(['Full range','Focus on main distribution','Custom range'])
     focus.setToolTip('View only: focus shows the 1st–99th percentile x-range. Values outside it remain in the histogram bins, statistics and exports. No records are removed and no rebinning occurs.')
     toolbar.addWidget(focus)
+    resolution_axis = QComboBox()
+    resolution_axis.addItem('sin θ / λ (Å⁻¹)',False)
+    resolution_axis.addItem('d (Å)',True)
+    resolution_axis.setCurrentIndex(1 if dialog.hkl_settings.value('hklCompleteness/resolutionAxis','stl')=='d' else 0)
+    resolution_axis.setToolTip('Display convention only: sinθ/λ = 1/(2d). Bin membership and statistics are unchanged.')
+    toolbar.addWidget(resolution_axis)
     tabs.setCornerWidget(dialog.hkl_advanced_button,Qt.TopRightCorner)
     main_layout.addLayout(toolbar)
+    range_controls = QWidget()
+    range_row = QHBoxLayout(range_controls)
+    range_row.setContentsMargins(0,0,0,0)
+    range_row.addWidget(QLabel('Histogram X range'))
+    range_min,range_max = _PlotLimitSpinBox(),_PlotLimitSpinBox()
+    for field in (range_min,range_max):
+        field.setDecimals(15); field.setRange(-1e100,1e100)
+        field.setMinimumWidth(90); field.setMaximumWidth(180)
+    apply_range,reset_range = QPushButton('Apply range'),QPushButton('Reset range')
+    for control in (range_min,range_max,apply_range,reset_range): range_row.addWidget(control)
+    range_status = QLabel(); range_status.setWordWrap(False)
+    range_status.setToolTip(distribution_summary.text())
+    range_status.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred)
+    main_layout.addWidget(range_controls)
+    main_layout.addWidget(range_status)
+    range_controls.hide()
     figure = Figure(figsize=(10,4),dpi=100,layout='constrained')
     canvas = FigureCanvasQTAgg(figure)
     canvas.setObjectName('hklCompletenessCanvas')
-    canvas.setMinimumHeight(190)
+    canvas.setMinimumHeight(170)
     panels = []
     if not complete and populated_coverage:
         panels.append('coverage')
@@ -1000,7 +1371,7 @@ def completeness_dialog(win, analysis):
     chart_scroll.setFrameShape(QScrollArea.NoFrame)
     chart_scroll.setWidgetResizable(True)
     chart_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-    chart_scroll.setMinimumHeight(90)
+    chart_scroll.setMinimumHeight(170)
     chart_scroll.setWidget(canvas)
     main_layout.addWidget(chart_scroll,1)
     dialog.hkl_chart_scroll = chart_scroll
@@ -1011,6 +1382,8 @@ def completeness_dialog(win, analysis):
     else:
         grid = figure.add_gridspec(2,2)
         positions = [grid[0,0],grid[0,1],grid[1,:]] if len(panels)==3 else [grid[0,0],grid[0,1],grid[1,0],grid[1,1]]
+    resolution_lines = []
+    hover_entries = []
     for panel,position in zip(panels,positions):
         axis = figure.add_subplot(position)
         axes[panel] = axis
@@ -1039,12 +1412,17 @@ def completeness_dialog(win, analysis):
             width = 2*(q75-q25)/np.cbrt(len(values))
             bin_count = min(160,max(1,math.ceil((float(values.max())-float(values.min()))/width))) if width>0 else min(160,max(1,int(np.sqrt(len(values)))))
             edges = np.histogram_bin_edges(values,bins=bin_count)
-            axis.hist(values,bins=edges,color='#2264b8',alpha=.75)
+            hist_counts,hist_edges,hist_bars = axis.hist(values,bins=edges,color='#2264b8',alpha=.75)
+            for j,bar in enumerate(hist_bars):
+                hover_entries.append((('hist',j),axis,bar,lambda j=j:
+                    f'{value}: [{number(hist_edges[j])}, {number(hist_edges[j+1])}'+(']' if j==len(hist_counts)-1 else ')')+
+                    f'\nOriginal input records: {int(hist_counts[j]):,}'))
             axis.set_title(value+' distribution · full range',fontsize=9)
             axis.set_xlabel(value,fontsize=8)
             axis.set_ylabel('Records',fontsize=8)
         if panel!='distribution':
             axis.set_xlabel('sinθ/λ (Å⁻¹)',fontsize=8)
+            if axis.lines: resolution_lines.append((axis,axis.lines[0]))
         axis.tick_params(labelsize=8)
         axis.grid(axis='y',alpha=.15)
     if not panels:
@@ -1053,9 +1431,27 @@ def completeness_dialog(win, analysis):
         main_layout.removeWidget(chart_scroll)
         chart_scroll.hide()
         main_layout.addWidget(empty)
+    if len(panels)==2:
+        plot_orientation = {'stacked':None}
+        def responsive_plots(_event=None):
+            stacked = canvas.width()<700
+            if plot_orientation['stacked']==stacked:
+                return
+            plot_orientation['stacked']=stacked
+            grid = figure.add_gridspec(2,1) if stacked else figure.add_gridspec(1,2)
+            for index, axis in enumerate(axes.values()):
+                axis.set_subplotspec(grid[index,0] if stacked else grid[0,index])
+            canvas.setMinimumHeight(380 if stacked else 170)
+            canvas.draw_idle()
+        canvas.mpl_connect('resize_event',responsive_plots)
+        responsive_plots()
     def count_scale():
         if 'distribution' in axes:
-            axes['distribution'].set_yscale('log' if scale.currentIndex()==0 else 'linear')
+            logarithmic = scale.currentIndex()==0
+            for count,bar in zip(hist_counts,hist_bars): bar.set_visible(not logarithmic or count>0)
+            # Zero-count bins stay hidden. Clip only the zero drawing baseline;
+            # masking it removes entire positive-height bar polygons in Agg.
+            axes['distribution'].set_yscale('log' if logarithmic else 'linear', **({'nonpositive':'clip'} if logarithmic else {}))
             axes['distribution'].relim()
             axes['distribution'].autoscale_view()
             canvas.draw_idle()
@@ -1063,29 +1459,87 @@ def completeness_dialog(win, analysis):
     count_scale()
     if 'distribution' in axes:
         histogram = axes['distribution']
-        full_xlim = histogram.get_xlim()
+        full_xlim = (float(values.min()),float(values.max()))
+        if full_xlim[0] == full_xlim[1]:
+            full_xlim = (float(hist_edges[0]),float(hist_edges[-1]))
         full_title = histogram.get_title()
         focused_xlim = tuple(np.quantile(values,[.01,.99]))
-        def focus_range(index):
-            limits = focused_xlim if index and focused_xlim[0]<focused_xlim[1] else full_xlim
+        sorted_values = np.sort(values)
+        def set_histogram_range(limits):
             histogram.set_xlim(limits)
+            range_min.setValue(limits[0]); range_max.setValue(limits[1])
+            outside = int(np.searchsorted(sorted_values,limits[0],side='left')+len(values)-np.searchsorted(sorted_values,limits[1],side='right'))
+            range_status.setText(f'{outside:,} / {len(values):,} records outside the selected range' if outside
+                                 else f'All {len(values):,} records visible')
+            range_status.setToolTip(f'Actual finite data range: {values.min():.12g} to {values.max():.12g}; original bins and values retained.')
+            canvas.draw_idle()
+        def focus_range(index):
+            range_controls.setVisible(index==2)
+            if index==2: return  # Custom limits are applied explicitly below.
+            limits = focused_xlim if index and focused_xlim[0]<focused_xlim[1] else full_xlim
+            set_histogram_range(limits)
             histogram.set_title(scientific_text(value+' distribution · focused view (tails retained)','plot') if index and limits==focused_xlim else full_title)
             canvas.draw_idle()
         focus.currentIndexChanged.connect(focus_range)
+        def apply_histogram_range():
+            if range_min.value()>=range_max.value():
+                range_status.setText('Minimum must be less than maximum.'); return
+            focus.blockSignals(True); focus.setCurrentIndex(2); focus.blockSignals(False)
+            range_controls.show()
+            histogram.set_title(scientific_text(value+' distribution · selected range (tails retained)','plot'))
+            set_histogram_range((range_min.value(),range_max.value()))
+        apply_range.clicked.connect(apply_histogram_range)
+        def reset_histogram_range():
+            focus.blockSignals(True); focus.setCurrentIndex(0); focus.blockSignals(False)
+            range_controls.hide()
+            histogram.set_title(scientific_text(full_title,'plot'))
+            set_histogram_range(full_xlim)
+        reset_range.clicked.connect(reset_histogram_range)
+        set_histogram_range(full_xlim)
     else:
         focus.setEnabled(False)
+        for control in (range_min,range_max,apply_range,reset_range,scale): control.setEnabled(False)
     tabs.addTab(main,'Analysis')
     figures = {0:figure}
     overlap = dict(report.overlap)
+    inspect_groups = QPushButton('Inspect overlap groups')
+    inspect_groups.setEnabled(bool(overlap.get('available') and overlap.get('groups')))
+    inspect_groups.setToolTip('Read-only original records using the existing exact group membership.' if inspect_groups.isEnabled()
+        else 'Exact overlap membership is unavailable. No groups are inferred for inspection.')
+    if not overlap.get('available'): toolbar.addWidget(inspect_groups)
+    dialog.hkl_selected_overlap_interval = None
+    def inspect(size=0):
+        if not inspect_groups.isEnabled(): return
+        detail = overlap_group_dialog(dialog,analysis,report,size=size,interval=dialog.hkl_selected_overlap_interval)
+        dialog.hkl_group_detail = detail
+        try:
+            detail.exec()
+        finally:
+            dialog.hkl_group_detail = None
+            detail.deleteLater()
+    inspect_groups.clicked.connect(lambda:inspect())
     if overlap['available']:
         overlap_page = QWidget()
         overlap_layout = QVBoxLayout(overlap_page)
         overlap_layout.setContentsMargins(0,0,0,0)
         summary = _overlap_metrics(report)
-        overlap_layout.addWidget(summary)
+        overlap_summary_row = QHBoxLayout()
+        overlap_summary_row.addWidget(summary,1)
+        overlap_summary_row.addWidget(inspect_groups)
+        overlap_layout.addLayout(overlap_summary_row)
         criterion = QLabel(scientific_text(_overlap_metadata(report)))
         criterion.setWordWrap(True)
-        overlap_layout.addWidget(criterion)
+        criterion_row = QHBoxLayout()
+        criterion_row.addWidget(criterion,1)
+        overlap_axis_selector = QComboBox()
+        overlap_axis_selector.addItem('sin θ / λ (Å⁻¹)',False)
+        overlap_axis_selector.addItem('d (Å)',True)
+        overlap_axis_selector.setMaximumWidth(180)
+        overlap_axis_selector.setToolTip(resolution_axis.toolTip())
+        overlap_axis_selector.currentIndexChanged.connect(resolution_axis.setCurrentIndex)
+        criterion_row.addWidget(overlap_axis_selector)
+        overlap_layout.addLayout(criterion_row)
+        dialog.hkl_overlap_resolution_axis = overlap_axis_selector
         overlap_figure = Figure(figsize=(9,3),dpi=100,layout='constrained')
         overlap_canvas = FigureCanvasQTAgg(overlap_figure)
         overlap_canvas.setMinimumHeight(240)
@@ -1103,11 +1557,20 @@ def completeness_dialog(win, analysis):
         else:
             size_axis.text(.5,.5,'No overlapping groups under the stated criterion',transform=size_axis.transAxes,ha='center',va='center',fontsize=8)
             size_axis.set_axis_off()
-        fraction_axis.plot(centers,[100*row['overlap_fraction'] if row['overlap_fraction'] is not None else np.nan for row in rows],'o-',color='#2264b8')
+        overlap_percent = [100*row['overlap_fraction'] if row['overlap_fraction'] is not None else np.nan for row in rows]
+        fraction_line, = fraction_axis.plot(centers,overlap_percent,'o-',color='#2264b8')
+        resolution_lines.append((fraction_axis,fraction_line))
         fraction_axis.set_xlabel('sinθ/λ (Å⁻¹)',fontsize=8)
-        fraction_axis.set_ylabel('Reflections in overlapping groups (%)',fontsize=8)
-        fraction_axis.set_title('Reflections in overlapping groups (%)',fontsize=9)
-        fraction_axis.set_ylim(0,105)
+        fraction_axis.set_ylabel('Input records (%)',fontsize=8)
+        fraction_axis.set_title('Input HKL records in overlapping groups (%)',fontsize=9,wrap=True)
+        fraction_axis.set_ylim(0,overlap_percent_limit(overlap_percent))
+        from matplotlib.ticker import PercentFormatter
+        fraction_axis.yaxis.set_major_formatter(PercentFormatter(xmax=100))
+        def click_size(event):
+            if event.inaxes is size_axis and event.button==1 and sizes:
+                for (size,_count),bar in zip(sizes,bars):
+                    if bar.contains(event)[0]: inspect(int(size)); return
+        overlap_canvas.mpl_connect('button_press_event',click_size)
         for axis in (size_axis,fraction_axis):axis.tick_params(labelsize=8)
         overlap_scroll = QScrollArea()
         overlap_scroll.setFrameShape(QScrollArea.NoFrame)
@@ -1134,6 +1597,7 @@ def completeness_dialog(win, analysis):
         derived_canvas.setMinimumHeight(190)
         derived_axis = derived_figure.subplots()
         derived_axis.plot(centers,[row['mean_significance'] for row in rows],'o-',color='#2264b8',markersize=3)
+        resolution_lines.append((derived_axis,derived_axis.lines[0]))
         derived_axis.set_title(DERIVED_LABEL,fontsize=9)
         derived_axis.set_xlabel('sinθ/λ (Å⁻¹)',fontsize=8)
         derived_axis.set_ylabel('Mean derived significance',fontsize=8)
@@ -1154,8 +1618,11 @@ def completeness_dialog(win, analysis):
     bins_layout = QVBoxLayout(bins_panel)
     bins_layout.setContentsMargins(0,0,0,0)
     bins_title = QLabel('RESOLUTION BINS · undefined coverage = n/a')
-    bins_layout.addWidget(bins_title)
-    columns = [('lo','Low'),('hi','High'),('observed','Input HKL'),('theory','Allowed HKL'),('coverage','Coverage (%)'),
+    bins_title.setWordWrap(True)
+    bins_heading = QHBoxLayout()
+    bins_heading.addWidget(bins_title,1)
+    bins_layout.addLayout(bins_heading)
+    columns = [('lo','Bin min'),('hi','Bin max'),('observed','Input HKL'),('theory','Allowed HKL'),('coverage','Indexed coverage (%)' if powder else 'Coverage (%)'),
                ('mean_value',f'Mean {value}'),('median_value',f'Median {value}')]
     if powder and report.count('valid_widths_or_sigmas'):
         columns.append(('mean_fwhm','Mean FWHM'))
@@ -1179,9 +1646,11 @@ def completeness_dialog(win, analysis):
             item.setToolTip(repr(val))
             table.setItem(i,j,item)
     analysis_columns = list(columns)
-    overlap_rows = overlap_bin_rows(analysis, report) if overlap['available'] else []
-    overlap_columns = [('lo','Low'), ('hi','High'), ('input','Input HKL'),
-                       ('affected','Affected HKL'), ('percent','Overlap (%)'),
+    table.horizontalHeader().setSortIndicator(0,Qt.AscendingOrder)
+    physical_bin_rows = overlap_bin_rows(analysis, report)
+    overlap_rows = physical_bin_rows if overlap['available'] else []
+    overlap_columns = [('lo','Bin min'), ('hi','Bin max'), ('input','Input HKL records'),
+                       ('affected','Affected records'), ('percent','Affected / input (%)'),
                        ('intensity_percent','Affected intensity in bin (%)')]
     def contextual_bins(index):
         is_overlap = tabs.tabText(index) == 'Peak overlap'
@@ -1195,8 +1664,8 @@ def completeness_dialog(win, analysis):
         for column,(key,title) in enumerate(selected_columns):
             tip = ('100 × sum of original input intensities of affected HKL records in this interval / sum of all original input intensities in this same interval. Requires all intensities in the interval finite and nonnegative and a positive denominator; otherwise N/A. This is not the fraction of the entire dataset intensity.' if key=='intensity_percent' else
                    'Input HKL records belonging to geometric overlap groups; not independently measured powder peaks.' if key in {'affected','percent'} else
-                   'Theoretical symmetry-allowed index coverage; not independent experimental powder information.' if key=='coverage' else
-                   'Interval (Low, High] in sinθ/λ (Å⁻¹); original shell boundaries are unchanged.' if key in {'lo','hi'} else
+                   COVERAGE_HELP if key=='coverage' else
+                   ('Converted interval [d min, d max) in Å; a zero reciprocal edge is unavailable as a finite d value.' if resolution_axis.currentData() else 'Interval (Bin min, Bin max] in sinθ/λ (Å⁻¹); original shell boundaries are unchanged.') if key in {'lo','hi'} else
                    'FWHM in degrees 2θ, not measurement uncertainty.' if key=='mean_fwhm' and report.fwhm_units=='degrees_2theta' else
                    SIGNED_CONVENTION if key=='mean_f_over_sigma' else title+'; original precision is retained in CSV and JSON exports.')
             table.horizontalHeaderItem(column).setToolTip(scientific_tooltip(tip))
@@ -1204,6 +1673,8 @@ def completeness_dialog(win, analysis):
         for i, record in enumerate(selected_rows):
             for j, (key, _) in enumerate(selected_columns):
                 value = record[key]
+                if key in {'lo','hi'} and resolution_axis.currentData():
+                    value = resolution_coordinates([record['hi' if key=='lo' else 'lo']],True)[0]
                 text = str(int(value)) if key in {'input','affected','observed','theory'} else _display_number(value, 5 if key in {'lo','hi','mean_fwhm'} else 3)
                 if key == 'percent' and value is not None:
                     text = f'{value:.1f}' if record['input']<100 else f'{value:.2f}'
@@ -1211,16 +1682,75 @@ def completeness_dialog(win, analysis):
                     text = 'N/A'
                 item = _NumericItem(text, value)
                 item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                item.setToolTip(repr(value))
+                item.setToolTip(scientific_tooltip(f'Bin {i+1}: '+resolution_interval(record['lo'],record['hi'],bool(resolution_axis.currentData()))+'\nValue: '+repr(value)))
+                item.setData(Qt.UserRole+1,i)
                 table.setItem(i,j,item)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        bins_title.setText(scientific_text('RESOLUTION BINS · sinθ/λ (Å⁻¹) · ' + ('overlap: original records; undefined denominator = N/A' if is_overlap else 'undefined coverage = n/a')))
+        bins_title.setText(scientific_text('RESOLUTION BINS · '+('d (Å)' if resolution_axis.currentData() else 'sinθ/λ (Å⁻¹)')+' · ' + ('overlap: original records; undefined denominator = N/A' if is_overlap else 'undefined coverage = n/a')))
         bins_title.setToolTip('Intervals are (lower, upper], identical to the plot. Cross-bin groups contribute each record in its own interval. Group counts are omitted: no new group-to-bin convention. Intensity fraction uses finite nonnegative input intensity within the interval.')
         dialog.hkl_bin_columns = selected_columns
+        table.setSortingEnabled(True)
     tabs.currentChanged.connect(contextual_bins)
     contextual_bins(0)
+    def select_interval():
+        if tabs.tabText(tabs.currentIndex())!='Peak overlap' or not table.selectedItems():
+            dialog.hkl_selected_overlap_interval = None; return
+        i = table.selectedItems()[0].data(Qt.UserRole+1)
+        if i is not None: dialog.hkl_selected_overlap_interval = (rows[i]['lo'],rows[i]['hi'])
+    table.itemSelectionChanged.connect(select_interval)
+    def copy_bins():
+        selected = sorted({i.row() for i in table.selectionModel().selectedRows()})
+        QApplication.clipboard().setText('\t'.join(table.horizontalHeaderItem(c).text() for c in range(table.columnCount()))+'\n'+
+            '\n'.join('\t'.join(table.item(r,c).text() for c in range(table.columnCount())) for r in selected))
+    copy_bins_button = QPushButton('Copy selected bins'); copy_bins_button.clicked.connect(copy_bins)
+    bins_heading.addWidget(copy_bins_button)
+    bins_copy_shortcut = QShortcut(QKeySequence.Copy,table); bins_copy_shortcut.activated.connect(copy_bins)
+    dialog.hkl_copy_bins = copy_bins_button
+
+    def resolution_display():
+        use_d = bool(resolution_axis.currentData())
+        if overlap['available']:
+            overlap_axis_selector.blockSignals(True)
+            overlap_axis_selector.setCurrentIndex(resolution_axis.currentIndex())
+            overlap_axis_selector.blockSignals(False)
+        for axis,line in resolution_lines:
+            line.set_xdata(resolution_coordinates(centers,use_d))
+            axis.set_xlabel(scientific_text('d (Å)' if use_d else 'sinθ/λ (Å⁻¹)','plot'))
+            axis.relim(); axis.autoscale_view(scalex=True,scaley=False)
+            if axis.xaxis_inverted()!=use_d: axis.invert_xaxis()
+        contextual_bins(tabs.currentIndex())
+        dialog.hkl_settings.setValue('hklCompleteness/resolutionAxis','d' if use_d else 'stl')
+        for fig in figures.values(): fig.canvas.draw_idle()
+
+    def bin_help(i):
+        row = rows[i]
+        physical = physical_bin_rows[i]['input']
+        coverage = number(row['coverage'])+'%' if row['coverage'] is not None else 'N/A'
+        return (f'Bin {i+1}: '+resolution_interval(row['lo'],row['hi'],bool(resolution_axis.currentData()))+
+            (f'\nOriginal input records: {physical:,}' if physical is not None else '')+
+            f'\nMean {value}: {number(row["mean_value"])}\nMedian {value}: {number(row["median_value"])}'+
+            f'\nIndexed HKL coverage: {coverage}'+
+            (f'\nInput HKL records in overlapping groups: {number(overlap_rows[i]["percent"])}%' if overlap_rows else ''))
+    hover_controllers = []
+    for fig in figures.values():
+        entries = hover_entries.copy() if fig is figure else []
+        for axis,line in resolution_lines:
+            if axis.figure is not fig: continue
+            # One transparent point artist per existing bin; updated with its axis.
+            for i in range(len(rows)):
+                entries.append((('bin',id(axis),i),axis,_BinPoint(line,i),lambda i=i:bin_help(i)))
+        hover_controllers.append(_PlotHover(fig.canvas,entries))
+    resolution_axis.currentIndexChanged.connect(lambda _index:resolution_display())
+    resolution_display()
+    dialog.hkl_hover_controllers = hover_controllers
+    dialog.hkl_resolution_axis = resolution_axis
+    dialog.hkl_inspect_groups = inspect_groups
+    dialog.hkl_histogram_min,dialog.hkl_histogram_max = range_min,range_max
+    dialog.hkl_histogram_apply,dialog.hkl_histogram_reset = apply_range,reset_range
+    dialog.hkl_histogram_range_status = range_status
+    dialog.hkl_histogram_range_controls = range_controls
     dialog.hkl_overlap_bin_rows = overlap_rows
-    table.setMinimumHeight(144)
+    table.setMinimumHeight(174)  # Header plus at least five independently scrollable rows.
     bins_layout.addWidget(table,1)
     splitter.addWidget(bins_panel)
     splitter.setSizes([390,260])
