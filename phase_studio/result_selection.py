@@ -25,6 +25,7 @@ from matplotlib.lines import Line2D
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from PySide6.QtCore import Qt, QTimer, QSettings, QEvent, QPoint
 from PySide6.QtWidgets import (
+    QApplication,
     QAbstractItemView, QButtonGroup, QDialog, QFormLayout, QGridLayout, QHBoxLayout,
     QHeaderView, QLabel, QPushButton, QSizePolicy, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
@@ -114,6 +115,23 @@ class CandidateSelection:
         c = self.candidate
         return () if c is None else (c.run_id, c.source, c.cycle, c.candidate_id,
             c.map_sha256, c.edma_sigma, c.structure_sha256, c.jana_model_sha256)
+
+
+@dataclass(frozen=True)
+class ResolvedCandidateSnapshot:
+    """One sealed candidate and its immutable, representation-specific geometry."""
+    selection: CandidateSelection
+    representation: str
+    atoms: tuple
+    coordinates: tuple
+    bonds: tuple
+    composition: str
+    detected_count: int
+    cell_segments: tuple
+
+    @property
+    def identity(self):
+        return self.selection.identity
 
 
 def candidate_selection(candidate, *, jana=True, pending=False) -> CandidateSelection:
@@ -658,6 +676,9 @@ class ResultSelectionDialog(QDialog):
         preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_host.structure_canvas = preview_canvas
         self._preview_canvas = preview_canvas
+        # Detaching reparents the canvas without resizing this dialog. Refit
+        # against its actual viewport, unless the user has set their camera.
+        preview_canvas.mpl_connect("resize_event", self._on_preview_resize)
 
         action_button = QPushButton("Pass to Jana2020" if jana_context else "Save map and model")
         action_button.setObjectName("primaryButton")
@@ -900,11 +921,15 @@ class ResultSelectionDialog(QDialog):
     def _open_fullscreen(self) -> None:
         family = "Charge-flipping solution" if self._active_source == "superflip" else "Structure prediction"
         self._fullscreen_button.setVisible(False)
+        previous = self._detached_viewer
         self._detached_viewer = show_detached_viewer(
             self, self._preview_section, f"{family} — Cycle {self.selected_candidate.cycle}" if self.selected_candidate else family, self._detached_viewer,
         )
-        self._detached_viewer.finished.connect(self._restore_fullscreen_action)
-        QTimer.singleShot(0, self._fit_preview)
+        if self._detached_viewer is not previous:
+            self._detached_viewer.finished.connect(self._restore_fullscreen_action)
+        self._sync_detached_identity(self.selected_candidate)
+        # Detach the existing view without replacing its selected candidate,
+        # threshold, representation or deliberately chosen camera.
 
     def _restore_fullscreen_action(self, _result: int = 0) -> None:
         self._fullscreen_button.setVisible(True)
@@ -994,6 +1019,9 @@ class ResultSelectionDialog(QDialog):
 
     def done(self, result: int) -> None:
         self._closed = True
+        detached = getattr(self,'_detached_viewer',None)
+        if detached is not None and not detached._restored:
+            detached.close()
         super().done(result)
 
     def _set_initial_splitter_sizes(self) -> None:
@@ -1041,6 +1069,9 @@ class ResultSelectionDialog(QDialog):
 
     @property
     def selected_candidate(self) -> Optional[ResultCandidate]:
+        accepted = getattr(self, '_accepted_selection', None)
+        if accepted is not None:
+            return accepted.candidate
         view = self._views.get(self._active_source)
         return view.selected if view is not None else None
 
@@ -1051,9 +1082,16 @@ class ResultSelectionDialog(QDialog):
             pending=candidate is not None and self._threshold_key(candidate) in self._pending_thresholds)
 
     def accept(self) -> None:
-        if not self.selection_snapshot.ready:
+        snapshot = self.selection_snapshot
+        rendered = getattr(self, '_resolved_preview', None)
+        if not snapshot.ready:
             self._sync_action_button()
             return  # Keep the explanation visible; never substitute another row.
+        if snapshot.geometry and (rendered is None or rendered.identity != snapshot.identity):
+            self._selected_output_summary.setText('Selected scientific structure is inconsistent with the preview. Reselect the candidate before passing it to Jana2020.')
+            self._action_button.setEnabled(False)
+            return
+        self._accepted_selection = snapshot
         super().accept()
 
     def selection_state(self) -> dict:
@@ -1096,12 +1134,8 @@ class ResultSelectionDialog(QDialog):
 
     def _show_empty_preview(self, candidate=None, reason="") -> None:
         self._current_candidate = candidate
-        detached = getattr(self, '_detached_viewer', None)
-        if detached is not None and detached.isVisible():
-            family = 'Charge-flipping solution' if candidate.source == 'superflip' else 'Structure prediction'
-            title = f'{family} — Cycle {candidate.cycle}'
-            detached.setWindowTitle(title)
-            detached.title_label.setText(title)
+        self._resolved_preview = None
+        self._sync_detached_identity(candidate)
         self.preview_candidate_id = ""
         self.preview_structure_hash = ""
         self._preview_fit = None
@@ -1181,6 +1215,8 @@ class ResultSelectionDialog(QDialog):
         self._sync_action_button()
 
     def _on_source_table_selection_changed(self, source: str) -> None:
+        if self._closed:
+            return
         view = self._views.get(source)
         if view is None:
             return
@@ -1295,6 +1331,10 @@ class ResultSelectionDialog(QDialog):
         """Fit after Qt resolves the canvas, coalescing resize bursts."""
         self._preview_fit_timer.start()
 
+    def _on_preview_resize(self, _event) -> None:
+        if not self._closed and not self._preview_user_interacted:
+            self._schedule_preview_fit()
+
     def _fit_preview(self) -> None:
         if self._preview_user_interacted:
             return
@@ -1374,6 +1414,9 @@ class ResultSelectionDialog(QDialog):
         path = Path(candidate.structure_path)
         stat = path.stat() if path.is_file() else None
         cache_key = (
+            candidate.run_id, candidate.source, candidate.cycle, candidate.candidate_id,
+            candidate.map_sha256, candidate.structure_sha256, candidate.edma_sigma,
+            candidate.jana_model_sha256, candidate.unit_cell, candidate.space_group,
             str(path), getattr(stat, "st_mtime_ns", 0), getattr(stat, "st_size", 0),
             self._view_mode, candidate.edma_asu_composition,
         )
@@ -1392,12 +1435,27 @@ class ResultSelectionDialog(QDialog):
         self._presentation_cache[cache_key] = result
         return result
 
+    def _sync_detached_identity(self, candidate):
+        detached = getattr(self, '_detached_viewer', None)
+        if detached is not None and not detached._restored:
+            family = ('Charge-flipping solution' if candidate.source == 'superflip' else 'Structure prediction') if candidate else 'Structure unavailable'
+            title = f'{family} — Cycle {candidate.cycle}' if candidate else family
+            detached.setWindowTitle(title)
+            detached.title_label.setText(title)
+            detached.candidate_identity = CandidateSelection(candidate,False,False,'').identity
+
     def _render_preview(self, candidate: ResultCandidate) -> None:
         status = candidate_selection(candidate, jana=self._jana_context)
         if not status.geometry:
             self._show_empty_preview(candidate, status.reason)
             return
         previous = self._current_candidate
+        palette=getattr(QApplication.instance(),'_phase_color_palette','phase')
+        if (previous == candidate and getattr(self,'_rendered_view_mode',None)==self._view_mode
+                and getattr(self,'_rendered_palette',None)==palette
+                and getattr(self,'_resolved_preview',None) is not None):
+            self._sync_detached_identity(candidate)
+            return  # Identical immutable data: keep artists, camera and geometry.
         same_candidate = previous is not None and (
             previous.run_id, previous.source, previous.cycle, previous.map_sha256,
             self._view_mode
@@ -1415,7 +1473,9 @@ class ResultSelectionDialog(QDialog):
         if not same_candidate:
             self._preview_user_interacted = False
         self._rendered_view_mode = self._view_mode
+        self._rendered_palette = palette
         self._current_candidate = candidate
+        self._sync_detached_identity(candidate)
         self.preview_candidate_id = candidate.candidate_id
         self.preview_structure_hash = candidate.structure_sha256
         figure = self._preview_figure
@@ -1427,8 +1487,13 @@ class ResultSelectionDialog(QDialog):
         host._structure_depth_artists = []
         try:
             atoms, coords, bonds, composition, detected_count, fit, cell_segments = self._candidate_presentation(candidate)
+            self._resolved_preview = ResolvedCandidateSnapshot(status,self._view_mode,
+                tuple((str(a.label),str(a.element),tuple(float(v) for v in a.frac)) for a in atoms),
+                tuple(tuple(float(v) for v in row) for row in coords),tuple(tuple(b) for b in bonds),
+                composition,int(detected_count),tuple(tuple(tuple(float(v) for v in row) for row in segment) for segment in cell_segments))
             composition_label = "EDMA asymmetric-unit composition"
         except Exception:
+            self._resolved_preview = None
             atoms, coords, bonds, composition, detected_count, fit, cell_segments = [], np.zeros((0, 3)), [], "", 0, None, []
             composition_label = "Composition"
         self._current_formula = composition
@@ -1537,3 +1602,7 @@ class ResultSelectionDialog(QDialog):
         self._preview_canvas.draw_idle()
         QTimer.singleShot(0, self._fit_preview)
         self._schedule_preview_fit()
+
+    def _refresh_viewer_palette(self):
+        if self._current_candidate is not None:
+            self._render_preview(self._current_candidate)

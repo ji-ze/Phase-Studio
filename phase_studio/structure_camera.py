@@ -117,8 +117,8 @@ class _CameraVisibility(QObject):
 
 def camera_settings_button(parent):
     """One shared persisted visual preference, independent of scientific options."""
-    from PySide6.QtGui import QAction
-    from PySide6.QtWidgets import QMenu, QToolButton
+    from PySide6.QtGui import QAction, QActionGroup
+    from PySide6.QtWidgets import QMenu, QToolButton, QApplication
     button = QToolButton(parent)
     button.setText('Camera')
     button.setToolTip('Camera preferences')
@@ -138,6 +138,40 @@ def camera_settings_button(parent):
     action.toggled.connect(save)
     menu.aboutToShow.connect(refresh)
     menu.addAction(action)
+    sensitivity = menu.addMenu('Rotation sensitivity')
+    sensitivity_group = QActionGroup(sensitivity)
+    for title, value in (('Slow · 0.5×',.5),('Normal · 1×',1.),('Fast · 2×',2.)):
+        item=sensitivity.addAction(title);item.setCheckable(True);sensitivity_group.addAction(item)
+        item.setData(value)
+        item.setChecked(str(settings.value('viewer/rotationSensitivity',1.))==str(value))
+        item.triggered.connect(lambda _checked=False,v=value: (settings.setValue('viewer/rotationSensitivity',v),settings.sync()))
+    palettes=menu.addMenu('Element colors')
+    palette_group=QActionGroup(palettes)
+    app=QApplication.instance()
+    app._phase_color_palette=str(settings.value('viewer/elementPalette','phase'))
+    def palette_changed(value):
+        settings.setValue('viewer/elementPalette',value);settings.sync()
+        app._phase_color_palette=value
+        for window in app.topLevelWidgets():
+            callback=getattr(window,'_refresh_viewer_palette',None)
+            if callback is not None:callback()
+    for title,value in (('Current Phase Studio palette','phase'),('Conventional CPK-style palette','cpk')):
+        item=palettes.addAction(title);item.setCheckable(True);palette_group.addAction(item)
+        item.setData(value)
+        item.setChecked(app._phase_color_palette==value)
+        item.triggered.connect(lambda _checked=False,v=value:palette_changed(v))
+    palettes.setToolTip('Conventional colors for common elements; other elements retain the consistent Phase Studio palette.')
+    def refresh_visual_preferences():
+        try:value=float(settings.value('viewer/rotationSensitivity',1.))
+        except (ValueError,TypeError):value=1.
+        for item in sensitivity_group.actions():item.setChecked(item.data()==value)
+        for item in palette_group.actions():item.setChecked(item.data()==str(settings.value('viewer/elementPalette','phase')))
+    menu.aboutToShow.connect(refresh_visual_preferences)
+    refresh_visual_preferences()
+    # Retain the Python wrappers as well as Qt ownership across popup cycles.
+    button._camera_submenus=(sensitivity,palettes)
+    button._camera_action_groups=(sensitivity_group,palette_group)
+    button._camera_menu_actions=tuple(menu.actions())+tuple(sensitivity.actions())+tuple(palettes.actions())
     button.setMenu(menu)
     return button
 
@@ -265,6 +299,11 @@ class StructureCameraController:
             'basis': camera_basis(axis.elev, axis.azim, getattr(axis, 'roll', 0)),
             'inverted': str(QSettings('PhaseStudio','PhaseStudio').value('viewer/invertMouseRotation','false')).lower() == 'true',
         }
+        try:
+            sensitivity=float(QSettings('PhaseStudio','PhaseStudio').value('viewer/rotationSensitivity',1.))
+            self._drag['sensitivity']=max(.25,min(3.,sensitivity)) if math.isfinite(sensitivity) else 1.
+        except (ValueError,TypeError):
+            self._drag['sensitivity']=1.
         self._interaction('press')  # Pause automatic motion before the first move.
         set_cursor = getattr(self.canvas, "setCursor", None)
         if callable(set_cursor):
@@ -308,6 +347,7 @@ class StructureCameraController:
         self._drag["moved"] = True
         axis = self._drag["axis"]
         if self._drag["mode"] == "rotate":
+            dx*=self._drag.get('sensitivity',1.);dy*=self._drag.get('sensitivity',1.)
             self._pending_rotation = (axis, self._drag['x'], self._drag['y'],
                                       self._drag['x']+dx, self._drag['y']+dy,
                                       self._drag['basis'], self._drag['inverted'])

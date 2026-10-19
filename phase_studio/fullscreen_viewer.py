@@ -148,6 +148,7 @@ class SingleStructureViewerWindow(QDialog):
         next_cycle: Optional[Callable[[], None]] = None,
         latest_cycle: Optional[Callable[[], None]] = None,
         elev: float = 20.0, azim: float = 35.0,
+        roll: float = 0.0, camera_limits=None, camera_zoom=None,
     ) -> None:
         super().__init__(parent, Qt.Window)
         self.setObjectName("singleStructureViewer")
@@ -155,6 +156,8 @@ class SingleStructureViewerWindow(QDialog):
         self._presentation = presentation
         self._color_for = color_for
         self._elev, self._azim = float(elev), float(azim)
+        self._roll = float(roll)
+        self._initial_camera = (camera_limits,camera_zoom) if camera_limits is not None else None
         self._auto_rotate = False
         self._user_camera_interacted = False
         self._fit = None
@@ -204,8 +207,8 @@ class SingleStructureViewerWindow(QDialog):
         root.addLayout(bar)
 
         if adjust_threshold is not None:
-            action(secondary_controls, "+ atoms", lambda: self._change(lambda: adjust_threshold(True)))
-            action(secondary_controls, "- atoms", lambda: self._change(lambda: adjust_threshold(False)))
+            self.add_atoms_button=action(secondary_controls, "+ atoms", lambda: self._change(lambda: adjust_threshold(True)))
+            self.remove_atoms_button=action(secondary_controls, "- atoms", lambda: self._change(lambda: adjust_threshold(False)))
         secondary_controls.addStretch(1)
         if set_mode is not None:
             action(secondary_controls, "Complete molecules", lambda: self._change(lambda: set_mode("molecule")))
@@ -261,13 +264,30 @@ class SingleStructureViewerWindow(QDialog):
             toggle_auto_rotate=lambda: self.auto_rotate_button.click(),
         )
         self.render()
+        if self._initial_camera is not None and self.figure.axes:
+            limits,zoom=self._initial_camera
+            axis=self.figure.axes[0]
+            axis.set_xlim3d(*limits[0]);axis.set_ylim3d(*limits[1]);axis.set_zlim3d(*limits[2])
+            if zoom is not None:
+                axis.set_box_aspect((1,1,1),zoom=zoom);axis._phase_fit_zoom=zoom
+            self._user_camera_interacted=True
 
     def _change(self, callback: Callable[[], None]) -> None:
         callback()
         self.render()
 
+    def _refresh_viewer_palette(self):
+        self._geometry_signature=None
+        self.render()
+
     def render(self) -> None:
         data = self._presentation() or {}
+        self.candidate_identity=data.get('candidate_identity')
+        for name,key in (('add_atoms_button','add_atoms'),('remove_atoms_button','remove_atoms')):
+            button=getattr(self,name,None)
+            if button is not None:
+                button.setEnabled(data.get(key+'_available',True))
+                button.setToolTip(data.get(key+'_reason',''))
         atoms = list(data.get('atoms', ()))
         coords = np.asarray(data.get('coords', ()), dtype=np.float64).reshape(-1,3)
         geometry_signature = (coords.tobytes(), tuple(tuple(bond) for bond in data.get('bonds',())),

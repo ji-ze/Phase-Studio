@@ -257,6 +257,79 @@ class ResultSelectionRedesignTests(unittest.TestCase):
         d._sync_action_button()
         self.assertFalse(d._action_button.isEnabled())
 
+    def test_fullscreen_cycle_title_tracks_actual_selected_atom_data(self):
+        d=self.dialog
+        d._apply_source('deblurred')
+        view=d._views['deblurred']
+        view.table.selectRow(1);self.events()
+        selected=d.selected_candidate
+        expected=d._candidate_presentation(selected)
+        d._open_fullscreen();self.events()
+        try:
+            self.assertIs(d._detached_viewer._viewer,d._preview_section)
+            self.assertEqual(d.preview_candidate_id,selected.candidate_id)
+            self.assertTrue(np.array_equal(d._preview_fit_coords,expected[1]))
+            from mpl_toolkits.mplot3d import proj3d
+            d._preview_canvas.draw()
+            axis=d._preview_figure.axes[0]
+            x,y,_=proj3d.proj_transform(*d._preview_fit_coords.T,axis.get_proj())
+            pixels=axis.transData.transform(np.column_stack((x,y)))
+            viewport=axis.get_position(original=True).transformed(axis.figure.transFigure)
+            self.assertTrue(np.all(pixels.min(axis=0)>[viewport.x0,viewport.y0]))
+            self.assertTrue(np.all(pixels.max(axis=0)<[viewport.x1,viewport.y1]))
+            view.table.selectRow(2);self.events()
+            self.assertIn('Cycle 3',d._metadata_label.text())
+            self.assertIn('Cycle 3',d._detached_viewer.title_label.text())
+        finally:
+            d._detached_viewer.close()
+
+    def test_resolved_snapshot_and_artists_survive_identical_refresh(self):
+        d=self.dialog;c=d.selected_candidate
+        snapshot=d._resolved_preview
+        artists=tuple(d._preview_figure.axes[0].collections)
+        d._render_preview(c)
+        self.assertIs(d._resolved_preview,snapshot)
+        self.assertEqual(tuple(d._preview_figure.axes[0].collections),artists)
+        self.assertEqual(snapshot.identity,d.selection_snapshot.identity)
+        self.assertTrue(np.array_equal(np.asarray(snapshot.coordinates),d._candidate_presentation(c)[1]))
+        with self.assertRaises(Exception):snapshot.composition='changed'
+
+    def test_accept_freezes_candidate_despite_later_selection_signal(self):
+        d=self.dialog;view=d._views[d.active_source]
+        view.table.selectRow(1);self.events();chosen=d.selected_candidate
+        d.accept();view.table.selectRow(2);self.events()
+        self.assertEqual(d.selected_candidate,chosen)
+
+    def test_fullscreen_two_families_three_cycles_thresholds_and_late_result(self):
+        d=self.dialog;pending=[]
+        def request(c,add,callback):
+            r=SimpleNamespace(threshold=.4 if add else .5);pending.append((c,callback,r));return r
+        d._adjust_threshold_async=request
+        for source in ('superflip','deblurred'):
+            d._apply_source(source);view=d._views[source]
+            for row in (1,0,2):
+                view.table.selectRow(row);self.events();c=d.selected_candidate
+                d._open_fullscreen();self.events()
+                try:
+                    for add in (True,False):
+                        d._change_threshold(add)
+                        original,callback,r=pending[-1]
+                        changed=engine.seal_result_candidate(replace(original,edma_sigma=r.threshold))
+                        callback(changed,None,r);self.events()
+                        self.assertEqual(d._resolved_preview.identity,d.selection_snapshot.identity)
+                        self.assertEqual(d._detached_viewer.candidate_identity,d.selection_snapshot.identity)
+                        expected=d._candidate_presentation(d.selected_candidate)
+                        self.assertTrue(np.array_equal(np.asarray(d._resolved_preview.coordinates),expected[1]))
+                        self.assertEqual(d._resolved_preview.detected_count,len(engine.parse_cif_atoms(Path(c.structure_path))))
+                finally:d._detached_viewer.close()
+            view.table.selectRow(2);d._change_threshold(True)
+            original,callback,r=pending[-1]
+            view.table.selectRow(1);self.events();selected=d.selected_candidate
+            callback(engine.seal_result_candidate(replace(original,edma_sigma=r.threshold)),None,r)
+            self.events()
+            self.assertEqual(d.selected_candidate,selected)
+            self.assertEqual(d._resolved_preview.identity,d.selection_snapshot.identity)
+
     def test_unready_scientific_winner_selects_best_ready_without_moving_star(self):
         backend=self.backend
         backend.results[-1].deblur_edma_cif=Path(backend.results[-1].deblur_edma_cif).with_name('unfinished.cif')

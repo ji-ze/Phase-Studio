@@ -123,6 +123,37 @@ class ExecutionRedesign(unittest.TestCase):
         self.window._refresh_tick()
         self.assertFalse(self.window.pass_now_button.isEnabled())
 
+    def test_finalizing_headline_and_committed_cycle_precede_completion_log(self):
+        b=self.backend;b._set_run_status('RUNNING')
+        b._apply_cycle_progress_state(self.engine.CycleProgressState(3,3,'Finalizing cycle',7,7,
+            detail='calculating metrics',busy=True))
+        self.window._refresh_tick()
+        self.assertIn('Cycle 3 of 3 · Finalizing',self.window.status_headline.text())
+        state=SimpleNamespace(completed_cycles=2,cfg=SimpleNamespace(cycles=3),run_id='current-test-run')
+        seen=[]
+        with patch.object(b,'log',side_effect=lambda *args,**kw:seen.append(('log',state.completed_cycles))), \
+             patch.object(b,'_queue_run_event',side_effect=lambda *args:seen.append(('event',state.completed_cycles))), \
+             patch.object(b,'_emit_cycle_progress',side_effect=lambda *args,**kw:seen.append(('complete',state.completed_cycles))), \
+             patch.object(b,'_emit_requested_workflow_stop',return_value=False):
+            b._finalize_completed_cycle(state,3,['Finalizing cycle'])
+        self.assertEqual(seen,[('event',3),('complete',3),('log',3)])
+
+    def test_completed_panel_edma_controls_are_independent_and_explain_missing_resources(self):
+        from phase_studio import autosolve_review as guided
+        self.structures();b=self.backend;b._set_run_status('RUNNING')
+        self.window._refresh_tick()
+        observed=self.window.review_columns[guided.ROLE_OBSERVED]
+        self.assertFalse(observed['add'].isEnabled())
+        self.assertIn('execution context',observed['add'].toolTip())
+        executable=self.root/'EDMA.exe';executable.write_bytes(b'UI fixture, never executed')
+        b._resume_state=SimpleNamespace(run_id='current-test-run',cfg=SimpleNamespace(work_dir=self.root,edma_exe=str(executable)))
+        with patch.object(b.review_edma_executor,'is_busy',side_effect=lambda key:key[1]=='superflip'), \
+             patch.object(b.review_edma_executor,'requested_threshold',return_value=.4):
+            self.window._refresh_tick()
+            self.assertFalse(observed['add'].isEnabled())
+            self.assertTrue(self.window.review_columns[guided.ROLE_PREDICTED]['add'].isEnabled())
+            self.assertIn('recalculation',observed['add'].toolTip())
+
     def test_projected_fit_compact_elongated_dense_orientations(self):
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg

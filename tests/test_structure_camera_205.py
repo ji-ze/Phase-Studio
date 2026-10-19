@@ -37,6 +37,29 @@ def pixel(axis,point):
     x,y,_=proj3d.proj_transform(*point,axis.get_proj())
     return axis.transData.transform((x,y))
 
+
+def test_camera_menu_palette_and_sensitivity_are_visual_preferences(viewer):
+    window,settings,data=viewer
+    from PySide6.QtWidgets import QToolButton
+    from phase_studio.app import element_color
+    before=data['coords'].copy()
+    menu=next(b for b in window.findChildren(QToolButton) if b.text()=='Camera').menu()
+    sensitivity=next(a.menu() for a in menu.actions() if a.text()=='Rotation sensitivity')
+    next(a for a in sensitivity.actions() if 'Fast' in a.text()).trigger()
+    assert float(settings.value('viewer/rotationSensitivity'))==2.
+    axis=window.figure.axes[0]
+    window._camera._press(SimpleNamespace(inaxes=axis,button=1,key='',x=300,y=300,dblclick=False))
+    assert window._camera._drag['sensitivity']==2.
+    window._camera._release(None)
+    palette=next(a.menu() for a in menu.actions() if a.text()=='Element colors')
+    next(a for a in palette.actions() if 'CPK' in a.text()).trigger()
+    try:
+        assert element_color('C')=='#808080' and element_color('N')=='#3050F8'
+        assert element_color('O')=='#FF0D0D' and element_color('Cl')=='#1FF01F'
+        assert np.array_equal(data['coords'],before)
+        assert settings.value('viewer/elementPalette')=='cpk'
+    finally:next(a for a in palette.actions() if 'Current' in a.text()).trigger()
+
 @pytest.mark.parametrize('dx,dy',[(30,0),(-30,0),(0,30),(0,-30),(25,-25)])
 def test_front_features_follow_projected_drag(viewer,dx,dy):
     window,settings,data=viewer

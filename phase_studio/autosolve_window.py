@@ -1355,7 +1355,20 @@ class AutosolveWindow(QMainWindow):
             f"<br>{html.escape(structure_site_summary(Path(panel.current_cif), data, self.view_mode))}"
         )
         data["title"] = f"Phase Studio — {family} · Cycle {panel.cycle}"
+        candidate=next((c for c in self._cycle_candidates(role) if int(c.cycle)==int(panel.cycle)),None)
+        if candidate is not None:
+            from phase_studio.result_selection import CandidateSelection
+            data['candidate_identity']=CandidateSelection(candidate,False,True,'').identity
+        column=self.review_columns.get(role,{})
+        for name,key in (('add_atoms','add'),('remove_atoms','remove')):
+            if key in column:
+                data[name+'_available']=column[key].isEnabled()
+                data[name+'_reason']=column[key].toolTip()
         return data
+
+    def _refresh_viewer_palette(self):
+        self._render_signature=None
+        self._refresh_tick()
 
     def _open_panel_fullscreen(self, role: str) -> None:
         panel = self._display_panel(role)
@@ -1383,6 +1396,9 @@ class AutosolveWindow(QMainWindow):
             latest_cycle=(lambda c=combo: c.setCurrentIndex(0)) if combo is not None else None,
             elev=panel_axis.elev if self._ordinary_dual_workflow and panel_axis is not None else self.structure_elev,
             azim=panel_axis.azim if self._ordinary_dual_workflow and panel_axis is not None else self.structure_azim,
+            roll=panel_axis.roll if panel_axis is not None else 0.,
+            camera_limits=(panel_axis.get_xlim3d(),panel_axis.get_ylim3d(),panel_axis.get_zlim3d()) if panel_axis is not None else None,
+            camera_zoom=getattr(panel_axis,'_phase_fit_zoom',None) if panel_axis is not None else None,
         )
 
     def _display_panel(self, role: str):
@@ -1818,10 +1834,28 @@ class AutosolveWindow(QMainWindow):
                 column["threshold"].setText("")
                 column["threshold"].setVisible(False)
             else:
-                idle = tunable and not any_busy and not handing_off
+                idle = tunable and not (review_busy if self._ordinary_dual_workflow else any_busy) and not handing_off
+                reason = ''
+                if self._ordinary_dual_workflow:
+                    state=getattr(backend,'_resume_state',None)
+                    executable=str(getattr(getattr(state,'cfg',None),'edma_exe',''))
+                    from shutil import which
+                    if review_candidate is None:
+                        reason='A completed, registered candidate is required before adjusting EDMA.'
+                    elif state is None:
+                        reason='This run has no retained EDMA execution context. Reopen a completed workflow result.'
+                    elif not executable or not (Path(executable).is_file() or which(executable)):
+                        reason='The configured EDMA executable is unavailable. Set its path in the program requirements.'
+                    elif not Path(review_candidate.map_path).is_file():
+                        reason='The selected scientific map is missing. Restore that candidate’s map before adjusting EDMA.'
+                    elif review_busy:
+                        reason='EDMA recalculation is running for this candidate; the previous completed structure is retained.'
+                    if reason:idle=False
                 control_sigma = requested_sigma if requested_sigma is not None else panel.threshold_sigma
                 column["add"].setEnabled(idle and guided.can_add_atoms(control_sigma))
                 column["remove"].setEnabled(idle and guided.can_remove_atoms(control_sigma))
+                column['add'].setToolTip(reason or 'Lower the EDMA threshold for this selected candidate only.')
+                column['remove'].setToolTip(reason or 'Raise the EDMA threshold for this selected candidate only.')
                 column["recalc"].setEnabled(idle)
                 column["pass_"].setEnabled(idle and final)
                 count = self._panel_atom_counts.get(role)
@@ -2445,6 +2479,10 @@ class AutosolveWindow(QMainWindow):
             )
             cycle_stage_text = (f"{cycle_text} · {run_status.title() or 'Preparing'}"
                                 if progress_state is not None else self._preparing_text)
+            if running and progress_state is not None and any(word in
+                    (progress_state.stage_name+' '+progress_state.detail).lower()
+                    for word in ('finaliz','metrics','evaluation')):
+                cycle_stage_text = f'{cycle_text} · Finalizing'
             if progress_state is None and run_status in {"COMPLETE", "STOPPED", "CANCELLED", "ERROR"}:
                 cycle_stage_text = run_status.title()
             if declined and not running:

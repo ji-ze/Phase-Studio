@@ -241,6 +241,9 @@ def main():
     original_builder = viewer.build_complete_molecule_view
     dialog._presentation_cache.clear()
     with patch.object(viewer, "build_complete_molecule_view", wraps=original_builder) as build_view:
+        # Prime the deliberately cleared geometry cache. An unchanged render
+        # can now reuse its existing artists without consulting that cache.
+        dialog._candidate_presentation(candidate)
         dialog._render_preview(candidate)
         dialog._fit_preview()
         dialog._reset_preview()

@@ -6547,6 +6547,13 @@ def element_color(element: str) -> str:
     """The one element-colour authority for every structure view and legend.
     Deterministic: the same element always gets the same colour; anything
     that does not resolve to a real element gets UNKNOWN_ELEMENT_COLOR."""
+    application = QApplication.instance()
+    if application is not None and getattr(application,'_phase_color_palette','phase')=='cpk':
+        conventional = {'H':'#FFFFFF','C':'#808080','N':'#3050F8','O':'#FF0D0D','F':'#90E050',
+                        'Cl':'#1FF01F','Br':'#A62929','I':'#940094','S':'#FFFF30','P':'#FF8000',
+                        'B':'#FFB5B5','Si':'#F0C8A0','Fe':'#E06633','Cu':'#C88033','Zn':'#7D80B0'}
+        color=conventional.get(clean_element_symbol(element))
+        if color is not None:return color
     placement = element_period_position(element_atomic_number(element))
     if placement is None:
         return UNKNOWN_ELEMENT_COLOR
@@ -15832,13 +15839,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self, state: PipelineState, cycle: int, progress_stages: Sequence[str],
     ) -> bool:
         """Checkpoint one valid cycle and apply terminal-intent precedence."""
-        self.log(f"Cycle {cycle} complete.", level="SUCCESS")
+        state.completed_cycles = cycle
+        self._queue_run_event("progress", state.completed_cycles, state.run_id)
         self._emit_cycle_progress(
             cycle, state.cfg.cycles, progress_stages, "Finalizing cycle",
             detail="completed", complete=True,
         )
-        state.completed_cycles = cycle
-        self._queue_run_event("progress", state.completed_cycles, state.run_id)
+        self.log(f"Cycle {cycle} complete.", level="SUCCESS")
         return self._emit_requested_workflow_stop(state.completed_cycles)
 
     def _run_configured_sharped_stage(
@@ -16795,7 +16802,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 effective_damping = effective_xplor_damping_factor(cfg.damping_factor)
                 if state.current_model is not None and effective_damping > 1.0:
                     damped_model = cycle_dir / f"cycle_{cyc:03d}_damped_modelfile.xplor"
-                    state.current_model = blend_xplor_maps(state.current_model, next_xplor_model, damped_model, effective_damping, self.log)
+                    state.current_model = blend_xplor_maps(state.current_model, next_xplor_model, damped_model, effective_damping,
+                        lambda message:self.log(message,level='DETAIL'))
                 else:
                     state.current_model = next_xplor_model
                 state.current_model_metric = sf_metric if use_superflip_xplor_modelfile else deblur_metric

@@ -469,7 +469,17 @@ def main():
     jana.results = jana_results
     jana.open_result_selector("jana")
     standalone.results = jana_results
-    standalone.open_result_selector("standalone")
+    # Keep this selector live for the subsequent row-interaction assertions.
+    def inspect_live_dialog(dialog):
+        opened.append(dialog)
+        dialog.show()
+        app.processEvents()
+        return QDialog.Rejected
+    QDialog.exec = inspect_live_dialog
+    try:
+        standalone.open_result_selector("standalone")
+    finally:
+        QDialog.exec = reject_dialog
     check(
         "Jana and standalone recommend the same cycle/source",
         jana.result_recommendation.recommended_candidate == standalone.result_recommendation.recommended_candidate,
@@ -1072,6 +1082,30 @@ def main():
               and appmod.file_sha256(override_model) == override_choice.structure_sha256)
         check("manual override: no preview substitution, duplicate handoff, or scientific recomputation",
               override_target.read_bytes() != override_preview.read_bytes() and len(gui_handoff_calls) == 1)
+
+        # Cycle 2 remains the exact handoff authority while Cycle 3 exists,
+        # including a late table-selection signal after pressing Pass.
+        m50_before=appmod.file_sha256(override_inflip.parent/'job.m50')
+        choose_second=accept_candidate(lambda c:c.cycle==2 and c.source=='deblurred')
+        def accept_second_then_late_third(dialog):
+            choose_second(dialog)
+            dialog.accept()
+            dialog._views['deblurred'].table.selectRow(2)
+            return dialog.result()
+        QDialog.exec=accept_second_then_late_third
+        gui_handoff_calls.clear()
+        override.open_result_selector('jana')
+        chosen=override.result_recommendation.selected_candidate
+        check('frozen handoff: selected SharpED Cycle 2 is preserved while Cycle 3 is latest',
+              chosen is not None and chosen.source=='deblurred' and chosen.cycle==2 and len(override_results)==3)
+        check('frozen handoff: exact Cycle 2 map and threshold-specific model, no preview or recomputation',
+              (override_inflip.parent/'job-deb.xplor').read_bytes()==Path(chosen.map_path).read_bytes()
+              and chosen.map_sha256==appmod.file_sha256(override_results[1].deblur_map)
+              and chosen.structure_sha256==appmod.file_sha256(override_results[1].deblur_edma_cif)
+              and len(gui_handoff_calls)==1)
+        check('frozen handoff: valid nonzero original m50 context is preserved',
+              appmod.file_sha256(override_inflip.parent/'job.m50')==m50_before
+              and (override_inflip.parent/'job.m50').stat().st_size>0)
 
         # A custom-threshold candidate is a new immutable structure identity.
         # Handoff performs no workflow Superflip, SharpED or EDMA work; its two
