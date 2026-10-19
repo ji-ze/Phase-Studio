@@ -175,7 +175,10 @@ with tempfile.TemporaryDirectory() as tmp,patch.object(QScreen,'availableGeometr
                 assert small.scroll_area.viewport().rect().contains(tile.mapTo(small.scroll_area.viewport(),tile.rect().bottomRight()))
             # Exercise the measured breakpoint at the component level.
             small.input_summary_section.setFixedWidth(small.summary_wide_minimum_width-1);settle()
-            assert small.input_summary_outer.direction().name=='TopToBottom'
+            # Analysis is a dataset-wide toolbar below the responsive two-column
+            # scientific summary, rather than a third column competing for width.
+            assert small.input_summary_outer.direction().name=='LeftToRight'
+            assert small.hkl_buttons_column.direction().name=='LeftToRight'
             small.dialog.close()
         assert source.read_bytes()==original
 if capture:(OUT/('geometry-dpi-'+str(scale)+'.json')).write_text(json.dumps(records,indent=2),encoding='utf8')

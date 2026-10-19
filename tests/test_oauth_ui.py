@@ -72,6 +72,8 @@ class OAuthUITests(unittest.TestCase):
         self.complete()
         self.assertEqual(self.dialog.selected_key,"mock-oauth-access")
         self.assertEqual(self.store.authentication_method(),"oauth")
+        from phase_studio.sharped_access import connection_status
+        self.assertEqual(connection_status(self.store),'Connected')
         self.assertFalse(self.store.remembered())
     def test_final_copy_geometry_and_collapse(self):
         d=self.dialog
@@ -177,7 +179,7 @@ class OAuthUITests(unittest.TestCase):
         self.dialog._start_oauth();self.wait(lambda:bool(self.urls))
         self.assertIs(self.dialog._oauth_worker,worker)
         self.assertEqual(len(self.urls),1)
-        self.assertEqual(self.dialog.heading.text(),"Complete sign-in in your browser")
+        self.assertEqual(self.dialog.heading.text(),"Waiting for Jana2020 sign-in…")
         self.assertTrue(self.dialog.progress.isVisible())
         self.dialog.reopen_button.click()
         self.assertEqual(self.urls,[self.urls[0],self.urls[0]])
@@ -188,7 +190,7 @@ class OAuthUITests(unittest.TestCase):
         self.dialog.cancel_sign_in_button.click();self.app.processEvents()
         self.assertFalse(self.dialog.isVisible());self.assertIsNone(self.dialog._oauth_worker)
         self.assertTrue(old.attempt.cancelled.is_set())
-        self.assertEqual(self.dialog.heading.text(),"Connect to SharpED")
+        self.assertEqual(self.dialog.heading.text(),"Authentication cancelled")
         self.dialog._closed=False;self.dialog.show();self.dialog.sign_in_button.click();new=self.dialog._oauth_worker
         old.signals.finished.emit(OAuthCredential("late-unused",time.monotonic()+3600),None)
         self.app.processEvents()

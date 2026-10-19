@@ -64,7 +64,7 @@ def probe(scale):
                 w.sharped_toggle.setChecked(expanded)
                 settle(height)
                 assert w.dialog.height() == height
-                assert 120 <= w.cycles.width() <= 140
+                assert w.cycles.width() == 110
                 assert 340 <= w.model.width() <= 420
                 assert box(w.refresh_models_button).left() > box(w.model).right()
                 assert abs(box(w.refresh_models_button).center().y() - box(w.model).center().y()) <= 3
@@ -101,7 +101,7 @@ def probe(scale):
         assert w.model_user_picked["value"] and w.model.currentText() == "SEED (cyclic CF)"
         w.cycles.setValue(1)
         assert w.model.currentText() == "SEED (cyclic CF)"
-        assert w.manual_model_indicator.text() == "Manually selected"
+        assert w.manual_model_indicator.text() == "Manually selected · Different from recommendation"
         w.restore_automatic_model_button.setFocus()
         QTest.keyClick(w.restore_automatic_model_button, Qt.Key_Space)
         assert not w.model_user_picked["value"]

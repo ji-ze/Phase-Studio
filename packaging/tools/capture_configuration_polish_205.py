@@ -75,7 +75,7 @@ with tempfile.TemporaryDirectory() as tmp,patch.object(QScreen,'availableGeometr
         assert state['calls']==1 and w.model.currentText()==seed and not w.model_user_picked['value']
         assert w.context_subtitle_label.text()=='Configure charge flipping and SharpED processing'
         assert w.primary_button.text()=='Next: Map feedback →'
-        assert w.connection_status.text()=='Sign in with Jana2020'
+        assert w.connection_status.text()=='Not connected'
         assert w.sharped_body.isHidden()
         if factor==1:snap('02-automatic-model',w)
         w.cycles.setValue(1);stable()
@@ -105,7 +105,7 @@ with tempfile.TemporaryDirectory() as tmp,patch.object(QScreen,'availableGeometr
         if factor==1:snap('07-authentication-required',w)
         # Public discovery and the presence of an unverified key cannot imply Connected.
         w.api_token.setText('mock-key-not-a-real-credential')
-        assert w.connection_status.text()=='SharpED account access'
+        assert w.connection_status.text()=='Credentials available — not yet verified'
         w.api_token.clear()
         # Removing the manual ID must not substitute an inference model.
         state['models'].remove(seed);w.refresh_models_button.click();pump();stable()

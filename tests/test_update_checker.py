@@ -15,6 +15,15 @@ def test_numeric_comparison(latest, expected):
     assert u.is_newer(u.Release(u.parse_version(latest)), '2.0.4') is expected
 
 
+@pytest.mark.parametrize('installed,expected', [
+    ('2.0.5-rc.1', True), ('v2.0.5-beta.10+build.9', True),
+    ('2.0.4-rc.10', True), ('2.0.10-rc.1', False),
+    ('2.0.5-rc.01', False), ('2.0.5-', False), ('2.0.5+build.9', False),
+])
+def test_stable_update_from_installed_prerelease(installed, expected):
+    assert u.is_newer(u.Release((2, 0, 5)), installed) is expected
+
+
 @pytest.mark.parametrize('tag', ['',None,12,'dev','development/2.0.5','2.0','2.0.5rc1',
     '2.0.5-rc.1','2.0.05','2.00.5',' 2.0.5','2.0.5\n','<b>2.0.5</b>','9'*130])
 def test_invalid_and_prerelease_tags(tag):

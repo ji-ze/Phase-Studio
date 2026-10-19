@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 import time
 import logging
+import hashlib
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, QUrl, Signal, QRectF
 from PySide6.QtGui import QAction, QIcon, QDesktopServices, QColor, QPainter, QPainterPath, QPen, QPixmap
@@ -15,6 +16,20 @@ from PySide6.QtWidgets import (
 from phase_studio import requirements as reqs
 from phase_studio.credentials import credential_store, credential_origin
 from phase_studio.sharped_server_client import DEFAULT_SERVER_URL
+
+
+def connection_status(store, base_url=DEFAULT_SERVER_URL):
+    """Session verification is distinct from possessing a persisted credential."""
+    token = store.get(base_url)
+    if not token:
+        return 'Not connected'
+    if store.is_oauth(token) and not store._oauth.usable():
+        return 'Authentication expired'
+    fingerprint = hashlib.sha256(token.encode('utf8')).hexdigest()
+    verification = getattr(store, '_access_verification', {}).get(base_url)
+    if verification and verification[0] == fingerprint:
+        return verification[1]
+    return 'Credentials available — not yet verified'
 from phase_studio.ui_branding import (
     activate_owned_dialog, apply_safe_dialog_geometry, create_phase_studio_brand_header,
 )
@@ -332,17 +347,25 @@ class SharpEDAccessDialog(QDialog):
 
     def _present(self, state, message=None):
         self.presentation_state = state
-        oauth_busy = state in {"waiting", "exchange"}
+        self.authentication_state = {'initial':'Ready','expired':'Authentication expired',
+            'opening':'Opening browser','waiting':'Waiting for browser authentication',
+            'exchange':'Verifying credentials','connected':'Connected','cancelled':'Authentication cancelled',
+            'error':'Authentication failed','denied':'Authentication failed','timeout':'Connection timed out',
+            'network':'Connection unavailable','api_network':'Connection unavailable',
+            'api_retry':'Verifying credentials'}[state]
+        oauth_busy = state in {"opening", "waiting", "exchange"}
         busy = oauth_busy or state == "api_retry"
         headings = {"initial":"Connect to SharpED", "expired":"Reconnect to SharpED",
-                    "waiting":"Complete sign-in in your browser", "exchange":"Connecting to SharpED",
+                    "opening":"Opening browser…", "waiting":"Waiting for Jana2020 sign-in…", "exchange":"Connecting to SharpED",
                     "network":"Could not connect to Jana2020", "api_network":"Could not connect to SharpED", "api_retry":"Connecting to SharpED",
                     "timeout":"Sign-in timed out", "error":"Sign-in could not be completed",
-                    "denied":"SharpED access unavailable", "connected":"Jana2020 sign-in completed"}
+                    "denied":"SharpED access unavailable", "connected":"Jana2020 sign-in completed",
+                    "cancelled":"Authentication cancelled"}
         descriptions = {
             "initial":"Use your existing Jana2020 account to access SharpED's online electron-density processing.",
             "expired":"Your previous connection has expired. Sign in with Jana2020 to continue.",
             "waiting":"Sign in with your Jana2020 account. Phase Studio will continue automatically.",
+            "opening":"Opening your browser for secure Jana2020 sign-in…",
             "exchange":"Completing your secure connection…",
             "network":"Check your internet connection and try again.",
             "api_network":"Check your internet connection and try again.",
@@ -350,7 +373,8 @@ class SharpEDAccessDialog(QDialog):
             "timeout":"Your sign-in wasn't completed in time.",
             "error":"Sign-in could not be completed. Please try again.",
             "denied":"Your Jana2020 account is signed in, but SharpED processing is not currently available for this account.",
-            "connected":"Continuing in Phase Studio…"}
+            "connected":"Continuing in Phase Studio…",
+            "cancelled":"Your workflow settings are unchanged. You can sign in again when ready."}
         self.heading.setText(headings[state])
         self.description.setText(message or descriptions[state])
         self.sign_in_button.setText("Try again" if state in {"network","api_network","error"} else
@@ -407,6 +431,7 @@ class SharpEDAccessDialog(QDialog):
         self._oauth_worker = None
         self._authorization_url = None
         self._idle_state()
+        self._present('cancelled')
         self.feedback.hide()
         self._fit_dialog()
         self.sign_in_button.setFocus()
@@ -446,7 +471,7 @@ class SharpEDAccessDialog(QDialog):
         self._browser_failed = False
         self._authorization_url = None
         self.manual_button.setChecked(False)
-        self._present("waiting")
+        self._present("opening")
         self.sign_in_button.hide()
         self.manual_button.setEnabled(False)
         self.connect_button.setEnabled(False)
@@ -476,6 +501,7 @@ class SharpEDAccessDialog(QDialog):
             worker.attempt.cancel()
             self.show_feedback("The browser could not be opened. Please retry.")
         else:
+            self._present("waiting")
             self.feedback.setText("Complete your Jana2020 sign-in in the browser.")
 
     def _oauth_progress(self, state):
@@ -506,6 +532,7 @@ class SharpEDAccessDialog(QDialog):
             safe_reason = reason if reason in {"cancelled","timeout","network","configuration","exchange","response","browser","port"} else "unknown"
             logging.getLogger(__name__).debug("Jana2020 sign-in failed; reason=%s", safe_reason)
             if getattr(error, "kind", None) == "cancelled" and not self._browser_failed:
+                self._present('cancelled')
                 self.reject()
             else:
                 kind = getattr(error, "kind", None)
@@ -514,6 +541,9 @@ class SharpEDAccessDialog(QDialog):
             self._fit_dialog()
             return
         self.store.activate_oauth(credential)
+        verification = getattr(self.store, '_access_verification', {})
+        verification[self.base_url] = (hashlib.sha256(credential.access_token.encode('utf8')).hexdigest(),'Connected')
+        self.store._access_verification = verification
         self.selected_key = credential.access_token
         self.checked_status = reqs.RequirementStatus(reqs.RequirementKind.SHARPED, reqs.RequirementState.OK)
         self._present("connected")
@@ -586,7 +616,8 @@ class SharpEDAccessDialog(QDialog):
         self._pending_key = token
         self._pending_remember = self.remember.isChecked()
         self._set_connecting(True)
-        self.show_feedback("Connecting to SharpED…")
+        self.authentication_state = 'Verifying credentials'
+        self.show_feedback("Verifying credentials…")
         self._probe = _AccessProbe(self.verify, token)
         self._probe.signals.completed.connect(self._probe_completed)
         QThreadPool.globalInstance().start(self._probe)
@@ -595,6 +626,14 @@ class SharpEDAccessDialog(QDialog):
         if self._closed:
             return
         self._set_connecting(False)
+        verification = getattr(self.store, '_access_verification', {})
+        # The legacy manual-key preflight checks the PUBLIC catalogue, not
+        # token validity. Never turn that response into verified authentication.
+        state = ('Credentials available — not yet verified' if status.ok else 'Authentication expired'
+                 if status.state == reqs.RequirementState.TOKEN_REJECTED else 'Connection unavailable')
+        verification[self.base_url] = (hashlib.sha256(self._pending_key.encode('utf8')).hexdigest(),state)
+        self.store._access_verification = verification
+        self.authentication_state = state
         if self.presentation_state == "api_retry":
             if status.ok:
                 self.selected_key = self._pending_key

@@ -1099,6 +1099,7 @@ class _JanaWorkflowWizard:
         from phase_studio import requirements as reqs
         from phase_studio.requirements_ui import show_requirement_remediation_dialog
         previous = credential_store.get()
+        self.connection_status.setText('Connecting')
         value = show_requirement_remediation_dialog(
             self.dialog, reqs.RequirementStatus(reqs.RequirementKind.SHARPED, reqs.RequirementState.OK),
             self.api_token.text(), sharped_base_url=DEFAULT_SERVER_URL,
@@ -1107,6 +1108,7 @@ class _JanaWorkflowWizard:
         )
         if value is not None or (previous and not credential_store.get()):
             self.api_token.setText(value or "")
+        self._update_account_presentation()
 
     # --- Wizard window width policy ---------------------------------------
     # The Wizard used to take whatever width self.content.sizeHint() happened
@@ -1936,17 +1938,9 @@ class _JanaWorkflowWizard:
                         width=max(width,label.sizeHint().width()+form.horizontalSpacing()+int(document.idealWidth()+1))
                     return width
                 fields_width=sum(form_width(form) for form in (wizard.input_summary_layout,wizard.input_summary_right_layout))+wizard.input_summary_columns.spacing()
-                actions_width=max(button.sizeHint().width() for button in (wizard.validate_hkl_button,wizard.analyze_completeness_button))
-                required=fields_width+actions_width+wizard.input_summary_outer.spacing()
+                required=fields_width
                 available=wizard.input_summary_section.contentsRect().width()
                 wizard.summary_wide_minimum_width=required
-                narrow_actions = available < required
-                wizard.input_summary_outer.setDirection(
-                    QHBoxLayout.TopToBottom if narrow_actions else QHBoxLayout.LeftToRight
-                )
-                wizard.hkl_buttons_column.setDirection(
-                    QHBoxLayout.LeftToRight if narrow_actions else QHBoxLayout.TopToBottom
-                )
                 narrow = event.size().width() < fields_width
                 wizard.input_summary_columns.setDirection(
                     QHBoxLayout.TopToBottom if narrow else QHBoxLayout.LeftToRight
@@ -1993,14 +1987,20 @@ class _JanaWorkflowWizard:
             self.input_summary_columns.addWidget(group, stretch)
         self.input_summary_outer.addWidget(self.input_summary_fields, 1)
 
-        self.hkl_buttons_column = QVBoxLayout()
-        self.hkl_buttons_column.setSpacing(4)
+        self.hkl_buttons_column = QHBoxLayout()
+        self.hkl_buttons_column.setSpacing(8)
+        analysis_label = QLabel("Input analysis")
+        analysis_label.setStyleSheet("color:#33456e; font-weight:600;")
+        self.hkl_buttons_column.addWidget(analysis_label)
         self.validate_hkl_button = QPushButton("Validate HKL")
         self.analyze_completeness_button = QPushButton("Analyze completeness")
         self.hkl_buttons_column.addWidget(self.validate_hkl_button)
         self.hkl_buttons_column.addWidget(self.analyze_completeness_button)
         self.hkl_buttons_column.addStretch(1)
+        analysis_button_width = max(self.validate_hkl_button.sizeHint().width(), self.analyze_completeness_button.sizeHint().width()) + 12
         for button in (self.validate_hkl_button, self.analyze_completeness_button):
+            button.setFixedWidth(analysis_button_width)
+            button.setAccessibleName(button.text())
             button.setMinimumHeight(36)
             button.setStyleSheet(
                 "QPushButton { background:#ffffff; color:#001170; border:1px solid #8fa9cc; padding:5px 12px; }"
@@ -2014,7 +2014,7 @@ class _JanaWorkflowWizard:
         ))
         for button in (self.validate_hkl_button, self.analyze_completeness_button):
             button.setMinimumWidth(diagnostic_width)
-        self.input_summary_outer.addLayout(self.hkl_buttons_column)
+        self.input_summary_body.addLayout(self.hkl_buttons_column)
         composition_row = QHBoxLayout()
         composition_row.setSpacing(10)
         composition_row.addWidget(QLabel("Superflip input composition"))
@@ -2100,7 +2100,11 @@ class _JanaWorkflowWizard:
                 # Analyze completeness themselves if the reflection block truly
                 # cannot be analyzed.
                 return
-            self.reflections_value.setText(f"{len(result.reflections):,} parsed · {len(result.unique_reflections):,} literal unique HKL")
+            self.reflections_value.setText(f"{len(result.reflections):,} HKL records · {len(result.unique_reflections):,} unique indices")
+            self.reflections_value.setToolTip(
+                "Unique indices count distinct literal (h, k, l) tuples, not symmetry-independent orbits. "
+                "For powder input, indexed reflections need not be independently measured or resolved."
+            )
             self.input_reflections = result.reflections
             if hasattr(self, "intensity_group"):
                 self._sync_page3_for_data_type()
@@ -2114,8 +2118,12 @@ class _JanaWorkflowWizard:
             rcell = result.cell
             from phase_studio.scientific_typography import scientific_text
             self.cell_value.setText(
-                scientific_text(f"a = {rcell.a:.5g}, b = {rcell.b:.5g}, c = {rcell.c:.5g} Å") + '<br>' +
-                scientific_text(f"alpha = {rcell.alpha:.4g}°, beta = {rcell.beta:.4g}°, gamma = {rcell.gamma:.4g}°")
+                '<table cellspacing="0" cellpadding="0"><tr>'+''.join(
+                    ('</tr><tr>' if index==3 else '')+'<td style="padding-right:10px">'+
+                    scientific_text(text).replace(' ','&nbsp;')+'</td>' for index,text in enumerate((
+                    f'a = {rcell.a:.5g} Å', f'b = {rcell.b:.5g} Å', f'c = {rcell.c:.5g} Å',
+                    f'alpha = {rcell.alpha:.4g}°', f'beta = {rcell.beta:.4g}°', f'gamma = {rcell.gamma:.4g}°')))+
+                '</tr></table>'
             )
             from phase_studio.hkl_diagnostics_ui import _spacegroup_display
             symbol, setting = _spacegroup_display(result.spacegroup.xhm())
@@ -2761,8 +2769,7 @@ class _JanaWorkflowWizard:
 
         self.cycles = QSpinBox()
         self.cycles.setRange(1, 999)
-        self.cycles.setMinimumWidth(120)
-        self.cycles.setMaximumWidth(140)
+        self.cycles.setFixedWidth(110)
         self.cycles.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.cycles.setValue(int(self.settings.value("cycles", 5)) or 5)
         self.cycles.setToolTip("Number of ordinary Superflip + SharpED workflow cycles.")
@@ -2860,6 +2867,7 @@ class _JanaWorkflowWizard:
         self.model_row_layout.addStretch(1)
         self.refresh_layout.addWidget(self.model_status, 1, Qt.AlignVCenter)
         self.model_state_row = QWidget()
+        self.model_state_row.setMaximumWidth(560)
         state_layout = QHBoxLayout(self.model_state_row)
         state_layout.setContentsMargins(0,0,0,0)
         state_layout.setSpacing(8)
@@ -2870,13 +2878,14 @@ class _JanaWorkflowWizard:
         state_layout.addWidget(self.refresh_row)
         self.processing_form.addRow("", self.model_state_row)
 
-        self.connection_heading = QLabel('SHARPED CONNECTION AND ADVANCED SETTINGS')
+        self.connection_heading = QLabel('SHARPED CONNECTION')
         self.connection_heading.setStyleSheet('color:#2264b8; font-weight:600;')
         self.connection_heading.setWordWrap(True)
         self.page2_layout.addWidget(self.connection_heading)
         self.connection_row = QWidget()
         connection_layout = QHBoxLayout(self.connection_row)
         connection_layout.setContentsMargins(0,0,0,0)
+        connection_layout.addWidget(QLabel("SharpED account"))
         self.connection_status = QLabel('SharpED account access')
         self.connection_status.setWordWrap(True)
         self.connection_status.setStyleSheet('color:#52658b;')
@@ -2922,13 +2931,18 @@ class _JanaWorkflowWizard:
             "Phase Studio for this session. Remember access saves it in Windows Credential Manager."
         )
         self.sharped_form.addRow("SharpED access key", self.api_token)
-        self.sharped_account_button = QPushButton("Account access…")
+        self.sharped_account_button = QPushButton("Manage account…")
+        self.sharped_account_button.setAccessibleName("Manage SharpED account")
         self.sharped_account_button.setMaximumWidth(180)
         self.sharped_account_button.clicked.connect(self._manage_sharped_access)
         connection_layout.addWidget(self.sharped_account_button)
         def update_account_presentation(_text=None):
             # A stored key alone does not establish an authenticated session.
-            self.connection_status.setText('SharpED account access' if self.api_token.text() else 'Sign in with Jana2020')
+            from phase_studio.sharped_access import connection_status
+            self.connection_status.setText('Credentials available — not yet verified'
+                if self.api_token.text() and self.api_token.text()!=credential_store.get(DEFAULT_SERVER_URL)
+                else connection_status(credential_store,DEFAULT_SERVER_URL))
+        self._update_account_presentation = update_account_presentation
         self.api_token.textChanged.connect(update_account_presentation)
         update_account_presentation()
 
@@ -2946,6 +2960,10 @@ class _JanaWorkflowWizard:
             self._size_stack_to_current_page(self.dialog.width())
 
         self.sharped_toggle.toggled.connect(sync_sharped_disclosure)
+        self.advanced_heading = QLabel("ADVANCED SETTINGS AND SCIENTIFIC VALIDATION")
+        self.advanced_heading.setStyleSheet('color:#2264b8; font-weight:600;')
+        self.advanced_heading.setWordWrap(True)
+        self.page2_layout.addWidget(self.advanced_heading)
         self.page2_layout.addWidget(self.sharped_group)
 
         self.refresh_results: "queue.Queue[tuple[str, object]]" = queue.Queue()
@@ -2966,7 +2984,7 @@ class _JanaWorkflowWizard:
             self.model_recommendation.setVisible(not manual)
             self.manual_model_indicator.setText(
                 "Manually selected · Matches recommended model"
-                if manual and self.model.currentText() == recommended else "Manually selected"
+                if manual and self.model.currentText() == recommended else "Manually selected · Different from recommendation"
             )
             self.model_recommendation.setText(
                 f"Automatically selected for {self.cycles.value()} "
@@ -3044,7 +3062,8 @@ class _JanaWorkflowWizard:
                     payload, subsystem="SharpED", operation="Load model catalog",
                 )
                 self.model_policy_error = "The live SharpED model catalogue is unavailable. Use Refresh models to retry."
-                self.model_status.setText("Model list unavailable — Refresh to retry")
+                self.model_status.setText(f"Cached: {len(self.model_catalog['values'])} models · Live catalogue unavailable"
+                                          if self.model_cache['loaded'] else "Model list unavailable — Refresh to retry")
                 self.model_status.setToolTip(
                     ('Previously loaded entries have not been reverified.\n\n' if self.model_cache['loaded'] else '') +
                     f"{report.summary}\n\n{report.guidance}\n\n{report.technical_details}"
@@ -3512,7 +3531,8 @@ class _JanaWorkflowWizard:
                     if title != 'Powder repartitioning' or self._map_feedback_wavelength()[0] > 0:
                         active.append((title, start.value() + 1))
             if active:
-                text = ('<b>Scientific warning</b><br>Map Feedback can modify the reflection data supplied to subsequent cycles. '
+                text = ('<b>Map Feedback enabled</b> · '+ ' → '.join(name for name, _ in active)+
+                        '<br>Scientific warning: Map Feedback can modify the reflection data supplied to subsequent cycles. '
                         'Validate the resulting structure against the original measured diffraction data.')
                 icon = QStyle.SP_MessageBoxWarning
             elif selected and total > 1:
@@ -3520,10 +3540,9 @@ class _JanaWorkflowWizard:
                         'Check the enabled methods, start cycles, damping, addition limit, map ratio mix and required wavelength.')
                 icon = QStyle.SP_MessageBoxInformation
             else:
-                text = ('<b>Map Feedback disabled</b><br>No Map Feedback corrections or powder intensity repartitioning '
-                        'will be applied between cycles. The original reflection data remain unchanged.')
+                text = ('<b>Map Feedback disabled</b> · No reflection-data updates will be applied between cycles.')
                 icon = QStyle.SP_MessageBoxInformation
-            text += '<br>Original experimental input files are never modified; active feedback uses derived data for subsequent cycles.'
+            text += '<br>Original experimental input files are never modified.'
             noops = [name for name in selected if name not in {name for name, _ in active}]
             if active and noops:
                 text += '<br>This setting currently has no effect: ' + ', '.join(noops) + '.'
@@ -4336,6 +4355,10 @@ def launch_autosolve_from_jana(
 def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     args = argv[1:]
+    if "--release-ui-check" in args:
+        index = args.index("--release-ui-check")
+        from phase_studio.release_diagnostics import run_release_ui_check
+        return run_release_ui_check(args[index + 1])
     if "--credential-self-check" in args:
         index = args.index("--credential-self-check")
         from phase_studio.oauth_diagnostics import run_credential_check

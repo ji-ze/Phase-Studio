@@ -27,9 +27,12 @@ def run_checks():
    w._size_stack_to_current_page(w.dialog.width())
    for _ in range(20):app.processEvents()
   settle();metadata=[getattr(w,n).text() for n in ('reflections_value','format_value','cell_value','spacegroup_value','composition_value')]
-  assert metadata[0]=='432 parsed · 432 literal unique HKL'
+  assert metadata[0]=='432 HKL records · 432 unique indices'
+  assert 'not symmetry-independent' in w.reflections_value.toolTip()
   from phase_studio.scientific_typography import scientific_text
-  assert metadata[2]==scientific_text('a = 24.352, b = 35.561, c = 26.032 Å')+'<br>'+scientific_text('alpha = 90°, beta = 91.02°, gamma = 90°')
+  assert metadata[2].count('<td ')==6 and metadata[2].count('<tr>')==2
+  for text in ('a = 24.352 Å','b = 35.561 Å','c = 26.032 Å','alpha = 90°','beta = 91.02°','gamma = 90°'):
+   assert scientific_text(text).replace(' ','&nbsp;') in metadata[2]
   assert w.data_type_value.text()=='Single crystal'
   assert metadata[3]=='P2\u2081/n (#14)' and metadata[4]=='Ag₁₂₄ S₈₈ B₇₆₈ H₇₀₄ O₄₀'
   tiles=(w.original_superflip_tile,w.superflip_sharped_tile,w.autosolve_tile,w.professional_mode_tile)

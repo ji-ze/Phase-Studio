@@ -65,6 +65,16 @@ def release_from_json(data):
 
 def is_newer(release, installed=VERSION):
     current = parse_version(installed)
+    if current is None and isinstance(installed, str):
+        # Stable releases supersede prereleases of the same numeric version.
+        # Prerelease GitHub assets remain excluded by release_from_json.
+        prerelease = re.fullmatch(
+            r'[vV]?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))-'
+            r'(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)'
+            r'(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*'
+            r'(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?', installed, re.ASCII)
+        if prerelease is not None:
+            return release.version >= parse_version(prerelease.group(1))
     return current is not None and release.version > current
 
 

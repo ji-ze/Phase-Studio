@@ -112,8 +112,8 @@ def main():
           240 <= wizard.model.minimumWidth() <= wizard.model.maximumWidth() <= 420)
     check("cycle control has a practical responsive width",
           110 <= wizard.cycles.width() <= 140)
-    check("cycle control stays in the compact 110-140 px band",
-          wizard.cycles.minimumWidth() == 120 and wizard.cycles.maximumWidth() == 140)
+    check("cycle control uses the compact 110 px width",
+          wizard.cycles.minimumWidth() == 110 and wizard.cycles.maximumWidth() == 110)
     wizard._ensure_models_loaded()
     pump(app, wizard)
     check("Superflip + SharpED: models are fetched automatically", calls["n"] == 1)
