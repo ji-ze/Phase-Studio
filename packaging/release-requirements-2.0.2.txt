@@ -9,3 +9,6 @@ PyInstaller==6.20.0
 pytest==9.1.1
 PyYAML==6.0.3
 jsonschema==4.26.0
+cryptography==50.0.2
+cffi==2.1.1
+pycparser==3.11

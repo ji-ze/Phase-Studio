@@ -14,6 +14,7 @@ dependencies = [
   "numpy",
   "matplotlib",
   "gemmi",
+  "cryptography>=43",
   "truststore>=0.10.4; platform_system == 'Windows'",
 ]
 
