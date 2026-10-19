@@ -19,6 +19,21 @@ from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSizePo
 from phase_studio.structure_camera import StructureCameraController, fit_projected_structure, camera_settings_button
 
 
+def _enter_fullscreen(window):
+    window._windowed_geometry=window.normalGeometry() if window.isMaximized() else window.geometry()
+    window._windowed_maximized=window.isMaximized()
+    window.showFullScreen()
+
+
+def _leave_fullscreen(window):
+    if getattr(window,'_windowed_maximized',False):
+        window.showMaximized()
+    else:
+        geometry=getattr(window,'_windowed_geometry',window.normalGeometry())
+        window.showNormal()
+        if geometry.isValid():window.setGeometry(geometry)
+
+
 class DetachedViewerWindow(QDialog):
     """Host one live viewer widget and restore it to its original container."""
 
@@ -67,16 +82,16 @@ class DetachedViewerWindow(QDialog):
         screen = self.parentWidget().screen() if self.parentWidget() is not None else None
         if screen is not None:
             self.setGeometry(screen.availableGeometry())
-        self.showFullScreen()
+        _enter_fullscreen(self)
         self.raise_()
         self.activateWindow()
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
-            self.showMaximized()
+            _leave_fullscreen(self)
             self.fullscreen_button.setText("Enter fullscreen")
         else:
-            self.showFullScreen()
+            _enter_fullscreen(self)
             self.fullscreen_button.setText("Exit fullscreen")
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 - Qt override
@@ -88,7 +103,7 @@ class DetachedViewerWindow(QDialog):
             # inspection session.  The explicit Close viewer action is the
             # only keyboard-independent way back to the embedded layout.
             if self.isFullScreen():
-                self.showMaximized()
+                _leave_fullscreen(self)
                 self.fullscreen_button.setText("Enter fullscreen")
             return
         super().keyPressEvent(event)
@@ -437,9 +452,9 @@ class SingleStructureViewerWindow(QDialog):
 
     def toggle_fullscreen(self) -> None:
         if self.isFullScreen():
-            self.showMaximized(); self.fullscreen_button.setText("Enter fullscreen")
+            _leave_fullscreen(self); self.fullscreen_button.setText("Enter fullscreen")
         else:
-            self.showFullScreen(); self.fullscreen_button.setText("Exit fullscreen")
+            _enter_fullscreen(self); self.fullscreen_button.setText("Exit fullscreen")
         if not self._user_camera_interacted:
             self._fit_timer.start()
 
@@ -452,7 +467,7 @@ class SingleStructureViewerWindow(QDialog):
         if event.key() == Qt.Key_F11:
             self.toggle_fullscreen(); return
         if event.key() == Qt.Key_Escape and self.isFullScreen():
-            self.showMaximized(); self.fullscreen_button.setText("Enter fullscreen"); return
+            _leave_fullscreen(self); self.fullscreen_button.setText("Enter fullscreen"); return
         super().keyPressEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802

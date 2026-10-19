@@ -1149,12 +1149,21 @@ class AutosolveWindow(QMainWindow):
         self.status_headline = QLabel("Autosolve")
         self.status_headline.setObjectName("dashboardTitle")
         # Secondary context line: the Jana2020 .inflip being solved (basename,
-        # middle-elided when long, full path in the tooltip). Hidden while
+        # middle-elided when long, full path available by explicit copying). Hidden while
         # there is nothing to show so it never reserves a blank line.
         self.status_secondary = QLabel("")
         self.status_secondary.setObjectName("dashboardSubtitle")
         self.status_secondary.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         self.status_secondary.setVisible(False)
+        self.status_secondary.setContextMenuPolicy(Qt.CustomContextMenu)
+        def input_menu(point):
+            from PySide6.QtWidgets import QMenu,QApplication
+            path=self._active_inflip_path()
+            if path is None:return
+            menu=QMenu(self.status_secondary)
+            menu.addAction('Copy full input path',lambda:QApplication.clipboard().setText(str(path)))
+            menu.exec(self.status_secondary.mapToGlobal(point))
+        self.status_secondary.customContextMenuRequested.connect(input_menu)
         layout.addWidget(self.status_headline)
         layout.addWidget(self.status_secondary)
         return header
@@ -2043,7 +2052,7 @@ class AutosolveWindow(QMainWindow):
         text = prefix + name
         if self.status_secondary.text() != text:
             self.status_secondary.setText(text)
-        self.status_secondary.setToolTip(str(path))
+        self.status_secondary.setToolTip('Right-click to copy the full input path.')
         self.status_secondary.setVisible(True)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
@@ -2403,7 +2412,8 @@ class AutosolveWindow(QMainWindow):
             "stopping", "selecting", "handing_off",
         }
         self.pass_now_button.setText(
-            "Pass to Jana2020" if backend.autosolve_is_jana() else "Save map and model"
+            ("Select result for Jana2020" if self._ordinary_dual_workflow else "Pass to Jana2020")
+            if backend.autosolve_is_jana() else "Save map and model"
         )
         active_handoff_blocked = self._ordinary_dual_workflow and str(getattr(backend, '_run_status', '')).upper() == 'RUNNING'
         self.pass_now_button.setEnabled(candidates_available and not handing_off_now and not interactive_pending and not active_handoff_blocked)
@@ -2504,6 +2514,10 @@ class AutosolveWindow(QMainWindow):
                 backend.superflip_repeat_group.setVisible(False)
                 backend.current_cycle_progress.setRange(0, 1)
                 backend.current_cycle_progress.setValue(0)
+                if run_status in {'COMPLETE','COMPLETED'} and progress_state is not None:
+                    cycle_stage_text=f'Workflow complete · {progress_state.cycle_index} of {progress_state.cycle_total} cycles'
+                    backend.current_cycle_detail.setText(cycle_stage_text)
+                    backend.current_cycle_stage_counter.setText('Completed')
         self.status_headline.setText(f"{self.workflow_name} · {cycle_stage_text}")
         if not self._ordinary_dual_workflow:
             stage_label = {

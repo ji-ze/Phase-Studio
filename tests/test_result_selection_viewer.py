@@ -274,7 +274,9 @@ def main():
           not dialog._preview_figure.texts)
     check("EDMA state and atom controls are grouped together",
           "0.40" in dialog._threshold_status.text()
-          and dialog._threshold_status.parentWidget() is dialog._preview_section)
+          and dialog._threshold_status.parentWidget() is dialog._add_atoms_button.parentWidget()
+          and dialog._threshold_status.parentWidget() is dialog._remove_atoms_button.parentWidget()
+          and dialog._preview_section.isAncestorOf(dialog._threshold_status))
     check("Result Selection states the exact output that will be exported", all(
         text in dialog._selected_output_summary.text()
         for text in ("Selected for export", "Structure prediction", "Cycle 3", "0.4")

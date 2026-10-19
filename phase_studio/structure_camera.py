@@ -117,10 +117,32 @@ class _CameraVisibility(QObject):
 
 def camera_settings_button(parent):
     """One shared persisted visual preference, independent of scientific options."""
-    from PySide6.QtGui import QAction, QActionGroup
+    from PySide6.QtGui import QAction, QActionGroup, QPainter, QPen
+    from PySide6.QtCore import QPointF
     from PySide6.QtWidgets import QMenu, QToolButton, QApplication
-    button = QToolButton(parent)
+    class CameraButton(QToolButton):
+        def paintEvent(self,event):
+            super().paintEvent(event)
+            painter=QPainter(self)
+            painter.setRenderHint(QPainter.Antialiasing)
+            color=self.palette().buttonText().color()
+            if not self.isEnabled(): color.setAlpha(100)
+            painter.setPen(QPen(color,1.5,Qt.SolidLine,Qt.RoundCap,Qt.RoundJoin))
+            x,y=self.width()-13.0,self.height()/2.0
+            painter.drawPolyline([QPointF(x-4,y-2),QPointF(x,y+2),QPointF(x+4,y-2)])
+            painter.end()
+
+        def keyPressEvent(self,event):
+            if event.key() in (Qt.Key_Return,Qt.Key_Enter,Qt.Key_Space,Qt.Key_Down):
+                self.showMenu();event.accept();return
+            super().keyPressEvent(event)
+    button = CameraButton(parent)
+    button.setObjectName('structureCameraMenu')
+    button.setAccessibleName('Camera preferences')
+    button.setStyleSheet('QToolButton#structureCameraMenu { padding-right:26px; } '
+        'QToolButton#structureCameraMenu::menu-indicator { image:none; width:0px; }')
     button.setText('Camera')
+    button.setMinimumWidth(button.fontMetrics().horizontalAdvance('Camera')+38)
     button.setToolTip('Camera preferences')
     button.setPopupMode(QToolButton.InstantPopup)
     menu = QMenu(button)

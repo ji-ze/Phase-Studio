@@ -36,9 +36,15 @@ def check_gui():
             assert len({table.columnWidth(c) for c in range(3)})==1
             for text,expected in [('300 0 1',300),('-300 0 1',-300),('0 0 1',0)]:
                 search.setText(text); QTest.qWait(210); settle()
+                for _ in range(200):
+                    if not dialog.hkl_preview_label.text().startswith('Searching'): break
+                    QTest.qWait(10);settle()
                 assert table.rowCount()==1 and table.item(0,0).numeric_value==expected
             search.setText('no match'); QTest.qWait(210); settle()
-            assert table.rowCount()==0 and '0 of 0 matching' in dialog.hkl_preview_label.text()
+            for _ in range(200):
+                if not dialog.hkl_preview_label.text().startswith('Searching'): break
+                QTest.qWait(10);settle()
+            assert table.rowCount()==0 and dialog.hkl_preview_label.text()=='No matching reflections'
             search.clear(); QTest.qWait(210); settle()
             table.sortItems(0,Qt.DescendingOrder)
             assert table.item(0,0).numeric_value==-251

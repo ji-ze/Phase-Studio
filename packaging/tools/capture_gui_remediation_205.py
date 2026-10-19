@@ -128,6 +128,9 @@ with tempfile.TemporaryDirectory() as tmp,patch.object(QScreen,'availableGeometr
                 validation.hkl_search.setText(f'{r.h} {r.k} {r.l}')
                 started=time.perf_counter()
                 QTest.keyClick(validation.hkl_search,Qt.Key_Return);settle()
+                for _ in range(200):
+                    if not validation.hkl_preview_label.text().startswith('Searching'): break
+                    QTest.qWait(10);settle()
                 evidence[name]['exact_search_and_paint_seconds']=time.perf_counter()-started
                 assert 0<validation.hkl_table.rowCount()<=200
                 if not BEFORE:

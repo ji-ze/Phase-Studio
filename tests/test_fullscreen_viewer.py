@@ -47,6 +47,12 @@ def main() -> int:
     app.processEvents()
     check("F11 keeps the live widget hosted and names the available action",
           viewer.parentWidget() is window and window.fullscreen_button.text() == "Enter fullscreen")
+    window.setGeometry(30,40,640,480)
+    app.processEvents()
+    saved=window.geometry()
+    window.toggle_fullscreen();app.processEvents()
+    window.toggle_fullscreen();app.processEvents()
+    check("fullscreen restores the preceding normal geometry",window.geometry()==saved and not window.isMaximized())
     QTest.keyClick(window, Qt.Key_Escape)
     app.processEvents()
     check("Esc leaves true fullscreen without closing the detached viewer", viewer.parentWidget() is window and not window.isFullScreen())

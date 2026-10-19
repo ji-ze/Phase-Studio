@@ -92,8 +92,11 @@ def check_ui():
         assert v.hkl_table.item(0,0).text()=='1'  # original row order until a user sorts
         v.hkl_derived_checkbox.setChecked(True)
         assert v.hkl_table.horizontalHeaderItem(v.hkl_table.columnCount()-1).text()==ui.DERIVED_LABEL
-        v.hkl_search.setText('3 2 1');QTest.qWait(220);settle()
-        assert v.hkl_table.rowCount()==1 and '1 matching records (5 total)' in v.hkl_preview_label.text()
+        v.hkl_search.setText('3 2 1');QTest.qWait(200);settle()
+        for _ in range(120):
+            if not v.hkl_preview_label.text().startswith('Searching'): break
+            QTest.qWait(25);settle()
+        assert v.hkl_table.rowCount()==1 and '1 match · Showing 1' in v.hkl_preview_label.text()
         assert v.hkl_table.item(0,5).text()=='0.0000'
         v.close()
         # Complete powder list exercises both compact summaries; variable

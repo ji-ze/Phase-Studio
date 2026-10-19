@@ -98,7 +98,7 @@ def check():
                 dialog.hkl_disclosures['Resolution methodology'].click(); settle()
                 assert any('ULPs' in label.text() for label in dialog.findChildren(QLabel))
                 initial = dialog.size()
-                assert initial.width()==1000 and initial.height()==600, initial.toTuple()
+                assert initial.width()==1050 and initial.height()==620, initial.toTuple()
                 dialog.hkl_copy_input_summary.click()
                 summary=QApplication.clipboard().text()
                 assert source in summary and 'Observation-processing provenance: Not documented' in summary

@@ -115,6 +115,9 @@ def capture():
             validation=win._build_hkl_validation_dialog(large);validation.show();settle()
             target=large.reflections[-1]
             started=time.perf_counter();validation.hkl_search.setText(f'{target.h} {target.k} {target.l}');QTest.qWait(220);settle()
+            for _ in range(200):
+                if not validation.hkl_preview_label.text().startswith('Searching'): break
+                QTest.qWait(10);settle()
             evidence['large-search']=dict(seconds=time.perf_counter()-started,target=[target.h,target.k,target.l],status=validation.hkl_preview_label.text(),parsed=len(large.reflections))
             assert validation.hkl_table.rowCount()>0
             snap('04-validation-full-dataset-search',validation);validation.close()

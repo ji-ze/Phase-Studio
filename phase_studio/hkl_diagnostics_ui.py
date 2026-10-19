@@ -122,11 +122,8 @@ def _top(win, dialog, result, report, completeness=False):
         body.insertLayout(0,identity_row)
     else:
         body.addWidget(summary)
-    issues = sum(report.count(key) for key in ('invalid_values','invalid_auxiliary','phase_nonfinite','invalid_reciprocal_values','rejected_records','exact_duplicate_entries','conflicting_duplicate_groups'))
-    count = QLabel(f'Parsed records: {report.count("parsed_records"):,} · Literal unique HKL: {report.count("literal_unique"):,} · '
-                   f'Input-integrity issues: {issues:,}')
-    count.setToolTip('Issue tally = invalid-value records + invalid auxiliary values + nonfinite phases + invalid reciprocal values + rejected records + exact duplicate entries + conflicting duplicate groups. Categories can overlap; this is not a count of distinct faulty records or a scientific validity verdict. '
-                     f'Symmetry-independent orbits: {report.count("symmetry_orbits"):,}; Friedel pairs are combined for coverage.')
+    count = QLabel(f'Parsed records: {report.count("parsed_records"):,} · Literal unique HKL: {report.count("literal_unique"):,}')
+    count.setToolTip('Parsed records and distinct literal (h, k, l) indices. Symmetry-independent orbits and their definitions are in Advanced Diagnostics.')
     dialog.hkl_integrity_summary = count
     count.setWordWrap(True)
     body.addWidget(count)
@@ -139,7 +136,7 @@ def _top(win, dialog, result, report, completeness=False):
         interpretation.hide()
         summary.layout().addWidget(count)
         summary.layout().addWidget(interpretation)
-        count.setToolTip(count.toolTip()+'\n'+interpretation.text())
+        count.setToolTip('Parsed records and literal unique HKL; interpretation and provenance are shown in Input details.')
     layout.addWidget(top)
     dialog.hkl_input_summary = summary
     dialog.hkl_interpretation = interpretation
@@ -304,6 +301,12 @@ def _file_provenance(report):
 
 
 class _AdvancedDiagnosticsDialog(QDialog):
+    def showEvent(self, event):
+        super().showEvent(event)
+        from .ui_branding import clamp_window_to_available_screen
+        # restoreGeometry precedes the window manager's final frame margins.
+        QTimer.singleShot(0, self, lambda: clamp_window_to_available_screen(self))
+
     def copy_selected_value(self):
         widget = QApplication.focusWidget()
         if isinstance(widget, QLabel) and self.isAncestorOf(widget):
@@ -478,7 +481,10 @@ def _detail_dialog(parent, report):
                      ('Protocol (0,0,0) records','Protocol records at the reciprocal origin; not physical reflections.'),
                      ('Excluded 000','Origin records excluded from the physical reflection domain.')]:
         table.values[key].setToolTip(tip)
-    disclose(body, 'Counting methodology', [('Coverage and Friedel convention', report.methods[0]), ('Exact symmetry setting', raw_sg)])
+    counting = [('Coverage and Friedel convention', report.methods[0]), ('Exact symmetry setting', raw_sg)]
+    if report.data_type.startswith('Powder'):
+        counting.append(('Powder interpretation', 'Symmetry-independent HKL reflections are crystallographic indices, not necessarily independently measured or experimentally resolved powder peaks. Multiple reflections may overlap.'))
+    disclose(body, 'Counting methodology', counting)
     body.addStretch(1)
 
     body = page('Absences && &duplicates')
@@ -489,11 +495,11 @@ def _detail_dialog(parent, report):
     known_issue_keys = [key for key in issue_keys if key != 'absent_significant_3sigma'
                         and (phase_defined or not key.startswith('phase_'))]
     if all(counts.get(key) == 0 for key in known_issue_keys) and not any(severity == 'WARNING' for severity, _ in report.warnings):
-        status = explanation('No reflection-index, systematic-absence or duplication issues detected.'
-                             + (' Significance not assessed: no genuine measurement uncertainties.'
-                                if not report.available('significance') else ''))
+        status = explanation('No reflection-index, systematic-absence or duplication issues detected.')
         status.setStyleSheet('font-weight:600; color:#33456e;')
         body.addWidget(status)
+    if not report.available('significance'):
+        body.addWidget(explanation('Significance not assessed: no genuine measurement uncertainties.', muted=True))
     rows(body, count_rows(issue_keys[:6]) + [('Forbidden HKL examples', report.absence_examples or 'None'),
                                            ('Conflicting HKL examples', report.duplicate_examples or 'None')])
     detail.hkl_detail_rows['Systematically absent entries'].setToolTip(
@@ -663,7 +669,7 @@ def _detail_dialog(parent, report):
     root.addWidget(close, 0, Qt.AlignRight)
     detail.hkl_close_button = close
     detail.hkl_details_tabs = tabs
-    a.fit_dialog_to_available_screen(detail, QSize(1000, 600))
+    a.fit_dialog_to_available_screen(detail, QSize(1050, 620))
     saved = detail.hkl_settings.value('hklAdvanced/geometry')
     if saved:
         detail.restoreGeometry(saved)
@@ -722,6 +728,78 @@ def _footer(win, layout, dialog, report, analysis=None, figure=None):
     dialog.full_source_path = str(analysis.hkl_path) if analysis is not None else report.source
 
 
+class _ReflectionSearch:
+    """Debounced view queries over a lazy index; never modify diagnostic data."""
+    def __init__(self, dialog, records, completed):
+        import queue
+        import threading
+        self.records = records
+        self.completed = completed
+        self.requests = queue.Queue()
+        self.results = queue.Queue()
+        self.cancelled = threading.Event()
+        self.revision = 0
+        self.started = False
+        self.timer = QTimer(dialog)
+        self.timer.setInterval(25)
+        self.timer.timeout.connect(self.poll)
+        dialog.finished.connect(lambda _result: (self.cancelled.set(), self.timer.stop()))
+
+    def submit(self, text):
+        import threading
+        self.revision += 1
+        if not text.split():
+            self.timer.stop()
+            return
+        self.requests.put((self.revision, text))
+        if not self.started:
+            self.started = True
+            threading.Thread(target=self.work, daemon=True, name='HKL-reflection-search').start()
+        self.timer.start()
+
+    def work(self):
+        import bisect
+        import heapq
+        import queue
+        index = None
+        while not self.cancelled.is_set():
+            try:
+                revision, text = self.requests.get(timeout=.2)
+                while not self.requests.empty():
+                    revision, text = self.requests.get_nowait()
+            except queue.Empty:
+                continue
+            try:
+                keys = tuple(int(part) for part in text.split())
+                if not 1 <= len(keys) <= 3:
+                    raise ValueError('Expected one to three indices')
+            except ValueError:
+                self.results.put((revision, [], 0))
+                continue
+            if index is None:
+                index = sorted((r.h, r.k, r.l, position) for position, r in enumerate(self.records))
+            if self.cancelled.is_set():
+                return
+            lower = keys + (float('-inf'),) * (4-len(keys))
+            upper = keys + (float('inf'),) * (4-len(keys))
+            first, last = bisect.bisect_left(index, lower), bisect.bisect_right(index, upper)
+            # Keep source order, including duplicate records. Count the whole
+            # range while materializing at most the first 200 source records.
+            positions = heapq.nsmallest(200, (index[i][3] for i in range(first, last)))
+            self.results.put((revision, [self.records[i] for i in positions], last-first))
+
+    def poll(self):
+        import queue
+        while not self.results.empty():
+            try:
+                revision, rows, matches = self.results.get_nowait()
+            except queue.Empty:
+                return
+            if revision == self.revision and not self.cancelled.is_set():
+                self.timer.stop()
+                self.completed(rows, matches)
+
+
 def validation_dialog(win, result):
     from . import app as a
     report = presentation_report(result)
@@ -729,19 +807,19 @@ def validation_dialog(win, result):
     dialog.setObjectName('hklValidationDialog')
     dialog.setWindowTitle('HKL Validation')
     layout = _top(win,dialog,result,report)
-    significant_absences = (f'; significance ≥3: {number(report.count("absent_significant_3sigma"))}'
-                            if report.available('significance') else '')
-    detail_text = (f'Systematically absent: {report.count("systematic_absent_entries")} '
-        f'(nonzero: {report.count("absent_nonzero_values")}{significant_absences}) · '
-        f'Exact duplicate entries: {report.count("exact_duplicate_entries")} · '
-        f'Conflicting groups: {report.count("conflicting_duplicate_groups")} · '
-        f'Invalid values: {report.count("invalid_values")} · Rejected records: {report.count("rejected_records")}')
     integrity_keys = ('systematic_absent_entries','exact_duplicate_entries','conflicting_duplicate_groups',
                       'invalid_values','invalid_auxiliary','rejected_records','invalid_indices','invalid_reciprocal_values',
                       'phase_missing','phase_nonfinite','missing_auxiliary')
-    clean = all(report.count(key)==0 for key in integrity_keys)
-    summary = QLabel('Input integrity: No issues detected' if clean else detail_text)
-    summary.setToolTip(detail_text+' · Counts are input diagnostics, not a declaration of scientific validity.')
+    counts = [report.count(key) for key in integrity_keys]
+    complete = all(value is not None for value in counts)
+    issues = sum(value or 0 for value in counts)
+    integrity_text = ('No issues detected' if complete and not issues else
+                      f'{issues:,} category findings (categories may overlap)' if issues else 'Some checks unavailable')
+    if issues and not complete:
+        integrity_text += ' · Some checks unavailable'
+    summary = QLabel('Input integrity: ' + integrity_text)
+    summary.setToolTip('Input integrity checks parsing, reflection indices, auxiliary values and duplicate records. It does not establish experimental or scientific validity.')
+    dialog.hkl_integrity_status = summary
     summary.setWordWrap(True)
     layout.addWidget(summary)
     _details(layout,dialog,report,result)
@@ -783,18 +861,13 @@ def validation_dialog(win, result):
     label = QLabel()
     label.setWordWrap(True)
     layout.addWidget(label)
-    def populate():
-        text = search.text().split()
-        original_rows = getattr(result,'reflections_raw',None)
-        rows = original_rows if original_rows is not None else result.reflections
-        total_records = len(rows)
-        if text:
-            try:
-                keys = tuple(int(x) for x in text)
-                rows = [r for r in rows if len(keys)<=3 and (r.h,r.k,r.l)[:len(keys)] == keys]
-            except ValueError:
-                rows = []
+    original_rows = getattr(result,'reflections_raw',None)
+    records = original_rows if original_rows is not None else result.reflections
+    def populate(rows=None, matches=None):
+        filtered = bool(search.text().split())
+        rows = records if rows is None else rows
         shown = rows[:200]
+        matches = len(rows) if matches is None else matches
         table.setSortingEnabled(False)
         current_headers = headers + ([DERIVED_LABEL] if derived.isChecked() and sig and amplitude else [])
         table.setColumnCount(len(current_headers))
@@ -821,16 +894,26 @@ def validation_dialog(win, result):
                 item.setToolTip(repr(value))
                 table.setItem(row,col,item)
         table.setSortingEnabled(True)
-        label.setText(f'Showing first {len(shown):,} of {len(rows):,} '+('matching records' if text else 'records')+
-                      (f' ({total_records:,} total)' if text else '')+' · Search covers all parsed records'+
-                      (' · No matching records' if text and not rows else ''))
+        label.setText(('No matching reflections' if not matches else
+                       f'{matches:,} ' + ('match' if matches == 1 else 'matches') + ' · Showing ' + ('first 200' if matches>200 else str(matches)))
+                      if filtered else f'Showing first {len(shown):,} of {len(records):,} records')
+    reflection_search = _ReflectionSearch(dialog, records, populate)
+    def apply_search():
+        if not search.text().split():
+            populate()
+        else:
+            label.setText('Searching all parsed records…')
+        reflection_search.submit(search.text())
     timer = QTimer(dialog)
     timer.setSingleShot(True)
     timer.setInterval(180)
-    timer.timeout.connect(populate)
-    search.textChanged.connect(lambda: timer.start())
-    search.returnPressed.connect(lambda: (timer.stop(),populate()))
-    derived.toggled.connect(lambda _checked: populate())
+    timer.timeout.connect(apply_search)
+    def schedule_search():
+        reflection_search.revision += 1  # Discard old results as soon as text changes.
+        timer.start()
+    search.textChanged.connect(schedule_search)
+    search.returnPressed.connect(lambda: (timer.stop(),apply_search()))
+    derived.toggled.connect(lambda _checked: apply_search())
     populate()
     layout.addWidget(table,1)
     copy_rows = QPushButton('Copy selected rows')
@@ -839,9 +922,11 @@ def validation_dialog(win, result):
         selected = sorted({index.row() for index in table.selectionModel().selectedRows()})
         if not selected:
             return ''
-        lines = ['\t'.join(table.horizontalHeaderItem(c).text() for c in range(table.columnCount()))]
+        header = table.horizontalHeader()
+        columns = [header.logicalIndex(i) for i in range(header.count()) if not table.isColumnHidden(header.logicalIndex(i))]
+        lines = ['\t'.join(table.horizontalHeaderItem(c).text() for c in columns)]
         for row in selected:
-            lines.append('\t'.join('' if table.item(row,c).numeric_value is None else str(table.item(row,c).numeric_value) for c in range(table.columnCount())))
+            lines.append('\t'.join('' if table.item(row,c).numeric_value is None else str(table.item(row,c).numeric_value) for c in columns))
         return '\n'.join(lines)
     def copy_selected():
         text = selected_text()
@@ -878,6 +963,7 @@ def validation_dialog(win, result):
     _footer(win,layout,dialog,report)
     dialog.hkl_table = table
     dialog.hkl_search = search
+    dialog.hkl_reflection_search = reflection_search
     dialog.hkl_preview_label = label
     dialog.hkl_derived_checkbox = derived
     dialog.diagnostics = report
@@ -1189,11 +1275,25 @@ def _overlap_metadata(report):
             if overlap.get('estimated') else overlap['reason'])
 
 
+class _OverlapMetricPanel(QWidget):
+    def resizeEvent(self,event):
+        super().resizeEvent(event)
+        columns=4 if self.width()>=1050 else 2
+        if getattr(self,'_columns',None)==columns:
+            return
+        self._columns=columns
+        for index,card in enumerate(self.cards):
+            self.layout().addWidget(card,index//columns,index%columns)
+        for column in range(4):
+            self.layout().setColumnStretch(column,1 if column<columns else 0)
+
+
 def _overlap_metrics(report, percentage_digits=2):
     overlap = dict(report.overlap)
     physical = report.count('parsed_records')-report.count('zero_000')
     fraction, intensity = overlap.get('fraction'), overlap.get('integrated_intensity_fraction')
-    widget = QWidget()
+    widget = _OverlapMetricPanel()
+    widget.cards=[]
     layout = QGridLayout(widget)
     layout.setContentsMargins(4,4,4,4)
     metrics = [('Overlapping groups', f'{overlap["group_count"]:,}'),
@@ -1211,8 +1311,13 @@ def _overlap_metrics(report, percentage_digits=2):
         metric.setTextInteractionFlags(Qt.TextSelectableByMouse | Qt.TextSelectableByKeyboard)
         metric.setFocusPolicy(Qt.StrongFocus)
         metric.setStyleSheet('font-size:13pt; font-weight:600; color:#001170;')
-        layout.addWidget(heading,0,column)
-        layout.addWidget(metric,1,column)
+        card=QWidget()
+        card_layout=QVBoxLayout(card)
+        card_layout.setContentsMargins(0,0,0,0)
+        card_layout.addWidget(heading)
+        card_layout.addWidget(metric)
+        widget.cards.append(card)
+        layout.addWidget(card,0,column)
         layout.setColumnStretch(column,1)
     return widget
 
@@ -1223,6 +1328,11 @@ class _CompletenessDialog(QDialog):
         super().__init__(parent)
         self.hkl_settings = QSettings(QSettings.defaultFormat(),QSettings.UserScope,'PhaseStudio','PhaseStudio')
         self.finished.connect(self._save_presentation)
+
+    def showEvent(self,event):
+        super().showEvent(event)
+        from .ui_branding import clamp_window_to_available_screen
+        QTimer.singleShot(0,self,lambda:clamp_window_to_available_screen(self))
 
     def restore_presentation(self):
         from .ui_branding import clamp_window_to_available_screen
@@ -1434,7 +1544,7 @@ def completeness_dialog(win, analysis):
     if len(panels)==2:
         plot_orientation = {'stacked':None}
         def responsive_plots(_event=None):
-            stacked = canvas.width()<700
+            stacked = canvas.width()<1100
             if plot_orientation['stacked']==stacked:
                 return
             plot_orientation['stacked']=stacked
@@ -1572,6 +1682,19 @@ def completeness_dialog(win, analysis):
                     if bar.contains(event)[0]: inspect(int(size)); return
         overlap_canvas.mpl_connect('button_press_event',click_size)
         for axis in (size_axis,fraction_axis):axis.tick_params(labelsize=8)
+        overlap_orientation = {'stacked':None}
+        def responsive_overlap(_event=None):
+            stacked = overlap_canvas.width()<1100
+            if overlap_orientation['stacked']==stacked:
+                return
+            overlap_orientation['stacked']=stacked
+            grid = overlap_figure.add_gridspec(2,1) if stacked else overlap_figure.add_gridspec(1,2)
+            for index,axis in enumerate((size_axis,fraction_axis)):
+                axis.set_subplotspec(grid[index,0] if stacked else grid[0,index])
+            overlap_canvas.setMinimumHeight(440 if stacked else 260)
+            overlap_canvas.draw_idle()
+        overlap_canvas.mpl_connect('resize_event',responsive_overlap)
+        responsive_overlap()
         overlap_scroll = QScrollArea()
         overlap_scroll.setFrameShape(QScrollArea.NoFrame)
         overlap_scroll.setWidgetResizable(True)
@@ -1750,7 +1873,8 @@ def completeness_dialog(win, analysis):
     dialog.hkl_histogram_range_status = range_status
     dialog.hkl_histogram_range_controls = range_controls
     dialog.hkl_overlap_bin_rows = overlap_rows
-    table.setMinimumHeight(174)  # Header plus at least five independently scrollable rows.
+    table.setMinimumHeight(table.horizontalHeader().sizeHint().height()+
+        6*table.verticalHeader().defaultSectionSize()+2*table.frameWidth())
     bins_layout.addWidget(table,1)
     splitter.addWidget(bins_panel)
     splitter.setSizes([390,260])
@@ -1777,7 +1901,7 @@ def completeness_dialog(win, analysis):
     dialog.hkl_distribution_values = values
     dialog.hkl_bins_title = bins_title
     dialog.hkl_content_splitter = splitter
-    a.fit_dialog_to_available_screen(dialog,QSize(1120,900))
+    a.fit_dialog_to_available_screen(dialog,QSize(1400,950))
     dialog.restore_presentation()
     for label in dialog.findChildren(QLabel):
         if label.textFormat() != Qt.RichText and '</' not in label.text():

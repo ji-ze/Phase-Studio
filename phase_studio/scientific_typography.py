@@ -52,7 +52,12 @@ def scientific_text(text, target='qt'):
 
 def scientific_tooltip(text, literal=False):
     """Rich tooltips share the label vocabulary; source strings stay untouched."""
-    return '<qt>'+(html.escape(str(text)) if literal else scientific_text(text))+'</qt>'
+    from .ui_style import _TOOLTIP_WRAP_PREFIX
+    text = str(text)
+    if text.startswith(_TOOLTIP_WRAP_PREFIX):
+        return text
+    body = html.escape(text) if literal else scientific_text(text)
+    return _TOOLTIP_WRAP_PREFIX+'380px;">'+body+'</div>'
 
 
 def install_scientific_headers(table):

@@ -110,6 +110,9 @@ def check_gui():
         headers=[validation.hkl_table.horizontalHeaderItem(i).text() for i in range(validation.hkl_table.columnCount())]
         assert 'Phase (°)' not in headers and 'I/FWHM' not in headers
         validation.hkl_search.setText('2 2 1');QTest.qWait(220);settle()
+        for _ in range(200):
+            if not validation.hkl_preview_label.text().startswith('Searching'): break
+            QTest.qWait(10);settle()
         assert validation.hkl_table.rowCount()==1
         assert [validation.hkl_table.item(0,i).text() for i in range(3)]==['2','2','1']
         validation.close()
@@ -118,10 +121,13 @@ def check_gui():
         duplicate_view.show();settle()
         duplicate_view.hkl_search.setText('1 2 1')
         QTest.keyClick(duplicate_view.hkl_search,Qt.Key_Return);settle()
+        for _ in range(200):
+            if not duplicate_view.hkl_preview_label.text().startswith('Searching'): break
+            QTest.qWait(10);settle()
         assert duplicate_view.isVisible() and duplicate_view.hkl_advanced is None
         assert duplicate_view.hkl_table.rowCount()==2
         assert [duplicate_view.hkl_table.item(i,3).numeric_value for i in range(2)]==[10,20]
-        assert '3 total' in duplicate_view.hkl_preview_label.text()
+        assert duplicate_view.hkl_preview_label.text() == '2 matches \u00b7 Showing 2'
         duplicate_view.hkl_table.selectRow(0);duplicate_view.hkl_copy_selected_button.click()
         assert '10.0' in QApplication.clipboard().text()
         duplicate_view.close()
