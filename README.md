@@ -5,7 +5,7 @@ crystallographic structure solution. It integrates external Superflip charge
 flipping and EDMA peak extraction, optional SharpED map prediction, and
 candidate-specific map/model transfer to Jana2020.
 
-**Version 2.0.5.** [Release notes](RELEASE_NOTES_2_0_5.md) cover the refined Wizard, HKL diagnostics, UNIVERSAL Autosolve and candidate-specific viewer/handoff safeguards. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
+**Version 2.0.6 release candidate.** [Release notes](RELEASE_NOTES_2_0_6.md) describe the EDMA scientific correction, responsive GUI and signed Windows updater. This candidate is not yet a published production release. Version 2.0.5 remains the published stable download. 2.0.2 was the first public 2.x release; 2.0.0 and 2.0.1 were internal builds.
 
 ## Features and workflows
 
@@ -27,11 +27,11 @@ listed in the release notes; automated previews do not establish those checks.
 
 ![Jana2020 Wizard](docs/screenshots/2.0.4-release/wizard.png)
 
-This is a reproducible offscreen UI preview, not scientific workstation acceptance.
+This is a reproducible offscreen UI preview from 2.0.4, not current scientific workstation acceptance.
 
 ## Standalone Windows installation
 
-Download **PhaseStudio-2.0.5-x64.exe** from
+For the published stable release, download **PhaseStudio-2.0.5-x64.exe** from
 [GitHub Releases](https://github.com/ji-ze/Phase-Studio/releases), verify it
 against `SHA256SUMS.txt`, and launch it. The Windows x64 ONEFILE download
 includes the Python/Qt runtime; no separate Python installation is required.
@@ -44,10 +44,14 @@ do not require Jana2020.
 
 ## Jana2020 integration
 
-Jana developers can download `PhaseStudio-Jana2020-2.0.5.zip`, containing
+For the published stable release, Jana developers can download `PhaseStudio-Jana2020-2.0.5.zip`, containing
 `PhaseStudio-Jana2020-2.0.5/Phase_studio.exe` and the complete `_internal` runtime.
 Keep them together. This release has no separate Jana installer and does not
 replace the scientific Superflip executable.
+
+The unpublished 2.0.6 candidate uses `PhaseStudio-2.0.6-x64.exe` and
+`PhaseStudio-Jana2020-2.0.6.zip`; it requires the remaining acceptance gates
+listed in its release notes before production publication.
 
 See [developer integration](docs/JANA_DEVELOPER_INTEGRATION.md) for placement,
 invocation, output protocol and acceptance checks. Jana2020 retains its own
@@ -116,14 +120,14 @@ Scientific publications reporting work performed with Phase Studio should cite
 the software. This is the project's scientific-attribution policy, separate
 from the standard MIT license; it adds no license restriction.
 
-> Zelenka, Jiří. *Phase Studio*, version 2.0.5. Institute of Physics of the
+> Zelenka, Jiří. *Phase Studio*, version 2.0.6. Institute of Physics of the
 > Czech Academy of Sciences. https://github.com/ji-ze/Phase-Studio
 
 ```bibtex
-@software{zelenka_phase_studio_204,
+@software{zelenka_phase_studio_206,
   author  = {Zelenka, Jiří},
   title   = {Phase Studio},
-  version = {2.0.5},
+  version = {2.0.6},
   url     = {https://github.com/ji-ze/Phase-Studio}
 }
 ```

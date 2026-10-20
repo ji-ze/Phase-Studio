@@ -1,6 +1,6 @@
-# Jana2020 developer integration — Phase Studio 2.0.5
+# Jana2020 developer integration — Phase Studio 2.0.6 candidate
 
-The ZIP contains `PhaseStudio-Jana2020-2.0.5/Phase_studio.exe` and the complete
+The candidate ZIP contains `PhaseStudio-Jana2020-2.0.6/Phase_studio.exe` and the complete
 `_internal/` directory. Keep the pair together. Do not distribute only the EXE,
 rename it to Superflip, or overwrite the scientific `SUPERFLIP/superflip.exe`.
 
@@ -54,7 +54,7 @@ their own licenses. SharpED workflows need the user's accepted current service
 terms, personal API token and applicable access entitlement; Superflip-only
 does not require that service.
 
-- `Phase_studio.exe --version` reports 2.0.5.
+- `Phase_studio.exe --version` reports 2.0.6.
 - `--release-ui-check <output.json>` exercises isolated offline HKL parsing,
   Wizard navigation, model policy, account UI and the update menu. It does not
   run scientific programs or establish native Jana acceptance.
@@ -67,3 +67,13 @@ does not require that service.
 
 Automated/file/numerical checks are not actual Jana GUI acceptance. The latter
 remains explicitly pending until performed and recorded on a real workstation.
+
+## Signed updates
+
+The 2.0.6 candidate includes the independent updater and pinned Ed25519 public
+key. The supported Jana package is the complete signed ONEDIR ZIP. No separate
+EXE-only signed asset is published by this candidate. During a direct Jana
+session, cancel Phase Studio normally, exit Jana, then reopen after installation;
+the updater does not complete a scientific handoff or restart phasing. Real
+parent-process and interactive UAC acceptance remains required. See
+[Windows update provisioning](WINDOWS_UPDATES.md) and the candidate release notes.
