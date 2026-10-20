@@ -154,6 +154,14 @@ class ExecutionRedesign(unittest.TestCase):
             self.assertTrue(self.window.review_columns[guided.ROLE_PREDICTED]['add'].isEnabled())
             self.assertIn('recalculation',observed['add'].toolTip())
 
+    def test_fullscreen_scientific_details_preserve_units(self):
+        from phase_studio import autosolve_review as guided
+        self.structures()
+        data = self.window._panel_fullscreen_presentation(guided.ROLE_PREDICTED)
+        self.assertIn('0.010–0.150 Å²', data['scientific_details'])
+        self.assertNotIn('?', data['scientific_details'])
+        self.assertNotIn('?', data['metadata'])
+
     def test_projected_fit_compact_elongated_dense_orientations(self):
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg

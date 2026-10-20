@@ -426,17 +426,17 @@ class SplitDistributionTests(unittest.TestCase):
                 # Dedicated Jana completion tests pin this new byte-identity
                 # contract, mutation failure, and absence of workflow reruns.
                 excluded |= {"return_phase_studio_result_to_jana", "perform_jana_handoff"}
-                # 2.0.2 displacement correction: AtomSite now carries canonical
-                # Uiso through every clone/export boundary; EDMA Biso is
-                # converted explicitly for Jana/CIF and converted back only
-                # for PDB. Dedicated displacement tests pin the formulas,
-                # complete .coo peak mapping, m40 conversion, and round trips.
+                # Explicit physical ADPs retain shared Uiso conversion/export limits.
+                # 2.0.6 corrects the former density-as-Biso assumption: EDMA
+                # peak density uses column 8 (not x_coc); peak m40 is byte-preserved and unknown CIF/PDB ADPs omitted.
+                # test_edma_peak_protocol pins actual exported files and exact
+                # canonical promotion of provenance, map and peak-model identity.
                 excluded |= {
                     "expand_atoms_by_symmetry", "parse_cif_atoms", "edma_asu_atoms",
                     "composition_from_full_cell_atoms", "expanded_unique_atoms",
                     "write_structure_cif", "write_structure_pdb", "write_structure_bundle",
                     "write_filtered_cif",
-                    "run_edma_on_xplor",
+                    "run_edma_on_xplor", "promote_threshold_structure", "parse_edma_coo",
                 }
             elif filename == "jana_superflip.py":
                 # UI-only requirement routing: the former generic token warning

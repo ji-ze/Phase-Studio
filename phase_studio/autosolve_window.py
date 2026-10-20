@@ -486,6 +486,7 @@ def build_complete_molecule_view(
     tolerance: float = BOND_TOLERANCE,
     max_length: float = MAX_BOND_LENGTH_ANGSTROM,
     max_atoms: int = MAX_MOLECULE_ATOMS,
+    *, retain_all_sites: bool = False,
 ) -> CompleteMoleculeView:
     """Grows the connected molecular/structural components of the RAW
     asymmetric unit (`seed_atoms`, e.g. from parse_cif_atoms -- NOT already
@@ -713,11 +714,17 @@ def build_complete_molecule_view(
         # A much smaller disconnected EDMA island is usually an incomplete
         # peak fragment and must not be promoted beside the main object just
         # because it barely exceeds half its site count.
-        if len(atoms) >= 0.8 * largest_size:
+        if retain_all_sites or len(atoms) >= 0.8 * largest_size:
             primary_atoms.extend(atoms)
             primary_coords.extend(coords)
         else:
             demoted.append((atoms, coords))
+    if retain_all_sites:
+        for component in singles:
+            atoms, coords = placed(component)
+            primary_atoms.extend(atoms)
+            primary_coords.extend(coords)
+        singles = []
     # The component-selection pass above decides which crystallographic
     # sites belong in this representation. Build the FINAL drawable graph
     # from those sites with periodic minimum-image edges, then unwrap it.
@@ -791,13 +798,20 @@ def _complete_molecule_view_for_path(path: Optional[Path]) -> Optional[CompleteM
         seed_atoms = parse_cif_atoms(resolved)
         if not seed_atoms:
             return None
-        view = build_complete_molecule_view(seed_atoms, cell, sg)
+        view = build_complete_molecule_view(seed_atoms, cell, sg, retain_all_sites=True)
+        if _is_edma_peak_structure(resolved):
+            view.bonds = []  # Distance contacts are not verified chemical bonds.
         if len(_MOLECULE_VIEW_CACHE) > 16:
             _MOLECULE_VIEW_CACHE.clear()
         _MOLECULE_VIEW_CACHE[cache_key] = view
         return view
     except Exception:
         return None
+
+
+def _is_edma_peak_structure(path: Path) -> bool:
+    return (path.with_name(path.stem + "_site_counts.json").is_file()
+            or path.with_name(path.stem + "_provenance.json").is_file())
 
 
 def prepare_structure_presentation(
@@ -816,7 +830,9 @@ def prepare_structure_presentation(
     independent_composition = str(composition or "").strip() or composition_from_atoms(raw_atoms)
     counts = {"independent_asu_sites": len(edma_asu_atoms(raw_atoms, cell, sg))}
     if str(view_mode) != "cell":
-        view = build_complete_molecule_view(raw_atoms, cell, sg)
+        view = build_complete_molecule_view(raw_atoms, cell, sg, retain_all_sites=True)
+        if _is_edma_peak_structure(resolved):
+            view.bonds = []
         return {
             "atoms": view.atoms, "coords": view.coords, "bonds": view.bonds,
             "cell_segments": [], "composition": independent_composition,
@@ -863,7 +879,11 @@ def structure_site_summary(path: Path, data: dict, view_mode: str) -> str:
         except (OSError, ValueError, KeyError):
             pass
     representation = "Full cell" if view_mode == "cell" else "Complete molecules"
-    return (f"Raw EDMA detected sites: {raw_sites}; CIF EDMA sites: {data.get('detected', 0)}; "
+    protocol = (" EDMA peak model: chemical connectivity unverified; atoms only. "
+                "ADP is not measured by peak extraction. Jana m40 uses composition-selected "
+                "peaks and density/charge; CIF uses symmetry-merged maxima."
+                if _is_edma_peak_structure(Path(path)) else "")
+    return (protocol + f"Raw EDMA detected sites: {raw_sites}; CIF EDMA sites: {data.get('detected', 0)}; "
             f"independent ASU sites: {data.get('independent_asu_sites', 0)}; "
             f"displayed in {representation}: {data.get('displayed', len(data.get('atoms', [])))}; "
             f"Jana m40 sites: {jana_sites}. Display expansion does not detect additional sites.")
@@ -1361,7 +1381,18 @@ class AutosolveWindow(QMainWindow):
             f"{html.escape(data.get('composition') or 'Unavailable')}<br>"
             f"EDMA {guided.format_sigma(panel.threshold_sigma)} · "
             f"{int(data.get('detected', 0)):,} EDMA sites"
-            f"<br>{html.escape(structure_site_summary(Path(panel.current_cif), data, self.view_mode))}"
+            f" · {data.get('displayed', 0)} displayed · {'Full cell' if self.view_mode == 'cell' else 'Complete molecules'}"
+        )
+        from hashlib import sha256
+        path = Path(panel.current_cif)
+        cell, sg, hm = parse_cif_cell_and_sg(path)
+        data["scientific_details"] = (
+            structure_site_summary(path, data, self.view_mode)
+            + f"\nInput/CIF space group: {hm} (No. {sg.number})"
+            + f"\nStructure: {path}\nSHA-256: {sha256(path.read_bytes()).hexdigest()}"
+            + ("\nPhysical ADP: unavailable in EDMA maxima. No density-to-Biso conversion."
+               if _is_edma_peak_structure(path) else "")
+            + "\nPhysical Uiso export policy, when available: 0.010–0.150 Å²."
         )
         data["title"] = f"Phase Studio — {family} · Cycle {panel.cycle}"
         candidate=next((c for c in self._cycle_candidates(role) if int(c.cycle)==int(panel.cycle)),None)

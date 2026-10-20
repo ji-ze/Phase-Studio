@@ -14,7 +14,7 @@ from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QDialog, QHBoxLayout, QLabel, QPushButton, QPlainTextEdit, QSizePolicy, QVBoxLayout, QWidget
 
 from phase_studio.structure_camera import StructureCameraController, fit_projected_structure, camera_settings_button
 
@@ -231,6 +231,7 @@ class SingleStructureViewerWindow(QDialog):
         secondary_controls.addSpacing(8)
         self.fullscreen_button = action(primary_controls, "Enter fullscreen", self.toggle_fullscreen)
         self.fullscreen_button.setObjectName("fullscreenToggle")
+        self.details_button = action(secondary_controls, "Scientific details", self._show_scientific_details)
         self.close_button = action(secondary_controls, "Close viewer", self.close)
         self.metadata_label = QLabel("")
         self.metadata_label.setWordWrap(True)
@@ -286,6 +287,21 @@ class SingleStructureViewerWindow(QDialog):
             if zoom is not None:
                 axis.set_box_aspect((1,1,1),zoom=zoom);axis._phase_fit_zoom=zoom
             self._user_camera_interacted=True
+
+    def _show_scientific_details(self):
+        data = self._presentation() or {}
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Scientific details")
+        layout = QVBoxLayout(dialog)
+        text = QPlainTextEdit(dialog)
+        text.setReadOnly(True)
+        text.setPlainText(str(data.get("scientific_details", "No additional provenance recorded.")))
+        layout.addWidget(text)
+        close = QPushButton("Close", dialog)
+        close.clicked.connect(dialog.accept)
+        layout.addWidget(close)
+        dialog.resize(680, 480)
+        dialog.exec()
 
     def _change(self, callback: Callable[[], None]) -> None:
         callback()

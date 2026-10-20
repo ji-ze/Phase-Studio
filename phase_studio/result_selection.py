@@ -1487,6 +1487,7 @@ class ResultSelectionDialog(QDialog):
             detached.candidate_identity = CandidateSelection(candidate,False,False,'').identity
 
     def _render_preview(self, candidate: ResultCandidate) -> None:
+        from phase_studio.autosolve_window import structure_site_summary
         status = candidate_selection(candidate, jana=self._jana_context)
         if not status.geometry:
             self._show_empty_preview(candidate, status.reason)
@@ -1591,6 +1592,7 @@ class ResultSelectionDialog(QDialog):
             ('Raw EDMA peaks',lineage['raw_edma_sites'] if lineage else 'Not available'),
             ('EDMA ASU composition',composition or 'Unavailable'),
             ('Rendered atoms',len(atoms)),
+            ('Scientific provenance', structure_site_summary(Path(candidate.structure_path), {'atoms': atoms, 'detected': detected_count, 'displayed': len(atoms), 'independent_asu_sites': candidate.detected_atom_count}, self._view_mode)),
             ('Jana model',f'{candidate.jana_model_site_count} atomic sites'
                 if candidate.jana_model_site_count is not None and candidate.jana_model_sha256
                 else 'prepared during handoff'),

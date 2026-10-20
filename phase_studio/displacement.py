@@ -147,37 +147,12 @@ def parse_edma_coo_isotropic_displacements(
     *,
     source_kind: IsotropicDisplacementKind,
 ) -> list[JanaM40IsotropicSite]:
-    """Read EDMA peak coordinates and their Biso-representation field.
+    """Reject ADP inference from the EDMA maxima table.
 
-    EDMA's documented nine-column maxima table is ``xyz``, ``xyz_coc``,
-    charge, density/B-scale isotropic value, and volume. The eighth column is
-    the same source quantity EDMA places in its m40 isotropic continuation
-    field. Keeping the representation explicit prevents magnitude-based unit
-    guessing and supplies the full peak set used by Phase Studio CIF/PDB.
+    Its columns are xyz, xyz_coc, charge, density, volume. None is Biso
+    or Uiso (EDMA manual and WriteAtom in EDMA_lib.f90).
     """
-    records: list[JanaM40IsotropicSite] = []
-    for line_number, raw in enumerate(Path(path).read_text(encoding="utf-8", errors="strict").splitlines(), start=1):
-        if not raw.strip() or raw.lstrip().startswith("#"):
-            continue
-        try:
-            values = [float(token) for token in raw.split()]
-        except ValueError as exc:
-            raise ValueError(f"Invalid EDMA coordinate record at line {line_number}: {path}") from exc
-        if len(values) < 9:
-            raise ValueError(f"Incomplete EDMA coordinate record at line {line_number}: {path}")
-        normalized = normalize_export_uiso(values[7], source_kind)
-        records.append(
-            JanaM40IsotropicSite(
-                label=f"peak-{len(records) + 1}",
-                fractional=(values[0], values[1], values[2]),
-                source_value=normalized.source_value,
-                source_kind=source_kind,
-                raw_uiso_angstrom2=normalized.raw_uiso_angstrom2,
-                uiso_angstrom2=normalized.uiso_angstrom2,
-                clamp_direction=normalized.clamp_direction,
-            )
-        )
-    return records
+    raise ValueError("EDMA .coo contains peak density and charge, not Biso/Uiso")
 
 
 _NUMBER = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[Ee][+-]?\d+)?"
@@ -199,10 +174,10 @@ def normalize_jana_m40_isotropic_displacements(
 ) -> list[JanaM40IsotropicSite]:
     """Normalize an m40 atom continuation field to Uiso exactly once.
 
-    EDMA ``writem40`` output declares the first value on the continuation
-    record in the Biso representation. Jana's corresponding isotropic field
-    is Uiso. The caller must state the source representation; values are never
-    classified from their magnitude.
+    Only call on a verified atomic displacement record with explicit units.
+    This function must NOT process EDMA m40forjana=yes peak interchange:
+    that continuation contains density and integrated charge, not an ADP.
+    EDMA's ordinary atomic m40 export already writes Uiso, not Biso.
     """
     m40 = Path(path)
     lines = m40.read_text(encoding="utf-8", errors="strict").splitlines(keepends=True)
@@ -224,6 +199,8 @@ def normalize_jana_m40_isotropic_displacements(
         continuation_index = index + 1
         if continuation_index >= len(lines):
             raise ValueError(f"Missing isotropic displacement record for {match.group('label')} in {m40}")
+        if len(lines[continuation_index].split()) == 2:
+            raise ValueError("EDMA Jana peak interchange contains density/charge, not an isotropic displacement record")
         newline = "\r\n" if lines[continuation_index].endswith("\r\n") else ("\n" if lines[continuation_index].endswith("\n") else "")
         continuation = _CONTINUATION.match(lines[continuation_index].rstrip("\r\n"))
         if continuation is None:

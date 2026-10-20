@@ -57,11 +57,7 @@ import numpy as np
 from phase_studio.displacement import (
     IsotropicDisplacementKind,
     biso_to_uiso,
-    export_uiso_statistics,
-    match_uiso_by_fractional_coordinate,
     normalize_export_uiso,
-    normalize_jana_m40_isotropic_displacements,
-    parse_edma_coo_isotropic_displacements,
     uiso_to_biso,
 )
 from phase_studio.edma_defaults import NORMAL_EDMA_THRESHOLD_SIGMA
@@ -5684,17 +5680,17 @@ def write_structure_pdb(
             x, y, z = fractional_to_cartesian(cell, atom.frac)
             name = (atom.label or f"{elem}{idx}")[:4]
             if atom.uiso_angstrom2 is None:
-                biso = 0.0
+                biso_field = " " * 6  # Unknown ADP, never an invented zero.
             else:
                 uiso = float(atom.uiso_angstrom2)
                 if bound_edma_uiso:
                     uiso = normalize_export_uiso(
                         uiso, IsotropicDisplacementKind.UISO,
                     ).uiso_angstrom2
-                biso = uiso_to_biso(uiso)
+                biso_field = f"{uiso_to_biso(uiso):6.2f}"
             f.write(
                 f"HETATM{idx:5d} {name:<4} UNK A   1    "
-                f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{biso:6.2f}          {elem:>2}\n"
+                f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{biso_field}          {elem:>2}\n"
             )
         f.write("END\n")
 
@@ -6438,7 +6434,9 @@ def parse_edma_coo(coo_file: Path) -> Tuple[np.ndarray, np.ndarray]:
                     densities.append(vals[4])
                 else:
                     atoms.append([vals[0], vals[1], vals[2]])
-                    densities.append(vals[3] if len(vals) > 3 else 1.0)
+                    # With centerofcharge=yes EDMA writes xyz, xyz_coc,
+                    # charge, density, volume. Column four is x_coc, not rho.
+                    densities.append(vals[7] if len(vals) == 9 else vals[3])
             except Exception:
                 continue
     return np.asarray(atoms, dtype=np.float64), np.asarray(densities, dtype=np.float64)
@@ -6743,31 +6741,13 @@ def run_edma_on_xplor(
             stop_event=stop_event,
             hide_console=True,
         )
-    m40_records = []
     if write_m40:
         m40_path = out_dir / f"{outbase}.m40"
         if m40_path.is_file() and m40_path.stat().st_size > 0:
-            # EDMA's writem40 continuation field is emitted in the Biso
-            # representation, while Jana2020 consumes that field as Uiso.
-            # Declare the source representation explicitly and normalize it
-            # once, before this artifact can be canonicalized or handed on.
-            m40_records = normalize_jana_m40_isotropic_displacements(
-                m40_path, source_kind=IsotropicDisplacementKind.BISO,
-            )
-            if m40_records:
-                source_values = [record.source_value for record in m40_records]
-                raw_uiso_values = [record.raw_uiso_angstrom2 for record in m40_records]
-                final_uiso_values = [record.uiso_angstrom2 for record in m40_records]
-                lower = sum(record.clamp_direction == "lower" for record in m40_records)
-                upper = sum(record.clamp_direction == "upper" for record in m40_records)
-                log(
-                    f"  [EDMA] Jana m40 displacement export · source Biso "
-                    f"{min(source_values):.6f}-{max(source_values):.6f} A^2 · raw Uiso "
-                    f"{min(raw_uiso_values):.6f}-{max(raw_uiso_values):.6f} A^2 · allowed "
-                    f"0.010-0.150 A^2 · lower-clamped {lower} · upper-clamped {upper} · "
-                    f"unchanged {len(m40_records) - lower - upper} · final "
-                    f"{min(final_uiso_values):.6f}-{max(final_uiso_values):.6f} A^2"
-                )
+            # m40forjana=yes is a peak-search interchange, not an ADP model.
+            # EDMA WriteAtom writes rho and integrated charge here. Preserve
+            # both fields byte-for-byte for Jana's own peak interpretation.
+            log("  [EDMA] Jana peak protocol preserved: density and integrated charge; ADP unavailable")
         else:
             # Preserve non-Jana/fixture execution compatibility. Any attempt
             # to publish a Jana candidate still fails later at the established
@@ -6786,9 +6766,6 @@ def run_edma_on_xplor(
     if not coo.is_file() or coo.stat().st_size == 0:
         tail = "\n".join(log_text.splitlines()[-80:])
         raise RuntimeError(f"EDMA did not create coordinate output: {coo}\nLog: {edma_log}\n{tail}")
-    coo_displacements = parse_edma_coo_isotropic_displacements(
-        coo, source_kind=IsotropicDisplacementKind.BISO,
-    )
     frac, dens = parse_edma_coo(coo)
     raw_edma_sites = len(frac)
     if len(frac) == 0:
@@ -6803,16 +6780,13 @@ def run_edma_on_xplor(
     atoms = [
         AtomSite(
             label=f"{elements[i]}{i+1}", element=elements[i], frac=frac[i], density=float(dens[i]),
-            uiso_angstrom2=(
-                match_uiso_by_fractional_coordinate(frac[i], coo_displacements)
-                if coo_displacements else None
-            ),
+            # Peak density is not an atomic displacement parameter.
+            uiso_angstrom2=None,
         )
         for i in range(len(frac))
     ]
-    # Preserve the canonical raw EDMA values in a separate scientific source
-    # CIF. Later CIF-seeded cycles resolve this sidecar automatically; user and
-    # Jana-facing artifacts receive the bounded export representation.
+    # Preserve coordinates for next-cycle CIF seeds. EDMA maxima provide no
+    # physical ADP: both source and exported CIF intentionally omit Uiso.
     raw_cif = cif.with_name(cif.stem + "_scientific_raw.cif")
     write_structure_cif(
         raw_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms,
@@ -6821,37 +6795,27 @@ def run_edma_on_xplor(
         cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms, structure_format,
         bound_edma_uiso=True,
     )
-    raw_uiso = [float(atom.uiso_angstrom2) for atom in atoms if atom.uiso_angstrom2 is not None]
-    if len(raw_uiso) != len(atoms):
-        raise RuntimeError(f"EDMA displacement export is missing values for {len(atoms) - len(raw_uiso)} sites: {coo}")
-    stats = export_uiso_statistics(raw_uiso)
-    source_biso = [record.source_value for record in coo_displacements]
-    log(
-        f"  [EDMA] Displacement export · source Biso "
-        f"{min(source_biso):.6f}-{max(source_biso):.6f} A^2 · {stats.site_count} sites · raw Uiso "
-        f"{stats.raw_min:.6f}-{stats.raw_max:.6f} A^2 · allowed 0.010-0.150 A^2 · "
-        f"lower-clamped {stats.lower_clamped} · upper-clamped {stats.upper_clamped} · "
-        f"unchanged {stats.unchanged} · final {stats.final_min:.6f}-{stats.final_max:.6f} A^2 · "
-        f"raw scientific CIF {raw_cif.name}"
-    )
-    clamped_sites = stats.lower_clamped + stats.upper_clamped
+    log("  [EDMA] ADP unavailable: maxima contain charge/density, not Biso/Uiso; no conversion or clamping applied")
     independent_sites = len(edma_asu_atoms(atoms, ref_ctx.cell, ref_ctx.spacegroup))
     jana_sites = _m40_model_count(m40_path) if write_m40 and m40_path.is_file() else None
     lineage = {
         "threshold_sigma": float(plimit_sigma), "raw_edma_sites": raw_edma_sites,
         "cif_sites": len(atoms), "independent_asu_sites": independent_sites,
         "jana_m40_sites": jana_sites, "jana_selection": "numberofatoms composition",
+        "displacement_parameter": "unavailable",
+        "jana_continuation_fields": ["peak_density", "integrated_charge"],
+        "adp_lower_clamped": 0, "adp_upper_clamped": 0,
     }
+    from .edma_provenance import edma_export_provenance
+    provenance = edma_export_provenance(coo, cif, m40_path if write_m40 else None)
+    cif.with_name(cif.stem + "_provenance.json").write_text(
+        json.dumps(provenance, indent=2), encoding="utf-8",
+    )
     cif.with_name(cif.stem + "_site_counts.json").write_text(
         json.dumps(lineage, indent=2), encoding="utf-8",
     )
     log(f"  [EDMA] Site lineage · raw detected {raw_edma_sites} · independent ASU {independent_sites} · "
         f"Jana m40 {jana_sites if jana_sites is not None else 'not requested'} · composition-constrained selection")
-    if clamped_sites * 2 >= stats.site_count:
-        log(
-            f"  [EDMA] Warning: {clamped_sites} of {stats.site_count} exported sites "
-            f"were clamped to the Uiso safety interval"
-        )
     return cif
 
 def parse_superflip_log_metrics(log_path: Path) -> SuperflipLogMetrics:
@@ -7222,6 +7186,11 @@ def promote_threshold_structure(
     if site_counts.is_file():
         target_counts = target.with_name(target.stem + "_site_counts.json")
         _copy_verified_handoff_artifact(site_counts, target_counts, file_sha256(site_counts))
+    provenance = source_path.with_name(source_path.stem + "_provenance.json")
+    if provenance.is_file():
+        _copy_verified_handoff_artifact(
+            provenance, target.with_name(target.stem + "_provenance.json"), file_sha256(provenance),
+        )
     return target
 
 
