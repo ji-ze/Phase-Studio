@@ -133,7 +133,7 @@ def check():
         QTimer.singleShot(0,lambda:ticks.append(True));qt.processEvents();assert ticks
         service.check(other,mode='jana',manual=True)
         gate.set();settle(service)
-        assert any('Jana2020 software release' in label.text() for label in service.notice.findChildren(QLabel))
+        assert any('scientific handoff files are not replaced' in label.text() for label in service.notice.findChildren(QLabel))
         service.notice.close();settle()
         # Closed/destroyed request owners cannot produce an orphan popup.
         gate.clear();service.check(parent,manual=True);parent.close();parent.deleteLater();qt.processEvents();gate.set();settle(service)
@@ -171,7 +171,7 @@ def check():
             assert 'Updates and application information' in wizard.update_menu.toolTip()
             assert any(ref() is wizard.dialog and mode=='jana' for ref,mode in service._windows)
             actions[0].trigger();settle(service)
-            assert any('Jana2020 software release' in label.text() for label in service.notice.findChildren(QLabel))
+            assert any('scientific handoff files are not replaced' in label.text() for label in service.notice.findChildren(QLabel))
             assert service.notice.rect().contains(service.notice.view_button.geometry())
             assert service.notice.rect().contains(service.notice.later_button.geometry())
             assert ui.update_service() is service

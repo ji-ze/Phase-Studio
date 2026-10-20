@@ -35,9 +35,8 @@ def test_signed_profiles(signed):
 def test_no_production_key_fails_closed(signed):
     key,public,document,verify=signed
     raw=m.canonical_manifest(document)
-    assert not m.TRUSTED_KEYS
     with pytest.raises(m.UpdateVerificationError,match='No trusted'):
-        m.verify_manifest(raw,key.sign(raw),release_version='2.0.6')
+        m.verify_manifest(raw,key.sign(raw),release_version='2.0.6',trusted_keys={})
 
 
 @pytest.mark.parametrize('field,value',[

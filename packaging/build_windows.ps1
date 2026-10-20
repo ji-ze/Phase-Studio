@@ -74,6 +74,11 @@ Push-Location $RepoRoot
 try {
     if ($Target -eq "All" -and $Clean) { Remove-SafePath $releaseDir }
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+    if ($buildStandalone -or $buildDeveloper) {
+        Write-Step "Building independent Windows updater (ONEFILE)"
+        Invoke-PyInstaller "packaging\pyinstaller\PhaseStudioUpdater.spec" "PhaseStudioUpdater" (Join-Path $buildDir "updater")
+        Assert-PathExists (Join-Path $buildDir "updater\PhaseStudioUpdater.exe") "Independent updater"
+    }
 
     if ($buildWrapper) {
         Write-Step "Building authoritative Jana2020 wrapper (ONEDIR)"
@@ -104,6 +109,8 @@ try {
         if ($Clean) { Remove-SafePath $developerDir }
         Invoke-PyInstaller "packaging\pyinstaller\PhaseStudioJanaDeveloper.spec" "PhaseStudioJanaDeveloper" $distDir
         Assert-PathExists (Join-Path $developerDir "Phase_studio.exe") "Jana developer executable"
+        & $PythonExe -c "from pathlib import Path; from phase_studio.update_transaction import write_inventory; import sys; write_inventory(Path(sys.argv[1]) / '_internal')" $developerDir
+        if ($LASTEXITCODE -ne 0) { throw "Runtime ownership inventory generation failed." }
         Test-OnedirRuntime $developerDir "superflip"
         & $PythonExe (Join-Path $PSScriptRoot "tools\check_distribution.py") $developerDir --profile developer
         if ($LASTEXITCODE -ne 0) { throw "Developer runtime boundary check failed." }

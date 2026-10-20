@@ -1,50 +1,51 @@
 # Windows updater implementation status
 
-This is an unfinished implementation, not a working automatic installer.
-The existing application still provides release notifications and browser-based
-release access. The new security modules are not yet connected to that UI.
+Preproduction implementation; public deployment acceptance is incomplete.
+The source trust map now contains a public Ed25519 verification key. This is
+not evidence that the corresponding GitHub signing secret, protected release
+environment or production release has been configured. Runtime installation
+availability depends on the compiled trust map and validated package identity;
+an empty trust map still fails closed. No release/tag has been created or
+replaced by this remediation.
 
-Completed foundations:
+Implemented source paths:
 
-- `update_manifest.py`: canonical versioned JSON, detached Ed25519 signatures,
-  compiled public-key trust, exact repository/channel/Windows x64/profile and
-  version matching, exact asset names/sizes/hashes and protocol compatibility.
-- `update_download.py`: bounded public HTTPS streaming, explicit official
-  repository/CDN redirect authority, cancellation, exact-size checks, progress,
-  fresh destinations and no authenticated SharpED HTTP client or headers.
-- `update_package.py`: checksum verification and validation of the complete
-  Jana ZIP inventory before extraction into a fresh staging directory. Rejects
-  traversal, normalization, duplicate/case-conflicting paths, links, device names,
-  alternate streams, unexpected ownership roots and missing executable/runtime.
-- Synthetic tests use ephemeral Ed25519 keys and controlled response fixtures.
-  They never establish a production signing identity or download public binaries.
+- Canonical Ed25519 manifest verification, exact profile/version/name/hash/size
+  matching, public bounded HTTPS downloads and strict complete ZIP validation.
+- Shared asynchronous consent/progress/error UI, actual frozen profile detection
+  and independent helper packaging with matching compiled public keys.
+- Current-user DPAPI plans, protected workspaces, process/path handles, installation
+  locks, runtime ownership inventories, transactional replacement and rollback.
+- Version-independent SHA-256 runtime content identity over every owned file,
+  including the inventory. A verified full package with an identical runtime
+  retains the installed runtime byte-for-byte and only replaces the executable.
+  This optimization does not yet constitute a separately published EXE-only
+  asset protocol or a completed frozen cross-version acceptance test.
+- Explicit UAC, original-user restart token, runtime/startup acknowledgement,
+  interrupted-journal detection and authenticated manual recovery command.
+- One-time key generation/public provisioning and protected build/sign/publish
+  GitHub Actions workflow. No key generation takes place during release builds.
+- Jana direct launches use explicit close/exit/reopen fallback. No automatic Jana
+  waiter/bootstrap or scientific handoff is claimed or performed by the updater.
 
-No production public key is configured. `TRUSTED_KEYS` is intentionally empty;
-runtime signature verification fails closed. Release engineering must supply a
-reviewed public Ed25519 key and identify the approved signing secret/service.
-Private keys must never enter source, local acceptance logs or an executable.
+Acceptance evidence and remaining gates:
 
-Still required before claiming complete update support:
+- Synthetic signatures, real DPAPI round trips, native Windows process/job/path
+  guards and replacement fault injection are tested using disposable fixtures.
+- Actual Qt update-state screenshots at 100%, 125% and 150% are stored under
+  ignored `build/acceptance-updater/`. Their releases and transfer are controlled
+  fixtures; these images are not evidence of public installation.
+- The prepared GitHub Actions workflow has not run. Repository environment
+  protections and production signing secret must still be configured.
+- Isolated native full-runtime replacement, frozen startup, rollback and
+  interrupted recovery passed using actual 2.0.6 packages. Identical-runtime
+  retention also passed with actual packages and all runtime hashes unchanged.
+  These are same-version transaction fixtures, not public signed cross-version
+  installation acceptance. A separate EXE-only asset, frozen cross-version
+  update, interactive UAC and actual Jana close/reopen remain activation gates.
+- Automated cache retention is not enabled; private caches remain for diagnosis.
 
-1. Connect authenticated discovery/download/verification to the existing update
-   service and consent UI, including exact `/releases/latest` asset metadata.
-2. Implement and package the independent Windows transaction helper, process
-   identity checks, installation lock, ownership inventory, journal, rollback,
-   permission/UAC handling and verified relaunch health protocol.
-3. Preserve Jana's parent-process contract. The current `jana_superflip.main`
-   directly owns the Wizard/scientific invocation, receives the original inflip
-   and working directory, returns nonzero for cancellation and returns after the
-   selected workflow. No resident bootstrap keeping Jana's waiter alive was
-   established. Restarting another EXE cannot be assumed equivalent. A verified
-   bootstrap or explicit reopen-from-Jana fallback is required.
-4. Add signed-manifest release tooling and the strict six-asset boundary,
-   protected GitHub Actions publication, reproducible frozen helper packaging,
-   disposable Windows update/rollback acceptance and actual update-state Qt
-   screenshots.
-5. Select the next unused patch version after remote tag inspection. Published
-   `v2.0.5` and its existing assets must remain unchanged. Existing users need a
-   one-time manual migration to the first updater-capable version.
-
-No automatic replacement of an installation has been enabled. No public release
-has been created or overwritten by this work. The new modules do not write to
-Jana scientific executables, projects or handoff files.
+See [Windows update provisioning](WINDOWS_UPDATES.md) for exact PowerShell and
+GitHub setup, the six-asset release contract, ownership boundaries, migration,
+recovery and the explicit public-activation checklist. Never describe the updater
+as activated until the real key and all native acceptance gates are satisfied.

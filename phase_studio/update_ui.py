@@ -131,6 +131,7 @@ class UpdateNotice(QDialog):
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.release = release
+        self.update_mode = mode
         self.browser = browser or QDesktopServices.openUrl
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -150,7 +151,7 @@ class UpdateNotice(QDialog):
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
         if release and mode == 'jana':
-            clarification = QLabel('The version integrated into Jana2020 may be updated through a Jana2020 software release.')
+            clarification = QLabel('The Jana2020 integration package updates Phase Studio only. Direct Jana sessions must be closed and reopened from Jana2020; scientific handoff files are not replaced.')
             clarification.setWordWrap(True)
             layout.addWidget(clarification)
         buttons = QHBoxLayout()
@@ -159,11 +160,25 @@ class UpdateNotice(QDialog):
         self.later_button.clicked.connect(self.reject)
         buttons.addWidget(self.later_button)
         self.view_button = None
+        self.update_button = None
         if release:
             self.view_button = QPushButton('View release on GitHub')
             self.view_button.setObjectName('primaryButton')
             self.view_button.clicked.connect(self._open_release)
             buttons.addWidget(self.view_button)
+            from .update_runtime import public_installation_status
+            allowed,reason=public_installation_status()
+            self.update_button=QPushButton('Update now')
+            self.update_button.setEnabled(allowed)
+            self.update_button.setToolTip(reason or 'Download, verify and review this update before installation.')
+            self.update_button.clicked.connect(self._install_update)
+            if allowed:
+                self.view_button.setObjectName('')
+                self.update_button.setObjectName('primaryButton')
+            buttons.addWidget(self.update_button)
+            if reason:
+                installation_note=QLabel(reason);installation_note.setWordWrap(True)
+                layout.addWidget(installation_note)
         layout.addLayout(buttons)
         self._fit()
         QTimer.singleShot(0, self, self._fit)
@@ -179,6 +194,16 @@ class UpdateNotice(QDialog):
     def _open_release(self):
         self.browser(QUrl(validated_release_url(self.release.url,version=self.release.version)))
         self.accept()
+
+    def _install_update(self):
+        from .update_install_ui import UpdateInstallDialog
+        app=QApplication.instance()
+        previous=getattr(app,'_phase_studio_install_dialog',None)
+        if previous is not None and previous.isVisible():previous.raise_();previous.activateWindow();return
+        dialog=UpdateInstallDialog(self.parentWidget(),self.release,jana=(getattr(self,'update_mode','standalone')=='jana'))
+        app._phase_studio_install_dialog=dialog
+        dialog.finished.connect(lambda _result:setattr(app,'_phase_studio_install_dialog',None))
+        dialog.show();self.accept()
 
 
 class UpdateService(QObject):
@@ -219,6 +244,8 @@ class UpdateService(QObject):
         return 'jana' if getattr(window, 'autosolve_is_jana', lambda: False)() else 'standalone'
 
     def attach(self, window, mode=None, automatic=True):
+        from .update_health import visible
+        QTimer.singleShot(500,window,lambda:visible(window))
         if not any(ref() is window for ref, _mode in self._windows):
             self._windows.append((weakref.ref(window), mode))
         if automatic:

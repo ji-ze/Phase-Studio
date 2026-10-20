@@ -49,6 +49,14 @@ def _run_catalog_check(output_path):
 
 
 def main():
+    if '--packaging-acceptance' in sys.argv:
+        from phase_studio.packaging_acceptance import run
+        return run(sys.argv[sys.argv.index('--packaging-acceptance')+1])
+    from phase_studio.update_health import consume
+    consume(sys.argv)
+    if '--update-runtime-check' in sys.argv:
+        from phase_studio.update_runtime import frozen_check
+        return frozen_check(sys.argv[sys.argv.index('--update-runtime-check')+1])
     if "--release-ui-check" in sys.argv:
         index = sys.argv.index("--release-ui-check")
         from phase_studio.release_diagnostics import run_release_ui_check

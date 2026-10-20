@@ -39,7 +39,7 @@ class SplitDistributionTests(unittest.TestCase):
         return {str(p.relative_to(self.target)): p.read_bytes() for p in self.target.rglob("*") if p.is_file()}
 
     def test_canonical_version(self):
-        self.assertEqual(VERSION, "2.0.5")
+        self.assertEqual(VERSION, "2.0.6")
         self.assertEqual(ji.bundled_integration_version(), VERSION)
         import phase_studio.app as app, phase_studio.jana_superflip as wizard
         self.assertEqual(app.__version__, VERSION)

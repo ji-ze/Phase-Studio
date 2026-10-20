@@ -21,6 +21,10 @@ def probe(scale):
     with tempfile.TemporaryDirectory() as folder:
         QSettings.setDefaultFormat(QSettings.IniFormat)
         QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, folder)
+        # The org/name constructor uses the native backend on this Windows
+        # build; isolate it explicitly rather than reading the user's model.
+        imports=js._qt_imports
+        js._qt_imports=lambda:imports()|{'QSettings':lambda org,name:QSettings(str(Path(folder)/(name+'.ini')),QSettings.IniFormat)}
         QDialog.exec = lambda self: QDialog.Rejected
         js.SharpEDServerClient.get_models = lambda self: SimpleNamespace(
             models=["PEAK A (model prediction)", "SEED (cyclic CF)", "Extra API model"], default_model="Extra API model")
@@ -41,6 +45,10 @@ def probe(scale):
             app.processEvents()
             w.refresh_timer.timeout.emit()
             time.sleep(.01)
+        deadline=time.monotonic()+8
+        while w.model_cache['inflight'] and time.monotonic()<deadline:
+            app.processEvents();w.refresh_timer.timeout.emit();QTest.qWait(10)
+        assert not w.model_cache['inflight']
         assert w.model.count() == 3
         assert not w.model_user_picked["value"]
         assert w.inflip_path == source and str(source) in w.inflip_info.toolTip(), repr(w.inflip_info.toolTip())

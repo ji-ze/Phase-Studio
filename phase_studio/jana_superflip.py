@@ -4371,8 +4371,15 @@ def launch_autosolve_from_jana(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    diagnostic_args=list(sys.argv if argv is None else argv)
+    if '--packaging-acceptance' in diagnostic_args:
+        from phase_studio.packaging_acceptance import run
+        return run(diagnostic_args[diagnostic_args.index('--packaging-acceptance')+1])
     argv = list(sys.argv if argv is None else argv)
     args = argv[1:]
+    if '--update-runtime-check' in args:
+        from phase_studio.update_runtime import frozen_check
+        return frozen_check(args[args.index('--update-runtime-check')+1])
     if "--release-ui-check" in args:
         index = args.index("--release-ui-check")
         from phase_studio.release_diagnostics import run_release_ui_check

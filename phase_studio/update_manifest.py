@@ -12,7 +12,7 @@ import re
 
 from .update_checker import REPOSITORY, parse_version
 
-TRUSTED_KEYS: dict[str, bytes] = {}
+from .update_trust import TRUSTED_KEYS
 PROTOCOL = 1
 MAX_MANIFEST_BYTES = 64 * 1024
 MAX_PACKAGE_BYTES = 1024 * 1024 * 1024

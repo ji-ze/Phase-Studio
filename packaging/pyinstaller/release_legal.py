@@ -29,7 +29,8 @@ def legal_datas(project_dir):
     for package in ("numpy", "matplotlib", "gemmi", "PySide6", "PySide6-Essentials",
                     "PySide6-Addons", "shiboken6", "qtvscodestyle", "truststore",
                     "PyInstaller", "packaging", "pillow", "fonttools", "kiwisolver",
-                    "contourpy", "cycler", "python-dateutil", "six", "pyparsing"):
+                    "contourpy", "cycler", "python-dateutil", "six", "pyparsing",
+                    "cryptography", "cffi", "pycparser", "pefile"):
         distribution = metadata.distribution(package)
         for file in distribution.files or ():
             relative = Path(str(file))

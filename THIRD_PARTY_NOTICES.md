@@ -63,3 +63,7 @@ Microsoft runtime DLLs are taken from the PySide6 wheel, never from System32
 or arbitrary PATH locations. Redistribution is governed by Microsoft's terms
 for licensed Visual Studio users. Possessing a DLL or an MIT Phase Studio
 license alone does not grant redistribution rights.
+
+## Update verification dependencies
+
+Ed25519 verification uses cryptography (Apache-2.0 OR BSD-3-Clause), with cffi and pycparser. Windows PE validation uses pefile. Their upstream license notices are collected from the installed distributions into PhaseStudioLegal/dependencies in both application packages and the independent updater. Private signing keys are not distributed.

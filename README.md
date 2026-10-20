@@ -152,3 +152,5 @@ provider for accounts, entitlement and current service terms.
 
 See [release packaging instructions](packaging/README_RELEASE.md) for source
 builds, legal resources and manual release preparation.
+
+Windows update signing, migration and activation requirements: [maintainer guide](docs/WINDOWS_UPDATES.md). Production deployment requires reviewed builds and native acceptance; a pinned public key alone is not production-readiness evidence.
