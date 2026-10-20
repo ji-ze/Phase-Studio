@@ -747,3 +747,18 @@ def apply_safe_dialog_geometry(
         dialog, QSize(width, height), width_fraction=width_fraction,
         height_fraction=height_fraction,
     )
+
+
+def guard_numeric_wheel(editor):
+    """A scrolling page must not edit an unfocused scientific parameter."""
+    from PySide6.QtCore import QObject, QEvent
+    class _IntentionalWheel(QObject):
+        def eventFilter(self, watched, event):
+            if event.type() == QEvent.Wheel and not watched.hasFocus():
+                event.ignore()
+                return True
+            return False
+    editor.setFocusPolicy(Qt.StrongFocus)
+    guard = _IntentionalWheel(editor)
+    editor.installEventFilter(guard)
+    editor._intentional_wheel_guard = guard

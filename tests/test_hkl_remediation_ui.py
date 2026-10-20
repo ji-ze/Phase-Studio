@@ -25,7 +25,7 @@ def check():
     from dataclasses import replace
     from unittest.mock import patch
     sys.path[:0] = [str(ROOT), str(ROOT/'tests')]
-    from PySide6.QtCore import QPoint, QRect, QSize, QSettings, QTimer, Qt
+    from PySide6.QtCore import QPoint, QRect, QSize, QSettings, QTimer, Qt, QItemSelectionModel
     from PySide6.QtGui import QScreen, QTextDocument
     from PySide6.QtWidgets import QApplication, QLabel, QToolTip, QTableWidgetSelectionRange
     from PySide6.QtTest import QTest
@@ -71,7 +71,7 @@ def check():
         load = fixture.load('\n'.join(f'{h} {k} {l} 10 .1' for h,k,l in triples))
         before = copy.deepcopy(load.diagnostics)
         view = validation_dialog(win,load);view.show();settle()
-        assert view.hkl_preview_label.text()=='Showing first 200 of 631 records'
+        assert view.hkl_preview_label.text()=='Showing all 631 records'
         assert not any('Input-integrity issues:' in plain(label.text()) for label in view.findChildren(QLabel))
         explanation = ('Input integrity checks parsing, reflection indices, auxiliary values and duplicate records. '
                        'It does not establish experimental or scientific validity.')
@@ -99,15 +99,16 @@ def check():
                 rendered=plain(tip)
                 assert '<div' not in rendered and '<qt>' not in rendered and '&quot;' not in rendered
         assert query(view,'  -7   2  -1  ')=='1 match · Showing 1'
-        assert view.hkl_table.item(0,0).numeric_value == -7
+        assert view.hkl_table.model().index(0,0).data(Qt.UserRole) == -7
         snap('03-exact-negative-search',view)
         assert query(view,'-7 2 1')=='No matching reflections'  # No Friedel/symmetry expansion.
         snap('13-no-search-results',view)
         assert query(view,'1')=='81 matches · Showing 81'
         assert query(view,'invalid')=='No matching reflections'
         assert query(view,'1 2 3 4')=='No matching reflections'
-        assert query(view,'')=='Showing first 200 of 631 records'
-        view.hkl_table.setRangeSelected(QTableWidgetSelectionRange(0,0,1,view.hkl_table.columnCount()-1),True)
+        assert query(view,'')=='Showing all 631 records'
+        view.hkl_table.selectRow(0)
+        view.hkl_table.selectionModel().select(view.hkl_table.model().index(1,0), QItemSelectionModel.Select | QItemSelectionModel.Rows)
         view.hkl_copy_selected_button.click()
         copied=QApplication.clipboard().text().splitlines()
         assert len(copied)==3 and copied[1].startswith('1\t0\t0\t10.0')
@@ -145,8 +146,8 @@ def check():
         heartbeat=QTimer();heartbeat.setInterval(10)
         heartbeat.timeout.connect(lambda:heartbeats.append(time.monotonic()))
         heartbeat.start();started=time.monotonic()
-        assert query(large_view,'1')=='40,500 matches · Showing first 200'
-        assert large_view.hkl_table.rowCount()==200
+        assert query(large_view,'1')=='40,500 matches · Showing 40,500'
+        assert large_view.hkl_table.model().rowCount()==40500
         assert len(heartbeats)>1
         records.update(large_records=len(large.reflections),first_query_seconds=time.monotonic()-started,
                        heartbeat_count=len(heartbeats),diagnostics_unchanged=load.diagnostics==before)

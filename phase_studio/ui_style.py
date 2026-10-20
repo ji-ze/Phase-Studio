@@ -1560,13 +1560,19 @@ def apply_phase_studio_style(app: object) -> None:
 
             def __init__(self, owner) -> None:
                 super().__init__(owner)
-                self.owner = owner
                 self.hovered_part = ""
                 self.pressed_part = ""
                 self.setObjectName("phaseStudioArrowOverlay")
                 self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                 self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
                 self.setAutoFillBackground(False)
+
+            @property
+            def owner(self):
+                # Qt already owns the parent relationship. A second Python
+                # owner -> overlay -> owner cycle can be cleared while Qt still
+                # dispatches paint events during dialog collection/shutdown.
+                return self.parentWidget()
 
             def arrow_rects(self):
                 full_rect = QRectF(0.0, 0.0, float(self.width()), float(self.height()))
@@ -1589,9 +1595,12 @@ def apply_phase_studio_style(app: object) -> None:
 
             def paintEvent(self, event) -> None:  # type: ignore[override]
                 del event
+                owner = self.owner
+                if owner is None or not hasattr(self, 'hovered_part'):
+                    return
                 painter = QPainter(self)
                 painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-                enabled = self.owner.isEnabled()
+                enabled = owner.isEnabled()
                 parts = self.arrow_rects()
                 for part, rect, _up in parts:
                     painter.fillRect(rect, QColor(self._background_for(part, enabled)))

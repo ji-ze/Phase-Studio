@@ -3,7 +3,7 @@ import math
 from dataclasses import replace
 from pathlib import Path
 import numpy as np
-from PySide6.QtCore import Qt, QTimer, QSize, QSettings, QRect, QAbstractTableModel
+from PySide6.QtCore import Qt, QTimer, QSize, QSettings, QRect, QAbstractTableModel, QModelIndex
 from PySide6.QtGui import QKeySequence, QShortcut, QCursor, QDoubleValidator
 from PySide6.QtWidgets import (QApplication,QDialog,QVBoxLayout,QHBoxLayout,QWidget,QLabel,
     QPushButton,QLineEdit,QTableWidget,QTableWidgetItem,QHeaderView,QSplitter,QScrollArea,QTabWidget,
@@ -728,6 +728,78 @@ def _footer(win, layout, dialog, report, analysis=None, figure=None):
     dialog.full_source_path = str(analysis.hkl_path) if analysis is not None else report.source
 
 
+class _ReflectionView(QTableView):
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        count = self.model().columnCount() if self.model() else 0
+        if count > 3:
+            width = max(112,min(220,(self.viewport().width()-144)//(count-3)))
+            for column in range(3,count):
+                self.setColumnWidth(column,max(width,min(210,self.fontMetrics().horizontalAdvance(self.model().headers[column])+28)))
+
+
+class _ReflectionModel(QAbstractTableModel):
+    """Virtual, read-only presentation; cells are evaluated only on demand.
+
+    Sorting changes only a list of source positions, never scientific records.
+    The bounded cache avoids repeating reciprocal-cell calculations on repaint.
+    """
+    def __init__(self, headers, values, parent=None):
+        super().__init__(parent)
+        from functools import lru_cache
+        self.headers, self.records, self.order = headers, [], []
+        self.values = lru_cache(maxsize=4096)(values)
+        self.sort_column, self.sort_order = -1, Qt.AscendingOrder
+
+    def rowCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.order)
+
+    def columnCount(self, parent=QModelIndex()):
+        return 0 if parent.isValid() else len(self.headers)
+
+    def headerData(self, section, orientation, role=Qt.DisplayRole):
+        if role == Qt.DisplayRole:
+            return self.headers[section] if orientation == Qt.Horizontal else str(section+1)
+
+    def numeric(self, row, column):
+        return self.values(self.order[row])[column]
+
+    def data(self, index, role=Qt.DisplayRole):
+        if not index.isValid(): return None
+        if role == Qt.TextAlignmentRole: return Qt.AlignRight | Qt.AlignVCenter
+        if role not in (Qt.DisplayRole, Qt.ToolTipRole, Qt.UserRole): return None
+        value = self.numeric(index.row(), index.column())
+        if role == Qt.UserRole: return value
+        if role == Qt.ToolTipRole: return repr(value)
+        if value is not None and not math.isfinite(float(value)): return str(value)+' (invalid)'
+        return str(int(value)) if index.column()<3 else _display_number(value)
+
+    def reset_rows(self, records, headers):
+        self.beginResetModel()
+        self.records, self.headers = records, headers
+        self.values.cache_clear()
+        self.order = list(range(len(records)))
+        self._sort_positions()
+        self.endResetModel()
+
+    def _sort_positions(self):
+        if self.sort_column < 0: return
+        column = self.sort_column
+        def key(position):
+            r = self.records[position]
+            value = (r.h,r.k,r.l,r.value,r.sigma)[column] if column<5 else self.values(position)[column]
+            return (value is None or not math.isfinite(float(value)), value if value is not None and math.isfinite(float(value)) else 0)
+        self.order.sort(key=key, reverse=self.sort_order == Qt.DescendingOrder)
+
+    def sort(self, column, order=Qt.AscendingOrder):
+        # A reset clears a selection instead of silently copying different sites
+        # after its row numbers move. Source records stay in their original order.
+        self.beginResetModel()
+        self.sort_column, self.sort_order = column, order
+        self._sort_positions()
+        self.endResetModel()
+
+
 class _ReflectionSearch:
     """Debounced view queries over a lazy index; never modify diagnostic data."""
     def __init__(self, dialog, records, completed):
@@ -759,7 +831,6 @@ class _ReflectionSearch:
 
     def work(self):
         import bisect
-        import heapq
         import queue
         index = None
         while not self.cancelled.is_set():
@@ -783,9 +854,8 @@ class _ReflectionSearch:
             lower = keys + (float('-inf'),) * (4-len(keys))
             upper = keys + (float('inf'),) * (4-len(keys))
             first, last = bisect.bisect_left(index, lower), bisect.bisect_right(index, upper)
-            # Keep source order, including duplicate records. Count the whole
-            # range while materializing at most the first 200 source records.
-            positions = heapq.nsmallest(200, (index[i][3] for i in range(first, last)))
+            # Return all matches in source order; the virtual view creates no cell widgets.
+            positions = sorted(index[i][3] for i in range(first, last))
             self.results.put((revision, [self.records[i] for i in positions], last-first))
 
     def poll(self):
@@ -827,7 +897,7 @@ def validation_dialog(win, result):
     search.setPlaceholderText('Find reflection (h k l), e.g. 0 2 0')
     search.setClearButtonEnabled(True)
     search.setAccessibleName('Find reflection in all parsed records')
-    search.setToolTip('Enter one, two or three signed integer indices. Prefix searches are supported; at most 200 matches are displayed.')
+    search.setToolTip('Enter one, two or three signed integer indices. Prefix searches are supported; all matching records are accessible.')
     search.setStyleSheet('QLineEdit { background:white; border:1px solid #8fa9cc; padding:7px 10px; } QLineEdit:focus { border:2px solid #2264b8; padding:6px 9px; }')
     search.setMaximumWidth(450)
     search.setMinimumWidth(350)
@@ -848,55 +918,48 @@ def validation_dialog(win, result):
     derived.setToolTip('Secondary approximation: I ≈ F² and σ(I) ≈ 2|F|σ(F), unreliable near zero; not directly measured I/σ(I).')
     derived.setVisible(sig and amplitude)
     layout.addWidget(derived)
-    table = QTableWidget(0,len(headers))
-    win._configure_diagnostic_table(table)
+    table = _ReflectionView()
+    table.setSelectionBehavior(QAbstractItemView.SelectRows)
     table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+    table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+    table.setAlternatingRowColors(True)
+    table.verticalHeader().setDefaultSectionSize(28)
     install_scientific_headers(table)
-    table.setHorizontalHeaderLabels(headers)
-    for column in range(len(headers)):
-        table.horizontalHeader().setSectionResizeMode(column,QHeaderView.Fixed if column<3 else QHeaderView.Stretch)
-        if column<3: table.setColumnWidth(column,48)
-    table.horizontalHeader().setStretchLastSection(False)
-    table.horizontalHeader().setSortIndicator(-1,Qt.AscendingOrder)
     label = QLabel()
     label.setWordWrap(True)
     layout.addWidget(label)
     original_rows = getattr(result,'reflections_raw',None)
     records = original_rows if original_rows is not None else result.reflections
+    def row_values(position):
+        r = model.records[position]
+        values = [r.h,r.k,r.l,r.value,r.sigma]
+        if phase: values.append(r.phase)
+        if sig:
+            values.append(a.reflection_amplitude_signal_to_noise(r) if amplitude else a.reflection_primary_signal_to_noise(r,result.data_mode))
+        values.append(a.reflection_d_spacing(result.cell,r.h,r.k,r.l) if (r.h,r.k,r.l)!=(0,0,0) else None)
+        values.append(a.reflection_sintheta_over_lambda(result.cell,r.h,r.k,r.l) if (r.h,r.k,r.l)!=(0,0,0) else None)
+        if derived.isChecked() and sig and amplitude:
+            values.append(a.reflection_primary_signal_to_noise(r,result.data_mode))
+        return values
+    model = _ReflectionModel(headers,row_values,table)
+    table.setModel(model)
+    table.horizontalHeader().setSortIndicator(-1,Qt.AscendingOrder)
+    table.setSortingEnabled(True)
     def populate(rows=None, matches=None):
         filtered = bool(search.text().split())
         rows = records if rows is None else rows
-        shown = rows[:200]
         matches = len(rows) if matches is None else matches
-        table.setSortingEnabled(False)
         current_headers = headers + ([DERIVED_LABEL] if derived.isChecked() and sig and amplitude else [])
-        table.setColumnCount(len(current_headers))
-        table.setHorizontalHeaderLabels(current_headers)
-        for column in range(len(current_headers)):
-            table.horizontalHeader().setSectionResizeMode(column,QHeaderView.Fixed if column<3 else QHeaderView.Stretch)
-            if column<3: table.setColumnWidth(column,48)
-        table.setRowCount(len(shown))
-        for row,r in enumerate(shown):
-            values = [r.h,r.k,r.l,r.value,r.sigma]
-            if phase: values.append(r.phase)
-            if sig:
-                values.append(a.reflection_amplitude_signal_to_noise(r) if amplitude else a.reflection_primary_signal_to_noise(r,result.data_mode))
-            values.append(a.reflection_d_spacing(result.cell,r.h,r.k,r.l) if (r.h,r.k,r.l)!=(0,0,0) else None)
-            values.append(a.reflection_sintheta_over_lambda(result.cell,r.h,r.k,r.l) if (r.h,r.k,r.l)!=(0,0,0) else None)
-            if derived.isChecked() and sig and amplitude:
-                values.append(a.reflection_primary_signal_to_noise(r,result.data_mode))
-            for col,value in enumerate(values):
-                text_value = str(int(value)) if col<3 else _display_number(value)
-                if value is not None and not math.isfinite(float(value)):
-                    text_value = str(value)+' (invalid)'
-                item = _NumericItem(text_value,value)
-                item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                item.setToolTip(repr(value))
-                table.setItem(row,col,item)
-        table.setSortingEnabled(True)
+        model.reset_rows(rows,current_headers)
+        for column, text in enumerate(current_headers):
+            table.horizontalHeader().setSectionResizeMode(column,QHeaderView.Interactive)
+            # Header width is measured, not a uniform stretch of numeric fields.
+            width = 48 if column<3 else max(112,min(210,table.fontMetrics().horizontalAdvance(text)+28))
+            table.setColumnWidth(column,width)
+        table.horizontalHeader().setStretchLastSection(False)
         label.setText(('No matching reflections' if not matches else
-                       f'{matches:,} ' + ('match' if matches == 1 else 'matches') + ' · Showing ' + ('first 200' if matches>200 else str(matches)))
-                      if filtered else f'Showing first {len(shown):,} of {len(records):,} records')
+                       f'{matches:,} ' + ('match' if matches == 1 else 'matches') + f' · Showing {matches:,}')
+                      if filtered else f'Showing all {len(records):,} records')
     reflection_search = _ReflectionSearch(dialog, records, populate)
     def apply_search():
         if not search.text().split():
@@ -924,15 +987,20 @@ def validation_dialog(win, result):
             return ''
         header = table.horizontalHeader()
         columns = [header.logicalIndex(i) for i in range(header.count()) if not table.isColumnHidden(header.logicalIndex(i))]
-        lines = ['\t'.join(table.horizontalHeaderItem(c).text() for c in columns)]
+        lines = ['\t'.join(model.headers[c] for c in columns)]
         for row in selected:
-            lines.append('\t'.join('' if table.item(row,c).numeric_value is None else str(table.item(row,c).numeric_value) for c in columns))
+            lines.append('\t'.join('' if model.numeric(row,c) is None else str(model.numeric(row,c)) for c in columns))
         return '\n'.join(lines)
     def copy_selected():
         text = selected_text()
         if text: QApplication.clipboard().setText(text)
     copy_rows.clicked.connect(copy_selected)
-    table.itemSelectionChanged.connect(lambda:copy_rows.setEnabled(bool(table.selectionModel().selectedRows())))
+    def selection_changed(*_):
+        count = len(table.selectionModel().selectedRows())
+        copy_rows.setEnabled(bool(count))
+        label.setText(label.text().split(' · Selected:')[0] + (f' · Selected: {count:,}' if count else ''))
+    table.selectionModel().selectionChanged.connect(selection_changed)
+    model.modelReset.connect(selection_changed)
     shortcut = QShortcut(QKeySequence.Copy,table)
     shortcut.setContext(Qt.WidgetWithChildrenShortcut)
     shortcut.activated.connect(copy_selected)
@@ -1047,7 +1115,7 @@ class _PlotHover:
         for key, axis, artist, text in self.entries:
             if event.inaxes is axis and artist.get_visible() and artist.contains(event)[0]:
                 if key != self.last:
-                    QToolTip.showText(QCursor.pos(), scientific_tooltip(text()), self.canvas)
+                    QToolTip.showText(QCursor.pos(), scientific_tooltip(text()), self.canvas, self.canvas.rect(), 5000)
                     self.last = key
                 return
         self.hide()
@@ -1430,8 +1498,8 @@ def completeness_dialog(win, analysis):
     scale.setToolTip('Only the count axis changes. The amplitude/intensity axis includes zero, negative values and the entire high-value tail. Zero-count bins are masked on a log count axis.')
     toolbar.addWidget(scale)
     focus = QComboBox()
-    focus.addItems(['Full range','Focus on main distribution','Custom range'])
-    focus.setToolTip('View only: focus shows the 1st–99th percentile x-range. Values outside it remain in the histogram bins, statistics and exports. No records are removed and no rebinning occurs.')
+    focus.addItems(['Full range','Detail','Custom range'])
+    focus.setToolTip('Detail is a display-only histogram of the 1st–99th percentile range. Original observations, full-range bins, statistics and exports remain unchanged; omitted tails are counted below.')
     toolbar.addWidget(focus)
     resolution_axis = QComboBox()
     resolution_axis.addItem('sin θ / λ (Å⁻¹)',False)
@@ -1457,7 +1525,8 @@ def completeness_dialog(win, analysis):
     main_layout.addWidget(range_controls)
     main_layout.addWidget(range_status)
     range_controls.hide()
-    figure = Figure(figsize=(10,4),dpi=100,layout='constrained')
+    figure = Figure(figsize=(10,5.4),dpi=100,layout='constrained')
+    figure.get_layout_engine().set(w_pad=.09,h_pad=.10,wspace=.16,hspace=.22)
     canvas = FigureCanvasQTAgg(figure)
     canvas.setObjectName('hklCompletenessCanvas')
     canvas.setMinimumHeight(170)
@@ -1472,6 +1541,7 @@ def completeness_dialog(win, analysis):
         panels.append('significance')
     if len(values):
         panels.append('distribution')
+    panels.sort(key=lambda panel: {'intensity':0,'width':1,'significance':1,'coverage':2,'distribution':3}[panel])
     # The viewport may shrink below the legible canvas height. This also
     # protects two-panel plots on a 1080p monitor at 150% DPI: a canvas clipped
     # directly by a QTabWidget has no way to expose its bottom axis labels.
@@ -1541,29 +1611,33 @@ def completeness_dialog(win, analysis):
         main_layout.removeWidget(chart_scroll)
         chart_scroll.hide()
         main_layout.addWidget(empty)
-    if len(panels)==2:
+    if len(panels)>=2:
         plot_orientation = {'stacked':None}
         def responsive_plots(_event=None):
-            stacked = canvas.width()<1100
+            stacked = canvas.width()<850
             if plot_orientation['stacked']==stacked:
                 return
             plot_orientation['stacked']=stacked
-            grid = figure.add_gridspec(2,1) if stacked else figure.add_gridspec(1,2)
+            count = len(axes)
+            grid = figure.add_gridspec(count,1) if stacked else figure.add_gridspec(math.ceil(count/2),2)
             for index, axis in enumerate(axes.values()):
-                axis.set_subplotspec(grid[index,0] if stacked else grid[0,index])
-            canvas.setMinimumHeight(380 if stacked else 170)
+                axis.set_subplotspec(grid[index,0] if stacked else
+                                    grid[index//2,:] if count%2 and index==count-1 else grid[index//2,index%2])
+            canvas.setMinimumHeight(230*count if stacked else 250*math.ceil(count/2))
             canvas.draw_idle()
         canvas.mpl_connect('resize_event',responsive_plots)
         responsive_plots()
     def count_scale():
         if 'distribution' in axes:
             logarithmic = scale.currentIndex()==0
-            for count,bar in zip(hist_counts,hist_bars): bar.set_visible(not logarithmic or count>0)
+            for count,bar in zip(hist_counts,hist_bars): bar.set_visible(focus.currentIndex()!=1 and (not logarithmic or count>0))
             # Zero-count bins stay hidden. Clip only the zero drawing baseline;
             # masking it removes entire positive-height bar polygons in Agg.
             axes['distribution'].set_yscale('log' if logarithmic else 'linear', **({'nonpositive':'clip'} if logarithmic else {}))
             axes['distribution'].relim()
             axes['distribution'].autoscale_view()
+            active_counts = detail_counts if focus.currentIndex()==1 else hist_counts
+            axes['distribution'].set_ylim(.8 if logarithmic else 0, max(1,float(active_counts.max()))*1.15)
             canvas.draw_idle()
     scale.currentIndexChanged.connect(lambda _index:count_scale())
     count_scale()
@@ -1575,20 +1649,33 @@ def completeness_dialog(win, analysis):
         full_title = histogram.get_title()
         focused_xlim = tuple(np.quantile(values,[.01,.99]))
         sorted_values = np.sort(values)
+        detail_values = values[(values>=focused_xlim[0]) & (values<=focused_xlim[1])]
+        # Separate display-only bins: never replace the full-range histogram.
+        detail_counts, detail_edges = np.histogram(detail_values,bins=min(60,max(1,int(np.sqrt(len(detail_values))))))
+        detail_line, = histogram.plot(np.repeat(detail_edges,2)[1:-1],np.repeat(detail_counts,2),
+                                      color='#001170',linewidth=1.6,visible=False)
+        dialog.hkl_full_histogram = (hist_counts.copy(),hist_edges.copy())
+        dialog.hkl_detail_histogram = (detail_counts.copy(),detail_edges.copy())
+        def show_detail(enabled):
+            detail_line.set_visible(enabled)
+            for count,bar in zip(hist_counts,hist_bars):
+                bar.set_visible(not enabled and (scale.currentIndex()!=0 or count>0))
         def set_histogram_range(limits):
             histogram.set_xlim(limits)
+            active_counts = detail_counts if detail_line.get_visible() else hist_counts
+            histogram.set_ylim(.8 if scale.currentIndex()==0 else 0,max(1,float(active_counts.max()))*1.15)
             range_min.setValue(limits[0]); range_max.setValue(limits[1])
             outside = int(np.searchsorted(sorted_values,limits[0],side='left')+len(values)-np.searchsorted(sorted_values,limits[1],side='right'))
-            range_status.setText(f'{outside:,} / {len(values):,} records outside the selected range' if outside
-                                 else f'All {len(values):,} records visible')
+            range_status.setText(f'Displayed {"amplitude" if a.reflection_mode_is_amplitude(analysis.data_mode) else "intensity"} range: {limits[0]:.7g}–{limits[1]:.7g} · {outside:,} / {len(values):,} records outside' + (' · display-only bins' if detail_line.get_visible() else ' · original bins'))
             range_status.setToolTip(f'Actual finite data range: {values.min():.12g} to {values.max():.12g}; original bins and values retained.')
             canvas.draw_idle()
         def focus_range(index):
             range_controls.setVisible(index==2)
             if index==2: return  # Custom limits are applied explicitly below.
             limits = focused_xlim if index and focused_xlim[0]<focused_xlim[1] else full_xlim
+            show_detail(bool(index and limits==focused_xlim))
             set_histogram_range(limits)
-            histogram.set_title(scientific_text(value+' distribution · focused view (tails retained)','plot') if index and limits==focused_xlim else full_title)
+            histogram.set_title(scientific_text(value+' distribution · Detail (display-only bins)','plot') if index and limits==focused_xlim else full_title)
             canvas.draw_idle()
         focus.currentIndexChanged.connect(focus_range)
         def apply_histogram_range():
@@ -1596,12 +1683,14 @@ def completeness_dialog(win, analysis):
                 range_status.setText('Minimum must be less than maximum.'); return
             focus.blockSignals(True); focus.setCurrentIndex(2); focus.blockSignals(False)
             range_controls.show()
+            show_detail(False)
             histogram.set_title(scientific_text(value+' distribution · selected range (tails retained)','plot'))
             set_histogram_range((range_min.value(),range_max.value()))
         apply_range.clicked.connect(apply_histogram_range)
         def reset_histogram_range():
             focus.blockSignals(True); focus.setCurrentIndex(0); focus.blockSignals(False)
             range_controls.hide()
+            show_detail(False)
             histogram.set_title(scientific_text(full_title,'plot'))
             set_histogram_range(full_xlim)
         reset_range.clicked.connect(reset_histogram_range)
@@ -1744,8 +1833,13 @@ def completeness_dialog(win, analysis):
     bins_title.setWordWrap(True)
     bins_heading = QHBoxLayout()
     bins_heading.addWidget(bins_title,1)
+    bins_toggle = QToolButton()
+    bins_toggle.setText('Show resolution bins')
+    bins_toggle.setCheckable(True)
+    bins_toggle.setChecked(True)
+    bins_heading.addWidget(bins_toggle)
     bins_layout.addLayout(bins_heading)
-    columns = [('lo','Bin min'),('hi','Bin max'),('observed','Input HKL'),('theory','Allowed HKL'),('coverage','Indexed coverage (%)' if powder else 'Coverage (%)'),
+    columns = [('lo','Bin min'),('hi','Bin max'),('observed','Input HKL'),('theory','Allowed HKL'),('coverage','Indexed HKL coverage (%)' if powder else 'Coverage (%)'),
                ('mean_value',f'Mean {value}'),('median_value',f'Median {value}')]
     if powder and report.count('valid_widths_or_sigmas'):
         columns.append(('mean_fwhm','Mean FWHM'))
@@ -1874,12 +1968,22 @@ def completeness_dialog(win, analysis):
     dialog.hkl_histogram_range_controls = range_controls
     dialog.hkl_overlap_bin_rows = overlap_rows
     table.setMinimumHeight(table.horizontalHeader().sizeHint().height()+
-        6*table.verticalHeader().defaultSectionSize()+2*table.frameWidth())
+        3*table.verticalHeader().defaultSectionSize()+2*table.frameWidth())
     bins_layout.addWidget(table,1)
+    def toggle_bins(checked):
+        table.setVisible(checked)
+        copy_bins_button.setVisible(checked)
+        bins_toggle.setText('Hide resolution bins' if checked else 'Show resolution bins')
+        bins_panel.setMaximumHeight(16777215 if checked else bins_heading.sizeHint().height()+8)
+    bins_toggle.toggled.connect(toggle_bins)
+    toggle_bins(True)
+    dialog.hkl_bins_toggle = bins_toggle
+    if dialog.screen() is not None and dialog.screen().availableGeometry().height()<700:
+        bins_toggle.setChecked(False)
     splitter.addWidget(bins_panel)
-    splitter.setSizes([390,260])
-    splitter.setStretchFactor(0,3)
-    splitter.setStretchFactor(1,2)
+    splitter.setSizes([500,160])
+    splitter.setStretchFactor(0,4)
+    splitter.setStretchFactor(1,1)
     layout.addWidget(splitter,1)
     dialog.hkl_resolution_summary = _resolution_summary(analysis)
     dialog.hkl_plot_figures = figures

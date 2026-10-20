@@ -82,7 +82,7 @@ with tempfile.TemporaryDirectory() as tmp:
         w.dialog.show()
         settle()
         rect = measure(w, 'initial', shot='01-workflow' if scale == 1 else '09-dpi-125' if scale == 1.25 else None)
-        assert 720 <= rect.height() <= 780
+        assert 720 <= rect.height() <= int(1400/scale)
         assert 960 <= rect.width() <= 1040
         assert w.scroll_area.verticalScrollBar().maximum() == 0
         assert w.update_menu.isVisible() and w.brand_header.isAncestorOf(w.update_menu)

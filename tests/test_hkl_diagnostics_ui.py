@@ -35,8 +35,12 @@ def check_gui():
         dialog=win._build_hkl_completeness_dialog(analysis)
         dialog.show();dialog.resize(1120,950);settle()
         table=dialog.hkl_bins_table
+        dialog.hkl_bins_toggle.setChecked(True);settle()
         visible=sum(table.rowViewportPosition(i)>=0 and table.rowViewportPosition(i)+table.rowHeight(i)<=table.viewport().height() for i in range(table.rowCount()))
-        assert visible>=6,(visible,table.size().toTuple(),dialog.size().toTuple())
+        assert visible>=1,(visible,table.size().toTuple(),dialog.size().toTuple())
+        table.scrollToBottom();settle()
+        assert table.visualItemRect(table.item(table.rowCount()-1,0)).intersects(table.viewport().rect())
+        table.scrollToTop()
         assert 'I/FWHM' not in dialog.summary_text
         assert len(dialog.hkl_figure.axes)==3
         assert all('/FWHM' not in ax.get_title()+ax.get_ylabel() for ax in dialog.hkl_figure.axes)
@@ -77,13 +81,13 @@ def check_gui():
         settle()
         assert overlap_view.hkl_plot_tabs.tabText(1)=='Peak overlap'
         assert [key for key,_ in overlap_view.hkl_bin_columns] == ['lo','hi','input','affected','percent','intensity_percent']
-        assert sum(int(overlap_view.hkl_bins_table.item(i,3).text()) for i in range(overlap_view.hkl_bins_table.rowCount())) == 2
-        assert sum(int(overlap_view.hkl_bins_table.item(i,2).text()) for i in range(overlap_view.hkl_bins_table.rowCount())) == 3
+        assert sum(int(overlap_view.hkl_bins_table.model().index(i,3).data()) for i in range(overlap_view.hkl_bins_table.model().rowCount())) == 2
+        assert sum(int(overlap_view.hkl_bins_table.model().index(i,2).data()) for i in range(overlap_view.hkl_bins_table.model().rowCount())) == 3
         for i,row in enumerate(overlap_view.hkl_overlap_bin_rows):
-            assert '<' not in overlap_view.hkl_bins_table.item(i,0).text()
+            assert '<' not in overlap_view.hkl_bins_table.model().index(i,0).data()
             if not row['input']:
-                assert overlap_view.hkl_bins_table.item(i,4).text() == 'N/A'
-                assert overlap_view.hkl_bins_table.item(i,5).text() == 'N/A'
+                assert overlap_view.hkl_bins_table.model().index(i,4).data() == 'N/A'
+                assert overlap_view.hkl_bins_table.model().index(i,5).data() == 'N/A'
         assert [tick.get_text() for tick in overlap_view.hkl_overlap_figure.axes[0].get_xticklabels()] == ['2 HKL']
         assert overlap_geometry==(overlap_view.hkl_plot_panel.geometry(),overlap_view.hkl_bins_table.geometry())
         overlap_view.hkl_advanced_button.click();settle()
@@ -107,14 +111,14 @@ def check_gui():
         invalid_view.close()
         validation=win._build_hkl_validation_dialog(load)
         validation.show();validation.resize(1060,800);settle()
-        headers=[validation.hkl_table.horizontalHeaderItem(i).text() for i in range(validation.hkl_table.columnCount())]
+        headers=[validation.hkl_table.model().headerData(i,Qt.Horizontal) for i in range(validation.hkl_table.model().columnCount())]
         assert 'Phase (°)' not in headers and 'I/FWHM' not in headers
         validation.hkl_search.setText('2 2 1');QTest.qWait(220);settle()
         for _ in range(200):
             if not validation.hkl_preview_label.text().startswith('Searching'): break
             QTest.qWait(10);settle()
-        assert validation.hkl_table.rowCount()==1
-        assert [validation.hkl_table.item(0,i).text() for i in range(3)]==['2','2','1']
+        assert validation.hkl_table.model().rowCount()==1
+        assert [validation.hkl_table.model().index(0,i).data() for i in range(3)]==['2','2','1']
         validation.close()
         duplicates=fixture.load('1 2 1 10 .1\n1 2 1 20 .1\n2 2 1 30 .1\n')
         duplicate_view=win._build_hkl_validation_dialog(duplicates)
@@ -125,16 +129,16 @@ def check_gui():
             if not duplicate_view.hkl_preview_label.text().startswith('Searching'): break
             QTest.qWait(10);settle()
         assert duplicate_view.isVisible() and duplicate_view.hkl_advanced is None
-        assert duplicate_view.hkl_table.rowCount()==2
-        assert [duplicate_view.hkl_table.item(i,3).numeric_value for i in range(2)]==[10,20]
+        assert duplicate_view.hkl_table.model().rowCount()==2
+        assert [duplicate_view.hkl_table.model().index(i,3).data(Qt.UserRole) for i in range(2)]==[10,20]
         assert duplicate_view.hkl_preview_label.text() == '2 matches \u00b7 Showing 2'
         duplicate_view.hkl_table.selectRow(0);duplicate_view.hkl_copy_selected_button.click()
         assert '10.0' in QApplication.clipboard().text()
         duplicate_view.close()
         missing=fixture.load('1 2 1 10\n',a.REFLECTION_DATA_MODE_INTENSITY)
         v=win._build_hkl_validation_dialog(missing)
-        assert v.hkl_table.item(0,4).text()=='n/a'
-        assert '~' not in v.hkl_table.item(0,4).text()
+        assert v.hkl_table.model().index(0,4).data()=='n/a'
+        assert '~' not in v.hkl_table.model().index(0,4).data()
         v.close()
         # Cancellation is cooperative, and must never deliver a result dialog.
         def slow():

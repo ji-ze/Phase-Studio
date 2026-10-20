@@ -1170,8 +1170,13 @@ class _JanaWorkflowWizard:
         return int(target)
 
     def _preferred_dialog_height(self) -> int:
-        """One content-independent initial height for every Wizard step."""
+        """Measure the initial page once; later navigation preserves user geometry."""
         target = self.WIZARD_PREFERRED_HEIGHT
+        if getattr(self, 'chrome_holder', {}).get('footer') is not None:
+            width = self._preferred_dialog_width()
+            chrome = sum(widget.sizeHint().height() for widget in
+                         (self.brand_header, self.context_banner, self.footer))
+            target = max(target, self._content_height_for_width(width) + chrome + 16)
         available = self._available_screen_height()
         if available > 0:
             target = min(target, max(1, int(available * self.WIZARD_MAX_SCREEN_FRACTION)))
@@ -1405,6 +1410,10 @@ class _JanaWorkflowWizard:
             saved_rect = self.settings.value("wizard/windowRect")
             if isinstance(saved_rect,QRect) and saved_rect.isValid():
                 self.dialog.setGeometry(saved_rect);restored=True
+            if restored and not self.settings.value("wizard/contentGeometryV2", False, type=bool):
+                if self.dialog.height() in (690, 760):
+                    self.dialog.resize(self.dialog.width(), self._preferred_dialog_height())
+            self.settings.setValue("wizard/contentGeometryV2", True)
             if not restored and self.jana_parent_rect is not None:
                 self.dialog.move(self.dialog.pos()+self.jana_parent_rect.center()-self.dialog.frameGeometry().center())
             from phase_studio.ui_branding import clamp_window_to_available_screen
@@ -1596,6 +1605,9 @@ class _JanaWorkflowWizard:
     def _workflow_changed(self) -> None:
         key = self._current_workflow()
         self.processing_progress.setVisible(key == WORKFLOW_SUPERFLIP_SHARPED)
+        if hasattr(self, 'execution_summary'):
+            self.execution_summary.setVisible(key in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING))
+            self._update_execution_summary()
         for card_key, card in self.workflow_cards.items():
             card.set_selected(card_key == key)
         cycles_visible = key in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
@@ -2774,6 +2786,8 @@ class _JanaWorkflowWizard:
         self.cycles = QSpinBox()
         self.cycles.setRange(1, 999)
         self.cycles.setFixedWidth(110)
+        from phase_studio.ui_branding import guard_numeric_wheel
+        guard_numeric_wheel(self.cycles)
         self.cycles.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.cycles.setValue(int(self.settings.value("cycles", 5)) or 5)
         self.cycles.setToolTip("Number of ordinary Superflip + SharpED workflow cycles.")
@@ -2947,7 +2961,7 @@ class _JanaWorkflowWizard:
                 credential_store, DEFAULT_SERVER_URL, entered_token=self.api_token.text())
             self.account_state = {'credentials': credentials, 'connection': connection}
             self.connection_status.setText(connection if status == 'Connected' else status)
-            self.connection_status.setToolTip(f'Credentials: {credentials}\nServer connection: {connection}')
+            self.connection_status.setToolTip(f'Credentials: {credentials}\nServer connection: {connection}\nA live model catalogue does not verify inference authentication.')
         self._update_account_presentation = update_account_presentation
         self.api_token.textChanged.connect(update_account_presentation)
         update_account_presentation()
@@ -3204,6 +3218,18 @@ class _JanaWorkflowWizard:
         self.omit_checkbox.toggled.connect(sync_rfree_dependency)
         sync_rfree_dependency()
 
+        self.execution_summary = QLabel()
+        self.execution_summary.setWordWrap(True)
+        self.execution_summary.setStyleSheet("color: #33456e;")
+        def update_execution_summary(*_):
+            mode = "Manually selected" if self.model_user_picked["value"] else "Automatically selected"
+            self.execution_summary.setText(f"{self.cycles.value()} cycles · Superflip + SharpED\n{mode} model: {self.model.currentText()}")
+        self.cycles.valueChanged.connect(update_execution_summary)
+        self.model.currentTextChanged.connect(update_execution_summary)
+        self.model.activated.connect(update_execution_summary)
+        self._update_execution_summary = update_execution_summary
+        update_execution_summary()
+        self.page2_layout.addWidget(self.execution_summary)
         self.page2_layout.addStretch(1)
         self.stack.addWidget(self.page2)
 
@@ -3425,10 +3451,36 @@ class _JanaWorkflowWizard:
         self.powder_note.setWordWrap(True)
         self.powder_note.setStyleSheet("color: #52658b;")
         self.powder_outer.addWidget(self.powder_note)
+        class _PowderColumns(QWidget):
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self.layout().setDirection(QHBoxLayout.TopToBottom if event.size().width()<720 else QHBoxLayout.LeftToRight)
+        self.powder_columns = _PowderColumns()
+        powder_columns_layout = QHBoxLayout(self.powder_columns)
+        powder_columns_layout.setContentsMargins(0,0,0,0)
+        powder_columns_layout.setSpacing(20)
+        self.powder_outer.removeWidget(self.powder_parameters)
+        powder_columns_layout.addWidget(self.powder_parameters,1)
+        powder_explanation = QWidget()
+        powder_explanation_layout = QVBoxLayout(powder_explanation)
+        powder_explanation_layout.setContentsMargins(0,0,0,0)
+        for note in (self.powder_wavelength_status,self.powder_note):
+            self.powder_outer.removeWidget(note)
+            powder_explanation_layout.addWidget(note)
+        self.powder_parameter_help = QLabel(
+            "Start after cycle uses that completed map for eligible subsequent cycles; the first cycle is not changed. "
+            "Separation factor is a fraction of the neighboring peaks' mean FWHM. "
+            "Map ratio mix 0 retains the observed split and 1 uses the map-derived split; each group's total is conserved.")
+        self.powder_parameter_help.setWordWrap(True)
+        powder_explanation_layout.addWidget(self.powder_parameter_help)
+        powder_explanation_layout.addStretch(1)
+        powder_columns_layout.addWidget(powder_explanation,1)
+        self.powder_outer.addWidget(self.powder_columns)
+        powder_group = self.powder_group
         class _FeedbackPanels(QWidget):
             def resizeEvent(self, event):
                 super().resizeEvent(event)
-                self.layout().setDirection(QHBoxLayout.TopToBottom if event.size().width() < 820 else QHBoxLayout.LeftToRight)
+                self.layout().setDirection(QHBoxLayout.TopToBottom if not powder_group.isHidden() or event.size().width()<820 else QHBoxLayout.LeftToRight)
 
         self.feedback_panels = _FeedbackPanels()
         self.feedback_panels_layout = QHBoxLayout(self.feedback_panels)
@@ -3449,6 +3501,8 @@ class _JanaWorkflowWizard:
             self.powder_mix_spin,
         ):
             editor.setMaximumWidth(180)
+            from phase_studio.ui_branding import guard_numeric_wheel
+            guard_numeric_wheel(editor)
 
         self.page3_validation_label = QLabel("")
         self.page3_validation_label.setWordWrap(True)
