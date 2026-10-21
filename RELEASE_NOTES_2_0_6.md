@@ -32,6 +32,20 @@ handoff does not silently recompute them. See the
 
 ## GUI, HKL and runtime stability
 
+- Repair threshold-specific EDMA review on long Windows project paths using
+  short isolated workspaces and atomic replacement. Failed extraction retains
+  diagnostics and the previous valid candidate; repeated + atoms / - atoms
+  operations never substitute preview maps or recompute phasing.
+- Automatically restore Jana2020 OAuth access grants from Windows Credential
+  Manager across processes and executable updates. No new Remember checkbox
+  is required. Explicit sign-out removes the OAuth grant while preserving a
+  separately stored manual API key. Temporary connection failures retain it.
+- Standardize Map Feedback's positive significance limit to I/σ(I) in both
+  configuration paths. Amplitude uncertainties use the explicit first-order
+  estimate I/σ(I) ≈ F/(2σ(F)); FWHM is never treated as uncertainty. The strict
+  positive gate changes intentionally; a zero limit still disables filtering.
+  Existing saved numerical limits are retained without silent migration.
+
 - Virtualize full reflection tables with bounded cell caching, full-dataset
   search/sort and selected-row TSV copying at source precision.
 - Improve responsive HKL diagnostics and display-only histogram Detail/Full
@@ -58,3 +72,18 @@ Existing installations without updater support need a one-time manual migration.
 The production public key is pinned and the main-only signing environment is
 configured. Publication requires separately configured environment protections;
 availability and a public release are not implied by these release notes.
+
+## Acceptance and limitations
+
+See [final acceptance](docs/FINAL_RELEASE_ACCEPTANCE_2_0_6.md) for the fresh
+combined-tree regression results, build provenance and deliverable checksums.
+Synthetic credential checks do not constitute live-server authentication.
+OAuth grants remain subject to server expiry (currently at most one hour),
+with a 60-second safety margin; no refresh token flow is invented. If secure
+storage is unavailable or the credential exceeds Windows storage limits, an
+explicit warning accompanies session-only authentication.
+
+Historical screenshots and workshop PDFs are preserved. Older Map Feedback
+images showing F/σ(F) or value/σ labels are superseded by the I/σ(I) policy in
+[the significance note](docs/MAP_FEEDBACK_SIGNIFICANCE_2_0_6.md); they have not
+been silently regenerated. Unknown EDMA displacement parameters remain unknown.

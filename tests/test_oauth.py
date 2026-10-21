@@ -204,10 +204,12 @@ class OAuthTests(unittest.TestCase):
             def __init__(self):self.value="saved-legacy"
             def read(self,origin):return self.value
             def write(self,*args):raise AssertionError("OAuth must not persist")
-            def delete(self,*args):raise AssertionError("OAuth must not delete legacy")
+            def delete(self,origin):
+                if origin != CredentialStore.oauth_target():
+                    raise AssertionError("OAuth must not delete legacy")
         backend=Backend();store=CredentialStore(backend)
         credential=oauth.OAuthCredential("memory-oauth",time.monotonic()+3600)
-        store.activate_oauth(credential);self.assertEqual(store.get(),credential.access_token)
+        store.activate_oauth(credential,remember=False);self.assertEqual(store.get(),credential.access_token)
         self.assertEqual(store.authentication_method(),"oauth");self.assertFalse(store.remembered())
         store.save_input(credential.access_token);self.assertEqual(backend.value,"saved-legacy")
         with self.assertRaises(ValueError):store.set(credential.access_token,remember=True)

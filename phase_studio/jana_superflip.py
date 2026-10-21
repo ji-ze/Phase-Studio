@@ -1500,10 +1500,11 @@ class _JanaWorkflowWizard:
         self.missing_group.setVisible(not is_powder)
         self.intensity_group.setVisible(True)
         self.powder_group.setVisible(is_powder)
-        ratio = "F/σ(F)" if reflection_mode_is_amplitude(mode) else "I/σ(I)"
-        self.intensity_form.labelForField(self.intensity_sigma_spin).setText(f"{ratio} limit")
+        self.intensity_form.labelForField(self.intensity_sigma_spin).setText("I/σ(I) limit")
         self.intensity_note.setText(
-            f"Positive limits use measured {ratio}; 0 applies to all map-supported reflections."
+            ("Positive limits use estimated I/σ(I) ≈ F/[2σ(F)]; this is a first-order approximation. "
+             if reflection_mode_is_amplitude(mode) else "Positive limits use measured I/σ(I). ")
+            + "0 applies to all map-supported reflections."
             if self.feedback_has_uncertainty else
             ("Experimental intensity uncertainties are not supplied. " if is_powder else
              "Valid measured uncertainties are unavailable. " if hasattr(self, "input_reflections") else
@@ -3372,11 +3373,9 @@ class _JanaWorkflowWizard:
         self.intensity_sigma_spin.setDecimals(3)
         self.intensity_sigma_spin.setValue(0.0)
         self.intensity_sigma_spin.setSpecialValueText("All map-supported")
-        self.intensity_sigma_spin.setToolTip(
-            "Positive limits filter using the supplied value uncertainty. Threshold 0 bypasses "
-            "that filter and corrects every reflection with a positive map prediction; σ is not required."
-        )
-        self.intensity_form.addRow("Significance limit", self.intensity_sigma_spin)
+        from phase_studio.app import MAP_FEEDBACK_SIGNIFICANCE_HELP
+        self.intensity_sigma_spin.setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
+        self.intensity_form.addRow("I/σ(I) limit", self.intensity_sigma_spin)
         self.intensity_parameters = QWidget()
         self.intensity_parameters.setLayout(self.intensity_form)
         self.intensity_outer.addWidget(self.intensity_parameters)

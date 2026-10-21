@@ -908,11 +908,11 @@
   },
   {
     "key": "map_feedback_intensity_max_i_over_sigma",
-    "label": "Apply when value/σ <",
+    "label": "I/σ(I) limit",
     "page": "_build_map_feedback_tab",
     "source_line": 10076,
     "type": "_add_dspin",
-    "tooltip": "Apply map-based intensity correction only to non-zero reflections with value/sigma below this limit. Use 0 to correct all non-zero reflections.",
+    "tooltip": "Correct when I/σ(I) is strictly below the limit. Amplitudes use the first-order approximation F/[2σ(F)], not recovered experimental intensity significance. Zero bypasses significance filtering for all map-supported reflections.",
     "enabled": false,
     "minimum": 0.0,
     "maximum": 1000.0,

@@ -996,7 +996,8 @@ class ResultSelectionDialog(QDialog):
         if report is not None:
             if self.selected_candidate is not None and self._threshold_key(self.selected_candidate) == key:
                 self._threshold_status.setText(
-                    "EDMA threshold update failed. Previous completed structure retained."
+                    "EDMA threshold update failed. Previous completed structure retained. "
+                    "Review Execution Log for the cause and recovery details."
                 )
             self._sync_action_button()
             return

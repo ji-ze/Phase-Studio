@@ -46,6 +46,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -3710,6 +3711,36 @@ def candidate_missing_hkls_from_bounds(reflections: Sequence[Reflection], cell: 
                 candidates.append(key)
     return candidates
 
+MAP_FEEDBACK_SIGNIFICANCE_HELP = (
+    "Correct when I/σ(I) is strictly below the limit. "
+    "Intensity significance is estimated from F and σ(F) using I/σ(I) ≈ F/[2σ(F)]. "
+    "This first-order approximation does not recover the original experimental significance, especially for weak reflections. "
+    "0 bypasses significance filtering and corrects all reflections with a positive map prediction; σ is not required."
+)
+
+
+def map_feedback_intensity_significance(reflection: Reflection, data_mode: str) -> Optional[float]:
+    """Equivalent I/sigma(I) for the weak-reflection gate; None means unusable.
+
+    Positive amplitudes use first-order propagation I=F², sigma(I)≈2F sigma(F).
+    Zero/negative values remain excluded from a positive-threshold gate. The
+    uncertainty-independent threshold-zero path never calls this function.
+    """
+    mode = normalize_reflection_data_mode(data_mode)
+    if mode not in {REFLECTION_DATA_MODE_INTENSITY, REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+                    REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        return None  # Unresolved formats and FWHM cannot supply significance.
+    if reflection.sigma is None:
+        return None
+    value, sigma = float(reflection.value), float(reflection.sigma)
+    if not math.isfinite(value) or not math.isfinite(sigma) or value <= 0 or sigma <= 0:
+        return None
+    significance = value / sigma
+    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        significance *= 0.5
+    return significance if math.isfinite(significance) else None
+
+
 def apply_map_feedback_to_reflections(
     reflections: Sequence[Reflection],
     data_mode: str,
@@ -3758,7 +3789,8 @@ def apply_map_feedback_to_reflections(
             key = (int(r.h), int(r.k), int(r.l))
             raw_i, map_phase = predictions.get(key, (0.0, 0.0))
             if max_i_over_sigma > 0:
-                if r.value <= 0 or not math.isfinite(float(r.value)) or r.sigma is None or r.sigma <= 0 or not math.isfinite(float(r.sigma)) or (float(r.value) / float(r.sigma)) >= max_i_over_sigma:
+                significance = map_feedback_intensity_significance(r, mode)
+                if significance is None or not significance < max_i_over_sigma:
                     corrected_reflections.append(r)
                     continue
             if raw_i > 0:
@@ -4647,9 +4679,7 @@ def _copy_verified_handoff_artifact(source: Path, target: Path, expected_hash: s
     if source == target:
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(
-        f".{target.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-    )
+    temporary = target.with_name(f".{uuid.uuid4().hex[:16]}.tmp")
     try:
         with source.open("rb") as input_stream, temporary.open("wb") as output_stream:
             shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
@@ -7154,9 +7184,7 @@ def promote_threshold_structure(
         if file_sha256(target) != digest:
             raise RuntimeError(f"Canonical candidate artifact changed unexpectedly: {target}")
     else:
-        temporary = target.with_name(
-            f".{target.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-        )
+        temporary = target.with_name(f".{uuid.uuid4().hex[:16]}.tmp")
         try:
             with source_path.open("rb") as input_stream, temporary.open("wb") as output_stream:
                 shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
@@ -7642,7 +7670,7 @@ INPUT_TOOLTIPS = {
     "map_feedback_intensity_enabled": "Enables map-based intensity correction. When off, the fields below are ignored.",
     "map_feedback_intensity_from_cycle": "First completed cycle whose map is used to damp observed intensities for the next cycle.",
     "map_feedback_intensity_damping": "Damping factor for map-based intensity correction. 0 keeps observed data; 1 replaces them by scaled map-derived intensities.",
-    "map_feedback_intensity_max_i_over_sigma": "Apply map-based intensity correction only to non-zero reflections with value/sigma below this limit. Use 0 to correct all non-zero reflections.",
+    "map_feedback_intensity_max_i_over_sigma": MAP_FEEDBACK_SIGNIFICANCE_HELP,
     "redistribute_overlaps": "Enables powder overlap repartitioning: each cycle, redistribute the combined observed intensity of overlapping-reflection groups (hkl I/F fwhm data only) between their members, using intensities calculated by FFT from that cycle's processed map. When off, the fields below are ignored.",
     "powder_redistribution_from_cycle": "First completed cycle whose map is used to redistribute overlapping powder reflections for the next cycle.",
     "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected from the Jana .m90 file, then the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
@@ -8792,7 +8820,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Missing-reflection completion</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
             <h3>Intensity correction</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
+            <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>I/&sigma;(I) limit</b> selects positive observations strictly below the intensity-significance threshold; amplitudes use the first-order approximation F/[2&sigma;(F)], not recovered experimental intensity significance. Zero bypasses significance filtering for all map-supported reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
             <h3>Powder overlap repartitioning</h3>
             <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
@@ -10113,8 +10141,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(intensity_feedback_form, "map_feedback_intensity_enabled", "Enable intensity correction", False, align_with_fields=True)
         self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 1, 1, 999, 1)
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
-        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply when value/σ <", 0.0, 0.0, 1000.0, 0.5, 3)
-        intensity_feedback_form.addRow("", self._settings_callout("Note", "At 0, correction applies to all non-zero reflections."))
+        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "I/σ(I) limit", 0.0, 0.0, 1000.0, 0.5, 3)
+        significance_control = self.inputs["map_feedback_intensity_max_i_over_sigma"]
+        significance_control.setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
+        intensity_feedback_form.labelForField(significance_control).setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
+        intensity_feedback_form.addRow("", self._settings_callout("Note", "At 0, correction applies to all map-supported reflections."))
 
         powder_feedback_form = self._add_form_group(feedback_tab, "Powder overlap repartitioning")
         self._add_checkbox(powder_feedback_form, "redistribute_overlaps", "Enable powder overlap repartitioning (FWHM data)", False, align_with_fields=True)
@@ -13954,17 +13985,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._review_cache_key(candidate, float(candidate.edma_sigma)), candidate,
         )
         run_id = str(candidate.run_id or state.run_id or self._active_run_id)
-        source_tag = "superflip" if candidate.source == "superflip" else "sharped"
-        request_tag = f"{time.time_ns()}-{os.getpid()}"
+        request_tag = uuid.uuid4().hex[:16]
         output_dir = (
-            state.cfg.work_dir / "review_edma" / (run_id or "legacy")
-            / f"{source_tag}_cycle_{candidate.cycle:03d}"
-            / f"request_{request_tag}_{float(new_sigma):.2f}sigma".replace(".", "p")
+            state.cfg.work_dir / "review_edma" / request_tag
         )
-        prefix = (
-            f"review_{source_tag}_cycle_{candidate.cycle:03d}_{request_tag}_"
-            f"{float(new_sigma):.2f}sigma"
-        ).replace(".", "p")
+        # Request directories already isolate generations. Repeating the run,
+        # source, cycle and timestamp in every filename exceeded MAX_PATH on
+        # real Jana projects, first when writing the scientific-source CIF.
+        prefix = "review"
         family = "Charge-flipping solution" if candidate.source == "superflip" else "Structure prediction"
         live_job = (
             self._new_structure_job(
@@ -13997,17 +14025,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     explicit_threshold=True,
                     stop_event=review_stop,
                 )
+                if not cif_has_readable_atoms(Path(cif)):
+                    raise RuntimeError("EDMA did not produce a readable nonempty structure. Previous result retained.")
                 canonical_cif = promote_threshold_structure(
                     Path(cif), output_dir, candidate.source, candidate.cycle, float(new_sigma),
                 )
-                return seal_result_candidate(replace(
+                updated = seal_result_candidate(replace(
                     candidate, structure_path=str(canonical_cif),
                     edma_sigma=float(new_sigma), usable_structure=True,
                 ))
+                if (getattr(state.cfg, "jana_inflip", None) is not None or candidate.jana_model_sha256) and not updated.jana_model_sha256:
+                    raise RuntimeError("EDMA did not produce a valid corresponding Jana model. Previous result retained.")
+                if candidate.map_sha256 and updated.map_sha256 != candidate.map_sha256:
+                    raise RuntimeError("EDMA source map changed during review. Previous result retained.")
+                return updated
             except BaseException:
-                # Completed review artifacts are the cache.  Failed/cancelled
-                # request workspaces contain no handoff-capable result.
-                shutil.rmtree(output_dir, ignore_errors=True)
+                # Keep the isolated input/process log for diagnosis. No failed
+                # workspace is returned, cached or installed on a CycleResult.
                 raise
 
         def completed(outcome: ReviewOutcome) -> None:

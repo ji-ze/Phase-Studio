@@ -32,7 +32,7 @@ When cycle count decreases, an existing later start value remains intact rather 
 
 ## Scientific terminology and wavelength
 
-Without verified genuine uncertainties, the section is **Map-supported intensity correction (experimental)**, with a no-σ-filter checkbox and explicit threshold-zero explanation. With genuine uncertainties, existing weak-reflection wording, measured F/σ(F) or I/σ(I) gate and completion controls remain. Powder controls depend on parsed FWHM capability, not filenames. FWHM is explicitly **peak width in degrees 2θ**, not σ(I).
+Without verified genuine uncertainties, the section is **Map-supported intensity correction (experimental)**, with a no-σ-filter checkbox and explicit threshold-zero explanation. With genuine uncertainties, existing weak-reflection wording, I/σ(I) gate (measured for intensity inputs; estimated as F/[2σ(F)] for amplitudes, a first-order approximation updated in 2.0.6) and completion controls remain. Powder controls depend on parsed FWHM capability, not filenames. FWHM is explicitly **peak width in degrees 2θ**, not σ(I).
 
 Automatic wavelength continues to use the existing resolver: manual entry, matching Jana .m90, .inflip metadata, then reference CIF. The resolved value and source are displayed when automatic repartitioning is enabled. Missing wavelength produces an input requirement and blocks invalid repartitioning through existing validation; no radiation value is guessed. The manual editor now retains eight decimal places, including 1.541866 Å, while zero still means Automatic. The screenshot wavelength comes from a matching **synthetic** .m90 fixture; it is not a claim of live ochlor execution.
 

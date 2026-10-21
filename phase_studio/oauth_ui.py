@@ -56,7 +56,7 @@ class ReauthorizationBridge(QObject):
 
     def _cancel(self, request):
         dialog = request.get("dialog")
-        if dialog is not None:
+        if dialog is not None and request.get('owns_dialog', False):
             dialog.reject()
 
     def _show(self, request):
@@ -64,12 +64,27 @@ class ReauthorizationBridge(QObject):
             request["event"].set()
             return
         from phase_studio.sharped_access import SharpEDAccessDialog
+        active = getattr(self.store, '_active_access_dialog', None)
+        if active is not None:
+            request['dialog'] = active
+            def share_result(_result):
+                if not request['cancelled'] and active.selected_key and self.store.is_oauth(active.selected_key):
+                    request['credential'] = self.store._oauth
+                request['event'].set()
+                request['dialog'] = None
+            active.finished.connect(share_result)
+            return
         dialog = SharpEDAccessDialog(QApplication.activeWindow(), store=self.store)
+        self.store._active_access_dialog = dialog
         request["dialog"] = dialog
+        request['owns_dialog'] = True
         from PySide6.QtCore import QTimer
         dialog.show_feedback("Your SharpED connection needs to be renewed. Continue with Jana2020 sign-in.")
         QTimer.singleShot(0, dialog, dialog._start_oauth)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            self.store._active_access_dialog = None
         if not request["cancelled"] and dialog.selected_key and self.store.is_oauth(dialog.selected_key):
             request["credential"] = self.store._oauth
         request["event"].set()

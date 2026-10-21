@@ -1,7 +1,8 @@
-"""Explicit offline frozen-package diagnostics; never launches science or login.
+"""Explicit frozen-package diagnostics; no login or remote scientific jobs.
 
 This path is entered only with --packaging-acceptance and a caller-selected
 output directory. All settings/credentials are isolated for the diagnostic run.
+An additional opt-in saved-map check exercises local native EDMA only.
 """
 import json,os,time,hashlib
 from pathlib import Path
@@ -10,6 +11,9 @@ from unittest.mock import patch
 
 
 def run(directory):
+    if os.environ.get('PHASE_STUDIO_EDMA_ACCEPTANCE_INPUT'):
+        from .edma_acceptance import run_saved_map_check
+        return run_saved_map_check(directory, os.environ['PHASE_STUDIO_EDMA_ACCEPTANCE_INPUT'])
     directory=Path(directory).absolute();directory.mkdir(parents=True,exist_ok=True)
     responsive=os.environ.get('PHASE_STUDIO_RESPONSIVE_ACCEPTANCE')=='1'
     started=time.perf_counter();report={'offline':True,'scientific_run':False,'real_jana':False,'controlled_fixtures':True}
@@ -124,6 +128,7 @@ def run(directory):
                     patch.object(a.IterativeSuperflipPipelineQtGUI,'save_settings',lambda self:None),\
                     patch.object(a.IterativeSuperflipPipelineQtGUI,'refresh_sharped_models',lambda self:None):
                 backend=a.IterativeSuperflipPipelineQtGUI();backend.timer.stop()
+                _check_feedback_significance(a, backend, wizard, report, directory, snap)
                 hkl=directory/'fixture.hkl'
                 hkl.write_text('\n'.join(f'{i%8-4} {i//8%8-4} {i//64+1} {10000 if i==343 else (i%50+1)/10} {0.05+i%7*.001}' for i in range(344)) if responsive else
                                '\n'.join(f'{h} {k} 1 {h*k+.125} .0527' for h in range(1,8) for k in range(1,7)))
@@ -211,3 +216,72 @@ def run(directory):
         settle()
         if screen_patch is not None:screen_patch.stop()
     return 0 if report.get('ok') else 1
+
+
+def _check_feedback_significance(a, backend, wizard, report, directory, snap):
+    """Frozen UI + actual correction gate, controlled predictions and no network."""
+    import gemmi
+    import math
+    backend.inputs['map_feedback_intensity_enabled'].setChecked(True)
+    control = backend.inputs['map_feedback_intensity_max_i_over_sigma']
+    assert backend.input_labels['map_feedback_intensity_max_i_over_sigma'].text() == 'I/σ(I) limit'
+    assert 'I/σ(I) ≈ F/[2σ(F)]' in control.toolTip()
+    for index in range(backend.basic_tabs.count()):
+        if 'map feedback' in backend.basic_tabs.tabText(index).casefold():
+            backend.basic_tabs.setCurrentIndex(index)
+    backend.category_tabs.setCurrentIndex(0)
+    backend.resize(1100, 800)
+    backend.show()
+    predictions = {(1,0,0):(1.,0.), (2,0,0):(9.,0.), (3,0,0):(16.,0.)}
+    results = []
+    for mode in (a.REFLECTION_DATA_MODE_INTENSITY, a.REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+                 a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA):
+        amplitude = a.reflection_mode_is_amplitude(mode)
+        backend._set_widget_value_from_string(backend.inputs['reflection_data_mode'],a.format_reflection_data_mode(mode))
+        rows = [a.Reflection(i,0,0,f if amplitude else f*f,s if amplitude else 2*f*s,37.)
+                for i,(f,s) in enumerate(((2.,.5),(4.,1.),(6.,.5)),1)]
+        original = [(r.value,r.sigma,r.phase) for r in rows]
+        with patch.object(wizard,'_detect_reflection_data_mode',return_value=mode), \
+                patch.object(wizard,'input_reflections',rows,create=True):
+            wizard._sync_page3_for_data_type()
+            wizard.stack.setCurrentWidget(wizard.page3)
+            wizard.intensity_enabled_checkbox.setChecked(True)
+            wizard.intensity_damping_spin.setValue(.5)
+            assert wizard.intensity_form.labelForField(wizard.intensity_sigma_spin).text() == 'I/σ(I) limit'
+            assert 'F/[2σ(F)]' in wizard.intensity_sigma_spin.toolTip()
+            if amplitude:
+                assert 'first-order approximation' in wizard.intensity_note.text()
+            for threshold in (2.,2.5):
+                control.setValue(threshold)
+                wizard.intensity_sigma_spin.setValue(threshold)
+                for origin, limit in (('configuration',control.value()),('wizard',wizard.intensity_sigma_spin.value())):
+                    with patch.object(a,'xplor_fft_predictions',return_value=predictions):
+                        updated,_ = a.apply_map_feedback_to_reflections(rows,mode,directory/'controlled-map.xplor',
+                            gemmi.UnitCell(10,10,10,90,90,90),0,False,0,True,.5,limit,lambda s:None)
+                    expected = (4.,16.,36.) if threshold == 2. else (3.125,18.125,36.)
+                    assert all(math.isclose(r.value*r.value if amplitude else r.value,value,abs_tol=1e-10)
+                               for r,value in zip(updated,expected))
+                    assert [(r.sigma,r.phase) for r in updated] == [(r.sigma,r.phase) for r in rows]
+                    results.append(dict(format=mode,ui=origin,limit=limit,passed=True))
+            assert [(r.value,r.sigma,r.phase) for r in rows] == original
+            suffix = 'amplitude' if amplitude else 'intensity'
+            if not a.reflection_mode_has_phase(mode):
+                snap('12-map-significance-wizard-'+suffix,wizard.dialog)
+                snap('12-map-significance-configuration-'+suffix,backend)
+    # Sentinel bypass and width-only rejection use the same frozen authority.
+    zeros = [a.Reflection(1,0,0,0.,None),a.Reflection(2,0,0,4.,None)]
+    with patch.object(a,'xplor_fft_predictions',return_value=predictions):
+        updated,_ = a.apply_map_feedback_to_reflections(zeros,a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+            directory/'controlled-map.xplor',gemmi.UnitCell(10,10,10,90,90,90),0,False,0,True,.5,0,lambda s:None)
+    assert updated[0].value > 0
+    for mode in (a.REFLECTION_DATA_MODE_INTENSITY_FWHM,a.REFLECTION_DATA_MODE_AMPLITUDE_FWHM):
+        try:
+            a.apply_map_feedback_to_reflections(zeros,mode,directory/'controlled-map.xplor',
+                gemmi.UnitCell(10,10,10,90,90,90),0,False,0,True,.5,2,lambda s:None)
+        except ValueError as error:
+            assert 'FWHM' in str(error)
+        else:
+            raise AssertionError('FWHM was treated as an uncertainty')
+    report['map_feedback_significance'] = dict(checks=results,zero_bypasses_filter=True,
+        fwhm_rejected=True,observations_unchanged=True,shared_unit='I/σ(I)')
+    wizard.dialog.close()

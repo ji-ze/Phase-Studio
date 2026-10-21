@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, QRunnable, QThreadPool, Qt, QTimer, QUrl, Si
 from PySide6.QtGui import QAction, QIcon, QDesktopServices, QColor, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QScrollArea, QVBoxLayout, QWidget,
+    QScrollArea, QVBoxLayout, QWidget, QMessageBox,
 )
 
 from phase_studio import requirements as reqs
@@ -560,7 +560,12 @@ class SharpEDAccessDialog(QDialog):
                               "Your browser could not be opened. Please try again." if self._browser_failed else None)
             self._fit_dialog()
             return
-        self.store.activate_oauth(credential)
+        self.store.activate_oauth(credential, remember=self.store.persistent_available)
+        if self.store.oauth_storage_error:
+            logging.getLogger(__name__).warning("Jana2020 sign-in works for this session, but secure storage is unavailable.")
+            QMessageBox.warning(self, "Sign-in could not be remembered",
+                "You are signed in for this session. Windows secure storage could not save the sign-in; "
+                "the next calculation may ask you to sign in again.")
         verification = getattr(self.store, '_access_verification', {})
         verification[self.base_url] = (hashlib.sha256(credential.access_token.encode('utf8')).hexdigest(),'Connected')
         self.store._access_verification = verification
@@ -688,10 +693,22 @@ class SharpEDAccessDialog(QDialog):
 
 def show_sharped_access_dialog(parent, status, configured_value="", **kwargs) -> Optional[str]:
     store = kwargs.get("store") or credential_store
+    from phase_studio.oauth_ui import install_reauthorization
+    install_reauthorization(store)
     base_url = kwargs.get("base_url", DEFAULT_SERVER_URL)
     if (store.authentication_method(base_url) == "oauth" and store._oauth.usable()
             and (status is None or status.state == reqs.RequirementState.TOKEN_MISSING)):
         return store.get(base_url)
+    active = getattr(store, '_active_access_dialog', None)
+    if active is not None:
+        active.raise_()
+        active.activateWindow()
+        return None  # The owning request resumes when its single dialog completes.
     dialog = SharpEDAccessDialog(parent, status, configured_value, **kwargs)
-    dialog.exec()
-    return dialog.selected_key
+    store._active_access_dialog = dialog
+    try:
+        dialog.exec()
+        return dialog.selected_key
+    finally:
+        store._active_access_dialog = None
+        dialog.deleteLater()

@@ -2,6 +2,11 @@
 
 ## 2.0.6 — release candidate, not yet published
 
+- Repair repeated EDMA threshold review and long-path atomic result replacement.
+- Persist Jana2020 OAuth securely and automatically across application processes.
+- Standardize Map Feedback significance to I/σ(I), with explicit amplitude
+  approximation, unchanged zero-limit behavior and preserved saved settings.
+
 - Correct EDMA density-column interpretation and preserve Jana peak protocol;
   stop interpreting peak density as atomic displacement.
 - Add scientific export provenance and truthful site/connectivity presentation.

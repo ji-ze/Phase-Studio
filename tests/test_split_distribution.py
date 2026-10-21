@@ -315,6 +315,18 @@ class SplitDistributionTests(unittest.TestCase):
                 for node in ast.parse(text).body:
                     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         continue
+                    if filename == "app.py" and node.name == "_copy_verified_handoff_artifact" and text == current:
+                        # Only shorten the atomic temporary basename to avoid
+                        # MAX_PATH. Keep every byte/hash/fsync/replace guard pinned.
+                        assignments = [(i, statement) for i, statement in enumerate(node.body)
+                            if isinstance(statement, ast.Assign) and any(
+                                isinstance(target, ast.Name) and target.id == "temporary"
+                                for target in statement.targets)]
+                        self.assertEqual(len(assignments), 1)
+                        index, assignment = assignments[0]
+                        expected = ast.parse('temporary = target.with_name(f".{uuid.uuid4().hex[:16]}.tmp")').body[0]
+                        self.assertEqual(ast.dump(assignment), ast.dump(expected))
+                        node.body[index] = ast.parse('temporary = target.with_name(f".{target.name}.tmp-{os.getpid()}-{threading.get_ident()}")').body[0]
                     if filename == "app.py" and node.name == "element_color" and text == current:
                         # Permit only the opt-in visual palette prelude. Keep
                         # the entire original default color calculation pinned

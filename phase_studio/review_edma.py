@@ -128,6 +128,10 @@ class ReviewEDMAExecutor:
             stored_callback = self._callbacks.pop(outcome.request.generation, None)
             if self._latest_generation.get(key) == outcome.request.generation:
                 callback = stored_callback
+                if outcome.error is not None:
+                    # The displayed completed candidate remains authoritative.
+                    # A retry steps from that threshold, not the failed request.
+                    self._latest_threshold.pop(key, None)
             pending = self._pending.pop(key, None)
             if pending is not None:
                 self._start_locked(pending)

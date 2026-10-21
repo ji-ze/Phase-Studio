@@ -453,6 +453,8 @@ class SharpEDServerClient:
             with request_opener(req, timeout=self.timeout, context=self.ssl_context) as resp:
                 return resp.read()
         except HTTPError as exc:
+            if oauth and exc.code == 401:
+                credential_store.reject_oauth(bearer)
             if oauth and exc.code == 401 and method == "GET" and not _oauth_retry:
                 # GET status/download can resume. Never replay an upload POST.
                 exc.close()
