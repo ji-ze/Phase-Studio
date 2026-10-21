@@ -179,6 +179,10 @@ with tempfile.TemporaryDirectory() as tmp:
         assert w.model.currentText() == 'Manual model'
         w.primary_button.click()
         assert w.stack.currentWidget() is w.page3
+        # This geometry capture injects explicit synthetic modes below; clear
+        # any verified file-backed result so the production resolver remains
+        # authoritative in real workflows.
+        w.hkl_load_result = None
         w.detected_data_mode_holder['mode'] = engine.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
         w.input_reflections = [engine.Reflection(1, 0, 0, 10.0, 2.0)]
         w._sync_page3_for_data_type()
@@ -194,6 +198,7 @@ with tempfile.TemporaryDirectory() as tmp:
         measure(w, 'single-options-collapsed', rect)
         # A controlled parsed powder mode exercises the existing availability
         # renderer; no scientific data is converted or inferred by this fixture.
+        w.hkl_load_result = None
         w.detected_data_mode_holder['mode'] = engine.REFLECTION_DATA_MODE_INTENSITY_FWHM
         w._sync_page3_for_data_type()
         w.powder_enabled_checkbox.setChecked(False)

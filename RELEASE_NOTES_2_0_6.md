@@ -52,6 +52,13 @@ handoff does not silently recompute them. See the
   views while preserving diagnostic objects and established JSON/CSV exports.
 - Improve Wizard sizing, feedback layout and explanatory text; prevent mouse
   wheel scrolling from changing unfocused scientific parameter controls.
+- Use the verified embedded Jana HKL diagnostics result for Wizard Map Feedback
+  and the run configuration, so a stale legacy reflection-mode setting cannot
+  turn powder `I + FWHM` into single-crystal `I + sigma(I)`. FWHM remains a
+  peak width, sigma filtering is unavailable for it, and the existing
+  threshold-zero map-supported correction and powder repartitioning remain
+  available under their existing requirements. Ambiguous declared layouts fail
+  closed. Genuine intensity/amplitude uncertainties keep their existing gates.
 - Fix Qt arrow-overlay ownership during repeated dialog destruction/shutdown.
   Keep source, rendered, ASU and Jana site counts explicitly distinguished.
 

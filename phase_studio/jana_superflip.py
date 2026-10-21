@@ -1453,25 +1453,14 @@ class _JanaWorkflowWizard:
         self._adjust_dialog_size()
 
     def _detect_reflection_data_mode(self) -> str:
-        # The ACTUAL parsed reflection format (not filename/composition/space
-        # group) -- calls the same shared resolver app.py's own
-        # _resolve_configured_data_mode_for_ui() uses for its "Jana2020
-        # .inflip" input mode (configured mode AUTO, no separate HKL
-        # override -- the Wizard never has one), without needing a hidden
-        # backing window just to reach it.
-        if self.detected_data_mode_holder["mode"] is None:
-            from phase_studio.app import (
-                REFLECTION_DATA_MODE_AUTO,
-                normalize_reflection_data_mode,
-                resolve_reflection_data_mode_from_sources,
-            )
-            try:
-                self.detected_data_mode_holder["mode"] = resolve_reflection_data_mode_from_sources(
-                    Path(""), REFLECTION_DATA_MODE_AUTO, self.inflip_path
-                )
-            except Exception:
-                self.detected_data_mode_holder["mode"] = normalize_reflection_data_mode(REFLECTION_DATA_MODE_AUTO)
-        return self.detected_data_mode_holder["mode"]
+        """Use the completed, verified HKL load shared with Input summary."""
+        result = getattr(self, "hkl_load_result", None)
+        if result is not None and getattr(result, "format_verified", False):
+            return result.data_mode
+        mode = getattr(self, "detected_data_mode_holder", {}).get("mode")
+        if not mode:
+            return ""
+        return mode
 
     def _sync_page3_for_data_type(self) -> None:
         from phase_studio.app import (
@@ -1481,11 +1470,12 @@ class _JanaWorkflowWizard:
         )
         import math
         mode = self._detect_reflection_data_mode()
-        is_powder = reflection_mode_has_fwhm(mode)
+        verified = bool(mode)
+        is_powder = verified and reflection_mode_has_fwhm(mode)
         self.feedback_is_powder = is_powder
-        self.reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal")
-        self.reflection_format_value.setText(format_reflection_data_mode(mode) if mode else "Not yet determined")
-        self.feedback_has_uncertainty = not is_powder and any(
+        self.reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal" if verified else "Not verified")
+        self.reflection_format_value.setText(format_reflection_data_mode(mode) if verified else "Not yet determined")
+        self.feedback_has_uncertainty = verified and not is_powder and any(
             r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma > 0
             and math.isfinite(float(r.value))
             for r in getattr(self, "input_reflections", ())
@@ -1497,9 +1487,10 @@ class _JanaWorkflowWizard:
              "Valid measured uncertainties unavailable." if hasattr(self, "input_reflections") else
              "Uncertainty availability has not been verified; validate the incoming HKL data.")
         )
-        self.missing_group.setVisible(not is_powder)
+        self.missing_group.setVisible(verified and not is_powder)
         self.intensity_group.setVisible(True)
         self.powder_group.setVisible(is_powder)
+        self.intensity_sigma_spin.setEnabled(self.feedback_has_uncertainty)
         self.intensity_form.labelForField(self.intensity_sigma_spin).setText("I/σ(I) limit")
         self.intensity_note.setText(
             ("Positive limits use estimated I/σ(I) ≈ F/[2σ(F)]; this is a first-order approximation. "
@@ -1538,6 +1529,17 @@ class _JanaWorkflowWizard:
             return "Wait for the live SharpED model catalogue, or use Refresh models to retry."
         if self._current_workflow() != WORKFLOW_SUPERFLIP_ONLY and not self.model.currentText().strip():
             return "Select an available SharpED model before running."
+        if (
+            self.cycles.value() > 1
+            and any(box.isChecked() for box in (
+                self.missing_enabled_checkbox,
+                self.intensity_enabled_checkbox,
+                self.powder_enabled_checkbox,
+            ))
+            and (getattr(self, "hkl_load_result", None) is None
+                 or not getattr(self.hkl_load_result, "format_verified", False))
+        ):
+            return "Map Feedback is unavailable until the incoming HKL column format has been verified. Review Input summary / Validate HKL."
         # Map feedback only affects SUBSEQUENT cycles -- an enabled method
         # whose "Start after cycle" leaves no later cycle to apply to would
         # silently do nothing; block Run rather than accept a setting that
@@ -2123,8 +2125,12 @@ class _JanaWorkflowWizard:
                 "For powder input, indexed reflections need not be independently measured or resolved."
             )
             self.input_reflections = result.reflections
+            self.hkl_load_result = result
+            self.detected_data_mode_holder["mode"] = result.data_mode if result.format_verified else None
             if hasattr(self, "intensity_group"):
                 self._sync_page3_for_data_type()
+                if self.stack.currentWidget() is self.page3:
+                    self._refresh_page3_validation_message()
             self.format_value.setText(format_reflection_data_mode(result.data_mode))
             # Use the diagnostic authority's verified column semantics, never
             # a filename or AUTO fallback, to classify the measurement input.
@@ -2233,6 +2239,7 @@ class _JanaWorkflowWizard:
             # propagated once Qt has processed the posted LayoutRequest.
             QTimer.singleShot(0, refit)
 
+        self._refresh_input_summary_and_refit = refresh_input_summary_and_refit
         QTimer.singleShot(0, refresh_input_summary_and_refit)
 
         self.files_section, self.files_body = build_page1_section("Reference and initial model")
@@ -3689,6 +3696,7 @@ class _JanaWorkflowWizard:
         )
 
         self.detected_data_mode_holder: dict = {"mode": None}
+        self.hkl_load_result = None
 
 
 
@@ -3855,6 +3863,11 @@ class _JanaWorkflowWizard:
             self._adjust_dialog_size()
 
         def go_to_page3() -> None:
+            # Reuse a completed page-one load when available. If a large HKL
+            # parse is still in progress, refresh_input_summary() keeps the
+            # unknown state fail-closed until its existing worker completes.
+            if getattr(self, "hkl_load_result", None) is None:
+                self._refresh_input_summary_and_refit()
             self.content_layout.setContentsMargins(14, 10, 14, 10)
             self._sync_page3_for_data_type()
             self._refresh_page3_validation_message()
@@ -3994,6 +4007,8 @@ class _JanaWorkflowWizard:
                 # objective state; users choose the exact family/cycle later.
                 autosolve_option="A" if action == "autosolve" else "",
             )
+
+        self._build_options = build_options
 
         def attempt_run() -> None:
             self._preflight_sharped_default_model = ""

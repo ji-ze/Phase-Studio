@@ -42,8 +42,8 @@ if source:
         powder.with_suffix('.m90').write_bytes(original.with_suffix('.m90').read_bytes())
 else:
     powder=fixture('powder-fixture.inflip','intensity fwhm','1 0 0 10 .1\n0 1 0 20 .1')
-intensity=fixture('measured-intensity-fixture.inflip','intensity','1 0 0 10 2\n0 1 0 20 5')
-amplitude=fixture('measured-amplitude-fixture.inflip','amplitude','1 0 0 4 1\n0 1 0 6 2')
+intensity=fixture('measured-intensity-fixture.inflip','intensity dummy','1 0 0 10 2\n0 1 0 20 5')
+amplitude=fixture('measured-amplitude-fixture.inflip','amplitude dummy','1 0 0 4 1\n0 1 0 6 2')
 out=ROOT/'build/map-feedback-2.0.3'/('scale-'+os.environ.get('QT_SCALE_FACTOR','1'))
 out.mkdir(parents=True,exist_ok=True)
 def wizard(path):
@@ -58,6 +58,16 @@ def wizard(path):
     w.cycles.setValue(3)
     w.model_policy_error=''
     w._go_to_map_feedback()
+    # Page-one HKL diagnostics are loaded asynchronously; wait for the same
+    # authoritative result the visible user workflow consumes before capture.
+    import time
+    deadline=time.time()+30
+    while getattr(w,'hkl_load_result',None) is None and time.time()<deadline:
+        app.processEvents()
+        time.sleep(.01)
+    assert w.hkl_load_result is not None, f'HKL diagnostic load did not finish: {path.name}'
+    assert w.hkl_load_result.format_verified, f'HKL format is not verified: {path.name}'
+    w._sync_page3_for_data_type()
     w._adjust_dialog_size=lambda:None
     return w
 def capture(w,name,height=820):

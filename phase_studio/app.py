@@ -4539,6 +4539,95 @@ def embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Op
         return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
     return None
 
+
+def _verified_embedded_reflection_data_mode_from_inflip(inflip_path: Optional[Path]) -> Optional[str]:
+    if inflip_path is None or not Path(inflip_path).is_file():
+        return None
+    saw_dataitemwidths = False
+    saw_dataformat_amplitude = False
+    saw_dataformat_intensity = False
+    saw_dataformat_phase = False
+    saw_dataformat_fwhm = False
+    saw_dataformat_dummy = False
+    sample_widths: List[int] = []
+    exact_data_width: Optional[int] = None
+    declared_items: Optional[Tuple[str, ...]] = None
+    dataitemwidth_count = 0
+    in_block = False
+    try:
+        for raw in Path(inflip_path).read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = split_inflip_line(raw)
+            key = parts[0].strip().lower() if parts else ""
+            if key == "dataitemwidths":
+                saw_dataitemwidths = True
+                widths = parts[1:]
+                if not widths or any(not token.strip().isdigit() for token in widths):
+                    return None
+                dataitemwidth_count = len(widths)
+            elif key == "dataformat":
+                declared = tuple(p.strip().lower() for p in parts[1:])
+                items = set(declared)
+                if not items or ({"intensity", "amplitude"} <= items):
+                    return None
+                if ("fwhm" in items) and ("phase" in items or "dummy" in items or "group" in items):
+                    return None
+                if ("phase" in items) and ("dummy" in items or "fwhm" in items or "group" in items):
+                    return None
+                if len(items) != len(declared):
+                    return None
+                if declared_items is not None and declared_items != declared:
+                    return None
+                declared_items = declared
+                saw_dataformat_intensity = "intensity" in items
+                saw_dataformat_amplitude = "amplitude" in items
+                saw_dataformat_phase = "phase" in items
+                saw_dataformat_fwhm = "fwhm" in items
+                saw_dataformat_dummy = "dummy" in items
+                exact_data_width = 3 + len(items)
+            if key == "fbegin":
+                in_block = True
+                continue
+            if in_block and key == "endf":
+                break
+            if in_block and raw.strip() and not raw.lstrip().startswith(COMMENT_PREFIXES):
+                fields = raw.split()
+                if len(fields) < 4:
+                    return None
+                sample_widths.append(len(fields))
+                # Jana's legacy dataformat intensity/amplitude without an
+                # auxiliary token is still an accepted declaration; its
+                # positional second data item can be a width/group in older
+                # projects. The powder diagnostics validator applies the
+                # stricter supported-layout check before enabling that path.
+                if exact_data_width is not None and len(fields) < exact_data_width:
+                    return None
+                if saw_dataformat_fwhm and len(fields) != exact_data_width:
+                    return None
+    except Exception:
+        return None
+    if not sample_widths:
+        return None
+    if saw_dataformat_phase:
+        return REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA if saw_dataformat_intensity else REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+    if saw_dataformat_fwhm:
+        return REFLECTION_DATA_MODE_INTENSITY_FWHM if saw_dataformat_intensity else REFLECTION_DATA_MODE_AMPLITUDE_FWHM
+    if saw_dataformat_dummy:
+        if saw_dataformat_intensity:
+            return REFLECTION_DATA_MODE_INTENSITY
+        if saw_dataformat_amplitude:
+            return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
+    if saw_dataformat_intensity:
+        return REFLECTION_DATA_MODE_INTENSITY
+    if saw_dataformat_amplitude:
+        return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
+    # Jana's established dataitemwidths-only form declares three fixed-width
+    # reflection values (F, phase, sigma) after h,k,l. Accept it only when every
+    # record has exactly that six-field shape; a merely populated sixth column
+    # without this declaration is never treated as sigma.
+    if saw_dataitemwidths and dataitemwidth_count == 3 and set(sample_widths) == {6}:
+        return REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA
+    return None
+
 def resolve_reflection_data_mode_from_sources(
     hkl_path: Path,
     configured_mode: str,
@@ -4599,6 +4688,21 @@ def build_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResult:
 def _build_uncached_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResult:
     from phase_studio.hkl_diagnostics import read_diagnostic_reflections, build_diagnostics
     hkl_path, data_mode, cell, sg, hm, source_note = resolve_hkl_analysis_inputs(request)
+    embedded = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
+    powder_context = None
+    if embedded:
+        from phase_studio.powder_diagnostics import standard_powder_context
+        powder_context = standard_powder_context(Path(request.jana_text))
+        if powder_context.get('unsupported_layout'):
+            raise ValueError(powder_context['error'])
+    verified_mode = _verified_embedded_reflection_data_mode_from_inflip(Path(request.jana_text)) if embedded else None
+    if embedded:
+        source = Path(request.jana_text).read_text(encoding="utf-8", errors="replace").splitlines()
+        declared = any(inflip_first_token(line) == "dataformat" for line in source)
+        if declared and verified_mode is None:
+            raise ValueError("The embedded Jana HKL columns could not be verified from dataformat/dataitemwidths.")
+        if verified_mode is not None:
+            data_mode = verified_mode
     value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
     reflections = list(read_diagnostic_reflections(hkl_path, data_mode)[0])
     unique = merge_duplicate_reflections(reflections)
@@ -4615,15 +4719,12 @@ def _build_uncached_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResul
         reflections=reflections,
         unique_reflections=unique,
     )
-    # An AUTO filename/default guess is not evidence that column 5 is sigma.
-    # Embedded Jana columns and explicitly selected external formats are declared.
-    embedded = request.mode == INPUT_MODE_INFLIP or (request.mode == INPUT_MODE_INFLIP_OVERRIDES and not request.hkl_text)
-    result.format_verified = (embedded and bool(embedded_reflection_data_mode_from_inflip(Path(request.jana_text)))) or normalize_reflection_data_mode(request.configured_mode) != REFLECTION_DATA_MODE_AUTO
+    # A format is verified only when a supported embedded dataformat exactly
+    # matches every reflection record, or an external layout was explicitly
+    # selected. An AUTO filename/default guess is never measurement evidence.
+    result.format_verified = (embedded and data_mode == verified_mode) or normalize_reflection_data_mode(request.configured_mode) != REFLECTION_DATA_MODE_AUTO
     if embedded:
-        from phase_studio.powder_diagnostics import standard_powder_context
-        result.powder_diagnostic_context = standard_powder_context(Path(request.jana_text))
-        if result.powder_diagnostic_context.get('unsupported_layout'):
-            raise ValueError(result.powder_diagnostic_context['error'])
+        result.powder_diagnostic_context = powder_context
     result.diagnostics = build_diagnostics(result)
     return result
 
@@ -15092,6 +15193,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         effective_configured_mode = (
             REFLECTION_DATA_MODE_AUTO if mode == INPUT_MODE_INFLIP else cfg.reflection_data_mode
         )
+        embedded_input = mode == INPUT_MODE_INFLIP or (
+            mode == INPUT_MODE_INFLIP_OVERRIDES and uses_embedded_hkl(cfg.hkl)
+        )
+        if embedded_input and cfg.jana_inflip is not None:
+            verified_mode = _verified_embedded_reflection_data_mode_from_inflip(cfg.jana_inflip)
+            if verified_mode is not None:
+                return verified_mode
+            correction_requested = any(bool(getattr(cfg, name, False)) for name in (
+                "map_feedback_missing_enabled", "map_feedback_intensity_enabled", "redistribute_overlaps",
+            ))
+            try:
+                declarations = cfg.jana_inflip.read_text(encoding="utf-8", errors="replace").splitlines()
+                if correction_requested or any(inflip_first_token(line) in {"dataformat", "dataitemwidths"} for line in declarations):
+                    raise ValueError("The embedded Jana HKL columns could not be verified from dataformat/dataitemwidths.")
+            except OSError:
+                pass
         return resolve_reflection_data_mode_from_sources(cfg.hkl, effective_configured_mode, cfg.jana_inflip)
 
     def _resolve_configured_data_mode_for_ui(self) -> str:
@@ -15109,6 +15226,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         inflip_text = self._path_value("jana_inflip").strip() if "jana_inflip" in self.inputs else ""
         inflip_path = active_jana_inflip(mode, inflip_text)
         try:
+            embedded_input = mode == INPUT_MODE_INFLIP or (
+                mode == INPUT_MODE_INFLIP_OVERRIDES and uses_embedded_hkl(Path(hkl_text))
+            )
+            if embedded_input and inflip_path is not None:
+                verified_mode = _verified_embedded_reflection_data_mode_from_inflip(inflip_path)
+                if verified_mode is not None:
+                    return verified_mode
             return resolve_reflection_data_mode_from_sources(Path(hkl_text), configured, inflip_path)
         except Exception:
             return normalize_reflection_data_mode(configured)
