@@ -48,7 +48,10 @@ jobs:
           $version = (python -c "from phase_studio.version import VERSION; print(VERSION)").Trim()
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Stable version required.' }
           git show-ref --verify --quiet "refs/tags/v$version"
-          if ($LASTEXITCODE -eq 0) { throw 'Version tag already exists. Never overwrite it.' }
+          $tagLookupExit = $LASTEXITCODE
+          if ($tagLookupExit -eq 0) { throw 'Version tag already exists. Never overwrite it.' }
+          if ($tagLookupExit -ne 1) { throw 'Version tag lookup failed. Refuse release.' }
+          $global:LASTEXITCODE = 0
           "version=$version" >> $env:GITHUB_OUTPUT
           "commit=$commit" >> $env:GITHUB_OUTPUT
       - run: python -m pip install -r packaging/release-requirements-2.0.2.txt
