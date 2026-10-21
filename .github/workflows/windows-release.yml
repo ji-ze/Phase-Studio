@@ -65,6 +65,14 @@ jobs:
           $env:TMP = $testTemp
           python -m pytest -q -p no:cacheprovider
           if ($LASTEXITCODE) { throw 'Regression suite failed.' }
+          $repoRoot = (Get-Location).Path
+          if ($env:PYTHONPATH) {
+            $env:PYTHONPATH = $repoRoot + [IO.Path]::PathSeparator + $env:PYTHONPATH
+          } else {
+            $env:PYTHONPATH = $repoRoot
+          }
+          python -c "import phase_studio; print(phase_studio.__file__)"
+          if ($LASTEXITCODE) { throw 'Phase Studio import verification failed.' }
           foreach ($test in @('test_scientific_core.py','test_jana_completion.py','test_workflow_states.py','test_result_selection_viewer.py','test_review_edma.py','test_fullscreen_viewer.py')) {
             python "tests/$test"
             if ($LASTEXITCODE) { throw "Acceptance failed: $test" }
