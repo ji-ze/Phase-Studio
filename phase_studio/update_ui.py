@@ -7,11 +7,11 @@ import weakref
 import logging
 from datetime import datetime, timezone
 
-from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer, QSettings, QLockFile, QStandardPaths, QPoint
+from PySide6.QtCore import QObject, Signal, Slot, Qt, QTimer, QSettings, QLockFile, QStandardPaths, QPoint, QSize
 from PySide6.QtGui import QDesktopServices, QAction
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import (QApplication, QDialog, QVBoxLayout, QHBoxLayout, QLabel,
-                              QPushButton, QCheckBox, QToolButton, QMenu)
+                              QPushButton, QCheckBox, QToolButton, QMenu, QWidget)
 
 from .update_checker import (Release, VERSION, RELEASES_URL, CHECK_INTERVAL, parse_version,
                              is_newer, fetch_latest_release, fetch_release_check, CheckResult,
@@ -131,6 +131,7 @@ class UpdateNotice(QDialog):
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.release = release
+        self.update_mode = mode
         self.browser = browser or QDesktopServices.openUrl
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -150,7 +151,7 @@ class UpdateNotice(QDialog):
         self.message.setWordWrap(True)
         layout.addWidget(self.message)
         if release and mode == 'jana':
-            clarification = QLabel('The version integrated into Jana2020 may be updated through a Jana2020 software release.')
+            clarification = QLabel('The Jana2020 integration package updates Phase Studio only. Direct Jana sessions must be closed and reopened from Jana2020; scientific handoff files are not replaced.')
             clarification.setWordWrap(True)
             layout.addWidget(clarification)
         buttons = QHBoxLayout()
@@ -159,11 +160,25 @@ class UpdateNotice(QDialog):
         self.later_button.clicked.connect(self.reject)
         buttons.addWidget(self.later_button)
         self.view_button = None
+        self.update_button = None
         if release:
             self.view_button = QPushButton('View release on GitHub')
             self.view_button.setObjectName('primaryButton')
             self.view_button.clicked.connect(self._open_release)
             buttons.addWidget(self.view_button)
+            from .update_runtime import public_installation_status
+            allowed,reason=public_installation_status()
+            self.update_button=QPushButton('Update now')
+            self.update_button.setEnabled(allowed)
+            self.update_button.setToolTip(reason or 'Download, verify and review this update before installation.')
+            self.update_button.clicked.connect(self._install_update)
+            if allowed:
+                self.view_button.setObjectName('')
+                self.update_button.setObjectName('primaryButton')
+            buttons.addWidget(self.update_button)
+            if reason:
+                installation_note=QLabel(reason);installation_note.setWordWrap(True)
+                layout.addWidget(installation_note)
         layout.addLayout(buttons)
         self._fit()
         QTimer.singleShot(0, self, self._fit)
@@ -179,6 +194,16 @@ class UpdateNotice(QDialog):
     def _open_release(self):
         self.browser(QUrl(validated_release_url(self.release.url,version=self.release.version)))
         self.accept()
+
+    def _install_update(self):
+        from .update_install_ui import UpdateInstallDialog
+        app=QApplication.instance()
+        previous=getattr(app,'_phase_studio_install_dialog',None)
+        if previous is not None and previous.isVisible():previous.raise_();previous.activateWindow();return
+        dialog=UpdateInstallDialog(self.parentWidget(),self.release,jana=(getattr(self,'update_mode','standalone')=='jana'))
+        app._phase_studio_install_dialog=dialog
+        dialog.finished.connect(lambda _result:setattr(app,'_phase_studio_install_dialog',None))
+        dialog.show();self.accept()
 
 
 class UpdateService(QObject):
@@ -219,6 +244,8 @@ class UpdateService(QObject):
         return 'jana' if getattr(window, 'autosolve_is_jana', lambda: False)() else 'standalone'
 
     def attach(self, window, mode=None, automatic=True):
+        from .update_health import visible
+        QTimer.singleShot(500,window,lambda:visible(window))
         if not any(ref() is window for ref, _mode in self._windows):
             self._windows.append((weakref.ref(window), mode))
         if automatic:
@@ -282,6 +309,7 @@ class UpdateService(QObject):
         window = self._visible(reference)
         release=result.release
         self.known_release = release if not result.error and release is not None and is_newer(release) else None
+        self._verified_release_at = self.clock() if self.known_release is not None else None
         self.release_changed.emit(self.known_release)
         if not result.error:
             self.state.cache(release, self.clock())
@@ -352,11 +380,31 @@ class _VersionMenu(QMenu):
 
 
 class _VersionButton(QToolButton):
+    def __init__(self, window, service):
+        super().__init__(window)
+        self._service = service
+        self._indicator_expiry = QTimer(self)
+        self._indicator_expiry.setSingleShot(True)
+        self._indicator_expiry.timeout.connect(lambda: self.show_release(None))
+
     @Slot(object)
     def show_release(self, release):
-        self.update_available = release is not None
-        self.setToolTip('Version and updates' + (f' · Version {release.label} available' if release else ''))
+        verified_at = getattr(self._service, '_verified_release_at', None)
+        age = self._service.clock() - verified_at if verified_at is not None else CHECK_INTERVAL
+        self.update_available = release is not None and is_newer(release) and 0 <= age < CHECK_INTERVAL
+        self._indicator_expiry.stop()
+        if self.update_available:
+            self._indicator_expiry.start(max(1, int((CHECK_INTERVAL - age) * 1000)))
+        self.setToolTip('Updates and application information')
+        self.setAccessibleDescription(f'Version {release.label} available' if self.update_available else '')
         self.update()
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            event.accept()
+            self.showMenu()
+            return
+        super().keyPressEvent(event)
 
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -366,7 +414,7 @@ class _VersionButton(QToolButton):
             painter.setRenderHint(QPainter.Antialiasing)
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor('#2468cb'))
-            painter.drawEllipse(4, 4, 7, 7)
+            painter.drawEllipse(self.width() - 7, 3, 4, 4)
             painter.end()
 
 
@@ -392,13 +440,25 @@ def add_update_controls(layout, window):
 
 def wizard_update_menu(window, *, mode='jana', automatic=True):
     service = update_service()
-    button = _VersionButton(window)
+    button = _VersionButton(window, service)
     button.show_release(service.known_release)
     service.release_changed.connect(button.show_release)
-    button.setText('Updates')
+    from .ui_branding import apply_established_icon
+    apply_established_icon(button, 'application_menu', size=16)
+    button.setText('')
+    button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+    button.setIconSize(QSize(16, 16))
+    button.setArrowType(Qt.NoArrow)
+    button.setAccessibleName('Phase Studio menu')
+    button.setFocusPolicy(Qt.StrongFocus)
+    button.setCursor(Qt.PointingHandCursor)
     button.setPopupMode(QToolButton.InstantPopup)
-    button.setMinimumHeight(36)
-    button.setMinimumWidth(button.sizeHint().width() + 20)
+    button.setFixedSize(30, 30)
+    button.setStyleSheet('QToolButton { background:transparent; border:2px solid transparent; padding:0; }'
+        'QToolButton:hover { background:#eaf2ff; }'
+        'QToolButton:focus { border-color:#2264b8; }'
+        'QToolButton:pressed { background:#dceaf8; }'
+        'QToolButton::menu-indicator { image:none; width:0px; height:0px; }')
     menu = _VersionMenu(button)
     check = menu.addAction('Check for updates')
     check.triggered.connect(lambda: service.check(window, mode=mode, manual=True))
@@ -414,3 +474,34 @@ def wizard_update_menu(window, *, mode='jana', automatic=True):
     button.setMenu(menu)
     service.attach(window, mode=mode,automatic=automatic)
     return button
+
+
+def install_application_header_menu(header, window, *, about, mode='jana', automatic=True):
+    """Replace only an interactive header badge; other branded dialogs stay unchanged."""
+    badge = header.findChild(QLabel, 'versionBadge')
+    if badge is None:
+        raise ValueError('Application header has no version badge slot')
+    controls = QWidget(header)
+    controls.setObjectName('applicationHeaderControls')
+    controls.setStyleSheet('QWidget#applicationHeaderControls { background:transparent; border:0; }')
+    row = QHBoxLayout(controls)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(8)
+    row.setAlignment(Qt.AlignVCenter)
+    label = QLabel('v' + VERSION)
+    label.setObjectName('applicationVersionLabel')
+    label.setFont(QApplication.font())
+    label.setStyleSheet('color:#52658b; background:transparent; border:0; padding:0; font-size:13px; font-weight:400;')
+    label.setFocusPolicy(Qt.NoFocus)
+    label.setTextInteractionFlags(Qt.NoTextInteraction)
+    label.setAccessibleName('Phase Studio version ' + VERSION)
+    button = wizard_update_menu(window, mode=mode, automatic=automatic)
+    button.setObjectName('applicationMenuButton')
+    button.menu().addSeparator()
+    button.menu().addAction('About Phase Studio').triggered.connect(about)
+    row.addWidget(label, 0, Qt.AlignVCenter)
+    row.addWidget(button, 0, Qt.AlignVCenter)
+    badge.parentWidget().layout().replaceWidget(badge, controls)
+    badge.hide()
+    controls.version_label, controls.menu_button = label, button
+    return controls

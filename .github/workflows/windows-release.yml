@@ -1,0 +1,161 @@
+name: Verified Windows release
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Reviewed source commit SHA (40 hexadecimal characters)
+        required: true
+        type: string
+      publish:
+        description: Publish after protected signing and publication approvals
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: phase-studio-windows-release
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      commit: ${{ steps.identity.outputs.commit }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PHASE_STUDIO_STARTUP_PROBE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate reviewed source and unused version
+        id: identity
+        shell: pwsh
+        env:
+          REQUESTED_SHA: ${{ inputs.source_ref }}
+        run: |
+          if ($env:REQUESTED_SHA -notmatch '^[a-fA-F0-9]{40}$') { throw 'A reviewed full commit SHA is required.' }
+          $commit = (git rev-parse HEAD).Trim()
+          if ($commit -ne $env:REQUESTED_SHA) { throw 'Checkout identity differs.' }
+          git merge-base --is-ancestor $commit origin/main
+          if ($LASTEXITCODE) { throw 'Stable releases must use a reviewed commit integrated into main.' }
+          $version = (python -c "from phase_studio.version import VERSION; print(VERSION)").Trim()
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Stable version required.' }
+          git show-ref --verify --quiet "refs/tags/v$version"
+          if ($LASTEXITCODE -eq 0) { throw 'Version tag already exists. Never overwrite it.' }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "commit=$commit" >> $env:GITHUB_OUTPUT
+      - run: python -m pip install -r packaging/release-requirements-2.0.2.txt
+      - name: Regressions and scientific authorities
+        shell: pwsh
+        run: |
+          python -m pytest -q -p no:cacheprovider
+          if ($LASTEXITCODE) { throw 'Regression suite failed.' }
+          foreach ($test in @('test_scientific_core.py','test_jana_completion.py','test_workflow_states.py','test_result_selection_viewer.py','test_review_edma.py','test_fullscreen_viewer.py')) {
+            python "tests/$test"
+            if ($LASTEXITCODE) { throw "Acceptance failed: $test" }
+          }
+          git diff --exit-code
+          if ($LASTEXITCODE) { throw 'Tests modified tracked source.' }
+      - name: Build both authoritative profiles
+        shell: pwsh
+        run: ./packaging/build_windows.ps1 -Target All
+      - name: Frozen verification and signed-contract preparation
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.identity.outputs.version }}
+        run: |
+          python packaging/tools/verify_update_build.py --dist dist --version $env:RELEASE_VERSION
+          if ($LASTEXITCODE) { throw 'Frozen verification failed.' }
+          $legacy = "dist/release/RELEASE_NOTES_$($env:RELEASE_VERSION.Replace('.','_')).md"
+          Move-Item -LiteralPath $legacy -Destination "dist/release/RELEASE_NOTES_$env:RELEASE_VERSION.md"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-windows-packages
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+  sign:
+    needs: build
+    runs-on: windows-latest
+    environment: phase-studio-release-signing
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography==50.0.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-windows-packages
+          path: release
+      - name: Sign using the previously provisioned key
+        env:
+          PHASE_STUDIO_UPDATE_SIGNING_KEY: ${{ secrets.PHASE_STUDIO_UPDATE_SIGNING_KEY }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: python packaging/tools/update_signing.py sign --directory release --version $env:RELEASE_VERSION
+      - uses: actions/upload-artifact@v4
+        with:
+          name: authenticated-windows-release
+          path: release/
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    if: inputs.publish
+    needs: [build, sign]
+    runs-on: windows-latest
+    environment: phase-studio-release-publication
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install cryptography==50.0.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: authenticated-windows-release
+          path: release
+      - name: Validate, upload draft, verify downloads, then publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          if ($env:GITHUB_REPOSITORY -ne 'ji-ze/Phase-Studio') { throw 'Wrong publishing repository.' }
+          python packaging/tools/update_signing.py verify --directory release --version $env:RELEASE_VERSION
+          if ($LASTEXITCODE) { throw 'Signed asset contract failed.' }
+          $tag = "v$env:RELEASE_VERSION"
+          $existing = gh api "repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" 2>$null
+          if ($LASTEXITCODE -eq 0) { throw 'Release already exists. Refuse replacement.' }
+          gh api --method POST "repos/$env:GITHUB_REPOSITORY/git/refs" -f "ref=refs/tags/$tag" -f "sha=$env:RELEASE_COMMIT"
+          if ($LASTEXITCODE) { throw 'Tag creation failed or tag already exists. No existing tag is changed.' }
+          gh release create $tag --verify-tag --draft --title "Phase Studio $env:RELEASE_VERSION" --notes-file "release/RELEASE_NOTES_$env:RELEASE_VERSION.md"
+          if ($LASTEXITCODE) { throw 'Draft creation failed.' }
+          $files = @(Get-ChildItem -LiteralPath release -File | ForEach-Object FullName)
+          gh release upload $tag @files
+          if ($LASTEXITCODE) { throw 'Upload failed; release stays draft.' }
+          gh release download $tag --dir verified-download
+          if ($LASTEXITCODE) { throw 'Download verification failed; release stays draft.' }
+          python packaging/tools/update_signing.py verify --directory verified-download --version $env:RELEASE_VERSION
+          if ($LASTEXITCODE) { throw 'Uploaded assets differ; release stays draft.' }
+          gh release edit $tag --draft=false
+          if ($LASTEXITCODE) { throw 'Publication failed.' }

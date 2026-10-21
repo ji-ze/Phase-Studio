@@ -32,13 +32,14 @@ results_log = []
 # The approved inventory, including the explicitly requested 2.0.3 vector
 # workflow family, pinned independently of the production module.
 APPROVED_ICON_SOURCES = {
+    "application_menu",  # Explicitly requested header ellipsis, not a workflow icon.
     "workflow_superflip", "workflow_sharped", "workflow_autosolve", "workflow_settings",
     "phase_studio_mark", "external_link", "qt_warning", "qt_information",
     # Qt standard (platform-shipped) monochrome glyphs for the four primary
     # Wizard tiles -- approved explicitly; never custom artwork.
     "qt_media_play", "qt_media_seek_forward", "qt_file_dialog_detailed_view", "qt_file_dialog_list_view",
 }
-APPROVED_ASSET_FILES = {"phase_studio.ico", "phase_studio_splash.png", "workflow_superflip.svg", "workflow_sharped.svg", "workflow_autosolve.svg", "workflow_settings.svg"}
+APPROVED_ASSET_FILES = {"phase_studio.ico", "phase_studio_splash.png", "workflow_superflip.svg", "workflow_sharped.svg", "workflow_autosolve.svg", "workflow_settings.svg", "application_menu.svg"}
 # Every function/method in the package whose name marks it as icon/glyph
 # artwork. Anything else matching ICON_FUNCTION_PATTERN is new artwork.
 APPROVED_ICON_FUNCTIONS = {

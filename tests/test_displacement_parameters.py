@@ -84,9 +84,9 @@ def main() -> None:
             " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
             " 0.000000 0.000000 0.000000 0.000000 0.000000 0.000000\n"
             "C1        1  1     1.000000 0.100000 0.200000 0.300000\n"
-            "   2.9200   1.0000\n"
+            "   2.9200   1.0000 0.0000 0.0000 0.0000 0.0000\n"
             "O1        2  1     0.500000-0.100000 0.400000 0.500000\n"
-            "   1.0000   0.5000\n",
+            "   1.0000   0.5000 0.0000 0.0000 0.0000 0.0000\n",
             encoding="utf-8",
         )
         records = normalize_jana_m40_isotropic_displacements(
@@ -134,13 +134,9 @@ def main() -> None:
             "0.900000 0.400000 0.500000 0.9 0.4 0.5 3.0 1.000000 7.0\n",
             encoding="utf-8",
         )
-        coo_records = parse_edma_coo_isotropic_displacements(
-            coo, source_kind=IsotropicDisplacementKind.BISO,
-        )
-        check("EDMA coo parser retains the complete peak set", len(coo_records) == 2)
-        check("EDMA coo Biso field converts to canonical Uiso", math.isclose(coo_records[0].uiso_angstrom2, biso_to_uiso(2.92), abs_tol=1e-14))
-        matched = match_uiso_by_fractional_coordinate((1.1, 0.2, 0.3), coo_records)
-        check("periodic coordinate matching supplies the correct peak Uiso", math.isclose(matched, biso_to_uiso(2.92), abs_tol=1e-14))
+        check("EDMA peak density cannot be converted into an ADP", _raises_value_error(
+            lambda: parse_edma_coo_isotropic_displacements(coo, source_kind=IsotropicDisplacementKind.BISO)
+        ))
 
         invalid = tmp / "invalid.m40"
         invalid.write_text("1 0 0 0\nC1 1 1 1.0 0.1 0.2 0.3\n", encoding="utf-8")

@@ -125,16 +125,16 @@ Candidate missing HKLs are selected within the existing observed index bounds an
 These are inferred values, not newly measured reflections. Additions can influence later cycles and must not be treated as independent observations validating the model that supplied them.
 
 <!-- PAGE {"title": "14 · Weak-reflection correction with σ", "image": "screenshots/workflow/feedback-single-crystal.png"} -->
-**Enable weak-reflection intensity correction** is off initially. **Start after cycle** defaults to 1. **Correction damping** is 0–1, default 0. A positive **Apply when value/σ <** threshold selects eligible positive finite values with finite positive matching uncertainty.
+**Enable weak-reflection intensity correction** is off initially. **Start after cycle** defaults to 1. **Correction damping** is 0–1, default 0. A positive **I/σ(I) limit** threshold selects eligible positive finite values with finite positive matching uncertainty.
 
-For I/σ(I) data the filter is I/σ(I). For F/σ(F) data it is F/σ(F), not a renamed intensity ratio. The correction itself blends intensities, with F converted through its intensity representation and converted back.
+The filter always uses I/σ(I). For amplitude data it estimates I/σ(I) ≈ F/[2σ(F)] by first-order propagation of I=F² and σ(I)≈2Fσ(F). This does not recover original experimental intensity significance, particularly for weak reflections. A limit of 2 approximately corresponds to F/σ(F)<4. The correction itself blends intensities, with F converted through its intensity representation and converted back.
 
 Inew = (1 − d)Iobs + d × scaled Imap. The scale uses the median of positive observed/predicted intensity ratios. d=0 is no correction; d=1 uses the scaled map prediction for eligible rows. A significance cutoff is strict: a ratio equal to the threshold is not selected.
 
 Use a nonzero cutoff only when the input actually supplies the correct experimental uncertainty.
 
 <!-- PAGE {"title": "15 · Threshold zero and width-only data", "image": "screenshots/workflow/feedback-powder.png"} -->
-**Apply when value/σ < = 0** means uncertainty-independent correction, not I/σ(I)<0. It bypasses the significance test and applies where the map predicts a positive intensity. The implementation can also affect zero observed values; do not interpret older “non-zero reflections” copy as a restriction excluding them.
+**I/σ(I) limit = 0** means uncertainty-independent correction, not I/σ(I)<0. It bypasses the significance test and applies where the map predicts a positive intensity. The implementation can also affect zero observed values; do not interpret older “non-zero reflections” copy as a restriction excluding them.
 
 For **h k l · I · FWHM**, no σ(I) is supplied. The significance field is unavailable; the verified threshold-zero correction remains possible with positive damping. FWHM is never silently used as an experimental uncertainty.
 
@@ -625,11 +625,11 @@ Damping factor for map-based intensity correction. 0 keeps observed data; 1 repl
 Affects derived reflection input for subsequent cycles only when the corresponding method is enabled and a later cycle exists. Original measured reflections remain distinct. Validate the changed-input result against them.
 
 <!-- PAGE {"title": "Parameter reference · Map feedback · 4", "image": "screenshots/standalone/standalone-map-feedback.png", "crop": "configuration", "reference": true, "keys": ["map_feedback_intensity_max_i_over_sigma", "redistribute_overlaps"]} -->
-**Apply when value/σ <** · `map_feedback_intensity_max_i_over_sigma`
+**I/σ(I) limit** · `map_feedback_intensity_max_i_over_sigma`
 
 **Allowed:** 0.0 to 1000.0. **Fresh full-configuration default:** 0.0.
 
-Strict positive-cutoff significance filter uses I/σ(I) or F/σ(F) according to the input. Zero bypasses the significance filter: eligible rows have positive map-predicted intensity and can include zero observed values. A nonzero cutoff is unavailable for FWHM-only data without experimental uncertainty.
+The strict positive-cutoff filter always uses I/σ(I); amplitudes use the first-order estimate F/[2σ(F)]. Stored numerical limits are retained unchanged. Historical amplitude settings used direct F/σ(F); explicitly halve an old limit only if you want to preserve its approximate selection. No automatic migration is performed. Zero bypasses the significance filter: eligible rows have positive map-predicted intensity and can include zero observed values. A nonzero cutoff is unavailable for FWHM-only data without experimental uncertainty.
 
 Affects derived reflection input for subsequent cycles only when the corresponding method is enabled and a later cycle exists. Original measured reflections remain distinct. Validate the changed-input result against them.
 

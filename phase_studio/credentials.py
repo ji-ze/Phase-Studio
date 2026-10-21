@@ -1,4 +1,4 @@
-"""Manual keys persist by default in Windows Credential Manager.
+"""Manual keys and expiring OAuth grants use separate WinCred targets.
 
 No credentials are written to QSettings. Headless/offscreen processes use
 session-only access unless a storage backend is explicitly supplied.
@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import ctypes
 import hashlib
+import json
+import math
 import os
 import threading
+import time
 from ctypes import wintypes
 from urllib.parse import urlsplit
 
@@ -101,6 +104,53 @@ class CredentialStore:
         self._oauth_state_lock = threading.RLock()
         self.reauthorize = None
         self._bindings = []
+        self._oauth_loaded = False
+        self._oauth_remember = backend is not None
+        self.oauth_storage_error = False
+
+    @staticmethod
+    def oauth_target():
+        from phase_studio.oauth import ISSUER, RESOURCE, CLIENT_ID
+        return "oauth:v1|" + ISSUER + "|" + RESOURCE + "|" + CLIENT_ID
+
+    def _restore_oauth(self):
+        from phase_studio.oauth import OAuthCredential, ISSUER, RESOURCE, CLIENT_ID, SCOPE
+        with self._oauth_state_lock:
+            if self._oauth_loaded:
+                return
+            self._oauth_loaded = True
+            if self.backend is None:
+                return
+            try:
+                record = json.loads(self.backend.read(self.oauth_target()) or "null")
+                if not isinstance(record, dict) or type(record.get('schema')) is not int or record['schema'] != 1:
+                    return
+                if (record.get('issuer'), record.get('resource'), record.get('client_id')) != (ISSUER, RESOURCE, CLIENT_ID):
+                    return
+                token, scope = record['access_token'], record['scope']
+                deadline, saved = record['expires_at_utc'], record['saved_at_utc']
+                if not all(type(v) in (int, float) and math.isfinite(v) for v in (deadline, saved)):
+                    return
+                now = time.time()
+                # Reject clock rollback and impossible lifetimes, never extend a grant.
+                if not saved <= now < deadline or not 60 < deadline - saved <= 3600:
+                    return
+                if (not isinstance(token, str) or not token or len(token) > 16384 or
+                        any(ord(c) < 33 or ord(c) >= 127 for c in token) or
+                        not isinstance(scope, str) or SCOPE not in scope.split()):
+                    return
+                from phase_studio.sharped_server_client import SharpEDServerClient
+                SharpEDServerClient._validate_request_headers({'Authorization': 'Bearer ' + token})
+                credential = OAuthCredential(token, time.monotonic() + deadline - now, scope, deadline)
+                if not credential.usable():
+                    return
+                self._redact(token)
+                self._oauth_fingerprints.add(hashlib.sha256(token.encode('utf8')).hexdigest())
+                self._oauth = credential
+                self._oauth_selected = True
+                self._oauth_remember = True
+            except (OSError, ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError):
+                return  # Leave unreadable saved data intact; a new sign-in can replace it.
 
     @staticmethod
     def _oauth_origin(base_url):
@@ -112,26 +162,65 @@ class CredentialStore:
             return False
 
     def is_oauth(self, token):
+        self._restore_oauth()
         return bool(token) and hashlib.sha256(token.encode("utf8")).hexdigest() in self._oauth_fingerprints
 
-    def activate_oauth(self, credential):
+    def activate_oauth(self, credential, *, remember=None):
         self._redact(credential.access_token)
         with self._oauth_state_lock:
+            self._oauth_loaded = True
+            if remember is not None:
+                self._oauth_remember = bool(remember)
             self._oauth_fingerprints.add(hashlib.sha256(credential.access_token.encode("utf8")).hexdigest())
             self._oauth = credential
             self._oauth_selected = True
+            self.oauth_storage_error = False
+            if self.backend is not None:
+                try:
+                    if self._oauth_remember:
+                        from phase_studio.oauth import ISSUER, RESOURCE, CLIENT_ID
+                        now = time.time()
+                        remaining = credential.expires_at - time.monotonic()
+                        deadline = credential.expires_at_utc
+                        if deadline is None:
+                            deadline = now + remaining
+                        deadline = min(deadline, now + remaining)
+                        if not math.isfinite(deadline) or not 60 < deadline - now <= 3600:
+                            raise ValueError('Invalid OAuth lifetime')
+                        self.backend.write(self.oauth_target(), json.dumps(dict(schema=1,
+                            issuer=ISSUER, resource=RESOURCE, client_id=CLIENT_ID,
+                            scope=credential.scope, access_token=credential.access_token,
+                            saved_at_utc=now, expires_at_utc=deadline)))
+                    else:
+                        self.backend.delete(self.oauth_target())
+                except (OSError, ValueError, UnicodeError):
+                    self.oauth_storage_error = True
         self._notify()
 
     def sign_out_oauth(self):
         with self._oauth_state_lock:
+            if self.backend is not None:
+                self.backend.delete(self.oauth_target())
+            self._oauth_loaded = True
             self._oauth_selected = False
             self._oauth = None
         self._notify()
+
+    def reject_oauth(self, token):
+        """Only a server 401 rejects a grant; never replay its upload."""
+        from dataclasses import replace
+        with self._oauth_state_lock:
+            if self._oauth is not None and self._oauth.access_token == token:
+                if self.backend is not None:
+                    self.backend.delete(self.oauth_target())
+                self._oauth = replace(self._oauth, expires_at=0)
 
     def bind_input(self, widget, base_url=lambda: DEFAULT_SERVER_URL):
         """Keep live Qt credential fields synchronized without persisting text edits."""
         import weakref
         from PySide6.QtCore import QObject, Signal, Slot
+        from phase_studio.oauth_ui import install_reauthorization
+        install_reauthorization(self)
         store = self
 
         class Binding(QObject):
@@ -160,13 +249,14 @@ class CredentialStore:
         self._bindings = live
 
     def authentication_method(self, base_url=DEFAULT_SERVER_URL):
+        self._restore_oauth()
         with self._oauth_state_lock:
             return "oauth" if self._oauth_selected and self._oauth_origin(base_url) else "manual"
 
     def oauth_for_request(self, token, *, force=False, cancel_event=None):
         """Serialized browser renewal; retired tokens identify the same session.
 
-        No OAuth credential ever goes through the persistent manual-key backend.
+        OAuth grants use a separate issuer/resource/client credential target.
         Reauthorization is a Qt-mediated callback installed by the account UI.
         """
         from phase_studio.oauth import OAuthError
@@ -194,6 +284,7 @@ class CredentialStore:
         return self.backend is not None
 
     def get(self, base_url: str = DEFAULT_SERVER_URL) -> str:
+        self._restore_oauth()
         with self._oauth_state_lock:
             if self._oauth_selected and self._oauth_origin(base_url):
                 return self._oauth.access_token
@@ -235,7 +326,7 @@ class CredentialStore:
         from phase_studio.sharped_server_client import SharpEDServerClient
         SharpEDServerClient._validate_request_headers({"Authorization": "Bearer " + token})
         if self.is_oauth(token):
-            raise ValueError("OAuth access is session-only.")
+            raise ValueError("OAuth access uses separate secure sign-in storage.")
         origin = credential_origin(base_url)
         self._redact(token)
         if remember is None:

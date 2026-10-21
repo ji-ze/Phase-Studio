@@ -154,6 +154,14 @@ class ExecutionRedesign(unittest.TestCase):
             self.assertTrue(self.window.review_columns[guided.ROLE_PREDICTED]['add'].isEnabled())
             self.assertIn('recalculation',observed['add'].toolTip())
 
+    def test_fullscreen_scientific_details_preserve_units(self):
+        from phase_studio import autosolve_review as guided
+        self.structures()
+        data = self.window._panel_fullscreen_presentation(guided.ROLE_PREDICTED)
+        self.assertIn('0.010–0.150 Å²', data['scientific_details'])
+        self.assertNotIn('?', data['scientific_details'])
+        self.assertNotIn('?', data['metadata'])
+
     def test_projected_fit_compact_elongated_dense_orientations(self):
         from matplotlib.figure import Figure
         from matplotlib.backends.backend_agg import FigureCanvasAgg
@@ -343,6 +351,38 @@ class ExecutionRedesign(unittest.TestCase):
             self.assertEqual(self.backend.active_workflow_operations(),[])
             self.assertIn("failed",self.window.review_columns[guided.ROLE_OBSERVED]["status"].text())
             self.assertTrue(self.window.pass_now_button.isEnabled())
+
+    def test_invalid_review_output_preserves_completed_candidates(self):
+        import time
+        result = self.structures()
+        self.backend._resume_state = SimpleNamespace(
+            run_id="current-test-run", cfg=SimpleNamespace(work_dir=self.root, jana_inflip=self.root/'input.inflip'))
+        for source in ('superflip', 'deblurred'):
+            original = next(c for c in self.engine.result_candidates_from_results([result]) if c.source == source)
+            for invalid in ('missing', 'empty', 'malformed', 'missing-m40'):
+                outcomes = []
+                def extract(state, input_map, output_dir, prefix, threshold, **kwargs):
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                    path = output_dir / 'review_edma.cif'
+                    if invalid == 'empty':
+                        path.write_text('data_empty\n')
+                    elif invalid == 'malformed':
+                        path.write_text('not a CIF')
+                    elif invalid == 'missing-m40':
+                        path.write_bytes(Path(original.structure_path).read_bytes())
+                    return path
+                with patch.object(self.backend, '_run_configured_edma_stage', extract):
+                    request = self.backend.request_result_candidate_retune(original, True,
+                        lambda updated, report, request: outcomes.append((updated, report)))
+                    deadline = time.monotonic()+5
+                    while not outcomes and time.monotonic() < deadline:
+                        self.backend._poll_queue(); self.qtapp.processEvents(); time.sleep(.01)
+                self.assertTrue(outcomes, invalid)
+                self.assertIsNone(outcomes[0][0])
+                self.assertEqual(outcomes[0][1].subsystem, 'EDMA')
+                current = next(c for c in self.engine.result_candidates_from_results([result]) if c.source == source)
+                self.assertEqual(current, original)
+                self.assertEqual(self.backend.review_edma_executor.requested_threshold(request.key, .5), .5)
 
     def test_finished_edma_job_cannot_be_resurrected_by_late_callback(self):
         from dataclasses import replace

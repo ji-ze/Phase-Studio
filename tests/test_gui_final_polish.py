@@ -32,18 +32,24 @@ def check_gui():
             search,table = dialog.hkl_search,dialog.hkl_table
             assert search.isClearButtonEnabled()
             assert search.placeholderText()=='Find reflection (h k l), e.g. 0 2 0'
-            assert table.rowCount()==200 and '901' in dialog.hkl_preview_label.text()
+            assert table.model().rowCount()==901 and '901' in dialog.hkl_preview_label.text()
             assert len({table.columnWidth(c) for c in range(3)})==1
             for text,expected in [('300 0 1',300),('-300 0 1',-300),('0 0 1',0)]:
                 search.setText(text); QTest.qWait(210); settle()
-                assert table.rowCount()==1 and table.item(0,0).numeric_value==expected
+                for _ in range(200):
+                    if not dialog.hkl_preview_label.text().startswith('Searching'): break
+                    QTest.qWait(10);settle()
+                assert table.model().rowCount()==1 and table.model().index(0,0).data(Qt.UserRole)==expected
             search.setText('no match'); QTest.qWait(210); settle()
-            assert table.rowCount()==0 and '0 of 0 matching' in dialog.hkl_preview_label.text()
+            for _ in range(200):
+                if not dialog.hkl_preview_label.text().startswith('Searching'): break
+                QTest.qWait(10);settle()
+            assert table.model().rowCount()==0 and dialog.hkl_preview_label.text()=='No matching reflections'
             search.clear(); QTest.qWait(210); settle()
-            table.sortItems(0,Qt.DescendingOrder)
-            assert table.item(0,0).numeric_value==-251
-            table.sortItems(0,Qt.AscendingOrder)
-            assert table.item(0,0).numeric_value==-450
+            table.sortByColumn(0,Qt.DescendingOrder)
+            assert table.model().index(0,0).data(Qt.UserRole)==450
+            table.sortByColumn(0,Qt.AscendingOrder)
+            assert table.model().index(0,0).data(Qt.UserRole)==-450
             selection = table.selectionModel()
             for row in (0,1): selection.select(table.model().index(row,0),QItemSelectionModel.Select|QItemSelectionModel.Rows)
             dialog.hkl_copy_selected_button.click()
@@ -70,7 +76,7 @@ def check_gui():
             assert available.contains(review.frameGeometry())
             review.hkl_plot_tabs.setCurrentIndex(1); settle()
             assert review.hkl_advanced_button.isVisible()
-            assert review.hkl_bins_table.horizontalHeaderItem(5).text()=='Affected intensity in bin (%)'
+            assert review.hkl_bins_table.model().headerData(5,Qt.Horizontal)=='Affected intensity in bin (%)'
             assert 'same interval' in review.hkl_bins_table.horizontalHeaderItem(5).toolTip()
             assert [key for key,_ in review.hkl_bin_columns]==['lo','hi','input','affected','percent','intensity_percent']
             review.hkl_content_splitter.setSizes([300,250]); settle()

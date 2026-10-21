@@ -264,6 +264,30 @@ class OAuthUITests(unittest.TestCase):
         self.assertEqual(self.store.get(),"session-legacy")
         self.assertEqual(self.dialog.selected_key,"session-legacy")
         self.assertIn("browser session is unchanged",self.dialog.feedback.text())
+    def test_repeated_wizard_requests_restore_sign_in_without_dialog(self):
+        from test_oauth_persistence import Backend
+        from phase_studio.sharped_access import show_sharped_access_dialog
+        backend = Backend()
+        first = CredentialStore(backend)
+        first.activate_oauth(OAuthCredential('synthetic-wizard-grant', time.monotonic()+600))
+        for _ in range(3):
+            independent = CredentialStore(backend)
+            with patch('phase_studio.sharped_access.SharpEDAccessDialog', side_effect=AssertionError('unnecessary login')):
+                self.assertEqual(show_sharped_access_dialog(None, None, store=independent), 'synthetic-wizard-grant')
+            self.assertIsNotNone(independent.reauthorize)
+
+    def test_concurrent_frontend_request_does_not_open_second_dialog(self):
+        from phase_studio.sharped_access import show_sharped_access_dialog
+        count = []
+        def execute(dialog):
+            count.append(1)
+            self.assertIsNone(show_sharped_access_dialog(None, None, store=self.store))
+            return QDialog.Rejected
+        with patch.object(SharpEDAccessDialog, 'exec', execute):
+            self.assertIsNone(show_sharped_access_dialog(None, None, store=self.store))
+        self.assertEqual(count, [1])
+        self.assertIsNone(self.store._active_access_dialog)
+
     def test_running_worker_stop_cancels_owned_reauthorization(self):
         self.store.activate_oauth(OAuthCredential("expired-worker-token",0))
         stop=threading.Event();outcome=[]

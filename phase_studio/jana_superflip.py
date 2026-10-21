@@ -63,6 +63,10 @@ SHARPED_ONE_CYCLE_MODEL = "PEAK A (model prediction)"
 SHARPED_ITERATIVE_MODEL = "SEED (cyclic CF)"
 
 
+def cycle_count_text(count: int) -> str:
+    return f"{count} {'cycle' if count == 1 else 'cycles'}"
+
+
 def sharped_model_for_cycles(cycles: int) -> str:
     """Return Phase Studio's exact, server-independent workflow policy."""
     return SHARPED_ONE_CYCLE_MODEL if int(cycles) == 1 else SHARPED_ITERATIVE_MODEL
@@ -1166,8 +1170,13 @@ class _JanaWorkflowWizard:
         return int(target)
 
     def _preferred_dialog_height(self) -> int:
-        """One content-independent initial height for every Wizard step."""
+        """Measure the initial page once; later navigation preserves user geometry."""
         target = self.WIZARD_PREFERRED_HEIGHT
+        if getattr(self, 'chrome_holder', {}).get('footer') is not None:
+            width = self._preferred_dialog_width()
+            chrome = sum(widget.sizeHint().height() for widget in
+                         (self.brand_header, self.context_banner, self.footer))
+            target = max(target, self._content_height_for_width(width) + chrome + 16)
         available = self._available_screen_height()
         if available > 0:
             target = min(target, max(1, int(available * self.WIZARD_MAX_SCREEN_FRACTION)))
@@ -1401,6 +1410,10 @@ class _JanaWorkflowWizard:
             saved_rect = self.settings.value("wizard/windowRect")
             if isinstance(saved_rect,QRect) and saved_rect.isValid():
                 self.dialog.setGeometry(saved_rect);restored=True
+            if restored and not self.settings.value("wizard/contentGeometryV2", False, type=bool):
+                if self.dialog.height() in (690, 760):
+                    self.dialog.resize(self.dialog.width(), self._preferred_dialog_height())
+            self.settings.setValue("wizard/contentGeometryV2", True)
             if not restored and self.jana_parent_rect is not None:
                 self.dialog.move(self.dialog.pos()+self.jana_parent_rect.center()-self.dialog.frameGeometry().center())
             from phase_studio.ui_branding import clamp_window_to_available_screen
@@ -1487,10 +1500,11 @@ class _JanaWorkflowWizard:
         self.missing_group.setVisible(not is_powder)
         self.intensity_group.setVisible(True)
         self.powder_group.setVisible(is_powder)
-        ratio = "F/σ(F)" if reflection_mode_is_amplitude(mode) else "I/σ(I)"
-        self.intensity_form.labelForField(self.intensity_sigma_spin).setText(f"{ratio} limit")
+        self.intensity_form.labelForField(self.intensity_sigma_spin).setText("I/σ(I) limit")
         self.intensity_note.setText(
-            f"Positive limits use measured {ratio}; 0 applies to all map-supported reflections."
+            ("Positive limits use estimated I/σ(I) ≈ F/[2σ(F)]; this is a first-order approximation. "
+             if reflection_mode_is_amplitude(mode) else "Positive limits use measured I/σ(I). ")
+            + "0 applies to all map-supported reflections."
             if self.feedback_has_uncertainty else
             ("Experimental intensity uncertainties are not supplied. " if is_powder else
              "Valid measured uncertainties are unavailable. " if hasattr(self, "input_reflections") else
@@ -1592,6 +1606,9 @@ class _JanaWorkflowWizard:
     def _workflow_changed(self) -> None:
         key = self._current_workflow()
         self.processing_progress.setVisible(key == WORKFLOW_SUPERFLIP_SHARPED)
+        if hasattr(self, 'execution_summary'):
+            self.execution_summary.setVisible(key in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING))
+            self._update_execution_summary()
         for card_key, card in self.workflow_cards.items():
             card.set_selected(card_key == key)
         cycles_visible = key in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
@@ -2770,6 +2787,8 @@ class _JanaWorkflowWizard:
         self.cycles = QSpinBox()
         self.cycles.setRange(1, 999)
         self.cycles.setFixedWidth(110)
+        from phase_studio.ui_branding import guard_numeric_wheel
+        guard_numeric_wheel(self.cycles)
         self.cycles.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.cycles.setValue(int(self.settings.value("cycles", 5)) or 5)
         self.cycles.setToolTip("Number of ordinary Superflip + SharpED workflow cycles.")
@@ -2938,10 +2957,12 @@ class _JanaWorkflowWizard:
         connection_layout.addWidget(self.sharped_account_button)
         def update_account_presentation(_text=None):
             # A stored key alone does not establish an authenticated session.
-            from phase_studio.sharped_access import connection_status
-            self.connection_status.setText('Credentials available — not yet verified'
-                if self.api_token.text() and self.api_token.text()!=credential_store.get(DEFAULT_SERVER_URL)
-                else connection_status(credential_store,DEFAULT_SERVER_URL))
+            from phase_studio.sharped_access import account_state
+            credentials, connection, status = account_state(
+                credential_store, DEFAULT_SERVER_URL, entered_token=self.api_token.text())
+            self.account_state = {'credentials': credentials, 'connection': connection}
+            self.connection_status.setText(connection if status == 'Connected' else status)
+            self.connection_status.setToolTip(f'Credentials: {credentials}\nServer connection: {connection}\nA live model catalogue does not verify inference authentication.')
         self._update_account_presentation = update_account_presentation
         self.api_token.textChanged.connect(update_account_presentation)
         update_account_presentation()
@@ -2972,13 +2993,19 @@ class _JanaWorkflowWizard:
         # One successful list is reused for the Wizard session.
         self.model_cache = {"loaded": False, "inflight": False, "key": None}
 
-        self.model_catalog = {"values": tuple()}
+        self.model_catalog = {"values": tuple(), "provenance": "unavailable"}
         self.missing_manual_model = ''
         self.model_policy_error = ""
 
+        def catalogue_status() -> str:
+            count = len(self.model_catalog['values'])
+            origin = {'live': 'Live server catalogue', 'offline': 'Controlled offline catalogue',
+                      'cached': 'Cached catalogue · Entries not reverified',
+                      'unavailable': 'Catalogue unavailable'}[self.model_catalog['provenance']]
+            return f"{count} {'model' if count == 1 else 'models'} · {origin}"
+
         def update_model_recommendation(_value: int = 0) -> None:
             self.manual_model_row.setVisible(self.model_user_picked["value"])
-            one_cycle = self.cycles.value() == 1
             recommended = sharped_model_for_cycles(self.cycles.value())
             manual = self.model_user_picked["value"]
             self.model_recommendation.setVisible(not manual)
@@ -2987,8 +3014,7 @@ class _JanaWorkflowWizard:
                 if manual and self.model.currentText() == recommended else "Manually selected · Different from recommendation"
             )
             self.model_recommendation.setText(
-                f"Automatically selected for {self.cycles.value()} "
-                f"{'cycle' if one_cycle else 'cycles'}"
+                "Automatically selected for " + cycle_count_text(self.cycles.value())
             )
             self.model_policy_error = ""
             if manual and self.model.currentIndex()<0 and self.model_cache['loaded']:
@@ -3003,11 +3029,10 @@ class _JanaWorkflowWizard:
                     self.model.setCurrentIndex(-1)
                     self.model_policy_error = f"Required automatic model is unavailable: {recommended}."
                     self.model_status.setText(self.model_policy_error)
-            if self.model_cache.get('last_error'):
+            if self.model_cache.get('last_error') or self.model_catalog['provenance'] == 'unavailable' and self.model_cache['loaded']:
                 self.model_policy_error = 'The live SharpED model catalogue is unavailable. Use Refresh models to retry.'
             elif self.model_cache['loaded'] and not self.model_policy_error:
-                count = len(self.model_catalog['values'])
-                self.model_status.setText(f"{count} {'model' if count==1 else 'models'} available")
+                self.model_status.setText(catalogue_status())
                 self.model_status.setToolTip('Public model catalogue; account authentication is checked separately.')
 
         def restore_automatic_model() -> None:
@@ -3058,11 +3083,12 @@ class _JanaWorkflowWizard:
             self.model_cache["inflight"] = False
             if state == "error":
                 self.model_cache['last_error'] = True
+                self.model_catalog['provenance'] = 'cached' if self.model_cache['loaded'] else 'unavailable'
                 report = build_error_report(
                     payload, subsystem="SharpED", operation="Load model catalog",
                 )
                 self.model_policy_error = "The live SharpED model catalogue is unavailable. Use Refresh models to retry."
-                self.model_status.setText(f"Cached: {len(self.model_catalog['values'])} models · Live catalogue unavailable"
+                self.model_status.setText(catalogue_status() + " · Live catalogue unavailable"
                                           if self.model_cache['loaded'] else "Model list unavailable — Refresh to retry")
                 self.model_status.setToolTip(
                     ('Previously loaded entries have not been reverified.\n\n' if self.model_cache['loaded'] else '') +
@@ -3090,16 +3116,18 @@ class _JanaWorkflowWizard:
                 self.model.setCurrentText(current)
             self.model.blockSignals(False)
             self.model_catalog["values"] = tuple(values)
+            # Actual client responses originate from HTTP; controlled offline
+            # providers identify themselves explicitly rather than impersonating it.
+            provenance = getattr(models_result, 'provenance', 'live')
+            self.model_catalog['provenance'] = provenance if provenance in ('live', 'cached', 'offline') else 'unavailable'
             self._sharped_server_default = default_model
             self.model_cache["loaded"] = True
             update_model_recommendation()
             self._fit_model_popup_width()
-            model_count = len(values)
-            noun = "model" if model_count == 1 else "models"
             if self.model_policy_error:
                 self.model_status.setText(self.model_policy_error)
             else:
-                self.model_status.setText(f"{model_count} {noun} available")
+                self.model_status.setText(catalogue_status())
                 self.model_status.setToolTip('Public model catalogue; account authentication is checked separately.')
 
         self.refresh_models_button.clicked.connect(lambda _checked=False: refresh_available_models(manual=True))
@@ -3191,6 +3219,18 @@ class _JanaWorkflowWizard:
         self.omit_checkbox.toggled.connect(sync_rfree_dependency)
         sync_rfree_dependency()
 
+        self.execution_summary = QLabel()
+        self.execution_summary.setWordWrap(True)
+        self.execution_summary.setStyleSheet("color: #33456e;")
+        def update_execution_summary(*_):
+            mode = "Manually selected" if self.model_user_picked["value"] else "Automatically selected"
+            self.execution_summary.setText(f"{self.cycles.value()} cycles · Superflip + SharpED\n{mode} model: {self.model.currentText()}")
+        self.cycles.valueChanged.connect(update_execution_summary)
+        self.model.currentTextChanged.connect(update_execution_summary)
+        self.model.activated.connect(update_execution_summary)
+        self._update_execution_summary = update_execution_summary
+        update_execution_summary()
+        self.page2_layout.addWidget(self.execution_summary)
         self.page2_layout.addStretch(1)
         self.stack.addWidget(self.page2)
 
@@ -3333,11 +3373,9 @@ class _JanaWorkflowWizard:
         self.intensity_sigma_spin.setDecimals(3)
         self.intensity_sigma_spin.setValue(0.0)
         self.intensity_sigma_spin.setSpecialValueText("All map-supported")
-        self.intensity_sigma_spin.setToolTip(
-            "Positive limits filter using the supplied value uncertainty. Threshold 0 bypasses "
-            "that filter and corrects every reflection with a positive map prediction; σ is not required."
-        )
-        self.intensity_form.addRow("Significance limit", self.intensity_sigma_spin)
+        from phase_studio.app import MAP_FEEDBACK_SIGNIFICANCE_HELP
+        self.intensity_sigma_spin.setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
+        self.intensity_form.addRow("I/σ(I) limit", self.intensity_sigma_spin)
         self.intensity_parameters = QWidget()
         self.intensity_parameters.setLayout(self.intensity_form)
         self.intensity_outer.addWidget(self.intensity_parameters)
@@ -3412,10 +3450,36 @@ class _JanaWorkflowWizard:
         self.powder_note.setWordWrap(True)
         self.powder_note.setStyleSheet("color: #52658b;")
         self.powder_outer.addWidget(self.powder_note)
+        class _PowderColumns(QWidget):
+            def resizeEvent(self, event):
+                super().resizeEvent(event)
+                self.layout().setDirection(QHBoxLayout.TopToBottom if event.size().width()<720 else QHBoxLayout.LeftToRight)
+        self.powder_columns = _PowderColumns()
+        powder_columns_layout = QHBoxLayout(self.powder_columns)
+        powder_columns_layout.setContentsMargins(0,0,0,0)
+        powder_columns_layout.setSpacing(20)
+        self.powder_outer.removeWidget(self.powder_parameters)
+        powder_columns_layout.addWidget(self.powder_parameters,1)
+        powder_explanation = QWidget()
+        powder_explanation_layout = QVBoxLayout(powder_explanation)
+        powder_explanation_layout.setContentsMargins(0,0,0,0)
+        for note in (self.powder_wavelength_status,self.powder_note):
+            self.powder_outer.removeWidget(note)
+            powder_explanation_layout.addWidget(note)
+        self.powder_parameter_help = QLabel(
+            "Start after cycle uses that completed map for eligible subsequent cycles; the first cycle is not changed. "
+            "Separation factor is a fraction of the neighboring peaks' mean FWHM. "
+            "Map ratio mix 0 retains the observed split and 1 uses the map-derived split; each group's total is conserved.")
+        self.powder_parameter_help.setWordWrap(True)
+        powder_explanation_layout.addWidget(self.powder_parameter_help)
+        powder_explanation_layout.addStretch(1)
+        powder_columns_layout.addWidget(powder_explanation,1)
+        self.powder_outer.addWidget(self.powder_columns)
+        powder_group = self.powder_group
         class _FeedbackPanels(QWidget):
             def resizeEvent(self, event):
                 super().resizeEvent(event)
-                self.layout().setDirection(QHBoxLayout.TopToBottom if event.size().width() < 820 else QHBoxLayout.LeftToRight)
+                self.layout().setDirection(QHBoxLayout.TopToBottom if not powder_group.isHidden() or event.size().width()<820 else QHBoxLayout.LeftToRight)
 
         self.feedback_panels = _FeedbackPanels()
         self.feedback_panels_layout = QHBoxLayout(self.feedback_panels)
@@ -3436,6 +3500,8 @@ class _JanaWorkflowWizard:
             self.powder_mix_spin,
         ):
             editor.setMaximumWidth(180)
+            from phase_studio.ui_branding import guard_numeric_wheel
+            guard_numeric_wheel(editor)
 
         self.page3_validation_label = QLabel("")
         self.page3_validation_label.setWordWrap(True)
@@ -3532,7 +3598,7 @@ class _JanaWorkflowWizard:
                         active.append((title, start.value() + 1))
             if active:
                 text = ('<b>Map Feedback enabled</b> · '+ ' → '.join(name for name, _ in active)+
-                        '<br>Scientific warning: Map Feedback can modify the reflection data supplied to subsequent cycles. '
+                        '<br>Scientific warning: Map Feedback uses derived reflection data for subsequent cycles. '
                         'Validate the resulting structure against the original measured diffraction data.')
                 icon = QStyle.SP_MessageBoxWarning
             elif selected and total > 1:
@@ -3548,7 +3614,7 @@ class _JanaWorkflowWizard:
                 text += '<br>This setting currently has no effect: ' + ', '.join(noops) + '.'
             self.map_feedback_warning_text.setText(text)
             self.map_feedback_warning_icon.setPixmap(self.dialog.style().standardIcon(icon).pixmap(20, 20))
-            cycle_text = f'{total} cycles configured'
+            cycle_text = cycle_count_text(total) + ' configured'
             if active:
                 # These are the existing engine's eligible subsequent cycles, not a promise of changed values.
                 for name, first in active:
@@ -3664,23 +3730,11 @@ class _JanaWorkflowWizard:
         self.primary_button.setObjectName("primaryButton")
         self.primary_button.setDefault(True)
         self.button_row.addWidget(self.back_button)
-        from phase_studio.update_ui import wizard_update_menu
-        self.update_menu = wizard_update_menu(self.dialog)
-        self.update_menu.setText(__version__)
-        self.update_menu.setObjectName("wizardVersionMenu")
-        self.update_menu.setAccessibleName("Version " + __version__ + ", updates")
-        self.update_menu.setToolTip("Version and updates")
-        self.update_menu.menu().addSeparator()
-        about = self.update_menu.menu().addAction('About Phase Studio')
-        about.triggered.connect(lambda: qt['QMessageBox'].about(self.dialog, 'About Phase Studio',
-            'Phase Studio ' + __version__ + '<br>Crystallographic phasing with Superflip and SharpED.'))
-        self.update_menu.setMinimumHeight(24)
-        self.update_menu.setMinimumWidth(0)
-        badge = self.brand_header.findChild(qt["QLabel"], "versionBadge")
-        if badge is not None:
-            badge.parentWidget().layout().replaceWidget(badge, self.update_menu)
-            badge.hide()
-        self.update_menu.setStyleSheet("QToolButton { color:#52658b; background:transparent; border:0; padding:2px 6px; }")
+        from phase_studio.update_ui import install_application_header_menu
+        from phase_studio.about_ui import show_about_dialog
+        self.header_controls = install_application_header_menu(self.brand_header, self.dialog,
+            about=lambda: show_about_dialog(self.dialog, jana=True))
+        self.update_menu = self.header_controls.menu_button
         self.button_row.addStretch(1)
         self.button_row.addWidget(self.cancel_button)
         self.button_row.addWidget(self.primary_button)
@@ -3767,6 +3821,20 @@ class _JanaWorkflowWizard:
             scroll_to_page_top()
             self._adjust_dialog_size()
 
+        def skip_map_feedback() -> bool:
+            return self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED and self.cycles.value() == 1
+
+        def sync_processing_navigation(_value=None) -> None:
+            skip = skip_map_feedback()
+            self.processing_progress.setText('Choose workflow → <b>Configure processing</b>' +
+                ('' if skip else ' → Map feedback'))
+            if self.stack.currentWidget() is self.page2:
+                self.primary_button.setText('Run phasing' if skip else
+                    ('Next: Map feedback →' if self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED else 'Next ›'))
+                self.primary_button.setToolTip('Start the configured phasing workflow.' if skip else 'Continue to Map Feedback.')
+
+        self.cycles.valueChanged.connect(sync_processing_navigation)
+
         def go_to_page2() -> None:
             self.content_layout.setContentsMargins(14, 16, 14, 10)
             self.stack.setCurrentWidget(self.page2)
@@ -3777,8 +3845,7 @@ class _JanaWorkflowWizard:
             # until they find the Refresh button. No-op for Superflip only, and
             # cached for the rest of the session.
             self._ensure_models_loaded()
-            self.primary_button.setText("Next: Map feedback →" if self._current_workflow()==WORKFLOW_SUPERFLIP_SHARPED else "Next ›")
-            self.primary_button.setToolTip("Continue to Map Feedback.")
+            sync_processing_navigation()
             banner_title, banner_subtitle = self.PAGE2_BANNER_TEXT.get(
                 self._current_workflow(), ("JANA2020 WORKFLOW", "")
             )
@@ -3940,10 +4007,14 @@ class _JanaWorkflowWizard:
                 self.result["action"] = "autosolve"
                 self.dialog.accept()
                 return
-            if self.stack.currentWidget() is self.page3:
+            if self.stack.currentWidget() is self.page3 or (
+                self.stack.currentWidget() is self.page2 and skip_map_feedback()
+            ):
                 validation_message = self._check_page3_validity()
                 if validation_message:
                     self._refresh_page3_validation_message()
+                    if self.stack.currentWidget() is self.page2:
+                        self.model_status.setText(validation_message)
                     return
                 if not self._ensure_workflow_requirements(needs_sharped=True):
                     return
@@ -4353,8 +4424,15 @@ def launch_autosolve_from_jana(
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    diagnostic_args=list(sys.argv if argv is None else argv)
+    if '--packaging-acceptance' in diagnostic_args:
+        from phase_studio.packaging_acceptance import run
+        return run(diagnostic_args[diagnostic_args.index('--packaging-acceptance')+1])
     argv = list(sys.argv if argv is None else argv)
     args = argv[1:]
+    if '--update-runtime-check' in args:
+        from phase_studio.update_runtime import frozen_check
+        return frozen_check(args[args.index('--update-runtime-check')+1])
     if "--release-ui-check" in args:
         index = args.index("--release-ui-check")
         from phase_studio.release_diagnostics import run_release_ui_check

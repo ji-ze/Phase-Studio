@@ -46,6 +46,7 @@ import tempfile
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -57,11 +58,7 @@ import numpy as np
 from phase_studio.displacement import (
     IsotropicDisplacementKind,
     biso_to_uiso,
-    export_uiso_statistics,
-    match_uiso_by_fractional_coordinate,
     normalize_export_uiso,
-    normalize_jana_m40_isotropic_displacements,
-    parse_edma_coo_isotropic_displacements,
     uiso_to_biso,
 )
 from phase_studio.edma_defaults import NORMAL_EDMA_THRESHOLD_SIGMA
@@ -3714,6 +3711,36 @@ def candidate_missing_hkls_from_bounds(reflections: Sequence[Reflection], cell: 
                 candidates.append(key)
     return candidates
 
+MAP_FEEDBACK_SIGNIFICANCE_HELP = (
+    "Correct when I/σ(I) is strictly below the limit. "
+    "Intensity significance is estimated from F and σ(F) using I/σ(I) ≈ F/[2σ(F)]. "
+    "This first-order approximation does not recover the original experimental significance, especially for weak reflections. "
+    "0 bypasses significance filtering and corrects all reflections with a positive map prediction; σ is not required."
+)
+
+
+def map_feedback_intensity_significance(reflection: Reflection, data_mode: str) -> Optional[float]:
+    """Equivalent I/sigma(I) for the weak-reflection gate; None means unusable.
+
+    Positive amplitudes use first-order propagation I=F², sigma(I)≈2F sigma(F).
+    Zero/negative values remain excluded from a positive-threshold gate. The
+    uncertainty-independent threshold-zero path never calls this function.
+    """
+    mode = normalize_reflection_data_mode(data_mode)
+    if mode not in {REFLECTION_DATA_MODE_INTENSITY, REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
+                    REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        return None  # Unresolved formats and FWHM cannot supply significance.
+    if reflection.sigma is None:
+        return None
+    value, sigma = float(reflection.value), float(reflection.sigma)
+    if not math.isfinite(value) or not math.isfinite(sigma) or value <= 0 or sigma <= 0:
+        return None
+    significance = value / sigma
+    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+        significance *= 0.5
+    return significance if math.isfinite(significance) else None
+
+
 def apply_map_feedback_to_reflections(
     reflections: Sequence[Reflection],
     data_mode: str,
@@ -3762,7 +3789,8 @@ def apply_map_feedback_to_reflections(
             key = (int(r.h), int(r.k), int(r.l))
             raw_i, map_phase = predictions.get(key, (0.0, 0.0))
             if max_i_over_sigma > 0:
-                if r.value <= 0 or not math.isfinite(float(r.value)) or r.sigma is None or r.sigma <= 0 or not math.isfinite(float(r.sigma)) or (float(r.value) / float(r.sigma)) >= max_i_over_sigma:
+                significance = map_feedback_intensity_significance(r, mode)
+                if significance is None or not significance < max_i_over_sigma:
                     corrected_reflections.append(r)
                     continue
             if raw_i > 0:
@@ -4651,9 +4679,7 @@ def _copy_verified_handoff_artifact(source: Path, target: Path, expected_hash: s
     if source == target:
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
-    temporary = target.with_name(
-        f".{target.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-    )
+    temporary = target.with_name(f".{uuid.uuid4().hex[:16]}.tmp")
     try:
         with source.open("rb") as input_stream, temporary.open("wb") as output_stream:
             shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
@@ -5684,17 +5710,17 @@ def write_structure_pdb(
             x, y, z = fractional_to_cartesian(cell, atom.frac)
             name = (atom.label or f"{elem}{idx}")[:4]
             if atom.uiso_angstrom2 is None:
-                biso = 0.0
+                biso_field = " " * 6  # Unknown ADP, never an invented zero.
             else:
                 uiso = float(atom.uiso_angstrom2)
                 if bound_edma_uiso:
                     uiso = normalize_export_uiso(
                         uiso, IsotropicDisplacementKind.UISO,
                     ).uiso_angstrom2
-                biso = uiso_to_biso(uiso)
+                biso_field = f"{uiso_to_biso(uiso):6.2f}"
             f.write(
                 f"HETATM{idx:5d} {name:<4} UNK A   1    "
-                f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{biso:6.2f}          {elem:>2}\n"
+                f"{x:8.3f}{y:8.3f}{z:8.3f}{1.00:6.2f}{biso_field}          {elem:>2}\n"
             )
         f.write("END\n")
 
@@ -6438,7 +6464,9 @@ def parse_edma_coo(coo_file: Path) -> Tuple[np.ndarray, np.ndarray]:
                     densities.append(vals[4])
                 else:
                     atoms.append([vals[0], vals[1], vals[2]])
-                    densities.append(vals[3] if len(vals) > 3 else 1.0)
+                    # With centerofcharge=yes EDMA writes xyz, xyz_coc,
+                    # charge, density, volume. Column four is x_coc, not rho.
+                    densities.append(vals[7] if len(vals) == 9 else vals[3])
             except Exception:
                 continue
     return np.asarray(atoms, dtype=np.float64), np.asarray(densities, dtype=np.float64)
@@ -6743,31 +6771,13 @@ def run_edma_on_xplor(
             stop_event=stop_event,
             hide_console=True,
         )
-    m40_records = []
     if write_m40:
         m40_path = out_dir / f"{outbase}.m40"
         if m40_path.is_file() and m40_path.stat().st_size > 0:
-            # EDMA's writem40 continuation field is emitted in the Biso
-            # representation, while Jana2020 consumes that field as Uiso.
-            # Declare the source representation explicitly and normalize it
-            # once, before this artifact can be canonicalized or handed on.
-            m40_records = normalize_jana_m40_isotropic_displacements(
-                m40_path, source_kind=IsotropicDisplacementKind.BISO,
-            )
-            if m40_records:
-                source_values = [record.source_value for record in m40_records]
-                raw_uiso_values = [record.raw_uiso_angstrom2 for record in m40_records]
-                final_uiso_values = [record.uiso_angstrom2 for record in m40_records]
-                lower = sum(record.clamp_direction == "lower" for record in m40_records)
-                upper = sum(record.clamp_direction == "upper" for record in m40_records)
-                log(
-                    f"  [EDMA] Jana m40 displacement export · source Biso "
-                    f"{min(source_values):.6f}-{max(source_values):.6f} A^2 · raw Uiso "
-                    f"{min(raw_uiso_values):.6f}-{max(raw_uiso_values):.6f} A^2 · allowed "
-                    f"0.010-0.150 A^2 · lower-clamped {lower} · upper-clamped {upper} · "
-                    f"unchanged {len(m40_records) - lower - upper} · final "
-                    f"{min(final_uiso_values):.6f}-{max(final_uiso_values):.6f} A^2"
-                )
+            # m40forjana=yes is a peak-search interchange, not an ADP model.
+            # EDMA WriteAtom writes rho and integrated charge here. Preserve
+            # both fields byte-for-byte for Jana's own peak interpretation.
+            log("  [EDMA] Jana peak protocol preserved: density and integrated charge; ADP unavailable")
         else:
             # Preserve non-Jana/fixture execution compatibility. Any attempt
             # to publish a Jana candidate still fails later at the established
@@ -6786,9 +6796,6 @@ def run_edma_on_xplor(
     if not coo.is_file() or coo.stat().st_size == 0:
         tail = "\n".join(log_text.splitlines()[-80:])
         raise RuntimeError(f"EDMA did not create coordinate output: {coo}\nLog: {edma_log}\n{tail}")
-    coo_displacements = parse_edma_coo_isotropic_displacements(
-        coo, source_kind=IsotropicDisplacementKind.BISO,
-    )
     frac, dens = parse_edma_coo(coo)
     raw_edma_sites = len(frac)
     if len(frac) == 0:
@@ -6803,16 +6810,13 @@ def run_edma_on_xplor(
     atoms = [
         AtomSite(
             label=f"{elements[i]}{i+1}", element=elements[i], frac=frac[i], density=float(dens[i]),
-            uiso_angstrom2=(
-                match_uiso_by_fractional_coordinate(frac[i], coo_displacements)
-                if coo_displacements else None
-            ),
+            # Peak density is not an atomic displacement parameter.
+            uiso_angstrom2=None,
         )
         for i in range(len(frac))
     ]
-    # Preserve the canonical raw EDMA values in a separate scientific source
-    # CIF. Later CIF-seeded cycles resolve this sidecar automatically; user and
-    # Jana-facing artifacts receive the bounded export representation.
+    # Preserve coordinates for next-cycle CIF seeds. EDMA maxima provide no
+    # physical ADP: both source and exported CIF intentionally omit Uiso.
     raw_cif = cif.with_name(cif.stem + "_scientific_raw.cif")
     write_structure_cif(
         raw_cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms,
@@ -6821,37 +6825,27 @@ def run_edma_on_xplor(
         cif, ref_ctx.cell, ref_ctx.spacegroup, ref_ctx.spacegroup_hm, atoms, structure_format,
         bound_edma_uiso=True,
     )
-    raw_uiso = [float(atom.uiso_angstrom2) for atom in atoms if atom.uiso_angstrom2 is not None]
-    if len(raw_uiso) != len(atoms):
-        raise RuntimeError(f"EDMA displacement export is missing values for {len(atoms) - len(raw_uiso)} sites: {coo}")
-    stats = export_uiso_statistics(raw_uiso)
-    source_biso = [record.source_value for record in coo_displacements]
-    log(
-        f"  [EDMA] Displacement export · source Biso "
-        f"{min(source_biso):.6f}-{max(source_biso):.6f} A^2 · {stats.site_count} sites · raw Uiso "
-        f"{stats.raw_min:.6f}-{stats.raw_max:.6f} A^2 · allowed 0.010-0.150 A^2 · "
-        f"lower-clamped {stats.lower_clamped} · upper-clamped {stats.upper_clamped} · "
-        f"unchanged {stats.unchanged} · final {stats.final_min:.6f}-{stats.final_max:.6f} A^2 · "
-        f"raw scientific CIF {raw_cif.name}"
-    )
-    clamped_sites = stats.lower_clamped + stats.upper_clamped
+    log("  [EDMA] ADP unavailable: maxima contain charge/density, not Biso/Uiso; no conversion or clamping applied")
     independent_sites = len(edma_asu_atoms(atoms, ref_ctx.cell, ref_ctx.spacegroup))
     jana_sites = _m40_model_count(m40_path) if write_m40 and m40_path.is_file() else None
     lineage = {
         "threshold_sigma": float(plimit_sigma), "raw_edma_sites": raw_edma_sites,
         "cif_sites": len(atoms), "independent_asu_sites": independent_sites,
         "jana_m40_sites": jana_sites, "jana_selection": "numberofatoms composition",
+        "displacement_parameter": "unavailable",
+        "jana_continuation_fields": ["peak_density", "integrated_charge"],
+        "adp_lower_clamped": 0, "adp_upper_clamped": 0,
     }
+    from .edma_provenance import edma_export_provenance
+    provenance = edma_export_provenance(coo, cif, m40_path if write_m40 else None)
+    cif.with_name(cif.stem + "_provenance.json").write_text(
+        json.dumps(provenance, indent=2), encoding="utf-8",
+    )
     cif.with_name(cif.stem + "_site_counts.json").write_text(
         json.dumps(lineage, indent=2), encoding="utf-8",
     )
     log(f"  [EDMA] Site lineage · raw detected {raw_edma_sites} · independent ASU {independent_sites} · "
         f"Jana m40 {jana_sites if jana_sites is not None else 'not requested'} · composition-constrained selection")
-    if clamped_sites * 2 >= stats.site_count:
-        log(
-            f"  [EDMA] Warning: {clamped_sites} of {stats.site_count} exported sites "
-            f"were clamped to the Uiso safety interval"
-        )
     return cif
 
 def parse_superflip_log_metrics(log_path: Path) -> SuperflipLogMetrics:
@@ -7190,9 +7184,7 @@ def promote_threshold_structure(
         if file_sha256(target) != digest:
             raise RuntimeError(f"Canonical candidate artifact changed unexpectedly: {target}")
     else:
-        temporary = target.with_name(
-            f".{target.name}.tmp-{os.getpid()}-{threading.get_ident()}"
-        )
+        temporary = target.with_name(f".{uuid.uuid4().hex[:16]}.tmp")
         try:
             with source_path.open("rb") as input_stream, temporary.open("wb") as output_stream:
                 shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
@@ -7222,6 +7214,11 @@ def promote_threshold_structure(
     if site_counts.is_file():
         target_counts = target.with_name(target.stem + "_site_counts.json")
         _copy_verified_handoff_artifact(site_counts, target_counts, file_sha256(site_counts))
+    provenance = source_path.with_name(source_path.stem + "_provenance.json")
+    if provenance.is_file():
+        _copy_verified_handoff_artifact(
+            provenance, target.with_name(target.stem + "_provenance.json"), file_sha256(provenance),
+        )
     return target
 
 
@@ -7673,7 +7670,7 @@ INPUT_TOOLTIPS = {
     "map_feedback_intensity_enabled": "Enables map-based intensity correction. When off, the fields below are ignored.",
     "map_feedback_intensity_from_cycle": "First completed cycle whose map is used to damp observed intensities for the next cycle.",
     "map_feedback_intensity_damping": "Damping factor for map-based intensity correction. 0 keeps observed data; 1 replaces them by scaled map-derived intensities.",
-    "map_feedback_intensity_max_i_over_sigma": "Apply map-based intensity correction only to non-zero reflections with value/sigma below this limit. Use 0 to correct all non-zero reflections.",
+    "map_feedback_intensity_max_i_over_sigma": MAP_FEEDBACK_SIGNIFICANCE_HELP,
     "redistribute_overlaps": "Enables powder overlap repartitioning: each cycle, redistribute the combined observed intensity of overlapping-reflection groups (hkl I/F fwhm data only) between their members, using intensities calculated by FFT from that cycle's processed map. When off, the fields below are ignored.",
     "powder_redistribution_from_cycle": "First completed cycle whose map is used to redistribute overlapping powder reflections for the next cycle.",
     "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected from the Jana .m90 file, then the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
@@ -8637,17 +8634,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.main_splitter.addWidget(left)
 
         brand_header=create_phase_studio_brand_header()
-        from phase_studio.update_ui import wizard_update_menu
-        self.version_menu=wizard_update_menu(self,mode=None,automatic=False)
-        self.version_menu.setText(__version__)
-        self.version_menu.setToolTip('Version and updates')
-        self.version_menu.setAccessibleName('Version '+__version__+', updates')
-        badge=brand_header.findChild(QLabel,'versionBadge')
-        if badge is not None:
-            badge.parentWidget().layout().replaceWidget(badge,self.version_menu)
-            badge.hide()
-        self.version_menu.menu().addSeparator()
-        self.version_menu.menu().addAction('About Phase Studio').triggered.connect(lambda:self._open_help_section('about'))
+        from phase_studio.update_ui import install_application_header_menu
+        from phase_studio.about_ui import show_about_dialog
+        self.header_controls = install_application_header_menu(brand_header, self,
+            mode=None, automatic=False, about=lambda: show_about_dialog(
+                self, jana=self.jana_wizard_context.launched_from_jana_wizard))
+        self.version_menu = self.header_controls.menu_button
         left_layout.addWidget(brand_header)
 
         category_tabs = QTabWidget()
@@ -8828,7 +8820,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Missing-reflection completion</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose map is used to add missing reflections for the next cycle. <b>Maximum added reflections (%)</b> caps generated missing reflections as a percent of the current reflection count, preventing feedback from overwhelming measured data.</p>
             <h3>Intensity correction</h3>
-            <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>Apply when value/&sigma; &lt;</b> limits correction to weak non-zero reflections below this value/&sigma;; 0 applies it to all non-zero reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
+            <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>I/&sigma;(I) limit</b> selects positive observations strictly below the intensity-significance threshold; amplitudes use the first-order approximation F/[2&sigma;(F)], not recovered experimental intensity significance. Zero bypasses significance filtering for all map-supported reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
             <h3>Powder overlap repartitioning</h3>
             <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
@@ -10149,8 +10141,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_checkbox(intensity_feedback_form, "map_feedback_intensity_enabled", "Enable intensity correction", False, align_with_fields=True)
         self._add_spin(intensity_feedback_form, "map_feedback_intensity_from_cycle", "Start after cycle", 1, 1, 999, 1)
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
-        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "Apply when value/σ <", 0.0, 0.0, 1000.0, 0.5, 3)
-        intensity_feedback_form.addRow("", self._settings_callout("Note", "At 0, correction applies to all non-zero reflections."))
+        self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "I/σ(I) limit", 0.0, 0.0, 1000.0, 0.5, 3)
+        significance_control = self.inputs["map_feedback_intensity_max_i_over_sigma"]
+        significance_control.setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
+        intensity_feedback_form.labelForField(significance_control).setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
+        intensity_feedback_form.addRow("", self._settings_callout("Note", "At 0, correction applies to all map-supported reflections."))
 
         powder_feedback_form = self._add_form_group(feedback_tab, "Powder overlap repartitioning")
         self._add_checkbox(powder_feedback_form, "redistribute_overlaps", "Enable powder overlap repartitioning (FWHM data)", False, align_with_fields=True)
@@ -13990,17 +13985,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._review_cache_key(candidate, float(candidate.edma_sigma)), candidate,
         )
         run_id = str(candidate.run_id or state.run_id or self._active_run_id)
-        source_tag = "superflip" if candidate.source == "superflip" else "sharped"
-        request_tag = f"{time.time_ns()}-{os.getpid()}"
+        request_tag = uuid.uuid4().hex[:16]
         output_dir = (
-            state.cfg.work_dir / "review_edma" / (run_id or "legacy")
-            / f"{source_tag}_cycle_{candidate.cycle:03d}"
-            / f"request_{request_tag}_{float(new_sigma):.2f}sigma".replace(".", "p")
+            state.cfg.work_dir / "review_edma" / request_tag
         )
-        prefix = (
-            f"review_{source_tag}_cycle_{candidate.cycle:03d}_{request_tag}_"
-            f"{float(new_sigma):.2f}sigma"
-        ).replace(".", "p")
+        # Request directories already isolate generations. Repeating the run,
+        # source, cycle and timestamp in every filename exceeded MAX_PATH on
+        # real Jana projects, first when writing the scientific-source CIF.
+        prefix = "review"
         family = "Charge-flipping solution" if candidate.source == "superflip" else "Structure prediction"
         live_job = (
             self._new_structure_job(
@@ -14033,17 +14025,23 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     explicit_threshold=True,
                     stop_event=review_stop,
                 )
+                if not cif_has_readable_atoms(Path(cif)):
+                    raise RuntimeError("EDMA did not produce a readable nonempty structure. Previous result retained.")
                 canonical_cif = promote_threshold_structure(
                     Path(cif), output_dir, candidate.source, candidate.cycle, float(new_sigma),
                 )
-                return seal_result_candidate(replace(
+                updated = seal_result_candidate(replace(
                     candidate, structure_path=str(canonical_cif),
                     edma_sigma=float(new_sigma), usable_structure=True,
                 ))
+                if (getattr(state.cfg, "jana_inflip", None) is not None or candidate.jana_model_sha256) and not updated.jana_model_sha256:
+                    raise RuntimeError("EDMA did not produce a valid corresponding Jana model. Previous result retained.")
+                if candidate.map_sha256 and updated.map_sha256 != candidate.map_sha256:
+                    raise RuntimeError("EDMA source map changed during review. Previous result retained.")
+                return updated
             except BaseException:
-                # Completed review artifacts are the cache.  Failed/cancelled
-                # request workspaces contain no handoff-capable result.
-                shutil.rmtree(output_dir, ignore_errors=True)
+                # Keep the isolated input/process log for diagnosis. No failed
+                # workspace is returned, cached or installed on a CycleResult.
                 raise
 
         def completed(outcome: ReviewOutcome) -> None:

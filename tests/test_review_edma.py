@@ -1,6 +1,7 @@
 """Release guards for independent, non-blocking interactive EDMA review."""
 
 import queue
+import hashlib
 import sys
 import tempfile
 import threading
@@ -156,7 +157,7 @@ def main():
             cycle=1, source="deblurred", map_path=str(selected_map),
             structure_path=str(original_cif), metrics=MapQualityMetrics(),
             edma_sigma=0.5, candidate_id="run-1:sharped:c001:t0.50:fixture",
-            map_sha256="map-hash", run_id="run-1",
+            map_sha256=hashlib.sha256(selected_map.read_bytes()).hexdigest(), run_id="run-1",
         )
         result = CycleResult(
             cycle=1, model_source="none", model_in=None, model_metric=None,
@@ -224,7 +225,7 @@ def main():
               and any("Structure prediction · EDMA updated · 1 detected sites · 0.40" in message for message in gui_review_logs))
         check("review EDMA diagnostics prove request/candidate/map/paths/hash/duration",
               any(all(token in message for token in (
-                  "Review EDMA request", candidate.candidate_id, "source map SHA-256 map-hash",
+                  "Review EDMA request", candidate.candidate_id, f"source map SHA-256 {candidate.map_sha256}",
                   str(selected_map), "output directory",
               )) for message in detailed_review_logs)
               and any(all(token in message for token in (

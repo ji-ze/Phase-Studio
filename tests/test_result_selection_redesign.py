@@ -62,8 +62,9 @@ class ResultSelectionRedesignTests(unittest.TestCase):
     def test_projected_geometry_and_manual_camera(self):
         from mpl_toolkits.mplot3d import proj3d
         d=self.dialog
-        for width,height in ((1280,720),(1500,850),(1920,1080),(2560,1440)):
+        for width,height in ((1000,600),(1280,720),(1500,850),(1920,1080),(2560,1440)):
             d.resize(width,height);self.events();d._request_preview_fit();d._preview_canvas.draw()
+            self.assertTrue(d._preview_section.rect().contains(d._preview_canvas.geometry()))
             axis=d._preview_figure.axes[0]
             points=d._preview_fit_coords.copy()
             x,y,_=proj3d.proj_transform(*points.T,axis.get_proj())
@@ -102,11 +103,21 @@ class ResultSelectionRedesignTests(unittest.TestCase):
         self.assertEqual(len(engine.parse_cif_atoms(path)),9)
         self.assertEqual(engine._m40_model_count(path.with_suffix('.m40')),2)
         d._render_preview(updated)
-        self.assertIn('EDMA candidate: 9 sites',d._metadata_label.toolTip())
+        self.assertEqual(dict(d._candidate_detail_rows)['EDMA candidate'],'9 sites')
+        self.assertIn('EDMA ASU composition',d._metadata_label.toolTip())
+        self.assertNotIn('&lt;b&gt;',d._metadata_label.toolTip())
         self.assertIn('Jana model: 2 atomic sites',d._metadata_label.text())
+        captured=[]
+        def inspect_details(widget):
+            from PySide6.QtWidgets import QLabel
+            captured.extend(label.text() for label in widget.findChildren(QLabel))
+            return QDialog.Rejected
+        with patch.object(QDialog,'exec',inspect_details):d._candidate_info.click()
+        self.assertIn('9 sites',captured)
+        self.assertIn('2 atomic sites',captured)
         absent=replace(updated,jana_model_sha256='',jana_model_site_count=None)
         d._render_preview(absent)
-        self.assertIn('prepared during handoff',d._metadata_label.toolTip())
+        self.assertEqual(dict(d._candidate_detail_rows)['Jana model'],'prepared during handoff')
     def test_async_identity_pending_and_same_m40(self):
         d=self.dialog
         pending=[]

@@ -37,15 +37,22 @@ def main():
 
     ui_style.apply_phase_studio_style(app)
     import phase_studio.jana_superflip as js
+    imports = js._qt_imports
+    js._qt_imports = lambda: imports() | {'QSettings': lambda org, name:
+        QSettings(str(Path(settings_dir.name)/(name+'.ini')), QSettings.IniFormat)}
 
     QDialog.exec = lambda self: QDialog.Rejected
 
     def build():
+        # Each hierarchy case tests a fresh invocation, not settings saved by
+        # the preceding Superflip-only/Professional action in this process.
+        QSettings(str(Path(settings_dir.name)/'JanaSuperflipWrapper.ini'), QSettings.IniFormat).clear()
         wizard = js._JanaWorkflowWizard([], None)
         wizard.run()
         wizard._ensure_workflow_requirements = lambda **_kwargs: True
         wizard._ensure_models_loaded = lambda: None
         wizard.model_cache["loaded"] = True
+        wizard.model_catalog["provenance"] = "offline"
         wizard.dialog.show()
         app.processEvents()
         return wizard

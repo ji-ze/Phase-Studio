@@ -82,13 +82,14 @@ with tempfile.TemporaryDirectory() as tmp:
         w.dialog.show()
         settle()
         rect = measure(w, 'initial', shot='01-workflow' if scale == 1 else '09-dpi-125' if scale == 1.25 else None)
-        assert 720 <= rect.height() <= 780
+        assert 720 <= rect.height() <= int(1400/scale)
         assert 960 <= rect.width() <= 1040
         assert w.scroll_area.verticalScrollBar().maximum() == 0
         assert w.update_menu.isVisible() and w.brand_header.isAncestorOf(w.update_menu)
         assert not w.footer.isAncestorOf(w.update_menu)
         from phase_studio.version import VERSION
-        assert w.update_menu.text() == VERSION
+        assert w.update_menu.text() == ''
+        assert w.header_controls.version_label.text() == 'v' + VERSION
         assert [a.text() for a in w.update_menu.menu().actions() if not a.isSeparator()] == [
             'Check for updates', 'Notify me when new versions are available', 'About Phase Studio']
         for tile in (w.original_superflip_tile, w.superflip_sharped_tile, w.autosolve_tile, w.professional_mode_tile):

@@ -100,7 +100,7 @@ def build_error_report(
     """Map an existing exception/message to a concise user-facing category."""
     message = sanitize_error_details(error).strip() or "The operation failed without an error message."
     lower = message.lower()
-    resolved_subsystem = _subsystem_from_message(message, subsystem)
+    resolved_subsystem = "EDMA" if subsystem == "EDMA" else _subsystem_from_message(message, subsystem)
     category = "internal"
     title = "Unexpected Phase Studio error"
     summary = "The current operation could not be completed."
@@ -121,7 +121,7 @@ def build_error_report(
         title = "Jana2020 Superflip runtime unavailable"
         summary = "The Superflip executable for the active Jana2020 installation could not be resolved."
         guidance = "Repair the Phase Studio integration for this Jana2020 installation and try again."
-    elif "sharped" in lower or resolved_subsystem == "SharpED":
+    elif resolved_subsystem != "EDMA" and ("sharped" in lower or resolved_subsystem == "SharpED"):
         resolved_subsystem = "SharpED"
         if (getattr(error, "code", None) == 403 or "http error 403" in lower
                 or "http 403" in lower or getattr(error, "category", "") == "authorization"):
@@ -185,7 +185,7 @@ def build_error_report(
             title = "SharpED processing failed"
             summary = "The SharpED server could not complete the submitted job."
             guidance = "Review the final server detail below, then retry or choose another model if appropriate."
-    elif "superflip" in lower:
+    elif resolved_subsystem != "EDMA" and "superflip" in lower:
         resolved_subsystem = "Superflip"
         if "executable not found" in lower or "was not found" in lower:
             category = "superflip_missing"
@@ -207,7 +207,7 @@ def build_error_report(
             title = "Superflip did not complete successfully"
             summary = "Superflip stopped with an error during reconstruction."
             guidance = "Review the exit information and final log lines, then check the Superflip input settings."
-    elif "edma" in lower:
+    elif resolved_subsystem == "EDMA" or "edma" in lower:
         resolved_subsystem = "EDMA"
         if "executable not found" in lower or "was not found" in lower:
             category = "edma_missing"

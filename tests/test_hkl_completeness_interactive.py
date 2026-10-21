@@ -59,7 +59,7 @@ def exercise():
             before=repr(report)
             export_shell_csv(Path(tmp)/'before.csv',report)
             report.export_json(Path(tmp)/'before.json',analysis)
-            assert any('Indexed coverage' in dialog.hkl_bins_table.horizontalHeaderItem(c).text() for c in range(dialog.hkl_bins_table.columnCount()))
+            assert any('Indexed HKL coverage' in dialog.hkl_bins_table.horizontalHeaderItem(c).text() for c in range(dialog.hkl_bins_table.columnCount()))
             assert 'experimentally resolved' in ui.COVERAGE_HELP
             x=np.asarray(dialog.hkl_axes['intensity'].lines[0].get_xdata())
             y=np.asarray(dialog.hkl_axes['intensity'].lines[0].get_ydata(),dtype=float)

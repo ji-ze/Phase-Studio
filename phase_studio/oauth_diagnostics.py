@@ -12,6 +12,9 @@ def run_credential_check(output_path, phase):
     from phase_studio.credentials import CredentialStore, WindowsCredentialBackend
     from phase_studio.version import VERSION
 
+    if phase.startswith('oauth-'):
+        return _oauth_persistence_check(output_path, phase)
+
     class TestBackend(WindowsCredentialBackend):
         @staticmethod
         def target(origin):
@@ -33,6 +36,61 @@ def run_credential_check(output_path, phase):
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_text(json.dumps(report, indent=2), encoding="utf8")
     return 0 if report["success"] else 1
+
+
+def _oauth_persistence_check(output_path, phase):
+    """Synthetic native WinCred grant shared by independent frozen processes."""
+    import hashlib
+    from phase_studio.credentials import CredentialStore, WindowsCredentialBackend
+    from phase_studio.oauth import OAuthCredential
+    from phase_studio.version import VERSION
+    namespace = hashlib.sha256(str(Path(output_path).resolve().parent).encode('utf8')).hexdigest()
+
+    class TestBackend(WindowsCredentialBackend):
+        @staticmethod
+        def target(origin):
+            return 'FZU/PhaseStudio/SelfTest/OAuth/' + namespace + '/' + hashlib.sha256(origin.encode('utf8')).hexdigest()
+
+    backend = TestBackend()
+    store = CredentialStore(backend)
+    mock = 'SYNTHETIC-OAUTH-CROSS-PROCESS-NOT-A-REAL-TOKEN'
+    manual = 'SYNTHETIC-MANUAL-KEY-CONSOLIDATION'
+    from phase_studio.credentials import credential_origin
+    manual_origin = credential_origin('https://jana.fzu.cz')
+    raw = backend.read(store.oauth_target())
+    safe_to_modify = not raw
+    if raw:
+        try:
+            safe_to_modify = json.loads(raw).get('access_token') == mock
+        except (ValueError, AttributeError):
+            pass
+    success = False
+    if safe_to_modify:
+        if phase == 'oauth-write':
+            store.activate_oauth(OAuthCredential(mock, time.monotonic()+600))
+            success = not store.oauth_storage_error and CredentialStore(backend).get() == mock
+        elif phase == 'oauth-read':
+            success = store.get() == mock and store.authentication_method() == 'oauth' and store._oauth.usable()
+        elif phase == 'oauth-remove':
+            store.sign_out_oauth()
+            success = not backend.read(store.oauth_target())
+        elif phase == 'oauth-manual-logout':
+            existing_manual = backend.read(manual_origin)
+            if existing_manual in ('', manual):
+                try:
+                    backend.write(manual_origin, manual)
+                    store.activate_oauth(OAuthCredential(mock, time.monotonic()+600))
+                    restored = CredentialStore(backend)
+                    assert restored.get() == mock
+                    restored.sign_out_oauth()
+                    success = (CredentialStore(backend).get() == manual
+                               and not backend.read(store.oauth_target()))
+                finally:
+                    backend.delete(manual_origin)
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(output_path).write_text(json.dumps(dict(version=VERSION, phase=phase,
+        isolated_synthetic_target=True, success=success)), encoding='utf8')
+    return 0 if success else 1
 
 
 def run_oauth_check(output_path, *, interactive=False):

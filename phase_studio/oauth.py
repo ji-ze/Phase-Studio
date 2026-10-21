@@ -43,6 +43,7 @@ class OAuthCredential:
     access_token: str = field(repr=False)
     expires_at: float
     scope: str = SCOPE
+    expires_at_utc: float | None = None
 
     def usable(self, now=None, margin=60):
         return (time.monotonic() if now is None else now) + margin < self.expires_at
@@ -143,6 +144,7 @@ class OAuthAttempt:
         from phase_studio.error_reporting import register_private_value
         register_private_value(code)
         started = self.clock()
+        started_utc = time.time()
         form = dict(grant_type="authorization_code", code=code,
                     redirect_uri=self.redirect_uri, client_id=CLIENT_ID, code_verifier=self.verifier)
         if self.resource:
@@ -160,7 +162,7 @@ class OAuthAttempt:
                 isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not 60 < expiry <= 3600 or
                 "id_token" in response or "refresh_token" in response):
             raise OAuthError("response")
-        return OAuthCredential(token, started + expiry, response["scope"])
+        return OAuthCredential(token, started + expiry, response["scope"], started_utc + expiry)
 
     def run(self, ready, progress=lambda state: None):
         try:

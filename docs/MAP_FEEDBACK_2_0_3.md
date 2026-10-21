@@ -40,12 +40,17 @@ No correction formula or successful processing order was changed.
 | Input | Positive threshold | Threshold zero |
 |---|---|---|
 | I with valid σ(I) | Original strict I/σ(I) gate | Original map-based correction without significance filtering |
-| F with valid σ(F) | Original strict F/σ(F) gate | Original F²/intensity update and amplitude conversion |
+| F with valid σ(F) | Strict estimated I/σ(I) ≈ F/[2σ(F)] gate (updated in 2.0.6) | Original F²/intensity update and amplitude conversion |
 | I/F with FWHM | Unavailable; peak width is never used as σ | Supported by the existing numerical routine; FWHM values are retained |
 | Missing/unusable uncertainty | Unavailable | Supported without uncertainty filtering |
 
-There is no verified I/σ(I) derivation from F/σ(F) in this correction routine.
-The GUI labels the amplitude gate accurately; no new derivation was introduced.
+In 2.0.6 the threshold consistently denotes I/σ(I). For positive amplitudes,
+first-order propagation uses I=F² and σ(I)≈2Fσ(F), giving F/[2σ(F)]. This is
+an approximation, particularly unreliable for weak amplitudes transformed from
+experimental intensities; it does not recover the original measured significance.
+Saved numerical values are unchanged. Historical amplitude settings used F/σ(F);
+explicitly halve an old limit to retain its approximate selection if desired.
+See [the focused scientific change](MAP_FEEDBACK_SIGNIFICANCE_2_0_6.md).
 
 Zero is an actual sentinel: the code bypasses the ratio gate and updates a
 reflection when its map prediction is positive. Contrary to the old tooltip,

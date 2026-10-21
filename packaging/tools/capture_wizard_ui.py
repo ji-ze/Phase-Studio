@@ -55,6 +55,7 @@ def main() -> int:
         "SEED (cyclic CF)",
     )
     wizard.model_cache["loaded"] = True
+    wizard.model_catalog["provenance"] = "offline"
     wizard.restore_automatic_model_button.click()
     wizard.model_status.setText("2 models available")
     wizard.cycles.setValue(1)

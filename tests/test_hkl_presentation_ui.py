@@ -37,17 +37,21 @@ def check_ui():
         original=analysis(load)
         view=win._build_hkl_completeness_dialog(original)
         view.show();view.resize(1120,950);settle()
-        assert visible_rows(view.hkl_bins_table)>=6
+        view.hkl_bins_toggle.setChecked(True);settle()
+        assert visible_rows(view.hkl_bins_table)>=1
+        view.hkl_bins_table.scrollToBottom();settle()
+        assert view.hkl_bins_table.visualItemRect(view.hkl_bins_table.item(view.hkl_bins_table.rowCount()-1,0)).intersects(view.hkl_bins_table.viewport().rect())
+        view.hkl_bins_table.scrollToTop()
         from phase_studio.scientific_typography import scientific_text
         assert view.hkl_axes['significance'].get_title()==scientific_text('Mean F/σ(F) vs resolution', 'plot')
-        assert 'Mean F/σ(F)' in [view.hkl_bins_table.horizontalHeaderItem(j).text() for j in range(view.hkl_bins_table.columnCount())]
+        assert 'Mean F/σ(F)' in [view.hkl_bins_table.model().headerData(j,Qt.Horizontal) for j in range(view.hkl_bins_table.model().columnCount())]
         rows=[dict(row) for row in view.diagnostics.shells]
         expected=np.asarray([row['mean_f_over_sigma'] for row in rows],dtype=float)
         assert np.allclose(np.asarray(view.hkl_axes['significance'].lines[0].get_ydata(),dtype=float),expected,equal_nan=True)
         derived=np.asarray([dict(row)['mean_significance'] for row in original.diagnostics.shells],dtype=float)
         assert np.allclose(np.asarray(view.hkl_derived_figure.axes[0].lines[0].get_ydata(),dtype=float),derived,equal_nan=True)
         assert any(label.text()=='Not reached' and ui.D98_NOT_REACHED in label.toolTip() for label in view.hkl_metrics_panel.findChildren(QLabel))
-        assert view.hkl_bins_table.item(0,0).text()=='0.00000'
+        assert view.hkl_bins_table.model().index(0,0).data()=='0.00000'
         assert view.hkl_bins_table.item(0,0).textAlignment() & Qt.AlignRight
         assert view.hkl_bins_table.horizontalHeaderItem(0).textAlignment() & Qt.AlignLeft
         hist=view.hkl_histogram_axis
@@ -86,15 +90,18 @@ def check_ui():
         view.hkl_advanced_button.setChecked(True);settle();view.close()
         assert not view.hkl_advanced.isVisible()
         v=win._build_hkl_validation_dialog(load);v.show();v.resize(1120,800);settle()
-        assert v.hkl_preview_label.text().startswith('Showing first 5 of 5 records')
-        headers=[v.hkl_table.horizontalHeaderItem(i).text() for i in range(v.hkl_table.columnCount())]
+        assert v.hkl_preview_label.text().startswith('Showing all 5 records')
+        headers=[v.hkl_table.model().headerData(i,Qt.Horizontal) for i in range(v.hkl_table.model().columnCount())]
         assert 'F/σ(F)' in headers and ui.DERIVED_LABEL not in headers
-        assert v.hkl_table.item(0,0).text()=='1'  # original row order until a user sorts
+        assert v.hkl_table.model().index(0,0).data()=='1'  # original row order until a user sorts
         v.hkl_derived_checkbox.setChecked(True)
-        assert v.hkl_table.horizontalHeaderItem(v.hkl_table.columnCount()-1).text()==ui.DERIVED_LABEL
-        v.hkl_search.setText('3 2 1');QTest.qWait(220);settle()
-        assert v.hkl_table.rowCount()==1 and '1 matching records (5 total)' in v.hkl_preview_label.text()
-        assert v.hkl_table.item(0,5).text()=='0.0000'
+        assert v.hkl_table.model().headerData(v.hkl_table.model().columnCount()-1,Qt.Horizontal)==ui.DERIVED_LABEL
+        v.hkl_search.setText('3 2 1');QTest.qWait(200);settle()
+        for _ in range(120):
+            if not v.hkl_preview_label.text().startswith('Searching'): break
+            QTest.qWait(25);settle()
+        assert v.hkl_table.model().rowCount()==1 and '1 match · Showing 1' in v.hkl_preview_label.text()
+        assert v.hkl_table.model().index(0,5).data()=='0.0000'
         v.close()
         # Complete powder list exercises both compact summaries; variable
         # widths retain their curve while powder never gains significance.
@@ -104,7 +111,11 @@ def check_ui():
         p=win._build_hkl_completeness_dialog(analysis(powder));p.show();p.resize(1120,900);settle()
         assert set(p.hkl_axes)=={'intensity','distribution'}
         assert '100%' in p.hkl_compact_summary.text() and 'FWHM constant: 0.0527' in p.hkl_compact_summary.text()
-        assert visible_rows(p.hkl_bins_table)>=6
+        p.hkl_bins_toggle.setChecked(True);settle()
+        assert visible_rows(p.hkl_bins_table)>=1
+        p.hkl_bins_table.scrollToBottom();settle()
+        assert p.hkl_bins_table.visualItemRect(p.hkl_bins_table.item(p.hkl_bins_table.rowCount()-1,0)).intersects(p.hkl_bins_table.viewport().rect())
+        p.hkl_bins_table.scrollToTop()
         assert not hasattr(p,'hkl_derived_figure') and p.hkl_plot_tabs.count()==1
         p.close()
         variable=fixture.load(text.rsplit('.0527',1)[0]+'.1')

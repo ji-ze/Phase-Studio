@@ -20,6 +20,8 @@ sys.path.insert(0, str(packaging_dir))
 import portable_runtime  # noqa: E402
 from release_legal import exclude_unused_qt_plugins, legal_datas
 from windows_version import version_resource
+from distribution_options import options,configure_qt,custom_hooks
+configure_qt()
 
 qt_report = portable_runtime.validate_pyside6_installation()
 
@@ -30,21 +32,28 @@ hiddenimports = ["PySide6.QtSvg",
     "phase_studio.sharped_server_client",
     "phase_studio.ui_style",
     "matplotlib.backends.backend_qtagg",
+    "matplotlib.backends.backend_pdf",
+    "matplotlib.backends.backend_svg",
+    "matplotlib.backends.backend_ps",
+    "matplotlib.backends.backend_pgf",
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
 ]
 
 try:
-    hiddenimports += collect_submodules("qtvscodestyle")
+    if 'style' not in options():hiddenimports += collect_submodules("qtvscodestyle")
 except Exception:
     pass
 
 datas = []
 datas += [(str(project_dir / "phase_studio" / "assets"), "phase_studio/assets")]
 datas += legal_datas(project_dir)
+if globals().get('developer_build',False):
+    from update_resources import updater_datas
+    datas += updater_datas(project_dir,'jana2020-onedir',release_version)
 try:
-    datas += collect_data_files("qtvscodestyle")
+    if 'style' not in options():datas += collect_data_files("qtvscodestyle")
 except Exception:
     pass
 
@@ -55,7 +64,7 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=custom_hooks(packaging_dir),
     hooksconfig={
         "matplotlib": {
             "backends": "QtAgg",

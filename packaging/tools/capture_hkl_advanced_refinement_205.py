@@ -62,7 +62,7 @@ def run():
             settings.remove('hklAdvanced');settings.sync()
             dialog = ui._detail_dialog(parent,report);dialog.show();settle()
             geometry = dialog.geometry()
-            assert dialog.width()==1000 and dialog.height()==600
+            assert dialog.width()==1050 and dialog.height()==620
             for index, name in enumerate(('input','counts','absences','values','resolution','overlap','availability')):
                 dialog.hkl_details_tabs.setCurrentIndex(index);settle()
                 assert dialog.geometry()==geometry

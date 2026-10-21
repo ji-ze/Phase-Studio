@@ -67,7 +67,16 @@ def main():
     import phase_studio.jana_superflip as js
 
     QDialog.exec = lambda self: QDialog.Rejected
-    QSettings("PhaseStudio", "JanaSuperflipWrapper").clear()
+    import tempfile
+    settings_dir = tempfile.TemporaryDirectory()
+    original_imports = js._qt_imports
+    def fixture_imports():
+        qt = original_imports()
+        qt["QSettings"] = lambda _organization, application: QSettings(
+            str(Path(settings_dir.name) / (application + ".ini")), QSettings.IniFormat,
+        )
+        return qt
+    js._qt_imports = fixture_imports
 
     calls = {"n": 0, "fail": False, "models": [
         "PEAK A (model prediction)", "UNIVERSAL", "SEED (cyclic CF)",
@@ -127,7 +136,7 @@ def main():
     )
     check(
         "Superflip + SharpED: the count is reported",
-        "4 models available" in status,
+        "4 models · Live server catalogue" in status,
     )
     check(
         "Superflip + SharpED: server-default presentation is hidden",
@@ -269,17 +278,8 @@ def main():
     )
     calls["fail"] = False
 
-    import tempfile
-    settings_dir = tempfile.TemporaryDirectory()
-    original_imports = js._qt_imports
-    def fixture_imports():
-        qt = original_imports()
-        qt["QSettings"] = lambda _organization, application: QSettings(
-            str(Path(settings_dir.name) / (application + ".ini")), QSettings.IniFormat,
-        )
-        return qt
-    js._qt_imports = fixture_imports
     settings = QSettings(str(Path(settings_dir.name) / "JanaSuperflipWrapper.ini"), QSettings.IniFormat)
+    settings.clear()
     settings.setValue("model", "UNIVERSAL")
     settings.remove("model_selection_mode")
     wizard = build(js.WORKFLOW_SUPERFLIP_SHARPED)

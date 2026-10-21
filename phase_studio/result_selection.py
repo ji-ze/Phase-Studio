@@ -646,7 +646,7 @@ class ResultSelectionDialog(QDialog):
             view = _SourceView(
                 "superflip", superflip_candidates, superflip_recommendation,
                 metric_columns, show_feedback_column,
-                "CHARGE-FLIPPING SOLUTION CANDIDATES  ·  SOURCE: SUPERFLIP",
+                "Charge-flipping candidates",
                 jana_context=jana_context,
             )
             self._views["superflip"] = view
@@ -655,7 +655,7 @@ class ResultSelectionDialog(QDialog):
             view = _SourceView(
                 "deblurred", sharped_candidates, sharped_recommendation,
                 metric_columns, show_feedback_column,
-                "STRUCTURE PREDICTION CANDIDATES  ·  SOURCE: SHARPED",
+                "SharpED candidates",
                 jana_context=jana_context,
             )
             self._views["deblurred"] = view
@@ -672,7 +672,9 @@ class ResultSelectionDialog(QDialog):
         # This is the flexible region.  A large canvas minimum used to force
         # the native dialog taller after its pre-layout screen clamp, placing
         # the handoff actions below the Windows work area on short monitors.
-        preview_canvas.setMinimumHeight(130)
+        # The actual viewport must shrink with a short screen. A taller canvas
+        # minimum paints a correctly fitted model outside the clipped panel.
+        preview_canvas.setMinimumHeight(40)
         preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_host.structure_canvas = preview_canvas
         self._preview_canvas = preview_canvas
@@ -745,23 +747,34 @@ class ResultSelectionDialog(QDialog):
             button.setCursor(Qt.PointingHandCursor)
             toolbar.addWidget(button)
         preview_layout.addLayout(toolbar)
-        view_toolbar = QHBoxLayout()
-        view_toolbar.setSpacing(6)
-        view_toolbar.addWidget(self._threshold_status)
+        from phase_studio.app import FlowLayout
+        view_controls=QWidget()
+        view_toolbar=FlowLayout(view_controls,spacing=6)
+        threshold_group=QWidget()
+        threshold_layout=QHBoxLayout(threshold_group)
+        threshold_layout.setContentsMargins(0,0,0,0)
+        threshold_layout.setSpacing(6)
+        threshold_layout.addWidget(self._threshold_status)
         for button in (self._add_atoms_button, self._remove_atoms_button):
             button.setCursor(Qt.PointingHandCursor)
-            view_toolbar.addWidget(button)
-        view_toolbar.addStretch(1)
+            threshold_layout.addWidget(button)
+        view_toolbar.addWidget(threshold_group)
         view_toolbar.addWidget(camera_settings_button(self))
-        view_toolbar.addWidget(QLabel("View:"))
+        representation_group=QWidget()
+        representation_layout=QHBoxLayout(representation_group)
+        representation_layout.setContentsMargins(0,0,0,0)
+        representation_layout.setSpacing(6)
+        representation_layout.addWidget(QLabel("View:"))
         for button in (self._molecule_button, self._cell_button, self._auto_rotate_button):
             button.setCursor(Qt.PointingHandCursor)
-            view_toolbar.addWidget(button)
+            button.setMinimumWidth(button.sizeHint().width())
+            representation_layout.addWidget(button)
+        view_toolbar.addWidget(representation_group)
         self._fullscreen_button.setCursor(Qt.PointingHandCursor)
         self._reset_button.setParent(self)
         self._reset_button.hide()  # Reset remains available through the canvas R key.
         self._fit_button.setToolTip("Fit visible geometry. Double-click to fit; press R to reset orientation.")
-        preview_layout.addLayout(view_toolbar)
+        preview_layout.addWidget(view_controls)
         camera_hint = QLabel(CAMERA_HELP_TEXT)
         camera_hint.setObjectName("structureInteractionHint")
         camera_hint.setAlignment(Qt.AlignRight)
@@ -777,7 +790,15 @@ class ResultSelectionDialog(QDialog):
         self._metadata_label = QLabel("")
         self._metadata_label.setObjectName("autosolveReviewDetail")
         self._metadata_label.setWordWrap(True)
-        preview_layout.addWidget(self._metadata_label)
+        metadata_row=QHBoxLayout()
+        metadata_row.addWidget(self._metadata_label,1)
+        self._candidate_info=QToolButton()
+        self._candidate_info.setText('Details')
+        self._candidate_info.setAccessibleName('Selected candidate details')
+        self._candidate_info.setToolTip('Inspect the displayed candidate and its scientific output identity.')
+        self._candidate_info.clicked.connect(self._show_candidate_details)
+        metadata_row.addWidget(self._candidate_info)
+        preview_layout.addLayout(metadata_row)
         self._element_legend = QLabel("")
         self._element_legend.setObjectName("elementLegend")
         self._element_legend.setTextFormat(Qt.RichText)
@@ -975,7 +996,8 @@ class ResultSelectionDialog(QDialog):
         if report is not None:
             if self.selected_candidate is not None and self._threshold_key(self.selected_candidate) == key:
                 self._threshold_status.setText(
-                    "EDMA threshold update failed. Previous completed structure retained."
+                    "EDMA threshold update failed. Previous completed structure retained. "
+                    "Review Execution Log for the cause and recovery details."
                 )
             self._sync_action_button()
             return
@@ -1045,10 +1067,10 @@ class ResultSelectionDialog(QDialog):
         # remains the dominant 66-70% of the dialog while retaining enough room
         # for every compact heading.
         try:
-            share = float(QSettings('PhaseStudio','PhaseStudio').value('viewer/resultSelectionTableShare', .28))
-            share = max(.20,min(.50,share)) if math.isfinite(share) else .28
+            share = float(QSettings('PhaseStudio','PhaseStudio').value('viewer/resultSelectionTableShare', .33))
+            share = max(.20,min(.50,share)) if math.isfinite(share) else .33
         except (ValueError,TypeError):
-            share = .28
+            share = .33
         table_width = int(available * share)
         table_width = max(table_width, required_width + 48)
         table_width = min(table_width, max(1, available - minimum_preview))
@@ -1144,9 +1166,30 @@ class ResultSelectionDialog(QDialog):
         self._preview_figure.text(.5, .5, "No completed structure is available for this selection.",
             ha="center", va="center", fontfamily="Segoe UI", wrap=True)
         self._metadata_label.setText(html.escape(reason))
+        self._candidate_detail_rows=()
+        self._candidate_info.setEnabled(False)
         self._threshold_status.clear()
         self._element_legend.clear()
         self._preview_canvas.draw_idle()
+
+    def _show_candidate_details(self):
+        rows=getattr(self,'_candidate_detail_rows',())
+        if not rows:return
+        dialog=QDialog(self)
+        dialog.setWindowTitle('Displayed candidate details')
+        layout=QVBoxLayout(dialog)
+        form=QFormLayout()
+        for title,value in rows:
+            label=QLabel(str(value))
+            label.setTextFormat(Qt.PlainText)
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse|Qt.TextSelectableByKeyboard)
+            form.addRow(title,label)
+        layout.addLayout(form)
+        close=QPushButton('Close');close.clicked.connect(dialog.accept)
+        layout.addWidget(close,alignment=Qt.AlignRight)
+        apply_safe_dialog_geometry(dialog,680,620)
+        dialog.exec()
 
     @property
     def active_source(self) -> str:
@@ -1445,6 +1488,7 @@ class ResultSelectionDialog(QDialog):
             detached.candidate_identity = CandidateSelection(candidate,False,False,'').identity
 
     def _render_preview(self, candidate: ResultCandidate) -> None:
+        from phase_studio.autosolve_window import structure_site_summary
         status = candidate_selection(candidate, jana=self._jana_context)
         if not status.geometry:
             self._show_empty_preview(candidate, status.reason)
@@ -1535,26 +1579,33 @@ class ResultSelectionDialog(QDialog):
             axis.set_axis_off()
         source = self._source_title(candidate.source)
         lineage = recorded_edma_site_lineage(candidate)
-        raw_detail = (
-            f" · Raw EDMA peaks: {lineage['raw_edma_sites']}"
-            if lineage else ""
-        )
         model = f" · {candidate.sharped_model}" if candidate.sharped_model else ""
         initialization = (
             f" · {candidate.superflip_initialization}"
             if candidate.source == "superflip" and candidate.superflip_initialization else ""
         )
-        self._metadata_label.setText(
-            f"{html.escape(source)} · Cycle {candidate.cycle}{html.escape(model)}{html.escape(initialization)}<br>"
-            f"<b>{html.escape(composition_label)}:</b> {html.escape((composition or 'Unavailable').translate(str.maketrans('0123456789', '₀₁₂₃₄₅₆₇₈₉')))}"
-            f"<br>EDMA candidate: {candidate.detected_atom_count if candidate.detected_atom_count is not None else detected_count} sites{raw_detail} · "
-            + (f"Jana model: {candidate.jana_model_site_count} atomic sites"
-               if candidate.jana_model_site_count is not None and candidate.jana_model_sha256
-               else "Jana model: prepared during handoff")
+        self._candidate_detail_rows=(
+            ('Source',source),('Cycle',candidate.cycle),
+            ('Superflip initialization',candidate.superflip_initialization or 'Not available'),
+            ('SharpED model',candidate.sharped_model or 'Not applicable'),
+            ('EDMA threshold',f'{candidate.edma_sigma} σ' if candidate.edma_sigma is not None else 'Not available'),
+            ('EDMA candidate',f'{candidate.detected_atom_count if candidate.detected_atom_count is not None else detected_count} sites'),
+            ('Raw EDMA peaks',lineage['raw_edma_sites'] if lineage else 'Not available'),
+            ('EDMA ASU composition',composition or 'Unavailable'),
+            ('Rendered atoms',len(atoms)),
+            ('Scientific provenance', structure_site_summary(Path(candidate.structure_path), {'atoms': atoms, 'detected': detected_count, 'displayed': len(atoms), 'independent_asu_sites': candidate.detected_atom_count}, self._view_mode)),
+            ('Jana model',f'{candidate.jana_model_site_count} atomic sites'
+                if candidate.jana_model_site_count is not None and candidate.jana_model_sha256
+                else 'prepared during handoff'),
+            ('Candidate ID',candidate.candidate_id),('Run ID',candidate.run_id),
+            ('Map SHA-256',candidate.map_sha256),('Structure SHA-256',candidate.structure_sha256),
+            ('Jana model SHA-256',candidate.jana_model_sha256),
         )
-        self._metadata_label.setToolTip(self._metadata_label.text().replace("<br>", "\n")
-            + f"\nRendered atoms: {len(atoms)}; candidate identity: {candidate.candidate_id}. "
-            "Changing EDMA sites need not change the composition-constrained Jana model count.")
+        self._candidate_info.setEnabled(True)
+        self._metadata_label.setToolTip(
+            "EDMA ASU composition\n\nComposition is determined from EDMA sites in the "
+            "crystallographic asymmetric unit. It may differ from the "
+            "composition-constrained Jana model.")
         self._metadata_label.setText(
             f"<b>ASU:</b> {html.escape((composition or 'Unavailable').translate(str.maketrans('0123456789', '₀₁₂₃₄₅₆₇₈₉')))}"
             f" · Jana model: {candidate.jana_model_site_count if candidate.jana_model_site_count is not None else 'unavailable'} atomic sites<br>"

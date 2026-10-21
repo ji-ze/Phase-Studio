@@ -45,7 +45,7 @@ def run_release_ui_check(output_path):
                     patch.object(js, 'application_dir', lambda: programs.parent), \
                     patch.object(QDialog, 'exec', lambda self: QDialog.Rejected), \
                     patch.object(js.SharpEDServerClient, 'get_models',
-                        lambda self: SimpleNamespace(models=models, default_model=models[0])):
+                        lambda self: SimpleNamespace(models=models, default_model=models[0], provenance='offline')):
                 wizard = js._JanaWorkflowWizard([], source)
                 wizard.run()
                 wizard.dialog.show()
@@ -60,12 +60,25 @@ def run_release_ui_check(output_path):
                     assert time.monotonic() < deadline
                 wizard.cycles.setValue(1)
                 assert wizard.model.currentText() == models[0]
+                assert wizard.primary_button.text() == 'Run phasing'
+                wizard._ensure_workflow_requirements = lambda **kwargs: False
+                wizard.primary_button.click()
+                assert wizard.stack.currentWidget() is wizard.page2
                 wizard.cycles.setValue(3)
                 assert wizard.model.currentText() == models[1]
                 wizard.primary_button.click()
                 assert wizard.stack.currentWidget() is wizard.page3
                 assert wizard.dialog.geometry() == geometry
                 assert wizard.update_menu.menu().actions()
+                wizard.update_menu.menu().actions()[-1].trigger()
+                for _ in range(15): app.processEvents()
+                from phase_studio.about_ui import AboutDialog, legal_directory
+                about = wizard.dialog._phase_studio_about
+                assert isinstance(about, AboutDialog) and VERSION in about.version_label.text()
+                assert 'Jana2020' in about.mode_label.text()
+                assert all((legal_directory()/name).is_file() for name in
+                           ('LICENSE', 'AUTHORS.md', 'CITATION.cff', 'THIRD_PARTY_NOTICES.md'))
+                about.close()
                 access = SharpEDAccessDialog(wizard.dialog, store=store)
                 access.show()
                 app.processEvents()
@@ -75,7 +88,8 @@ def run_release_ui_check(output_path):
                 assert not (programs / 'superflip_original.exe').exists()
                 assert source.read_bytes() == original
                 report.update(ok=True, parsed_records=2, navigation=True, model_policy=True,
-                    account_dialog=True, update_menu=True, original_superflip_required=False,
+                    account_dialog=True, update_menu=True, about_dialog=True, one_cycle_skip=True,
+                    original_superflip_required=False,
                     context='Isolated synthetic project and executable-path fixtures; no native Jana acceptance')
                 wizard.dialog.close()
     except Exception as error:

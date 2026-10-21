@@ -60,16 +60,78 @@ class FeedbackTests(unittest.TestCase):
         out,_ = self.feedback(rows, self.a.REFLECTION_DATA_MODE_INTENSITY, 2.5)
         self.assertEqual([r.value for r in out], [10.,30.,30.])
 
-    def test_amplitudes_keep_the_original_f_over_sigma_f_gate(self):
+    def test_amplitudes_use_first_order_intensity_significance(self):
         import gemmi
-        rows = [self.a.Reflection(i,0,0,v,s) for i,(v,s) in enumerate([(2,.1),(4,4),(6,.1)],1)]
+        rows = [self.a.Reflection(i,0,0,v,s) for i,(v,s) in enumerate([(2,.5),(4,1),(6,.5)],1)]
         predictions = {(i,0,0):(v,0) for i,v in enumerate([1.,9.,16.],1)}
         with patch.object(self.a,'xplor_fft_predictions',return_value=predictions):
             out,_ = self.a.apply_map_feedback_to_reflections(rows,self.a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
-                self.root/'map.xplor',gemmi.UnitCell(10,10,10,90,90,90),0,False,0,True,.5,1.5,lambda s:None)
+                self.root/'map.xplor',gemmi.UnitCell(10,10,10,90,90,90),0,False,0,True,.5,2.5,lambda s:None)
         self.assertAlmostEqual(out[1].value,math.sqrt(18.125))
-        self.assertEqual([out[0].value,out[2].value],[2.,6.])
-        self.assertEqual([r.sigma for r in out],[.1,4,.1])
+        self.assertAlmostEqual(out[0].value,math.sqrt(3.125))
+        self.assertEqual(out[2].value,6.)
+        self.assertEqual([r.sigma for r in out],[.5,1,.5])
+
+    def test_equivalent_intensities_amplitudes_phase_formats_and_strict_boundary(self):
+        a=self.a
+        for imode,fmode in [(a.REFLECTION_DATA_MODE_INTENSITY,a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA),
+                           (a.REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA)]:
+            for threshold in (2.,2.5):
+                fs=[a.Reflection(i,0,0,f,s,37.) for i,(f,s) in enumerate([(2,.5),(4,1),(6,.5)],1)]
+                intensities=[a.Reflection(r.h,0,0,r.value**2,2*r.value*r.sigma,r.phase) for r in fs]
+                fout,_=self.feedback(fs,fmode,threshold)
+                iout,_=self.feedback(intensities,imode,threshold)
+                for before,fr,ir in zip(fs,fout,iout):
+                    self.assertAlmostEqual(fr.value**2,ir.value)
+                    self.assertEqual(fr.sigma,before.sigma)
+                    self.assertEqual(fr.phase,before.phase)
+                    self.assertEqual(a.map_feedback_intensity_significance(before,fmode),
+                        a.map_feedback_intensity_significance(intensities[before.h-1],imode))
+                if threshold==2.:self.assertEqual([r.value for r in fout],[2,4,6])
+
+    def test_significance_helper_rejects_unusable_measurements(self):
+        a=self.a
+        for mode in (a.REFLECTION_DATA_MODE_INTENSITY,a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+                     a.REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA):
+            for value,sigma in [(0,1),(-1,1),(float('nan'),1),(float('inf'),1),
+                                (1,None),(1,0),(1,-1),(1,float('nan')),(1,float('inf'))]:
+                self.assertIsNone(a.map_feedback_intensity_significance(a.Reflection(1,0,0,value,sigma),mode))
+        for mode in (a.REFLECTION_DATA_MODE_INTENSITY_FWHM,a.REFLECTION_DATA_MODE_AMPLITUDE_FWHM,a.REFLECTION_DATA_MODE_AUTO):
+            self.assertIsNone(a.map_feedback_intensity_significance(a.Reflection(1,0,0,1,.1),mode))
+
+    def test_only_positive_significance_gate_changes_from_scientific_baseline(self):
+        import ast
+        import subprocess
+        baseline='b628eb9da8b66f9b91b34ab87a6d67eebf0da78c'
+        old=ast.parse(subprocess.check_output(['git','show',baseline+':phase_studio/app.py']).decode('utf-8'))
+        new=ast.parse(Path(self.a.__file__).read_text(encoding='utf-8'))
+        find=lambda tree:next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='apply_map_feedback_to_reflections')
+        original,current=find(old),find(new)
+        gates=[n for n in ast.walk(current) if isinstance(n,ast.If) and
+            ast.dump(n.test)==ast.dump(ast.parse('max_i_over_sigma > 0',mode='eval').body)]
+        self.assertEqual(len(gates),1)
+        expected=ast.parse('significance = map_feedback_intensity_significance(r, mode)\n'
+            'if significance is None or not significance < max_i_over_sigma:\n'
+            '    corrected_reflections.append(r)\n    continue').body
+        self.assertEqual([ast.dump(n) for n in gates[0].body],[ast.dump(n) for n in expected])
+        gates[0].body=ast.parse('if r.value <= 0 or not math.isfinite(float(r.value)) or r.sigma is None or r.sigma <= 0 or not math.isfinite(float(r.sigma)) or (float(r.value) / float(r.sigma)) >= max_i_over_sigma:\n'
+            '    corrected_reflections.append(r)\n    continue').body
+        self.assertEqual(ast.dump(current),ast.dump(original))
+
+    def test_amplitude_threshold_zero_preserves_existing_damping_and_zero_behavior(self):
+        a=self.a
+        rows=[a.Reflection(i,0,0,f,None,23.) for i,f in enumerate([0.,4.,6.],1)]
+        out,_=self.feedback(rows,a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,0,.5)
+        # Original median scale = median(16/16,36/4) = 5; no significance gate.
+        self.assertAlmostEqual(out[0].value,math.sqrt(10))
+        self.assertAlmostEqual(out[1].value,math.sqrt(48))
+        self.assertAlmostEqual(out[2].value,math.sqrt(28))
+        self.assertEqual([(r.value,r.sigma,r.phase) for r in rows],[(0.,None,23.),(4.,None,23.),(6.,None,23.)])
+        measured=[a.Reflection(r.h,0,0,r.value,1.,r.phase) for r in rows]
+        gated,_=self.feedback(measured,a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,2.5,.5)
+        self.assertEqual(gated[0].value,0.)
+        self.assertAlmostEqual(gated[1].value,math.sqrt(48))
+        self.assertEqual(gated[2].value,6.)
 
     def test_fwhm_can_only_use_existing_uncertainty_independent_mode(self):
         rows = [self.a.Reflection(i,0,0,v,.0527) for i,v in enumerate([10.,20.,30.],1)]
@@ -78,6 +140,8 @@ class FeedbackTests(unittest.TestCase):
         self.assertEqual([r.sigma for r in out],[.0527]*3)
         with self.assertRaisesRegex(ValueError,'FWHM'):
             self.feedback(rows,self.a.REFLECTION_DATA_MODE_INTENSITY_FWHM,2)
+        with self.assertRaisesRegex(ValueError,'FWHM'):
+            self.feedback(rows,self.a.REFLECTION_DATA_MODE_AMPLITUDE_FWHM,2)
 
     def test_nonfinite_or_missing_uncertainties_do_not_pass_significance_filter(self):
         for sigma in [None,0,-1,float('nan'),float('inf')]:
@@ -113,6 +177,7 @@ class FeedbackTests(unittest.TestCase):
         w.model_cache['loaded'] = True
         models = ['PEAK A (model prediction)','SEED (cyclic CF)']
         w.model_catalog['values'] = tuple(models)
+        w.model_catalog['provenance'] = 'offline'
         w.model.addItems(models)
         w.model_policy_error = ''
         w._go_to_map_feedback()
@@ -196,7 +261,30 @@ class FeedbackTests(unittest.TestCase):
         self.assertTrue(w.feedback_has_uncertainty)
         w.intensity_enabled_checkbox.setChecked(True)
         self.assertTrue(w.intensity_sigma_spin.isEnabled())
-        self.assertEqual(w.intensity_form.labelForField(w.intensity_sigma_spin).text(),'F/σ(F) limit')
+        self.assertEqual(w.intensity_form.labelForField(w.intensity_sigma_spin).text(),'I/σ(I) limit')
+        self.assertIn('first-order approximation',w.intensity_note.text())
+        self.assertIn('F/[2σ(F)]',w.intensity_sigma_spin.toolTip())
+
+    def test_full_configuration_uses_same_intensity_significance_unit(self):
+        a=self.a
+        with patch.object(a.IterativeSuperflipPipelineQtGUI,'load_settings'),patch.object(a.IterativeSuperflipPipelineQtGUI,'save_settings'),patch.object(a.IterativeSuperflipPipelineQtGUI,'refresh_sharped_models'):
+            win=a.IterativeSuperflipPipelineQtGUI()
+        self.addCleanup(win.close)
+        win.inputs['map_feedback_intensity_enabled'].setChecked(True)
+        from PySide6.QtWidgets import QLabel
+        self.assertTrue(any(label.text()=='I/σ(I) limit' for label in win.findChildren(QLabel)))
+        self.assertIn('I/σ(I) ≈ F/[2σ(F)]',win.inputs['map_feedback_intensity_max_i_over_sigma'].toolTip())
+        from PySide6.QtCore import QSettings
+        settings=QSettings(str(self.root/'existing-settings.ini'),QSettings.IniFormat)
+        key='inputs/map_feedback_intensity_max_i_over_sigma'
+        settings.setValue(key,'3.0')
+        settings.setValue('inputs/reflection_data_mode',a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA)
+        win.settings=settings
+        with patch.object(win,'refresh_sharped_models'):
+            a.IterativeSuperflipPipelineQtGUI.load_settings(win)
+        self.assertEqual(win.inputs['map_feedback_intensity_max_i_over_sigma'].value(),3.)
+        a.IterativeSuperflipPipelineQtGUI.save_settings(win)
+        self.assertEqual(float(settings.value(key)),3.)
 
     def test_one_cycle_collapses_parameters_preserves_values_and_does_not_block(self):
         w = self.wizard()

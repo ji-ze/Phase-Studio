@@ -51,6 +51,9 @@ def main():
 
     import phase_studio.app as appmod
     import phase_studio.jana_superflip as jana
+    imports = jana._qt_imports
+    jana._qt_imports = lambda: imports() | {'QSettings': lambda org, name:
+        QSettings(str(settings_root / (name + '.ini')), QSettings.IniFormat)}
 
     # Keep constructor-time catalog refreshes out of this preflight test.
     appmod.IterativeSuperflipPipelineQtGUI.refresh_sharped_models = lambda self: None
@@ -164,7 +167,7 @@ def main():
     )
     check("SharpED remediation has the requested account/token actions",
           all(label in observed["buttons"] for label in (
-              "Open SharpED token page", "Connect to SharpED", "Back"
+              "Sign in with Jana2020", "Use an access key instead ▾", "Back"
           )))
     check("skipping a missing SharpED token does not start the worker", window.worker is None)
 
@@ -178,7 +181,7 @@ def main():
         dialog = QApplication.activeModalWidget()
         if dialog is None:
             return
-        network_dialog["buttons"] = [button.text() for button in dialog.findChildren(QPushButton)]
+        network_dialog["buttons"] = [button.text() for button in dialog.findChildren(QPushButton) if button.isVisible()]
         network_dialog["text"] = " ".join(label.text() for label in dialog.findChildren(appmod.QLabel))
         close = next((button for button in dialog.findChildren(QPushButton) if button.text() == "Back"), None)
         if close is not None:
@@ -194,7 +197,8 @@ def main():
         "configured-token",
     )
     check("SharpED network remediation does not offer a token as the fix",
-          "Connect to SharpED" in network_dialog["buttons"]
+          "Try again" in network_dialog["buttons"]
+          and "Connect using access key" not in network_dialog["buttons"]
           and "Back" in network_dialog["buttons"])
     check("SharpED network remediation names the network problem and offers Close",
           "Back" in network_dialog["buttons"]
@@ -253,11 +257,12 @@ def main():
         dialog = QApplication.activeModalWidget()
         if dialog is None:
             return
+        dialog.manual_button.click()
         token_edit = dialog.findChild(appmod.QLineEdit, "requirementTokenEdit")
         if token_edit is not None:
             token_edit.setText("configured-token")
         button = next(
-            (item for item in dialog.findChildren(QPushButton) if item.text() == "Connect to SharpED"), None,
+            (item for item in dialog.findChildren(QPushButton) if item.text() == "Connect using access key"), None,
         )
         if button is not None:
             button.click()
@@ -285,6 +290,11 @@ def main():
         QDialog.exec = original_exec
         wizard._ensure_models_loaded = lambda: None
         wizard.model_cache["loaded"] = True
+        wizard.model_catalog["provenance"] = "offline"
+        models = [jana.SHARPED_ONE_CYCLE_MODEL, jana.SHARPED_ITERATIVE_MODEL]
+        wizard.model_catalog['values'] = tuple(models)
+        wizard.model.clear()
+        wizard.model.addItems(models)
         wizard.shared_settings = _MemorySettings()
         wizard.workflow_state["key"] = workflow
         wizard._workflow_changed()
@@ -322,15 +332,18 @@ def main():
     wizard.refresh_timer.stop()
     wizard.dialog.deleteLater()
 
-    wizard = build_wizard(jana.WORKFLOW_SUPERFLIP_SHARPED)
-    wizard.api_token.setText("configured-token")
-    wizard.primary_button.click()  # workflow page -> SharpED settings page
-    wizard.primary_button.click()  # SharpED settings -> Map Feedback
-    title = capture_wizard_dialog(wizard, wizard.primary_button.click)
-    check("Superflip + SharpED Wizard button reaches preflight before execution",
-          "Set up Superflip" in title and wizard.result["action"] == "cancel")
-    wizard.refresh_timer.stop()
-    wizard.dialog.deleteLater()
+    for cycles in (1, 3):
+        wizard = build_wizard(jana.WORKFLOW_SUPERFLIP_SHARPED)
+        wizard.cycles.setValue(cycles)
+        wizard.api_token.setText("configured-token")
+        wizard.primary_button.click()  # workflow page -> SharpED settings page
+        if cycles > 1:
+            wizard.primary_button.click()  # SharpED settings -> Map Feedback
+        title = capture_wizard_dialog(wizard, wizard.primary_button.click)
+        check(f"Superflip + SharpED ({cycles} cycles) reaches preflight before execution",
+              "Set up Superflip" in title and wizard.result["action"] == "cancel")
+        wizard.refresh_timer.stop()
+        wizard.dialog.deleteLater()
 
     wizard = build_wizard(jana.WORKFLOW_PHASE_RECYCLING)
     wizard.shared_settings.setValue("inputs/superflip_exe", str(superflip))

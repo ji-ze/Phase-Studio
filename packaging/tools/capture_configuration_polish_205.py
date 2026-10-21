@@ -54,7 +54,7 @@ with tempfile.TemporaryDirectory() as tmp,patch.object(QScreen,'availableGeometr
     def models(_client):
         state['calls']+=1
         if state['fail']:raise TimeoutError('mock offline request')
-        return SimpleNamespace(models=list(state['models']),default_model='Extra catalogue model')
+        return SimpleNamespace(models=list(state['models']),default_model='Extra catalogue model',provenance='offline')
     with patch.object(js,'_qt_imports',lambda:imports()|{'QSettings':factory}),patch.object(js,'credential_store',CredentialStore(backend=None)),patch.object(js,'application_dir',lambda:jana),patch.object(QDialog,'exec',lambda self:QDialog.Rejected),patch.object(js.SharpEDServerClient,'get_models',models):
         w=js._JanaWorkflowWizard([],source);w.run();w.dialog.show();settle(w)
         initial=QRect(w.dialog.geometry())
@@ -114,7 +114,7 @@ with tempfile.TemporaryDirectory() as tmp,patch.object(QScreen,'availableGeometr
         w.cycles.setValue(1);assert w.model.currentIndex()==-1 and w.model_policy_error
         w.restore_automatic_model_button.click();stable()
         assert w.model.currentText()==peak and not w.model_user_picked['value'] and not w.model_policy_error
-        assert w.model_status.text().endswith('models available')
+        assert w.model_status.text().endswith('Controlled offline catalogue')
         # Missing automatic policy cannot silently use the server default.
         state['models'].remove(peak);w.refresh_models_button.click();pump()
         assert w.model.currentIndex()==-1 and peak in w.model_policy_error

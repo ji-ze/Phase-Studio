@@ -542,6 +542,7 @@ def apply_phase_studio_app_icon(app: "QApplication") -> None:
 # tests/test_jana_wizard_tile_icons.py fails if an action carries an icon that
 # does not come from this inventory, or if new icon artwork/assets appear.
 ESTABLISHED_ICON_INVENTORY = {
+    "application_menu": "Requested horizontal ellipsis for the application header menu.",
     "workflow_superflip": "Charge-flipping electron-density profile.",
     "workflow_sharped": "Broad-to-sharp electron-density restoration peaks.",
     "workflow_autosolve": "Approved Variant B: atomic structure inside a focus frame.",
@@ -590,7 +591,7 @@ ICON_SOURCE_PROPERTY = "phaseStudioIconSource"
 
 def established_icon(source: str, style=None) -> QIcon:
     """The QIcon for one ESTABLISHED_ICON_INVENTORY entry."""
-    if source in {"workflow_superflip", "workflow_sharped", "workflow_autosolve", "workflow_settings"}:
+    if source in {"workflow_superflip", "workflow_sharped", "workflow_autosolve", "workflow_settings", "application_menu"}:
         from PySide6.QtSvg import QSvgRenderer
         asset = Path(__file__).resolve().parent / "assets" / (source + ".svg")
         renderer = QSvgRenderer(str(asset))
@@ -746,3 +747,18 @@ def apply_safe_dialog_geometry(
         dialog, QSize(width, height), width_fraction=width_fraction,
         height_fraction=height_fraction,
     )
+
+
+def guard_numeric_wheel(editor):
+    """A scrolling page must not edit an unfocused scientific parameter."""
+    from PySide6.QtCore import QObject, QEvent
+    class _IntentionalWheel(QObject):
+        def eventFilter(self, watched, event):
+            if event.type() == QEvent.Wheel and not watched.hasFocus():
+                event.ignore()
+                return True
+            return False
+    editor.setFocusPolicy(Qt.StrongFocus)
+    guard = _IntentionalWheel(editor)
+    editor.installEventFilter(guard)
+    editor._intentional_wheel_guard = guard

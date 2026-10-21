@@ -43,6 +43,8 @@ sys.path.insert(0, str(spec_dir))
 import portable_runtime  # noqa: E402
 from release_legal import exclude_unused_qt_plugins, legal_datas
 from windows_version import version_resource
+from distribution_options import options,configure_qt,custom_hooks
+configure_qt()
 
 # Fail before doing any work if the build environment cannot produce a
 # consistent Qt runtime (Conda PySide6 with Qt outside the Python package,
@@ -57,6 +59,10 @@ hiddenimports = ["PySide6.QtSvg",
     "truststore",
     "phase_studio.ui_style",
     "matplotlib.backends.backend_qtagg",
+    "matplotlib.backends.backend_pdf",
+    "matplotlib.backends.backend_svg",
+    "matplotlib.backends.backend_ps",
+    "matplotlib.backends.backend_pgf",
     "PySide6.QtCore",
     "PySide6.QtGui",
     "PySide6.QtWidgets",
@@ -67,13 +73,16 @@ if installer_build:
                      "phase_studio.ui_branding", "PySide6.QtCore", "PySide6.QtGui", "PySide6.QtWidgets"]
 
 try:
-    hiddenimports += collect_submodules("qtvscodestyle")
+    if 'style' not in options():hiddenimports += collect_submodules("qtvscodestyle")
 except Exception:
     pass
 
 datas = []
 datas += [(str(project_dir / "phase_studio" / "assets"), "phase_studio/assets")]
 datas += legal_datas(project_dir)
+if not installer_build and not store_build:
+    from update_resources import updater_datas
+    datas += updater_datas(project_dir,'standalone-onefile',release_version)
 if installer_build:
     wrapper_payload = Path(os.environ.get("PHASE_STUDIO_WRAPPER_PAYLOAD", project_dir / "dist" / "superflip"))
     if not (wrapper_payload / "superflip.exe").is_file() or not (wrapper_payload / "_internal").is_dir():
@@ -91,7 +100,7 @@ if installer_build:
         (str(payload_manifest), "JanaIntegrationPayload"),
     ]
 try:
-    datas += collect_data_files("qtvscodestyle")
+    if 'style' not in options():datas += collect_data_files("qtvscodestyle")
 except Exception:
     pass
 
@@ -102,7 +111,7 @@ a = Analysis(
     binaries=[],
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=[],
+    hookspath=custom_hooks(spec_dir),
     hooksconfig={
         "matplotlib": {
             "backends": "QtAgg",

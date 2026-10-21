@@ -60,6 +60,17 @@ def test_camera_menu_palette_and_sensitivity_are_visual_preferences(viewer):
         assert settings.value('viewer/elementPalette')=='cpk'
     finally:next(a for a in palette.actions() if 'Current' in a.text()).trigger()
 
+
+def test_camera_button_reserves_separate_indicator_space(viewer):
+    window,settings,data=viewer
+    from PySide6.QtWidgets import QToolButton
+    button=next(b for b in window.findChildren(QToolButton) if b.text()=='Camera')
+    assert button.accessibleName()=='Camera preferences'
+    assert 'padding-right:26px' in button.styleSheet()
+    assert 'menu-indicator { image:none; width:0px; }' in button.styleSheet()
+    assert button.width()>=button.fontMetrics().horizontalAdvance('Camera')+26
+    assert not button.grab().isNull()
+
 @pytest.mark.parametrize('dx,dy',[(30,0),(-30,0),(0,30),(0,-30),(25,-25)])
 def test_front_features_follow_projected_drag(viewer,dx,dy):
     window,settings,data=viewer

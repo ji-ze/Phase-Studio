@@ -7,7 +7,7 @@ import threading
 import time
 import unittest
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from phase_studio.credentials import CredentialStore
@@ -82,9 +82,34 @@ class OAuthAPITests(unittest.TestCase):
         for code in [401,403,500]:
             with self.subTest(code=code):
                 self.calls.clear();self.failures=[code]
+                self.store.activate_oauth(OAuthCredential("mock-initial",time.monotonic()+3600))
+                self.renewals.clear()
                 with self.assertRaises(SharpEDServerError):
                     self.client._request_bytes("POST",RESOURCE+"/api/user/sharp-ed/upload",data=b"density",headers={"Authorization":"Bearer mock-initial"})
                 self.assertEqual(len(self.calls),1);self.assertEqual(self.renewals,[])
+    def test_persisted_grant_survives_non_authentication_post_failures(self):
+        from test_oauth_persistence import Backend
+        backend = Backend()
+        store = CredentialStore(backend)
+        store.activate_oauth(OAuthCredential('synthetic-persisted-grant',time.monotonic()+600))
+        store = CredentialStore(backend)  # New process-local store, no browser callback.
+        with patch('phase_studio.credentials.credential_store',store):
+            for code in (403,500):
+                self.calls.clear();self.failures=[code]
+                with self.assertRaises(SharpEDServerError):
+                    self.client._request_bytes('POST',RESOURCE+'/api/user/sharp-ed/upload',data=b'density',
+                        headers={'Authorization':'Bearer synthetic-persisted-grant'})
+                self.assertEqual(len(self.calls),1)
+                self.assertEqual(CredentialStore(backend).get(),'synthetic-persisted-grant')
+            with patch.object(self,'open',side_effect=URLError('synthetic timeout')):
+                with self.assertRaises(SharpEDServerError):
+                    self.client._request_bytes('POST',RESOURCE+'/api/user/sharp-ed/upload',data=b'density',
+                        headers={'Authorization':'Bearer synthetic-persisted-grant'})
+            self.assertEqual(CredentialStore(backend).get(),'synthetic-persisted-grant')
+            body = self.client._request_bytes('GET',RESOURCE+'/api/user/sharp-ed/status/existing-job',
+                headers={'Authorization':'Bearer synthetic-persisted-grant'})
+            self.assertEqual(body,b'scientific-result')
+
     def test_oauth_never_sent_to_other_hosts_or_legacy_fallback_header(self):
         for url in ["https://jana.fzu.cz/api/user/sharp-ed/upload","http://sharped.fzu.cz/api/user/sharp-ed/status/job","https://evil.invalid/job"]:
             with self.subTest(url=url),self.assertRaises(SharpEDServerError):
