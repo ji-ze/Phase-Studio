@@ -131,15 +131,21 @@ def test_wall_deadline_is_not_extended_by_activation():
 def test_independent_windows_processes_share_secure_grant(tmp_path):
     script = ('from phase_studio.oauth_diagnostics import run_credential_check; '
               'import sys; raise SystemExit(run_credential_check(sys.argv[1], sys.argv[2]))')
+    # This subprocess tests the real current-user Credential Manager. The
+    # release workflow runs the parent pytest process with Qt offscreen; that
+    # setting intentionally disables the app's default credential backend and
+    # must not leak into this native integration test.
+    child_env = os.environ.copy()
+    child_env.pop('QT_QPA_PLATFORM', None)
     try:
         for phase in ('oauth-write', 'oauth-read'):
             output = tmp_path/(phase+'.json')
             process = subprocess.run([sys.executable, '-c', script, str(output), phase],
-                capture_output=True, timeout=30)
+                capture_output=True, timeout=30, env=child_env)
             assert process.returncode == 0
             assert json.loads(output.read_text())['success']
             assert TOKEN not in output.read_text()
     finally:
         cleanup = subprocess.run([sys.executable, '-c', script,
-            str(tmp_path/'remove.json'), 'oauth-remove'], capture_output=True, timeout=30)
+            str(tmp_path/'remove.json'), 'oauth-remove'], capture_output=True, timeout=30, env=child_env)
         assert cleanup.returncode == 0

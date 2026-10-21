@@ -265,6 +265,109 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn('first-order approximation',w.intensity_note.text())
         self.assertIn('F/[2σ(F)]',w.intensity_sigma_spin.toolTip())
 
+    def test_stale_legacy_reflection_mode_cannot_override_embedded_fwhm(self):
+        path = self.input_file(powder=False)
+        text = path.read_text(encoding='utf8')
+        text = text.replace('dataformat amplitude', 'reflection_data_mode intensity\ndataformat intensity fwhm')
+        path.write_text(text, encoding='utf8')
+        loaded = self.a.build_hkl_load_result(
+            self.a.build_hkl_analysis_request_from_inflip(path, work_dir=self.root)
+        )
+        self.assertEqual(loaded.data_mode, self.a.REFLECTION_DATA_MODE_INTENSITY_FWHM)
+        self.assertTrue(loaded.format_verified)
+        self.assertTrue(loaded.diagnostics.data_type.startswith('Powder'))
+        self.assertFalse(loaded.diagnostics.available('significance'))
+        from types import SimpleNamespace
+        run_config = SimpleNamespace(input_source_mode=self.a.INPUT_MODE_INFLIP,
+            reflection_data_mode=self.a.REFLECTION_DATA_MODE_AUTO, hkl=Path(''), jana_inflip=path)
+        effective_mode = self.a.IterativeSuperflipPipelineQtGUI._resolve_configured_data_mode(object(), run_config)
+        self.assertEqual(effective_mode, self.a.REFLECTION_DATA_MODE_INTENSITY_FWHM)
+        from PySide6.QtWidgets import QDialog
+        w = self.j._JanaWorkflowWizard([], path)
+        with patch.object(QDialog, 'exec', return_value=QDialog.Rejected): w.run()
+        w.input_reflections = loaded.reflections
+        w.hkl_load_result = loaded
+        w._go_to_map_feedback()
+        for _ in range(5): self.qtapp.processEvents()
+        w._sync_page3_for_data_type()
+        self.assertEqual(w._detect_reflection_data_mode(), loaded.data_mode)
+        self.assertEqual(w.reflection_type_value.text(), 'Powder / polycrystalline')
+        self.assertEqual(w.reflection_format_value.text(), self.a.format_reflection_data_mode(loaded.data_mode))
+        self.assertIn('FWHM is not measurement uncertainty', w.page3_description.text())
+        self.assertFalse(w.feedback_has_uncertainty)
+        self.assertFalse(w.intensity_sigma_spin.isEnabled())
+        self.assertFalse(w.missing_group.isVisible())
+        self.assertFalse(w.powder_group.isHidden())
+        w.model_cache['loaded'] = True
+        w.model_catalog['values'] = ('PEAK A (model prediction)',)
+        w.model.addItem('PEAK A (model prediction)')
+        w.model.setCurrentIndex(0)
+        w.model_policy_error = ''
+        w.intensity_enabled_checkbox.setChecked(True)
+        w.intensity_sigma_spin.setValue(7.0)
+        self.assertEqual(w.intensity_sigma_spin.value(), 7.0)
+        w.workflow_state['key'] = self.j.WORKFLOW_PHASE_RECYCLING
+        w.cycles.setValue(3)
+        w.powder_enabled_checkbox.setChecked(True)
+        options = w._build_options('recycle')
+        self.assertEqual(options.intensity_sigma_threshold, 0.0)
+        self.assertTrue(options.enable_powder_repartition)
+        w.dialog.close()
+
+    def test_embedded_declared_layout_rejects_extra_inconsistent_columns(self):
+        path = self.input_file(powder=False)
+        rows = path.read_text(encoding='utf8').replace('dataformat amplitude', 'dataformat intensity fwhm')
+        lines = rows.splitlines()
+        first = lines.index('fbegin') + 1
+        lines[first] += ' 0.5'
+        rows = '\n'.join(lines) + '\n'
+        path.write_text(rows, encoding='utf8')
+        self.assertIsNone(self.a._verified_embedded_reflection_data_mode_from_inflip(path))
+        request = self.a.build_hkl_analysis_request_from_inflip(path, work_dir=self.root)
+        with self.assertRaisesRegex(ValueError, 'could not be verified'):
+            self.a.build_hkl_load_result(request)
+        from types import SimpleNamespace
+        run_config = SimpleNamespace(input_source_mode=self.a.INPUT_MODE_INFLIP,
+            reflection_data_mode=self.a.REFLECTION_DATA_MODE_AUTO, hkl=Path(''), jana_inflip=path,
+            map_feedback_intensity_enabled=True)
+        with self.assertRaisesRegex(ValueError, 'could not be verified'):
+            self.a.IterativeSuperflipPipelineQtGUI._resolve_configured_data_mode(object(), run_config)
+
+    def test_declared_dataitemwidths_phase_sigma_layout_remains_verified(self):
+        path = self.input_file(powder=False)
+        lines = path.read_text(encoding='utf8').splitlines()
+        lines = [line for line in lines if line.strip() != 'dataformat amplitude']
+        begin = lines.index('fbegin')
+        lines.insert(begin, 'dataitemwidths 4 15 15')
+        for index in range(begin + 1, len(lines)):
+            if lines[index].strip() == 'endf':
+                break
+            fields = lines[index].split()
+            lines[index] = ' '.join(fields[:4] + ['0.0', '1.0'])
+        path.write_text('\n'.join(lines) + '\n', encoding='utf8')
+        loaded = self.a.build_hkl_load_result(
+            self.a.build_hkl_analysis_request_from_inflip(path, work_dir=self.root)
+        )
+        self.assertEqual(loaded.data_mode, self.a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA)
+        self.assertTrue(loaded.format_verified)
+        self.assertEqual(loaded.reflections[0].phase, 0.0)
+        self.assertEqual(loaded.reflections[0].sigma, 1.0)
+
+    def test_unverified_map_feedback_does_not_fabricate_type_or_sigma(self):
+        path = self.input_file(powder=False)
+        path.write_text(path.read_text(encoding='utf8').replace('dataformat amplitude', ''), encoding='utf8')
+        from PySide6.QtWidgets import QDialog
+        w = self.j._JanaWorkflowWizard([], path)
+        with patch.object(QDialog, 'exec', return_value=QDialog.Rejected): w.run()
+        w.hkl_load_result = None
+        w.input_reflections = []
+        w._sync_page3_for_data_type()
+        self.assertEqual(w.reflection_type_value.text(), 'Not verified')
+        self.assertFalse(w.feedback_has_uncertainty)
+        self.assertFalse(w.intensity_sigma_spin.isEnabled())
+        self.assertFalse(w.missing_group.isVisible())
+        w.dialog.close()
+
     def test_full_configuration_uses_same_intensity_significance_unit(self):
         a=self.a
         with patch.object(a.IterativeSuperflipPipelineQtGUI,'load_settings'),patch.object(a.IterativeSuperflipPipelineQtGUI,'save_settings'),patch.object(a.IterativeSuperflipPipelineQtGUI,'refresh_sharped_models'):
@@ -338,6 +441,10 @@ class FeedbackTests(unittest.TestCase):
         from PySide6.QtWidgets import QDialog
         for cycles in [1,3]:
             w=self.j._JanaWorkflowWizard([],self.input_file())
+            loaded=self.a.build_hkl_load_result(
+                self.a.build_hkl_analysis_request_from_inflip(w.inflip_path,work_dir=self.root))
+            w.hkl_load_result=loaded
+            w.input_reflections=loaded.reflections
             def configure(dialog):
                 w.workflow_state['key']=self.j.WORKFLOW_SUPERFLIP_SHARPED
                 w.cycles.setValue(cycles)

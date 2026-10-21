@@ -2,6 +2,10 @@
 
 ## 2.0.6 — release candidate, not yet published
 
+- Fix embedded Jana HKL interpretation in Wizard Map Feedback and the
+  execution configuration using the verified shared diagnostics result;
+  FWHM is preserved as peak width and never treated as measurement sigma.
+
 - Repair repeated EDMA threshold review and long-path atomic result replacement.
 - Persist Jana2020 OAuth securely and automatically across application processes.
 - Standardize Map Feedback significance to I/σ(I), with explicit amplitude
