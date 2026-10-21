@@ -58,6 +58,11 @@ jobs:
       - name: Regressions and scientific authorities
         shell: pwsh
         run: |
+          $testTemp = Join-Path $env:RUNNER_TEMP 'phase-studio-tests'
+          New-Item -ItemType Directory -Path $testTemp -Force | Out-Null
+          $env:TMPDIR = $testTemp
+          $env:TEMP = $testTemp
+          $env:TMP = $testTemp
           python -m pytest -q -p no:cacheprovider
           if ($LASTEXITCODE) { throw 'Regression suite failed.' }
           foreach ($test in @('test_scientific_core.py','test_jana_completion.py','test_workflow_states.py','test_result_selection_viewer.py','test_review_edma.py','test_fullscreen_viewer.py')) {
