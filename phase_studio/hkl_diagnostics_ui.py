@@ -140,7 +140,30 @@ def _top(win, dialog, result, report, completeness=False):
     layout.addWidget(top)
     dialog.hkl_input_summary = summary
     dialog.hkl_interpretation = interpretation
+    metadata_source = result.source_note.split('; cell/symmetry source: ')[-1]
+    provenance = QLabel('Cell / symmetry source: ' + Path(metadata_source).name)
+    provenance.setWordWrap(True)
+    provenance.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    provenance.setToolTip(result.source_note + '\nThis diagnostic snapshot does not replace current manual overrides. Re-run validation after changing inputs.')
+    if isinstance(summary.layout(), QGridLayout):
+        grid = summary.layout()
+        grid.addWidget(provenance, grid.rowCount(), 0, 1, grid.columnCount())
+    else:
+        summary.layout().addWidget(provenance)
+    dialog.hkl_metadata_provenance = provenance
+    if completeness and report.data_type.startswith('Powder'):
+        coverage_note = QLabel('Powder indexed HKL coverage is not independent experimental completeness; peaks may overlap.')
+        coverage_note.setWordWrap(True)
+        coverage_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        coverage_note.setFixedHeight(2 * coverage_note.fontMetrics().lineSpacing() + 4)
+        layout.addWidget(coverage_note)
+        dialog.hkl_powder_coverage_note = coverage_note
     overlap = dict(report.overlap)
+    if overlap.get('wavelength'):
+        wavelength_note = QLabel(f'Effective wavelength: {overlap["wavelength"]:.8g} Å · {overlap.get("wavelength_source", "input metadata")}')
+        wavelength_note.setWordWrap(True)
+        layout.addWidget(wavelength_note)
+        dialog.hkl_effective_wavelength = wavelength_note
     if report.data_type.startswith('Powder') and report.fwhm_units=='degrees_2theta' and not overlap['available'] and not overlap.get('wavelength') and 'Wavelength missing' in overlap['reason']:
         prompt = QLabel('Wavelength required for peak overlap. Enter the measured wavelength; overlap numbers and graphs are hidden until it is known.')
         prompt.setWordWrap(True)
@@ -1482,6 +1505,9 @@ def completeness_dialog(win, analysis):
     splitter.setChildrenCollapsible(False)
     tabs = QTabWidget()
     tabs.setObjectName('hklPlotTabs')
+    # The enclosing splitter owns the plot height; switching pages must not
+    # reallocate space according to their different canvas minimum sizes.
+    tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
     main = QWidget()
     main_layout = QVBoxLayout(main)
     main_layout.setContentsMargins(0,0,0,0)
@@ -1903,7 +1929,7 @@ def completeness_dialog(win, analysis):
                 item.setData(Qt.UserRole+1,i)
                 table.setItem(i,j,item)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        bins_title.setText(scientific_text('RESOLUTION BINS · '+('d (Å)' if resolution_axis.currentData() else 'sinθ/λ (Å⁻¹)')+' · ' + ('overlap: original records; undefined denominator = N/A' if is_overlap else 'undefined coverage = n/a')))
+        bins_title.setText(scientific_text('RESOLUTION BINS · '+('d (Å)' if resolution_axis.currentData() else 'sinθ/λ (Å⁻¹)')+' · ' + ('overlap records' if is_overlap else 'indexed coverage')))
         bins_title.setToolTip('Intervals are (lower, upper], identical to the plot. Cross-bin groups contribute each record in its own interval. Group counts are omitted: no new group-to-bin convention. Intensity fraction uses finite nonnegative input intensity within the interval.')
         dialog.hkl_bin_columns = selected_columns
         table.setSortingEnabled(True)

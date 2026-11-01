@@ -10252,14 +10252,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "I/σ(I) limit", 0.0, 0.0, 1000.0, 0.5, 3)
         significance_control = self.inputs["map_feedback_intensity_max_i_over_sigma"]
+        self._intensity_feedback_form = intensity_feedback_form
         significance_control.setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
         intensity_feedback_form.labelForField(significance_control).setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
         intensity_feedback_form.addRow("", self._settings_callout("Note", "At 0, correction applies to all map-supported reflections."))
+        self.feedback_uncertainty_note = QLabel(
+            "FWHM is a peak width, not a measurement uncertainty. "
+            "Positive I/σ(I) filtering is unavailable; threshold 0 retains map-supported correction."
+        )
+        self.feedback_uncertainty_note.setWordWrap(True)
+        intensity_feedback_form.addRow(self.feedback_uncertainty_note)
+        self.feedback_reset_significance = QPushButton("Set inapplicable limit to 0")
+        self.feedback_reset_significance.clicked.connect(lambda: significance_control.setValue(0))
+        self.feedback_reset_significance.clicked.connect(self._sync_map_feedback_widgets)
+        intensity_feedback_form.addRow(self.feedback_reset_significance)
 
         powder_feedback_form = self._add_form_group(feedback_tab, "Powder overlap repartitioning")
         self._add_checkbox(powder_feedback_form, "redistribute_overlaps", "Enable powder overlap repartitioning (FWHM data)", False, align_with_fields=True)
         self._add_spin(powder_feedback_form, "powder_redistribution_from_cycle", "Start after cycle", 1, 1, 999, 1)
         self._add_dspin(powder_feedback_form, "powder_wavelength", "Wavelength (Å)", 0.0, 0.0, 10.0, 0.01, 5)
+        self.inputs["powder_wavelength"].setSpecialValueText("Automatic")
         self._add_dspin(powder_feedback_form, "powder_separation_factor", "Separation factor", 0.2, 0.001, 100.0, 0.05, 3)
         self._add_dspin(powder_feedback_form, "powder_redistribution_mix", "Map ratio mix", 1.0, 0.0, 1.0, 0.05, 3)
         powder_feedback_form.addRow("", self._settings_callout(
@@ -10983,6 +10995,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     else:
                         tooltip = INPUT_TOOLTIPS.get(field_key, "")
                     widget.setToolTip(tooltip)  # type: ignore[attr-defined]
+        # Hide the inapplicable gate without changing a saved numerical limit.
+        # The existing execution validation still rejects a stale positive gate.
+        fwhm = reflection_mode_has_fwhm(self._resolve_configured_data_mode_for_ui())
+        significance = self.inputs.get("map_feedback_intensity_max_i_over_sigma")
+        if significance is not None and hasattr(self, "_intensity_feedback_form"):
+            self._intensity_feedback_form.setRowVisible(significance, not fwhm)
+            if fwhm:
+                significance.setEnabled(False)
+                self.input_labels["map_feedback_intensity_max_i_over_sigma"].setEnabled(False)
+            self._intensity_feedback_form.setRowVisible(self.feedback_uncertainty_note, fwhm)
+            self._intensity_feedback_form.setRowVisible(self.feedback_reset_significance, fwhm and significance.value() > 0)
+            self.feedback_uncertainty_note.setText(
+                "FWHM is a peak width, not a measurement uncertainty. "
+                + ("The saved positive I/σ(I) limit is inapplicable. Set it to 0 below to use "
+                   "map-supported correction with FWHM data."
+                   if significance.value() > 0 else
+                   "Positive I/σ(I) filtering is unavailable; threshold 0 retains map-supported correction.")
+            )
         if hasattr(self, "metrics_tabs") and "map_feedback_change" in self._metrics_tab_keys:
             feedback_index = self._metrics_tab_keys.index("map_feedback_change")
             self.metrics_tabs.setTabVisible(feedback_index, self._check_value("map_feedback_intensity_enabled"))
@@ -14783,7 +14813,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # the exclusion rule here. When only the heaviest subset is actually
         # drawn, say so explicitly instead, rather than call the full count
         # "shown".
-        return f"{shown:,} atoms shown"
+        qualifier = " · selected molecular components" if view_mode == "molecule" else ""
+        return f"{shown:,} atoms shown{qualifier}"
 
     def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
         atom_fade = structure_depth_fade(
