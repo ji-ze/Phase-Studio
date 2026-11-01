@@ -1170,6 +1170,7 @@ class HklAnalysisRequest:
     work_text: str
     configured_mode: str
     metadata: Optional[CrystalMetadata] = None
+    powder_wavelength: float = 0.0
 
 @dataclass
 class HklLoadResult:
@@ -4695,6 +4696,13 @@ def _build_uncached_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResul
         powder_context = standard_powder_context(Path(request.jana_text))
         if powder_context.get('unsupported_layout'):
             raise ValueError(powder_context['error'])
+        if powder_context and not powder_context.get('error') and not powder_context.get('wavelength'):
+            wavelength, source = resolve_powder_wavelength(
+                request.powder_wavelength, Path(request.jana_text),
+                Path(request.ref_text) if request.ref_text else None,
+                resolve_jana_m90_path(Path(request.jana_text)),
+            )
+            powder_context.update(wavelength=wavelength or None, wavelength_source=source)
     verified_mode = _verified_embedded_reflection_data_mode_from_inflip(Path(request.jana_text)) if embedded else None
     if embedded:
         source = Path(request.jana_text).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -11260,7 +11268,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         work_text = self._path_value("work_dir").strip() if "work_dir" in self.inputs else ""
         configured_mode = self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO
         metadata = self._resolve_crystal_metadata_from_inputs()
-        return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode, metadata)
+        return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode, metadata,
+                                  self._dspin_value("powder_wavelength"))
 
     def _set_hkl_task_running(self, running: bool) -> None:
         if not running:

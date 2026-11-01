@@ -58,11 +58,11 @@ def check_cancelled():
 def cached_load_result(request):
     from . import app as a
     companion = a.resolve_jana_m90_path(Path(request.jana_text)) if request.jana_text else None
-    files = tuple(source_identity(p) for p in (request.hkl_text,request.jana_text,companion)
+    files = tuple(source_identity(p) for p in (request.hkl_text,request.jana_text,request.ref_text,companion)
                   if p and Path(p).is_file())
     metadata = request.metadata
     crystal = (tuple(metadata.cell.parameters),metadata.spacegroup.xhm(),metadata.source,str(metadata.source_path)) if metadata is not None else None
-    key = (files,request.mode,request.hkl_text,request.jana_text,request.ref_text,request.work_text,request.configured_mode,crystal)
+    key = (files,request.mode,request.hkl_text,request.jana_text,request.ref_text,request.work_text,request.configured_mode,crystal,request.powder_wavelength)
     with _cache_lock:
         if key not in _load_cache:
             result = a._build_uncached_hkl_load_result(request)
