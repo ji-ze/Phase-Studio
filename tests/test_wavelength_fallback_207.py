@@ -4,6 +4,30 @@ from dataclasses import replace
 from phase_studio import app as a
 
 
+def test_wizard_diagnostics_snapshot_current_reference_and_wavelength(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from phase_studio import jana_superflip as js
+    from phase_studio.jana_superflip import _JanaWorkflowWizard
+    installation = tmp_path / 'Jana'
+    (installation / 'SUPERFLIP').mkdir(parents=True)
+    (installation / 'SUPERFLIP/superflip.exe').write_bytes(b'Path fixture; never executed')
+    monkeypatch.setattr(js, 'application_dir', lambda: installation)
+    source = tmp_path / 'sample.inflip'
+    source.write_text('dimension 3\ncell 10 10 10 90 90 90\nspacegroup P1\ncomposition C2\ndataformat intensity fwhm\nfbegin\n1 0 0 10 .1\n2 0 0 20 .1\nendf\n')
+    reference = tmp_path / 'reference.cif'
+    reference.write_text('data_ref\n_diffrn_radiation_wavelength 0.39986\n')
+    state = SimpleNamespace(inflip_path=source,
+        reference_file=SimpleNamespace(text=lambda: str(reference)),
+        powder_wavelength_spin=SimpleNamespace(value=lambda: .61))
+    request = _JanaWorkflowWizard._hkl_diagnostic_request(state)
+    request.work_text = str(tmp_path / 'work')
+    result = a.build_hkl_load_result(request)
+    assert request.ref_text == str(reference) and request.powder_wavelength == .61
+    assert request.metadata.source == a.METADATA_SOURCE_INFLIP
+    overlap = dict(result.diagnostics.overlap)
+    assert overlap['wavelength'] == .61 and overlap['wavelength_source'] == 'manual entry'
+
+
 def test_reference_wavelength_fallback_and_cache(tmp_path):
     source = tmp_path / 'sample.inflip'
     source.write_text('dimension 3\ncell 10 10 10 90 90 90\nspacegroup P1\ncomposition C2\ndataformat intensity fwhm\nfbegin\n1 0 0 10 .1\n2 0 0 20 .1\nendf\n')

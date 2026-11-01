@@ -1426,6 +1426,23 @@ class _JanaWorkflowWizard:
 
         QTimer.singleShot(0, self.stack._grow_to_current_page)
 
+    def _hkl_diagnostic_request(self):
+        """Snapshot the Wizard inputs, independently of cached Advanced widgets."""
+        from phase_studio.app import build_hkl_analysis_request_from_inflip, parse_inflip_settings
+        if self.inflip_path is None:
+            raise ValueError("No incoming Jana2020 .inflip was supplied.")
+        parsed = parse_inflip_settings(self.inflip_path)
+        imported = build_jana_handoff_import(self.inflip_path, JanaRunOptions(action="edit"), parsed)
+        reference = self.reference_file.text().strip()
+        work_dir = imported.values.get("work_dir", "")
+        request = build_hkl_analysis_request_from_inflip(
+            self.inflip_path, Path(reference).expanduser() if reference else None,
+            Path(work_dir) if work_dir else None,
+        )
+        if hasattr(self, "powder_wavelength_spin"):
+            request.powder_wavelength = self.powder_wavelength_spin.value()
+        return request
+
     def _get_backing_window(self):
         win = self.backing_window_holder.get("win")
         if win is not None:
@@ -2167,14 +2184,22 @@ class _JanaWorkflowWizard:
 
         def validate_hkl_clicked() -> None:
             try:
-                self._get_backing_window().test_hkl_load_dialog()
+                from phase_studio.app import build_hkl_load_result
+                request = self._hkl_diagnostic_request()
+                self._get_backing_window()._start_hkl_background_task(
+                    "HKL validation", lambda: build_hkl_load_result(request), "hkl_load_result"
+                )
             except Exception as exc:
                 report = build_error_report(exc, subsystem="HKL", operation="HKL validation")
                 show_phase_studio_error(self.dialog, report)
 
         def analyze_completeness_clicked() -> None:
             try:
-                self._get_backing_window().open_hkl_completeness_dialog()
+                from phase_studio.hkl_diagnostics import cached_analysis
+                request = self._hkl_diagnostic_request()
+                self._get_backing_window()._start_hkl_background_task(
+                    "HKL completeness analysis", lambda: cached_analysis(request), "hkl_completeness_result"
+                )
             except Exception as exc:
                 report = build_error_report(exc, subsystem="HKL", operation="HKL completeness")
                 show_phase_studio_error(self.dialog, report)

@@ -124,8 +124,9 @@ def check_ui():
         assert tooltip_text(w.analyze_completeness_button) == 'Show reflection completeness and intensity statistics.'
         calls = []
         class Diagnostics:
-            def test_hkl_load_dialog(self): calls.append('validate')
-            def open_hkl_completeness_dialog(self): calls.append('analyze')
+            def _start_hkl_background_task(self, label, worker, kind):
+                assert callable(worker)
+                calls.append('validate' if kind == 'hkl_load_result' else 'analyze')
         w._get_backing_window = lambda: Diagnostics()
         for button in [w.validate_hkl_button,w.analyze_completeness_button]:
             button.click()
