@@ -139,3 +139,8 @@ is now explicit, and no missing-manual-metadata execution defect was established
 Private machine-readable reports and input hashes stay in ignored
 `build/audit-2.0.7/real-run/`. No original scientific file was edited, no scientific
 exporter or execution algorithm changed, and no 2.0.7 release was published.
+
+
+## November 1 palette and feedback follow-up
+
+The user supplied the current screenshot folder. Later evidence, implementation, quantitative replay and remaining limitations are recorded in [the palette and feedback review](PALETTE_AND_FEEDBACK_DIAGNOSTICS_2_0_7.md). Earlier missing-evidence statements describe the investigation at that point; the exact original nine-image archive is still not identified.

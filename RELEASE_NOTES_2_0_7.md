@@ -17,3 +17,5 @@ current reference and wavelength. See the [reference review](docs/SELEXIPAG_REFE
 The original nine screenshots, conflicting wavelength priorities, small/high-DPI
 clipping and physical-monitor acceptance remain open. This preview is not approved
 for release publication.
+
+Palette switching, bounded panel metadata and quantitative persisted Map Feedback diagnostics are covered in [the follow-up review](docs/PALETTE_AND_FEEDBACK_DIAGNOSTICS_2_0_7.md), including actual Qt evidence and 20 verified recorded feedback transitions. Current screenshot evidence is available; full-window high-DPI clipping and physical-monitor acceptance remain open.

@@ -2,6 +2,10 @@
 
 ## 2.0.7 — development, not published
 
+- Recolor actual atom artists immediately across comparison, Auto Solve, fullscreen and result-selection viewers while preserving cameras and palette preference.
+- Bound long comparison metadata to each panel with complete accessible text.
+- Add separate persisted Map Feedback operation diagnostics, cycle history, reflection deltas, conservation checks and CSV/JSON export without changing scientific calculations.
+
 - Hide the inapplicable standalone significance control for FWHM data while preserving saved values and execution validation; display Automatic for the wavelength sentinel.
 - Show diagnostic metadata provenance and an explicit powder indexed-coverage caveat.
 - Keep plot-tab geometry stable at constrained display scales; provide an explicit reset action for inapplicable saved significance limits.

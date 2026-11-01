@@ -264,3 +264,8 @@ isolated in commit `9983104`; UI/development documentation is in `440c5cb`.
 Local comparison viewer: `build/audit-2.0.7/comparison.html`. Capture binaries,
 source snapshots, packages and detailed test logs are ignored and remain local.
 Only pre-existing untracked `docs/workshop/` remains outside this work.
+
+
+## November 1 palette and feedback follow-up
+
+The user supplied the current screenshot folder. Later evidence, implementation, quantitative replay and remaining limitations are recorded in [the palette and feedback review](PALETTE_AND_FEEDBACK_DIAGNOSTICS_2_0_7.md). Earlier missing-evidence statements describe the investigation at that point; the exact original nine-image archive is still not identified.
