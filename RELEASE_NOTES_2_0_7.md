@@ -9,7 +9,11 @@ for evidence, regression results and unresolved acceptance requirements.
 - Use available reference metadata when a diagnostic wavelength is missing.
 - Correct the documented publication status of 2.0.6.
 
-The original nine-screen evidence archive and reference CIF are still required
-to investigate the reported 62/70 count and exact session provenance. Conflicting
-wavelength priorities, small/high-DPI clipping and physical-monitor acceptance
-remain open. This preview is not approved for release publication.
+The original CIF and real run now independently establish a periodic-neighbour
+display defect behind the 62/70 count; molecular views now contain both complete
+35-heavy-atom molecules. Full cell remains 280. Wizard diagnostics use their
+current reference and wavelength. See the [reference review](docs/SELEXIPAG_REFERENCE_REVIEW_2_0_7.md).
+
+The original nine screenshots, conflicting wavelength priorities, small/high-DPI
+clipping and physical-monitor acceptance remain open. This preview is not approved
+for release publication.

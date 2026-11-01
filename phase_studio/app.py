@@ -9508,7 +9508,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         controls.addWidget(QLabel("View:"))
         self.structure_molecule_view_button = QPushButton("Complete molecules")
         self.structure_molecule_view_button.setToolTip(
-            "Reconstruct molecular components across periodic cell boundaries. "
+            "Complete the independent molecular components of the asymmetric unit across periodic cell boundaries. "
+            "More than one independent molecule can be shown. "
             "Small disconnected fragments may be omitted; Full cell shows all sites. "
             "Atom counts describe the displayed non-H/He atoms."
         )

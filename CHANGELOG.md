@@ -8,6 +8,8 @@
 - Describe classic molecular-view counts as selected molecular components without changing selection or exports.
 - Resolve a missing diagnostic wavelength from available run inputs and invalidate cached diagnostics when the reference changes. Existing incoming diagnostic wavelength priorities are preserved.
 - Record the GUI audit and outstanding evidence/physical-monitor acceptance requirements in `docs/GUI_UX_AUDIT_2_0_7.md`.
+- Complete molecular views across multiple cell boundaries: independently verified Selexipag reference now shows both complete 35-heavy-atom molecules (70 total), with full cell unchanged at 280. Scientific input files and exporters are unchanged.
+- Use current Wizard reference/wavelength fields for validation and completeness without overwriting cached manual settings.
 
 ## 2.0.6 — published 2026-10-21
 
