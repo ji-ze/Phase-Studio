@@ -9507,6 +9507,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         controls.addWidget(self.structure_element_legend, 1)
         controls.addWidget(QLabel("View:"))
         self.structure_molecule_view_button = QPushButton("Complete molecules")
+        self.structure_molecule_view_button.setToolTip(
+            "Reconstruct molecular components across periodic cell boundaries. "
+            "Small disconnected fragments may be omitted; Full cell shows all sites. "
+            "Atom counts describe the displayed non-H/He atoms."
+        )
         self.structure_full_cell_view_button = QPushButton("Full cell")
         for button in (self.structure_molecule_view_button, self.structure_full_cell_view_button):
             button.setObjectName("metricsViewToggle")
@@ -14813,8 +14818,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # the exclusion rule here. When only the heaviest subset is actually
         # drawn, say so explicitly instead, rather than call the full count
         # "shown".
-        qualifier = " · selected molecular components" if view_mode == "molecule" else ""
-        return f"{shown:,} atoms shown{qualifier}"
+        return f"{shown:,} atoms shown"
 
     def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
         atom_fade = structure_depth_fade(

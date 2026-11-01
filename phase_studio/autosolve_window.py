@@ -597,6 +597,12 @@ def build_complete_molecule_view(
             next_frontier: List[int] = []
             for fi in frontier:
                 point = comp_coords[fi]
+                # Query the cached home-cell neighbourhood in the frontier
+                # atom's own cell. A finite molecule may cross more than one
+                # cell face; a pool anchored at the original cell cuts it off.
+                lattice_shift = np.floor(frac_of @ (point - vec)).astype(np.int64)
+                cartesian_shift = orth @ lattice_shift
+                point = point - cartesian_shift
                 near = grid.candidates(point)
                 if near.size == 0:
                     continue
@@ -615,15 +621,15 @@ def build_complete_molecule_view(
                     if previous is None or np.linalg.norm(pool_coords[pi] - point) < np.linalg.norm(pool_coords[previous] - point):
                         best_by_seed[candidate_seed] = pi
                 for pi in best_by_seed.values():
-                    key = key_of(pool_atoms[pi].element, pool_coords[pi])
+                    key = key_of(pool_atoms[pi].element, pool_coords[pi] + cartesian_shift)
                     if key in accepted:
                         continue
                     accepted.add(key)
                     placed_seed.add(pool_seed[pi])
                     placed_seed_op[pool_seed[pi]] = pool_op[pi]
                     source = pool_atoms[pi]
-                    comp_atoms.append(AtomSite(label=source.label, element=source.element, frac=pool_frac_array[pi].copy(), density=source.density))
-                    comp_coords.append(pool_coords[pi])
+                    comp_atoms.append(AtomSite(label=source.label, element=source.element, frac=pool_frac_array[pi] + lattice_shift, density=source.density))
+                    comp_coords.append(pool_coords[pi] + cartesian_shift)
                     next_frontier.append(len(comp_atoms) - 1)
                     if total_atoms + len(comp_atoms) >= max_atoms:
                         break
@@ -646,6 +652,9 @@ def build_complete_molecule_view(
         while completion_frontier:
             current_index = completion_frontier.pop(0)
             existing_atom, point = comp_atoms[current_index], comp_coords[current_index]
+            lattice_shift = np.floor(frac_of @ (point - vec)).astype(np.int64)
+            cartesian_shift = orth @ lattice_shift
+            point = point - cartesian_shift
             near = grid.candidates(point)
             if near.size == 0:
                 continue
@@ -661,14 +670,14 @@ def build_complete_molecule_view(
                     continue
                 options = [pi for pi in valid if pool_seed[pi] == seed_id]
                 pi = min(options, key=lambda item: float(np.linalg.norm(pool_coords[item] - point)))
-                key = key_of(pool_atoms[pi].element, pool_coords[pi])
+                key = key_of(pool_atoms[pi].element, pool_coords[pi] + cartesian_shift)
                 if key in accepted or total_atoms + len(comp_atoms) >= max_atoms:
                     continue
                 accepted.add(key)
                 symmetry_completed_seeds.add(seed_id)
                 source = pool_atoms[pi]
-                comp_atoms.append(AtomSite(label=source.label, element=source.element, frac=pool_frac_array[pi].copy(), density=source.density))
-                comp_coords.append(pool_coords[pi])
+                comp_atoms.append(AtomSite(label=source.label, element=source.element, frac=pool_frac_array[pi] + lattice_shift, density=source.density))
+                comp_coords.append(pool_coords[pi] + cartesian_shift)
                 completion_frontier.append(len(comp_atoms) - 1)
         covered[list(placed_seed)] = True
         components.append((comp_atoms, comp_coords))
