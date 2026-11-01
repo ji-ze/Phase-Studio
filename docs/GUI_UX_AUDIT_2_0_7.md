@@ -173,8 +173,15 @@ and 6 failures. Three release-version failures were corrected (citation,
 development notes, version expectation); the diagnostic geometry failure was
 corrected without weakening its assertion; two Windows-native checks passed
 outside sandbox restrictions. Final focused UI checks: 11 passed, including
-the unchanged DPI geometry regression. A final complete native-access run is
-in progress; its result is recorded below when complete.
+the unchanged DPI geometry regression. The final complete native-access run
+passed: **631 passed, 4 skipped, 37 subtests passed in 600.87 seconds**.
+Command: `.venv-build/Scripts/python.exe -m pytest -q -p no:cacheprovider
+--basetemp=build/qa207-regression`; log: `pytest-final-full.txt` under the audit
+evidence directory. The four skips are the existing opt-in real-project case
+and inapplicable ONEFILE/ONEDIR transaction combinations; no scientific golden
+expectation or test assertion was weakened. After splitting the independent
+fallback test into its own file, both new regression tests also passed together
+in 2.68 seconds (`pytest-split.txt`).
 No historical run is substituted for a new acceptance result.
 
 Both packaging specifications remain unchanged. Fresh 2.0.7 packages were built
@@ -201,3 +208,19 @@ Local build SHA-256 values (unsigned development artifacts):
 Missing scientific archive, unresolved U06/U08, small/high-DPI clipping,
 physical-monitor checks and real Jana acceptance prevent release approval.
 No 2.0.7 tag, release or merge is authorized by this report.
+
+## Review integration and changed files
+
+Draft PR: https://github.com/ji-ze/Phase-Studio/pull/21. The diagnostic fallback is
+isolated in commit `9983104`; UI/development documentation is in `440c5cb`.
+
+| Area | Changed files |
+| --- | --- |
+| Runtime | `phase_studio/app.py`, `phase_studio/hkl_diagnostics.py`, `phase_studio/hkl_diagnostics_ui.py`, `phase_studio/version.py` |
+| Regression | `tests/test_wavelength_fallback_207.py`, `tests/test_gui_audit_207.py`, `tests/test_split_distribution.py` (development version expectation only) |
+| Reproduction | `packaging/tools/capture_gui_audit_207.py` |
+| Development/release closure | `README.md`, `CHANGELOG.md`, `CITATION.cff`, `RELEASE_NOTES_2_0_7.md`, this audit |
+
+Local comparison viewer: `build/audit-2.0.7/comparison.html`. Capture binaries,
+source snapshots, packages and detailed test logs are ignored and remain local.
+Only pre-existing untracked `docs/workshop/` remains outside this work.
