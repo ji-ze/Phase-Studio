@@ -107,6 +107,10 @@ class FeedbackTests(unittest.TestCase):
         new=ast.parse(Path(self.a.__file__).read_text(encoding='utf-8'))
         find=lambda tree:next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='apply_map_feedback_to_reflections')
         original,current=find(old),find(new)
+        hooks=[n for n in current.body if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name) and n.value.func.id=='record_feedback_observation']
+        self.assertEqual(len(hooks),1)
+        self.assertEqual(ast.dump(hooks[0]),ast.dump(ast.parse("record_feedback_observation('map', locals())").body[0]))
+        current.body.remove(hooks[0])  # Only the exact read-only observer is exempt; every calculation remains pinned.
         gates=[n for n in ast.walk(current) if isinstance(n,ast.If) and
             ast.dump(n.test)==ast.dump(ast.parse('max_i_over_sigma > 0',mode='eval').body)]
         self.assertEqual(len(gates),1)

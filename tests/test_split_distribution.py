@@ -315,6 +315,16 @@ class SplitDistributionTests(unittest.TestCase):
                 for node in ast.parse(text).body:
                     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         continue
+                    if filename == 'app.py' and text == current and node.name == 'redistribute_overlap_reflections':
+                        # Permit only two exact read-only observations, including
+                        # the no-groups return. The complete numerical AST stays pinned.
+                        hooks=[n for n in ast.walk(node) if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name) and n.value.func.id=='record_feedback_observation']
+                        self.assertEqual(len(hooks),2)
+                        expected=ast.parse("record_feedback_observation('powder', locals())").body[0]
+                        for hook in hooks:self.assertEqual(ast.dump(hook),ast.dump(expected))
+                        for parent in ast.walk(node):
+                            for _field,value in ast.iter_fields(parent):
+                                if isinstance(value,list):value[:]=[child for child in value if child not in hooks]
                     if filename == "app.py" and node.name == "_copy_verified_handoff_artifact" and text == current:
                         # Only shorten the atomic temporary basename to avoid
                         # MAX_PATH. Keep every byte/hash/fsync/replace guard pinned.

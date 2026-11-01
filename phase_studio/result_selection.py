@@ -1561,11 +1561,12 @@ class ResultSelectionDialog(QDialog):
             colors = [host._element_color(atom.element) for atom in atoms]
             count_scale = max(0.30, min(1.0, (320.0 / max(1, len(atoms))) ** 0.32))
             sizes = structure_marker_sizes(len(atoms))
-            axis.scatter(
+            scatter = axis.scatter(
                 coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors,
                 edgecolors="#ffffff", linewidths=max(0.08, 0.18 * count_scale),
                 depthshade=False,
             )
+            scatter._phase_elements = tuple(atom.element for atom in atoms)
             if bonds:
                 axis.add_collection3d(Line3DCollection(
                     [np.asarray([coords[i], coords[j]]) for i, j in bonds],
@@ -1655,5 +1656,6 @@ class ResultSelectionDialog(QDialog):
         self._schedule_preview_fit()
 
     def _refresh_viewer_palette(self):
-        if self._current_candidate is not None:
-            self._render_preview(self._current_candidate)
+        from phase_studio.structure_camera import recolor_atoms
+        recolor_atoms(self._preview_canvas, self._preview_host._element_color)
+        self._rendered_palette = getattr(QApplication.instance(), '_phase_color_palette', 'phase')

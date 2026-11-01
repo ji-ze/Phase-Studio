@@ -170,11 +170,12 @@ def camera_settings_button(parent):
     palettes=menu.addMenu('Element colors')
     palette_group=QActionGroup(palettes)
     app=QApplication.instance()
-    app._phase_color_palette=str(settings.value('viewer/elementPalette','phase'))
+    if not hasattr(app, '_phase_color_palette'):
+        app._phase_color_palette=str(settings.value('viewer/elementPalette','phase'))
     def palette_changed(value):
         settings.setValue('viewer/elementPalette',value);settings.sync()
         app._phase_color_palette=value
-        for window in app.topLevelWidgets():
+        for window in app.allWidgets():
             callback=getattr(window,'_refresh_viewer_palette',None)
             if callback is not None:callback()
     for title,value in (('Current Phase Studio palette','phase'),('Conventional CPK-style palette','cpk')):
@@ -187,7 +188,7 @@ def camera_settings_button(parent):
         try:value=float(settings.value('viewer/rotationSensitivity',1.))
         except (ValueError,TypeError):value=1.
         for item in sensitivity_group.actions():item.setChecked(item.data()==value)
-        for item in palette_group.actions():item.setChecked(item.data()==str(settings.value('viewer/elementPalette','phase')))
+        for item in palette_group.actions():item.setChecked(item.data()==app._phase_color_palette)
     menu.aboutToShow.connect(refresh_visual_preferences)
     refresh_visual_preferences()
     # Retain the Python wrappers as well as Qt ownership across popup cycles.
@@ -196,6 +197,30 @@ def camera_settings_button(parent):
     button._camera_menu_actions=tuple(menu.actions())+tuple(sensitivity.actions())+tuple(palettes.actions())
     button.setMenu(menu)
     return button
+
+
+def recolor_atoms(canvas, color_for, depth_artists=(), update_depth=None):
+    """Recolor persistent artists without touching geometry or any camera state."""
+    from matplotlib.colors import to_rgb
+    depths = {id(item.scatter): item for item in depth_artists}
+    elements = []
+    for axis in canvas.figure.axes:
+        for scatter in axis.collections:
+            symbols = getattr(scatter, '_phase_elements', ())
+            if not symbols:
+                continue
+            elements.extend(symbols)
+            colors = np.asarray([to_rgb(color_for(symbol)) for symbol in symbols])
+            blend = getattr(scatter, '_phase_white_blend', 0.)
+            colors += (1. - colors) * blend
+            depth = depths.get(id(scatter))
+            if depth is not None:
+                depth.atom_base_colors = colors
+                update_depth(depth, axis.elev, axis.azim)
+            else:
+                scatter.set_facecolor(colors)
+    canvas.draw_idle()
+    return elements
 
 
 def camera_basis(elev, azim, roll=0):

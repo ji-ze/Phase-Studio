@@ -1416,8 +1416,11 @@ class AutosolveWindow(QMainWindow):
         return data
 
     def _refresh_viewer_palette(self):
-        self._render_signature=None
-        self._refresh_tick()
+        from phase_studio.structure_camera import recolor_atoms
+        elements = recolor_atoms(self.structure_canvas, self._element_color,
+            self._structure_depth_artists + self._secondary_depth_artists,
+            self._update_structure_depth_artist)
+        self._set_displayed_elements(elements)
 
     def _open_panel_fullscreen(self, role: str) -> None:
         panel = self._display_panel(role)
@@ -2732,6 +2735,8 @@ class AutosolveWindow(QMainWindow):
                 view.secondary_coords[:, 0], view.secondary_coords[:, 1], view.secondary_coords[:, 2],
                 s=secondary_sizes, c=secondary_colors, alpha=1.0, linewidths=0.0, depthshade=False,
             )
+            secondary_scatter._phase_elements = tuple(a.element for a in view.secondary_atoms)
+            secondary_scatter._phase_white_blend = SECONDARY_PEAK_WHITE_BLEND
             secondary_artists = StructureDepthArtists(
                 scatter=secondary_scatter,
                 atom_coordinates=view.secondary_coords,
@@ -2750,6 +2755,7 @@ class AutosolveWindow(QMainWindow):
             coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=atom_base_colors,
             alpha=1.0, edgecolors="#ffffff", linewidths=0.3, depthshade=False,
         )
+        scatter._phase_elements = tuple(a.element for a in view.atoms)
         depth_artists = StructureDepthArtists(
             scatter=scatter,
             atom_coordinates=coords,

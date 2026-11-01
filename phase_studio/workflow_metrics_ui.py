@@ -406,13 +406,14 @@ def update_metrics_plot(self) -> None:
     feedback_key = "map_feedback_change"
     feedback_index = self._metrics_tab_keys.index(feedback_key) if feedback_key in self._metrics_tab_keys else -1
     if feedback_index >= 0:
-        feedback_enabled = bool(self._check_value("map_feedback_intensity_enabled"))
+        feedback_enabled = bool(self._check_value("map_feedback_intensity_enabled") or self._check_value("redistribute_overlaps") or any(r.powder_repartition_avg_change_percent is not None or r.intensity_correction_avg_change_percent is not None for r in self.results))
         self.metrics_tabs.setTabVisible(feedback_index, feedback_enabled)
         if feedback_enabled:
             feedback_values = [result.intensity_correction_avg_change_percent for result in self.results]
             self._render_metrics_tab(
                 feedback_key,
-                [("Map Feedback change (%)", feedback_values, False, "#001170", "o", "-")],
+                [("Intensity correction · legacy mean (%)", feedback_values, False, "#001170", "o", "-"),
+                 ("Powder repartitioning · legacy group mean (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#44b7ff", "^", "--")],
                 raw=True,
-                raw_ylabel="Mean intensity change (%)",
+                raw_ylabel="Legacy operation-specific change (%) · input cycle",
             )

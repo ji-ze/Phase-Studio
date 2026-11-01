@@ -49,6 +49,7 @@ import traceback
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from phase_studio.feedback_diagnostics import record_feedback_observation
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
@@ -3838,6 +3839,7 @@ def apply_map_feedback_to_reflections(
         f"intensity_max_i_over_sigma={max_i_over_sigma:g}, reflections={len(current)}, "
         f"avg_intensity_change={'n/a' if avg_change_percent is None else f'{avg_change_percent:.2f}%'}"
     )
+    record_feedback_observation('map', locals())
     return current, avg_change_percent
 
 def bragg_two_theta_deg(d_value: float, wavelength: float) -> Optional[float]:
@@ -3998,6 +4000,7 @@ def redistribute_overlap_reflections(
                 )
             except OSError:
                 pass
+        record_feedback_observation('powder', locals())
         return current, None
     by_group: Dict[int, List[Reflection]] = {}
     for r in current:
@@ -4053,6 +4056,7 @@ def redistribute_overlap_reflections(
             feedback_map, group_avg_change_percent, avg_change_percent,
         )
         log(f"Overlap repartitioning: detailed log written to {log_path}")
+    record_feedback_observation('powder', locals())
     return updated, avg_change_percent
 
 def wants_xplor_modelfile(value: str) -> bool:
@@ -9405,11 +9409,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # off. It is diagnostic only: never a ranking/recommendation input.
         tab_specs.append((
             "map_feedback_change", "Map Feedback change (%)",
-            "Average intensity change caused by that cycle's map-based intensity correction, "
-            "relative to the observed reflection intensities before correction. Lower is better; "
-            "it should shrink toward 0% as the map increasingly agrees with the observed data. "
-            "Each cycle's point reflects the correction that fed its input, so it lags one cycle "
-            "behind the correction run itself.",
+            "Separate legacy engine means for intensity correction and powder groups. "
+            "Points are labelled by the target input cycle; detailed diagnostics label source N to input N+1. "
+            "Magnitude is diagnostic only, not a quality score or ranking criterion.",
         ))
         for key, title, tooltip in tab_specs:
             # Each page is now JUST the canvas -- the interaction controls
@@ -9492,9 +9494,63 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metrics_toolbar_layout.addWidget(self.metrics_reset_btn)
         metrics_layout.addWidget(metrics_toolbar)
         metrics_layout.addWidget(self.metrics_tabs, 1)
+        feedback_row = QHBoxLayout()
+        self.feedback_reports = {}
+        self.feedback_summary = QLabel('Map Feedback: no completed steps')
+        self.feedback_summary.setWordWrap(True)
+        self.feedback_summary.setFixedHeight(2*self.feedback_summary.fontMetrics().lineSpacing())
+        feedback_row.addWidget(self.feedback_summary, 1)
+        feedback_details = QPushButton('Map Feedback diagnostics…')
+        feedback_details.clicked.connect(self._open_feedback_diagnostics)
+        feedback_row.addWidget(feedback_details)
+        metrics_layout.addLayout(feedback_row)
         self.metrics_tabs.currentChanged.connect(self._on_metrics_tab_changed)
         self._on_metrics_tab_changed(self.metrics_tabs.currentIndex())
         self.result_splitter.addWidget(metrics_section)
+
+    def _publish_feedback_diagnostics(self, capture, directory):
+        try:
+            from phase_studio.feedback_diagnostics import save_report
+            report = save_report(directory, capture.report())
+            if any(op['status']=='Scientific error' for op in report['operations']):
+                self.log(f'Scientific diagnostic error after cycle {report["source_cycle"]}: group-wise intensity conservation failed. Diagnostics did not change any values.', level='ERROR')
+            self.msg_queue.put(('feedback_diagnostics', report))
+        except Exception as exc:
+            self.log(f'Map Feedback diagnostics unavailable: {exc}', level='WARNING')
+
+    def _receive_feedback_diagnostics(self, report):
+        self.feedback_reports[report['source_cycle']] = report
+        target = report['target_cycle']
+        prefix = f'After cycle {report["source_cycle"]} → ' + (f'input {target}' if target else 'no next input')
+        active = [op for op in report['operations'] if op['status'] != 'Disabled']
+        parts=[]
+        for op in active:
+            text=f'{op["operation"]}: {op["status"]}'
+            if 'modified_reflections' in op:text+=f' · {op["modified_reflections"]} changed'
+            if op.get('mean_absolute_delta') is not None:text+=f' · mean |ΔI| {op["mean_absolute_delta"]:.4g}'
+            if op.get('mean_absolute_relative_percent') is not None:text+=f' · mean relative {op["mean_absolute_relative_percent"]:.4g}%'
+            parts.append(text)
+        summary=prefix+': '+('; '.join(parts) if parts else 'Disabled')
+        self.feedback_summary.setText(summary)
+        self.feedback_summary.setAccessibleName(summary)
+        self.feedback_summary.setToolTip(summary+'\n'+report['definitions'])
+        dialog = getattr(self, '_feedback_diagnostics_dialog', None)
+        if dialog is not None and dialog.isVisible() and Path(dialog.directory).resolve()==Path(report['detail_path']).parent.parent.resolve():
+            dialog.refresh(list(self.feedback_reports.values()))
+
+    def _open_feedback_diagnostics(self):
+        from phase_studio.feedback_diagnostics import load_summaries
+        from phase_studio.feedback_diagnostics_ui import FeedbackDiagnosticsDialog
+        directory = self.last_run_config.work_dir if self.last_run_config is not None else Path(self._path_value('work_dir') or '.')
+        try:
+            recorded = {r['source_cycle']:r for r in load_summaries(directory)}
+            recorded.update(self.feedback_reports)
+            self.feedback_reports = recorded
+        except (OSError,ValueError) as exc:
+            self._append_execution_log(f'Diagnostics unavailable: {exc}',level='WARNING')
+        reports = list(self.feedback_reports.values())
+        self._feedback_diagnostics_dialog = FeedbackDiagnosticsDialog(self,reports,directory)
+        self._feedback_diagnostics_dialog.show()
 
     def _build_structure_comparison_section(self) -> None:
         structure_section, structure_layout = self._make_result_section("STRUCTURE COMPARISON")
@@ -9575,8 +9631,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 nav.addWidget(previous); nav.addWidget(combo, 1); nav.addWidget(next_button); nav.addWidget(latest)
                 navigation.setVisible(False)
                 column_layout.addWidget(navigation)
-                metadata = QLabel("")
-                metadata.setWordWrap(True)
+                from phase_studio.viewer_metadata import PanelMetadataLabel
+                metadata = PanelMetadataLabel()
                 metadata.setAlignment(Qt.AlignCenter)
                 metadata.setVisible(False)
                 column_layout.addWidget(metadata)
@@ -9628,6 +9684,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             orientation_changed=self._classic_camera_orientation_changed,
         )
         structure_layout.addWidget(self.structure_canvas, 1)
+        from phase_studio.viewer_metadata import PanelMetadataLabel
+        self.structure_metadata_band = QWidget()
+        metadata_row = QHBoxLayout(self.structure_metadata_band)
+        metadata_row.setContentsMargins(0,0,0,0)
+        self.structure_metadata_labels = [PanelMetadataLabel() for _ in range(3)]
+        for label in self.structure_metadata_labels:
+            metadata_row.addWidget(label, 1)
+        structure_layout.addWidget(self.structure_metadata_band)
         self.result_splitter.addWidget(structure_section)
 
     @staticmethod
@@ -11021,7 +11085,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
         if hasattr(self, "metrics_tabs") and "map_feedback_change" in self._metrics_tab_keys:
             feedback_index = self._metrics_tab_keys.index("map_feedback_change")
-            self.metrics_tabs.setTabVisible(feedback_index, self._check_value("map_feedback_intensity_enabled"))
+            self.metrics_tabs.setTabVisible(feedback_index, self._check_value("map_feedback_intensity_enabled") or self._check_value("redistribute_overlaps") or any(r.powder_repartition_avg_change_percent is not None or r.intensity_correction_avg_change_percent is not None for r in self.results))
 
     def _sync_input_source_mode_widgets(self) -> None:
         if self._configuration_locked:
@@ -11733,6 +11797,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.log_text.horizontalScrollBar().setValue(0)
         self._last_log_record = None
         self.results.clear()
+        self.feedback_reports.clear()
+        self.feedback_summary.setText("Map Feedback: no completed steps")
         self._structure_jobs.clear()
         self._operation_states.clear()
         self._live_structures.clear()
@@ -11833,6 +11899,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         self._active_run_id = run_id
         self.results.clear()
+        self.feedback_reports.clear()
+        self.feedback_summary.setText("Map Feedback: no completed steps")
         self._structure_jobs.clear()
         self._operation_states.clear()
         self._live_structures.clear()
@@ -12890,6 +12958,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         widget.setCurrentText(displayed)
                         widget.blockSignals(False)
                     self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
+                elif kind == "feedback_diagnostics":
+                    self._receive_feedback_diagnostics(payload)
                 elif kind == "hkl_load_result":
                     parsed_count = len(payload.reflections) if isinstance(payload, HklLoadResult) else 0
                     unique_count = len(payload.unique_reflections) if isinstance(payload, HklLoadResult) else 0
@@ -14797,6 +14867,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=atom_base_colors,
             alpha=1.0, edgecolors="#ffffff", linewidths=0.18, depthshade=False,
         )
+        scatter._phase_elements = tuple(a.element for a in plot_atoms)
         depth_artists = StructureDepthArtists(
             scatter=scatter,
             atom_coordinates=coords,
@@ -14820,6 +14891,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # drawn, say so explicitly instead, rather than call the full count
         # "shown".
         return f"{shown:,} atoms shown"
+
+    def _refresh_viewer_palette(self):
+        from phase_studio.structure_camera import recolor_atoms
+        elements = recolor_atoms(self.structure_canvas, self._element_color,
+            self._structure_depth_artists, self._update_structure_depth_artist)
+        entries = "&nbsp;&nbsp;&nbsp; ".join(
+            f'<span style="color:{self._element_color(e)}; font-size:12pt;">&#9679;</span>&nbsp;{html.escape(e)}'
+            for e in sorted(set(elements), key=lambda e: -element_atomic_number(e)))
+        self.structure_element_legend.setText('<span style="color:#52658b;">Elements:</span>&nbsp;&nbsp; '+entries if entries else '')
 
     def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
         atom_fade = structure_depth_fade(
@@ -15015,8 +15095,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         title_y = axes_top + title_band * 0.52
         for title_text in getattr(self, "structure_title_texts", []):
             title_text.set_y(title_y)
-        for metadata_text in getattr(self, "structure_metadata_texts", []):
-            metadata_text.set_y(metadata_band * 0.44)
+        # Panel metadata live in bounded Qt labels beneath the canvas.
         for separator in getattr(self, "structure_separators", []):
             separator.set_ydata([max(0.08, metadata_band + 0.01), axes_top - 0.01])
 
@@ -15092,18 +15171,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             for x_position, (_panel, title, _atoms, _empty_text) in zip((1.0 / 6.0, 0.5, 5.0 / 6.0), panels)
         ]
-        self.structure_metadata_texts = [
-            self.structure_figure.text(
-                x_position,
-                0.03,
-                metadata,
-                ha="center",
-                va="center",
-                fontsize=7.5,
-                color="#52658b",
-            )
-            for x_position, metadata in zip((1.0 / 6.0, 0.5, 5.0 / 6.0), panel_metadata)
-        ]
+        self.structure_metadata_texts = []
+        for label, metadata in zip(self.structure_metadata_labels, panel_metadata):
+            label.setText(metadata)
+        self.structure_metadata_band.setVisible(any(panel_metadata))
         self.structure_separators = []
         for x_position in (1.0 / 3.0, 2.0 / 3.0):
             separator = Line2D(
@@ -16912,57 +16983,63 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 checkpoint.result_recorded = True
             state.pending_powder_repartition_change_percent = None
             state.pending_intensity_correction_change_percent = None
-            if cyc < cfg.cycles and not checkpoint.feedback_completed:
-                add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
-                correct_intensities = cfg.map_feedback_intensity_enabled and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
-                redistribute = cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength > 0
-                if cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength <= 0:
-                    self.log("Overlap repartitioning enabled but Wavelength is 0; skipping for this cycle.", level="WARNING")
-                if add_missing or correct_intensities or redistribute:
-                    feedback_reflections = state.current_reflections
-                    intensity_change = None
-                    powder_change = None
-                    if add_missing or correct_intensities:
-                        feedback_reflections, intensity_change = apply_map_feedback_to_reflections(
+            from phase_studio.feedback_diagnostics import FeedbackCapture
+            with FeedbackCapture(cyc, configured_data_mode, state.current_reflections, cfg) as feedback_capture:
+                if cyc < cfg.cycles and not checkpoint.feedback_completed:
+                    add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
+                    correct_intensities = cfg.map_feedback_intensity_enabled and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
+                    redistribute = cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength > 0
+                    if cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength <= 0:
+                        self.log("Overlap repartitioning enabled but Wavelength is 0; skipping for this cycle.", level="WARNING")
+                    if add_missing or correct_intensities or redistribute:
+                        feedback_reflections = state.current_reflections
+                        intensity_change = None
+                        powder_change = None
+                        if add_missing or correct_intensities:
+                            feedback_reflections, intensity_change = apply_map_feedback_to_reflections(
+                                feedback_reflections,
+                                configured_data_mode,
+                                deblur_map,
+                                ref_ctx.cell,
+                                cfg.resolution_d_min,
+                                add_missing,
+                                cfg.map_feedback_missing_percent_limit,
+                                correct_intensities,
+                                cfg.map_feedback_intensity_damping,
+                                cfg.map_feedback_intensity_max_i_over_sigma,
+                                self.log,
+                                excluded_hkls=state.omit_test_hkls,
+                            )
+                        if redistribute:
+                            feedback_reflections, powder_change = redistribute_overlap_reflections(
+                                feedback_reflections,
+                                configured_data_mode,
+                                deblur_map,
+                                ref_ctx.cell,
+                                cfg.powder_wavelength,
+                                cfg.powder_separation_factor,
+                                cfg.powder_redistribution_mix,
+                                self.log,
+                                log_path=cycle_dir / f"cycle_{cyc:03d}_powder_repartitioning.log",
+                            )
+                        feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
+                        n_feedback = write_observed_reflections(
+                            feedback_hkl,
                             feedback_reflections,
-                            configured_data_mode,
-                            deblur_map,
-                            ref_ctx.cell,
-                            cfg.resolution_d_min,
-                            add_missing,
-                            cfg.map_feedback_missing_percent_limit,
-                            correct_intensities,
-                            cfg.map_feedback_intensity_damping,
-                            cfg.map_feedback_intensity_max_i_over_sigma,
-                            self.log,
-                            excluded_hkls=state.omit_test_hkls,
+                            cfg.i_over_sigma_min,
+                            data_mode=configured_data_mode,
+                            cell=ref_ctx.cell,
+                            resolution_d_min=cfg.resolution_d_min,
                         )
-                    if redistribute:
-                        feedback_reflections, powder_change = redistribute_overlap_reflections(
-                            feedback_reflections,
-                            configured_data_mode,
-                            deblur_map,
-                            ref_ctx.cell,
-                            cfg.powder_wavelength,
-                            cfg.powder_separation_factor,
-                            cfg.powder_redistribution_mix,
-                            self.log,
-                            log_path=cycle_dir / f"cycle_{cyc:03d}_powder_repartitioning.log",
-                        )
-                    feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
-                    n_feedback = write_observed_reflections(
-                        feedback_hkl,
-                        feedback_reflections,
-                        cfg.i_over_sigma_min,
-                        data_mode=configured_data_mode,
-                        cell=ref_ctx.cell,
-                        resolution_d_min=cfg.resolution_d_min,
-                    )
-                    observed_hkls[configured_data_mode] = feedback_hkl
-                    state.current_reflections = feedback_reflections
-                    state.pending_intensity_correction_change_percent = intensity_change
-                    state.pending_powder_repartition_change_percent = powder_change
-                    self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
+                        observed_hkls[configured_data_mode] = feedback_hkl
+                        state.current_reflections = feedback_reflections
+                        state.pending_intensity_correction_change_percent = intensity_change
+                        state.pending_powder_repartition_change_percent = powder_change
+                        feedback_capture.output_file = str(feedback_hkl)
+                        feedback_capture.written_reflections = n_feedback
+                        self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
+            if not checkpoint.feedback_completed:
+                self._publish_feedback_diagnostics(feedback_capture, cfg.work_dir)
             checkpoint.feedback_completed = True
             if not checkpoint.continuation_completed and use_xplor_modelfile:
                 next_xplor_model = sf_map if use_superflip_xplor_modelfile else deblur_map

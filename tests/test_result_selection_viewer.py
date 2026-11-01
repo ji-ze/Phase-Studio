@@ -400,7 +400,7 @@ def main():
     molecule_counts = tuple(map(len, (
         win.reference_atoms_for_plot, win.superflip_atoms_for_plot, win.deblur_atoms_for_plot,
     )))
-    classic_formulas = [text.get_text().split(" · ", 1)[0] for text in win.structure_metadata_texts]
+    classic_formulas = [text.accessibleName().split(" · ", 1)[0] for text in win.structure_metadata_labels]
     check("classic shared Complete-molecules mode applies to all three panels", molecule_counts == (2, 2, 2))
     check("wrong Reference formula remains isolated from both result formulas",
           win._classic_structure_formula("reference", ()) == "Zn8 I8"
@@ -470,7 +470,7 @@ def main():
     )))
     check("classic shared Full-cell mode expands all three panels together", cell_counts == (4, 4, 4))
     check("classic formulas remain independent of the shared view mode",
-          [text.get_text().split(" · ", 1)[0] for text in win.structure_metadata_texts] == classic_formulas)
+          [text.accessibleName().split(" · ", 1)[0] for text in win.structure_metadata_labels] == classic_formulas)
     win._structure_source_paths["deblur"] = None
     win.deblur_atoms_for_plot = []
     win.results = [replace(result, deblur_quality=None) for result in win.results]
@@ -478,8 +478,8 @@ def main():
     win._update_structure_views()
     check("unavailable SharpED panel shows no borrowed or fabricated formula",
           win._classic_structure_formula("deblur", []) == ""
-          and "Zn8" not in win.structure_metadata_texts[2].get_text()
-          and "N1 O1" not in win.structure_metadata_texts[2].get_text())
+          and "Zn8" not in win.structure_metadata_labels[2].accessibleName()
+          and "N1 O1" not in win.structure_metadata_labels[2].accessibleName())
     check("classic view mode is persisted through the shared settings authority",
           str(win.settings.value("viewer/structure_view_mode", "")) == "cell")
 
