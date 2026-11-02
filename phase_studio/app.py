@@ -50,6 +50,8 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from phase_studio.feedback_diagnostics import record_feedback_observation
+from phase_studio.run_provenance import (RunProvenance,observe_pipeline,observe_reflection_read,
+    observe_native_command,active_provenance,provenance_scope,record as record_provenance,timestamp as provenance_timestamp)
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
@@ -578,17 +580,24 @@ class ExecutionLogRecord:
     subsystem: str = "Workflow"
     category: str = "USER_PROGRESS"
     timestamp: str = ""
+    cycle: Optional[int] = None
+    event_type: str = "log"
 
 
 class RunDiagnosticLog:
     """Complete timestamped per-run forensic log, safe for worker threads."""
 
     def __init__(self, path: Path, cfg: "RunConfig") -> None:
+        from .error_reporting import register_private_value
+        from .run_provenance import safe as safe_provenance_value
+        register_private_value(getattr(cfg,'sharped_api_token',''))
+        self.provenance=None;self._diagnostic_stream=None
         self._lock = threading.Lock()
         jana_inflip = getattr(cfg, "jana_inflip", None)
         project = Path(jana_inflip).resolve().parent if jana_inflip else None
         requested_path = Path(path).expanduser().resolve()
         run_id = str(getattr(cfg, "run_id", "") or requested_path.parent.name)
+        self.run_id=run_id
         self.path = requested_path
         self.fallback_reason = ""
         self.persistent = True
@@ -623,7 +632,7 @@ class RunDiagnosticLog:
             if getattr(sys, "frozen", False) else "development source tree"
         )
         project_log = project / "log.txt" if project is not None else "standalone"
-        sharped_endpoint = str(getattr(cfg, "sharped_base_url", "") or "not configured")
+        sharped_endpoint = safe_provenance_value(str(getattr(cfg, "sharped_base_url", "") or "not configured"))
         self._stream.write("\n" + "=" * 72 + "\n")
         self._stream.write(f"Phase Studio version: {__version__}\n")
         self._stream.write(f"Started: {datetime.now().astimezone().isoformat(timespec='seconds')}\n")
@@ -666,13 +675,27 @@ class RunDiagnosticLog:
                 )
                 self._stream.flush()
 
+        self.diagnostic_path=self.path.with_name('diagnostic.log')
+        try:
+            self._diagnostic_stream=self.diagnostic_path.open('a',encoding='utf8')
+            self._diagnostic_stream.write(f'\nPhase Studio {__version__} · run {run_id} · {provenance_timestamp()}\n')
+            self.provenance=RunProvenance(self.path.parent,cfg) if self.persistent else None
+        except Exception as exc:
+            self._stream.write(f'WARNING: structured provenance unavailable: {redact_log_secrets(exc)}\n');self._stream.flush()
+
     def write(self, record: ExecutionLogRecord) -> None:
-        timestamp = record.timestamp or datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3]
-        line = f"{timestamp} [{record.category}][{record.subsystem}] {record.text}\n"
+        timestamp = record.timestamp if 'T' in record.timestamp and ('+' in record.timestamp or record.timestamp.endswith('Z')) else provenance_timestamp()
+        text=redact_log_secrets(record.text)
+        cycle=f' cycle {record.cycle}' if record.cycle is not None else ''
+        line = f"{timestamp} [{record.category}][{record.subsystem}]{cycle} {text}\n"
         with self._lock:
             try:
-                self._stream.write(line)
-                self._stream.flush()
+                if self._diagnostic_stream is not None:
+                    self._diagnostic_stream.write(line);self._diagnostic_stream.flush()
+                if record.category not in {'DIAGNOSTIC','TRACE'}:
+                    self._stream.write(line);self._stream.flush()
+                record_provenance(self.provenance,'event',record.event_type,record.subsystem,record.cycle,
+                                  dict(message=text,category=record.category,source_timestamp=timestamp),record.level)
             except OSError:
                 # Logging is ancillary; worker/UI progress must continue.
                 pass
@@ -681,8 +704,32 @@ class RunDiagnosticLog:
         with self._lock:
             try:
                 self._stream.close()
+                if self._diagnostic_stream is not None:self._diagnostic_stream.close()
+                record_provenance(self.provenance,'close')
             except Exception:
                 pass
+
+    def cycle_summary(self,cycle):
+        if self.provenance is None:return
+        record=self.provenance.manifest['cycles'].get(str(cycle))
+        if record is None:return
+        def show(value):return 'Unavailable' if value is None else str(value)
+        lines=['='*60,f'CYCLE {cycle} / {self.provenance.manifest.get("configured_cycles")}',
+            f'Input reflections: {show(record["reflection_input"].get("records"))} · {record["reflection_input"].get("path")}',
+            f'Initialization: {record["initialization_source"]}']
+        for source,key in [('Superflip','superflip_quality'),('SharpED','deblur_quality')]:
+            metric=record['result'].get(key) or {}
+            lines.append(f'{source}: F0.5={show(metric.get("reference_f05"))}; RMSD(A)={show(metric.get("reference_rmsd"))}; phase agreement={show(metric.get("reference_phase_agreement"))}')
+        for key in ('superflip_site_lineage','deblurred_site_lineage'):
+            counts=record.get(key) or {}
+            lines.append(f'EDMA {key.split("_")[0]}: raw={show(counts.get("raw_edma_sites"))}; CIF={show(counts.get("cif_sites"))}; Jana model={show(counts.get("jana_m40_sites"))}; threshold(sigma)={show(counts.get("threshold_sigma"))}')
+        feedback=record.get('map_feedback') or {}
+        for operation in feedback.get('operations',[]):
+            lines.append(f'Map Feedback after {cycle} -> input {feedback.get("target_cycle")}: {operation["operation"]} · {operation["status"]} · modified={show(operation.get("modified_reflections"))}; group conservation={show(operation.get("conservation"))}')
+        lines+=['Cycle status: '+record['status'],'Detailed numeric changes: feedback_diagnostics/; full identities: run_manifest.json','='*60]
+        with self._lock:
+            try:self._stream.write('\n'.join(lines)+'\n');self._stream.flush()
+            except OSError:pass
 
 
 def redact_log_secrets(message: object) -> str:
@@ -782,7 +829,7 @@ def classify_log_record(
         category = "DIAGNOSTIC"
     return ExecutionLogRecord(
         text=text, level=resolved_level, subsystem=resolved_subsystem, category=category,
-        timestamp=datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3],
+        timestamp=provenance_timestamp(),
     )
 
 
@@ -984,6 +1031,7 @@ class RunConfig:
     # the established manual behavior.
     edma_threshold_mode: str = "manual"
     run_id: str = ""
+    setting_provenance: Optional[Dict[str, object]] = None
 
 
 @dataclass
@@ -2511,10 +2559,12 @@ def parse_reflection_line(line: str, value_col: int, sigma_col: Optional[int]) -
         return None
 
 def read_hkl(hkl_path: Path, value_col: int = 4, sigma_col: Optional[int] = 5, include_000: bool = False) -> List[Reflection]:
+    observe_reflection_read('start',hkl_path)
     reflections: List[Reflection] = []
     with hkl_path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             r = parse_reflection_line(line, value_col=value_col, sigma_col=sigma_col)
+            observe_reflection_read('line',hkl_path,line=line,reflection=r,include_000=include_000)
             if r is None:
                 continue
             if not include_000 and r.h == 0 and r.k == 0 and r.l == 0:
@@ -2522,6 +2572,7 @@ def read_hkl(hkl_path: Path, value_col: int = 4, sigma_col: Optional[int] = 5, i
             reflections.append(r)
     if not reflections:
         raise ValueError(f"No reflections parsed from HKL file: {hkl_path}")
+    observe_reflection_read('finish',hkl_path)
     return reflections
 
 def reflection_columns_for_mode(data_mode: str) -> Tuple[int, Optional[int], bool]:
@@ -6095,6 +6146,7 @@ def run_command(
     per call site rather than globally -- a console that IS part of the user
     interface must keep showing."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    observe_native_command(cmd,cwd,log_path)
     display_cmd = [Path(str(cmd[0])).name] if cmd else []
     for argument in cmd[1:]:
         text = str(argument)
@@ -8461,11 +8513,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.input_labels: Dict[str, QWidget] = {}
         self.settings = QSettings("PhaseStudio", "PhaseStudio")
         self._build_ui()
+        from phase_studio.setting_provenance import SettingOrigins
+        self._setting_origins=SettingOrigins(self)
         QTimer.singleShot(0, self._apply_adaptive_window_geometry)
         self.help_shortcut = QShortcut(QKeySequence(Qt.Key_F1), self)
         self.help_shortcut.setContext(Qt.WindowShortcut)
         self.help_shortcut.activated.connect(self._open_context_help)
         self.load_settings()
+        self._setting_origins.loaded(self.settings)
         QTimer.singleShot(250, self.refresh_sharped_models)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll_queue)
@@ -9520,9 +9575,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     detail['written_input_difference'] = written_input_difference(
                         capture.input_file,capture.output_file or capture.input_file,capture.mode)
             report = save_report(directory, detail)
+            record_provenance(active_provenance(),'feedback',report)
             if any(op['status']=='Scientific error' for op in report['operations']):
                 self.log(f'Scientific diagnostic error after cycle {report["source_cycle"]}: group-wise intensity conservation failed. Diagnostics did not change any values.', level='ERROR')
-            self.msg_queue.put(('feedback_diagnostics', report))
+            self._queue_run_event('feedback_diagnostics',report,getattr(capture.cfg,'run_id',None))
         except Exception as exc:
             self.log(f'Map Feedback diagnostics unavailable: {exc}', level='WARNING')
 
@@ -9845,13 +9901,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
 
     def _classic_fullscreen_presentation(self, panel: str) -> dict:
-        from phase_studio.autosolve_window import prepare_structure_presentation
+        from phase_studio.viewer_alignment import present_structure,comparison_policy,panel_summary
 
         candidate = self._classic_selected_candidate(panel)
         path = self._structure_source_paths.get(panel)
         composition_label, composition = self._classic_structure_composition(panel)
-        data = prepare_structure_presentation(
+        data = present_structure(
             path, self.structure_view_mode, composition, composition_label,
+            policy=comparison_policy(),reference_path=self._structure_source_paths.get('reference'),
+            metric_cell=self.structure_cell,
         )
         title = {"reference": "Reference", "superflip": "Charge-flipping solution", "deblur": "Structure prediction"}[panel]
         source = {"reference": "Reference", "superflip": "Superflip", "deblur": "SharpED"}[panel]
@@ -9867,6 +9925,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"{int(data.get('detected', 0)):,} EDMA sites"
             )
         data["metadata"] = metadata
+        if comparison_policy()!='independent':data['metadata']+='<br>'+html.escape(panel_summary(data))
         data["title"] = f"Phase Studio — {title}{cycle}"
         return data
 
@@ -9926,6 +9985,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.execution_log_open_button.clicked.connect(self._open_run_diagnostic_log)
         self.execution_log_open_button.setEnabled(False)
         log_actions.addWidget(self.execution_log_open_button)
+        self.execution_log_export_button=QToolButton()
+        self.execution_log_export_button.setObjectName('diagnosticTextAction')
+        self.execution_log_export_button.setText('Export sanitized diagnostics')
+        self.execution_log_export_button.clicked.connect(self._export_sanitized_run_diagnostics)
+        log_actions.addWidget(self.execution_log_export_button)
         log_layout.addLayout(log_actions)
         self.log_text = QTextEdit()
         self.log_text.setObjectName("executionLog")
@@ -9960,8 +10024,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _open_run_diagnostic_log(self) -> None:
         diagnostic = getattr(self, "_run_diagnostic_log", None)
-        if diagnostic is not None and diagnostic.path.is_file():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(diagnostic.path)))
+        path=getattr(diagnostic,'diagnostic_path',getattr(diagnostic,'path',None))
+        if path is not None and path.is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+
+    def _export_sanitized_run_diagnostics(self):
+        provenance=getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None)
+        if provenance is None:
+            QMessageBox.information(self,'Diagnostics unavailable','No structured run provenance is available for this session.');return
+        name,_=QFileDialog.getSaveFileName(self,'Export sanitized diagnostic metadata','','ZIP (*.zip)')
+        if name:
+            try:provenance.export_sanitized(name)
+            except (OSError,ValueError) as exc:QMessageBox.warning(self,'Export unavailable',redact_log_secrets(exc))
 
     # ----- Basic-tab builders, one per tab, called in order from _build_ui.
     # Each assigns the same self.* attributes, connects the same signals, and
@@ -12069,12 +12143,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 return
             seen.add(text)
         work_dir = self.last_run_config.work_dir if self.last_run_config is not None else None
-        self._queue_run_event("log", classify_log_record(
+        record=classify_log_record(
             message,
             level=level,
             subsystem=subsystem,
             work_dir=work_dir,
-        ))
+        )
+        self._queue_run_event('log',replace(record,cycle=getattr(self._run_event_context,'cycle',None)))
 
     def _queue_run_event(
         self, kind: str, payload: object, run_id: Optional[str] = None,
@@ -12095,9 +12170,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._structure_job_generation += 1
             job_id = f"operation:{self._structure_job_generation}"
         self._queue_run_event("operation_state", (job_id, name, cycle, "running"), state.run_id)
+        self._run_event_context.cycle=cycle
+        provenance=getattr(state,'provenance',None)
+        operation_started=time.perf_counter();operation_status='completed'
+        record_provenance(provenance,'operation','started',name,cycle)
         try:
-            return call()
+            with provenance_scope(provenance,cycle):return call()
+        except BaseException:
+            operation_status='cancelled' if self.stop_now.is_set() else 'failed'
+            raise
         finally:
+            record_provenance(provenance,'operation','finished',name,cycle,status=operation_status,seconds=time.perf_counter()-operation_started)
             self._queue_run_event("operation_state", (job_id, name, cycle, "finished"), state.run_id)
 
     def active_workflow_operations(self) -> List[str]:
@@ -12165,6 +12248,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         busy: bool = False,
         complete: bool = False,
     ) -> None:
+        self._run_event_context.cycle=cycle_index
         try:
             stage_index = list(stages).index(stage_name) + 1
         except ValueError:
@@ -12636,6 +12720,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             widget = self.inputs.get(key)
             if widget is not None:
                 self._set_widget_value_from_string(widget, value)
+                if getattr(self,'_setting_origins',None) is not None:self._setting_origins.mark(key,'Selected preset',str(preset))
 
         if "recommended" in name:
             set_value("cycles", "5")
@@ -14577,6 +14662,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             map_feedback_powder_enabled=bool(cfg.redistribute_overlaps) if cfg is not None else False,
             feedback_directory=cfg.work_dir if cfg is not None else None,
             feedback_reports_provider=lambda: list(self.feedback_reports.values()),
+            comparison_reference=cfg.reference_cif if cfg is not None else self._structure_source_paths.get('reference'),
         )
         # A run owns its explicit selection; QSettings and a previous run do not.
         session_key = (str(getattr(cfg, "run_id", "")),
@@ -14625,6 +14711,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if cfg is not None:
             write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", self.results, chosen)
         if not is_jana:
+            record_provenance(getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None),'selection',chosen,'standalone export selected; export completion not implied')
             self._export_selected_candidate(chosen)
             return True
 
@@ -14647,13 +14734,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """The one Jana2020 handoff authority (perform_jana_handoff in a
         worker thread), shared by Result Selection and guided Autosolve."""
         self.handoff_btn.setEnabled(False)
+        provenance=getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None)
+        record_provenance(provenance,'handoff','requested',candidate)
 
         def handoff_worker() -> None:
             self._run_event_context.run_id = str(candidate.run_id or cfg.run_id)
+            self._run_event_context.cycle=candidate.cycle
             try:
                 perform_jana_handoff(cfg, result, candidate, log=self.log)
+                record_provenance(provenance,'handoff','completed',candidate)
                 self._queue_run_event("handoff_done", None, candidate.run_id or cfg.run_id)
             except Exception as exc:
+                record_provenance(provenance,'handoff','failed',candidate,reason=redact_log_secrets(exc))
                 self._queue_run_event("handoff_error", build_error_report(
                     exc,
                     subsystem="Jana2020",
@@ -14982,6 +15074,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return []
         try:
             resolved = Path(path)
+            from phase_studio.viewer_alignment import comparison_policy,present_structure
+            if comparison_policy()!='independent':
+                data=present_structure(resolved,getattr(self,'structure_view_mode','molecule'),
+                    policy=comparison_policy(),reference_path=self._structure_source_paths.get('reference'),metric_cell=self.structure_cell)
+                if not hasattr(self,'_comparison_data'):self._comparison_data={}
+                self._comparison_data[str(resolved.resolve())]=data
+                return data['atoms']
             raw_atoms = parse_cif_atoms(resolved)
             _cell, sg, _hm = parse_cif_cell_and_sg(resolved)
             if getattr(self, "structure_view_mode", "molecule") == "cell":
@@ -15111,6 +15210,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             separator.set_ydata([max(0.08, metadata_band + 0.01), axes_top - 0.01])
 
     def _update_structure_views(self) -> None:
+        from phase_studio.viewer_alignment import comparison_policy,panel_summary
+        previous=next(iter(getattr(self,'_structure_interactive_axes',[])),None)
+        orientation=(previous.elev,previous.azim,previous.roll) if previous is not None else None
+        if orientation and comparison_policy()!='independent':self.structure_elev,self.structure_azim=orientation[:2]
         self.structure_figure.clear()
         self.structure_figure.patch.set_facecolor("#ffffff")
         self.structure_axes = []
@@ -15169,6 +15272,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"{composition_text} · {atom_metadata}"
                 if composition_text and atom_metadata else (composition_text or atom_metadata)
             )
+            path=self._structure_source_paths.get(panel)
+            data=getattr(self,'_comparison_data',{}).get(str(Path(path).resolve())) if path else None
+            if comparison_policy()!='independent' and data:panel_metadata[-1]+=' · '+panel_summary(data)
         self.structure_title_texts = [
             self.structure_figure.text(
                 x_position,
@@ -15196,8 +15302,28 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.structure_figure.add_artist(separator)
             self.structure_separators.append(separator)
         self._layout_structure_figure()
+        if comparison_policy()!='independent' and self._structure_depth_artists:
+            from phase_studio.autosolve_window import _bounding_sphere
+            points=np.vstack([item.atom_coordinates for item in self._structure_depth_artists])
+            if self.structure_view_mode=='cell':points=np.vstack([points,*[item.cell_corners for item in self._structure_depth_artists]])
+            lower=np.min(points,axis=0);upper=np.max(points,axis=0);spans=np.maximum(upper-lower,1.)
+            limits=tuple((float(lo-.04*span),float(hi+.04*span)) for lo,hi,span in zip(lower,upper,spans))
+            for axis in self._structure_interactive_axes:
+                axis.set_box_aspect(spans/max(spans),zoom=1.1);self._apply_structure_axis_limits(axis,limits)
+                self._classic_fit_limits[axis]=limits
+                if orientation:axis.view_init(*orientation[:2],roll=orientation[2])
+            if orientation:self._update_structure_depth_cue(orientation[0],orientation[1])
         self._classic_camera.refresh_axes()
         self.structure_canvas.draw_idle()
+
+    def _refresh_comparison_frame(self):
+        self._comparison_data={}
+        for role,attribute in [('reference','reference_atoms_for_plot'),('superflip','superflip_atoms_for_plot'),('deblur','deblur_atoms_for_plot')]:
+            setattr(self,attribute,self._classic_structure_atoms(self._structure_source_paths.get(role)))
+        self._update_structure_views()
+
+    def _comparison_provenance(self):
+        return {path:data.get('alignment',{}) for path,data in getattr(self,'_comparison_data',{}).items()}
 
     def get_config(self) -> RunConfig:
         resolved_inputs = resolve_run_inputs(
@@ -15308,6 +15434,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sharped_poll_seconds=self._spin_value("sharped_poll_seconds"),
             sharped_max_polls=self._spin_value("sharped_max_polls"),
             edma_threshold_mode=str(getattr(self, "edma_threshold_mode", "manual") or "manual"),
+            setting_provenance=self._setting_origins.snapshot() if getattr(self,'_setting_origins',None) is not None else None,
         )
 
     def _resolve_configured_data_mode(self, cfg: RunConfig) -> str:
@@ -15665,6 +15792,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         self.worker.start()
 
+    @observe_pipeline
     def pipeline_worker(self, cfg: Optional[RunConfig], resume_state: Optional[PipelineState] = None) -> None:
         worker_run_id = (
             resume_state.run_id if resume_state is not None
@@ -16003,6 +16131,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 performance_root=performance_root,
                 run_id=cfg.run_id,
             )
+            state.provenance=active_provenance()
+            diagnostic=getattr(self,'_run_diagnostic_log',None)
+            state.diagnostic_log=diagnostic if diagnostic is not None and diagnostic.run_id==state.run_id else None
+            record_provenance(state.provenance,'prepared',cfg,state,refl,original_count=len(refl_raw))
             self._resume_state = state
             if preparation_timing is not None:
                 preparation_timing.stop()
@@ -16025,6 +16157,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     performance_root.stop()
                 if cfg is not None:
                     profiler.write_report(cfg.work_dir / "workflow_performance.txt", "failed")
+            record_provenance(active_provenance(),'finish','failed')
             self._queue_run_event(
                 "error_report",
                 build_error_report(
@@ -16036,6 +16169,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     @staticmethod
     def _finish_performance_profile(state: PipelineState, outcome: str) -> None:
+        record_provenance(getattr(state,'provenance',None),'finish',outcome)
         profiler = state.performance_profiler
         if profiler is None or not profiler.enabled:
             return
@@ -16072,6 +16206,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 state.cfg.work_dir / "map_quality_assessment.txt", pending_results
             )
         state.all_results[:] = pending_results
+        record_provenance(getattr(state,'provenance',None),'completed_cycle',state,result)
         for source, quality in (
             ("superflip", result.superflip_quality), ("deblurred", result.deblur_quality),
         ):
@@ -16094,6 +16229,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     ) -> bool:
         """Checkpoint one valid cycle and apply terminal-intent precedence."""
         state.completed_cycles = cycle
+        record_provenance(getattr(state,'provenance',None),'cycle_finished',cycle)
+        diagnostic=getattr(state,'diagnostic_log',None)
+        if diagnostic is not None:diagnostic.cycle_summary(cycle)
         self._queue_run_event("progress", state.completed_cycles, state.run_id)
         self._emit_cycle_progress(
             cycle, state.cfg.cycles, progress_stages, "Finalizing cycle",

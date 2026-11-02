@@ -14,7 +14,8 @@ except Exception:
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(\b(?:api[_ -]?token|access[_ -]?token|authorization[_ -]?token|"
     r"bearer[_ -]?token|job[_ -]?token|download[_ -]?token|api[_ -]?key|access[_ -]?key|"
-    r"authorization[_ -]?code|code[_ -]?verifier|pkce[_ -]?verifier|token)\b[\"']?\s*[:=]\s*)"
+    r"authorization[_ -]?code|code[_ -]?verifier|pkce[_ -]?verifier|refresh[_ -]?token|"
+    r"password|passwd|client[_ -]?secret|signing[_ -]?key|private[_ -]?key|authorization|token)\b[\"']?\s*[:=]\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[^\s,;]+")
@@ -38,6 +39,9 @@ def sanitize_error_details(value: object) -> str:
     for private in sorted(tuple(_PRIVATE_VALUES), key=len, reverse=True):
         text = text.replace(private, "[REDACTED]")
     text = _BEARER_RE.sub(r"\1[REDACTED]", text)
+    text = re.sub(r'(?im)(\bAuthorization\s*:\s*)(?:Basic|Token)\s+[^\r\n,;]+',r'\1[REDACTED]',text)
+    text = re.sub(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----','[REDACTED PRIVATE KEY]',text,flags=re.DOTALL)
+    text = re.sub(r'(https?://)[^/\s:@]+:[^@\s/]+@',r'\1[REDACTED]@',text)
     text = _SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", text)
     text = _TOKEN_URL_RE.sub(r"\1[REDACTED]", text)
     return _TOKEN_QUERY_RE.sub(r"\1[REDACTED]", text)

@@ -1100,6 +1100,10 @@ class AutosolveWindow(QMainWindow):
             toggle_auto_rotate=lambda: self.auto_rotate_button.toggle(),
         )
         root.addWidget(self.structure_canvas, 14)
+        from .viewer_metadata import PanelMetadataLabel
+        self.comparison_status=PanelMetadataLabel()
+        self.comparison_status.setFixedHeight(self.comparison_status.fontMetrics().lineSpacing()+4)
+        self.comparison_status.setVisible(False);root.addWidget(self.comparison_status)
         self.search_placeholder = QLabel(
             "<b>Searching for a solution</b><br><br>"
             "Superflip and SharpED are searching the electron-density maps.<br>"
@@ -1368,8 +1372,11 @@ class AutosolveWindow(QMainWindow):
             return {}
         composition_label = "EDMA asymmetric-unit composition"
         composition = panel.edma_asu_composition
-        data = prepare_structure_presentation(
+        from .viewer_alignment import present_structure,comparison_policy,panel_summary
+        data = present_structure(
             Path(panel.current_cif), self.view_mode, composition, composition_label,
+            policy=comparison_policy(),reference_path=self._reference_path(),
+            metric_cell=self.structure_cell,
         )
         family = (
             "Charge-flipping solution" if self._ordinary_dual_workflow and role == guided.ROLE_OBSERVED else
@@ -1393,6 +1400,7 @@ class AutosolveWindow(QMainWindow):
             f" · {data.get('displayed', 0)} displayed · {'Full cell' if self.view_mode == 'cell' else 'Complete molecules'}"
         )
         from hashlib import sha256
+        if comparison_policy()!='independent':data['metadata']+='<br>'+html.escape(panel_summary(data))
         path = Path(panel.current_cif)
         cell, sg, hm = parse_cif_cell_and_sg(path)
         data["scientific_details"] = (
@@ -1421,6 +1429,14 @@ class AutosolveWindow(QMainWindow):
             self._structure_depth_artists + self._secondary_depth_artists,
             self._update_structure_depth_artist)
         self._set_displayed_elements(elements)
+
+    def _refresh_comparison_frame(self):
+        self._render_signature=None
+        panels=getattr(self,'_last_panels',{})
+        self._render_structures(panels.get(guided.ROLE_OBSERVED),panels.get(guided.ROLE_PREDICTED))
+
+    def _comparison_provenance(self):
+        return {role:data.get('alignment',{}) for role,data in getattr(self,'_comparison_data',{}).items()}
 
     def _open_panel_fullscreen(self, role: str) -> None:
         panel = self._display_panel(role)
@@ -2852,6 +2868,12 @@ class AutosolveWindow(QMainWindow):
         shows exactly the structure its ReviewPanel names -- in Review the
         user-tuned threshold's structure, otherwise the best COMPLETED
         candidate's recorded structure."""
+        from .viewer_alignment import present_structure,comparison_policy,panel_summary
+        policy=comparison_policy()
+        self._comparison_data={}
+        if policy!='independent' and self._structure_interactive_axes:
+            self.structure_elev=self._structure_interactive_axes[0].elev
+            self.structure_azim=self._structure_interactive_axes[0].azim
         previous_cameras = {
             role: (axis.elev, axis.azim, self._structure_axis_limits(axis),
                    getattr(axis, "_phase_fit_zoom", None), axis.roll)
@@ -3039,8 +3061,16 @@ class AutosolveWindow(QMainWindow):
             self.structure_axes.append(axis)
             self._axis_roles[axis] = role
             role_axes.append((role, cycle, axis))
+            if policy!='independent' and self.view_mode=='cell' and path is not None:
+                self._comparison_data[role]=present_structure(path,'cell',policy=policy,reference_path=self._reference_path(),metric_cell=self.structure_cell)
             if self.view_mode == "molecule":
-                view = _complete_molecule_view_for_path(path)
+                if policy!='independent' and path is not None:
+                    data=present_structure(path,self.view_mode,policy=policy,reference_path=self._reference_path(),metric_cell=self.structure_cell)
+                    if not hasattr(self,'_comparison_data'):self._comparison_data={}
+                    self._comparison_data[role]=data
+                    center,radius=data['fit'] if data.get('fit') else (np.zeros(3),1.)
+                    view=CompleteMoleculeView(data['atoms'],data['coords'],data['bonds'],[],np.zeros((0,3)),center,radius)
+                else:view = _complete_molecule_view_for_path(path)
                 if view is not None:
                     if self._plot_molecule_panel(axis, view, empty_text):
                         displayed_elements += [clean_element_symbol(a.element) for a in view.atoms]
@@ -3062,6 +3092,15 @@ class AutosolveWindow(QMainWindow):
         # FIT_EXTENT_CHANGE_RATIO -- never merely because THIS render ran
         # (e.g. an ordinary +/- atoms nudge with a similar extent leaves
         # the user's current framing alone; see item 19-22).
+        if policy!='independent' and self._structure_depth_artists:
+            points=np.vstack([item.atom_coordinates for item in self._structure_depth_artists])
+            if self.view_mode=='cell':points=np.vstack([points,*[item.cell_corners for item in self._structure_depth_artists]])
+            center,radius=_bounding_sphere(points)
+            for axis in self._structure_interactive_axes:self._fit_axis(axis,center,radius,MOLECULE_VIEW_FILL)
+        if hasattr(self,'comparison_status'):
+            self.comparison_status.setVisible(policy!='independent')
+            self.comparison_status.setText(' | '.join(role+': '+panel_summary(data) for role,data in self._comparison_data.items()))
+            self.comparison_status.setToolTip(json.dumps(self._comparison_provenance(),indent=2))
         force_refit = False
         seen_roles = set()
         for role, cycle, axis in role_axes:

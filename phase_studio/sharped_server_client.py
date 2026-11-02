@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import mimetypes
 import os
 import re
@@ -11,6 +12,7 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+from phase_studio.run_provenance import observe_remote,remote_identity
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin
 from urllib.request import Request, urlopen
@@ -207,6 +209,7 @@ class SharpEDServerClient:
         # A blocking transfer is an atomic network/file operation. Observe a
         # cancellation raised during it before any caller starts postprocessing.
         self._raise_if_stopped(stop_event)
+        observe_remote('server_result',file=out_path,stage='download before local inverse scaling or symmetry processing')
         return out_path
 
     def upload(
@@ -234,6 +237,8 @@ class SharpEDServerClient:
             "model": model,
         }
         body, boundary = self._multipart_body(file_path, content_type, fields)
+        observe_remote('request_prepared',model_identifier=model,inference_fields=fields,
+                       payload_sha256=hashlib.sha256(body).hexdigest(),endpoint=self.base_url)
         if log:
             log(f"[SharpED] Model ID: {model} · displayed name: {model}")
             log(f"[SharpED] Uploading {file_path.name} · {len(body) / (1024 * 1024):.1f} MiB")
@@ -256,6 +261,7 @@ class SharpEDServerClient:
             status_url = self._url(f"/api/user/sharp-ed/status/{token}")
         if log:
             log(f"[SharpED] Job submitted · ID {data.get('job_id', -1)}")
+        observe_remote('upload_accepted',job_id=data.get('job_id'),**remote_identity(data))
         return UploadResult(
             job_id=int(data.get("job_id", -1)),
             token=token,
@@ -597,4 +603,5 @@ class SharpEDServerClient:
                 ).encode("utf-8")
             )
         chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+        observe_remote('multipart_prepared',file=file_path,uploaded_file_sha256=hashlib.sha256(chunks[1]).hexdigest(),uploaded_bytes=len(chunks[1]))
         return b"".join(chunks), boundary

@@ -170,6 +170,34 @@ def camera_settings_button(parent):
     palettes=menu.addMenu('Element colors')
     palette_group=QActionGroup(palettes)
     app=QApplication.instance()
+    from .viewer_alignment import POLICIES
+    frames=menu.addMenu('Comparison frame');frame_group=QActionGroup(frames)
+    if not hasattr(app,'_phase_comparison_policy'):
+        app._phase_comparison_policy=str(settings.value('viewer/comparisonFrame','independent'))
+    def frame_changed(value):
+        settings.setValue('viewer/comparisonFrame',value);settings.sync();app._phase_comparison_policy=value
+        for widget in app.allWidgets():
+            callback=getattr(widget,'_refresh_comparison_frame',None)
+            if callback is not None:callback()
+    for title,value in POLICIES:
+        item=frames.addAction(title);item.setCheckable(True);frame_group.addAction(item);item.setData(value)
+        item.setChecked(app._phase_comparison_policy==value)
+        item.setToolTip('Presentation only: valid symmetry operations and whole-component lattice translations. Scientific coordinates and handoff outputs are unchanged.')
+        item.triggered.connect(lambda _checked=False,v=value:frame_changed(v))
+    export_frame=frames.addAction('Export presentation provenance…')
+    export_frame.setEnabled(callable(getattr(parent,'_comparison_provenance',None)))
+    def export_provenance():
+        import json
+        from pathlib import Path
+        from PySide6.QtWidgets import QFileDialog,QMessageBox
+        path,_=QFileDialog.getSaveFileName(parent,'Export presentation-only transforms','','JSON (*.json)')
+        if path:
+            try:
+                record=dict(schema=1,presentation_only=True,comparison_policy=app._phase_comparison_policy,
+                            panels=parent._comparison_provenance())
+                Path(path).write_text(json.dumps(record,indent=2,allow_nan=False),encoding='utf8')
+            except (OSError,ValueError,TypeError) as exc:QMessageBox.warning(parent,'Export unavailable',str(exc))
+    export_frame.triggered.connect(export_provenance)
     if not hasattr(app, '_phase_color_palette'):
         app._phase_color_palette=str(settings.value('viewer/elementPalette','phase'))
     def palette_changed(value):
@@ -189,12 +217,13 @@ def camera_settings_button(parent):
         except (ValueError,TypeError):value=1.
         for item in sensitivity_group.actions():item.setChecked(item.data()==value)
         for item in palette_group.actions():item.setChecked(item.data()==app._phase_color_palette)
+        for item in frame_group.actions():item.setChecked(item.data()==app._phase_comparison_policy)
     menu.aboutToShow.connect(refresh_visual_preferences)
     refresh_visual_preferences()
     # Retain the Python wrappers as well as Qt ownership across popup cycles.
-    button._camera_submenus=(sensitivity,palettes)
-    button._camera_action_groups=(sensitivity_group,palette_group)
-    button._camera_menu_actions=tuple(menu.actions())+tuple(sensitivity.actions())+tuple(palettes.actions())
+    button._camera_submenus=(sensitivity,palettes,frames)
+    button._camera_action_groups=(sensitivity_group,palette_group,frame_group)
+    button._camera_menu_actions=tuple(menu.actions())+tuple(sensitivity.actions())+tuple(palettes.actions())+tuple(frames.actions())
     button.setMenu(menu)
     return button
 

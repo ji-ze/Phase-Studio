@@ -315,6 +315,15 @@ class SplitDistributionTests(unittest.TestCase):
                 for node in ast.parse(text).body:
                     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         continue
+                    if filename == 'app.py' and text == current and node.name == 'read_hkl':
+                        # Only three exact read-only observer calls are permitted;
+                        # parser, filtering, ordering and return AST remain pinned.
+                        hooks=[n for n in ast.walk(node) if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name) and n.value.func.id=='observe_reflection_read']
+                        expected=ast.parse("observe_reflection_read('start',hkl_path)\nobserve_reflection_read('line',hkl_path,line=line,reflection=r,include_000=include_000)\nobserve_reflection_read('finish',hkl_path)").body
+                        self.assertEqual(sorted(map(ast.dump,hooks)),sorted(map(ast.dump,expected)))
+                        for parent in ast.walk(node):
+                            for _field,value in ast.iter_fields(parent):
+                                if isinstance(value,list):value[:]=[child for child in value if child not in hooks]
                     if filename == 'app.py' and text == current and node.name == 'redistribute_overlap_reflections':
                         # Permit only two exact read-only observations, including
                         # the no-groups return. The complete numerical AST stays pinned.

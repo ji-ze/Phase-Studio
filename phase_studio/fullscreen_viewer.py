@@ -313,6 +313,13 @@ class SingleStructureViewerWindow(QDialog):
         self.legend_label.setText('<b>Elements:</b> ' + ' &nbsp; '.join(
             f'<span style="color:{self._color_for(e)}">&#9632;</span> {e}' for e in sorted(set(elements))))
 
+    def _refresh_comparison_frame(self):
+        self._geometry_signature=None
+        self.render()
+
+    def _comparison_provenance(self):
+        return (self._presentation() or {}).get('alignment',{})
+
     def render(self) -> None:
         data = self._presentation() or {}
         self.candidate_identity=data.get('candidate_identity')

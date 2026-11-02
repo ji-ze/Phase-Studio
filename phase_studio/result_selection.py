@@ -505,6 +505,7 @@ class ResultSelectionDialog(QDialog):
         map_feedback_powder_enabled: bool = False,
         feedback_directory: Optional[Path] = None,
         feedback_reports_provider: Optional[Callable] = None,
+        comparison_reference: Optional[Path] = None,
     ) -> None:
         super().__init__(parent)
         self._jana_context = jana_context
@@ -512,6 +513,7 @@ class ResultSelectionDialog(QDialog):
         self._parse_structure = parse_structure
         self._reference_atoms = reference_atoms
         self._source_title = source_title
+        self._comparison_reference = comparison_reference
         self._authoritative_composition = str(authoritative_composition or "")
         self._authoritative_composition_label = str(
             authoritative_composition_label or "Composition"
@@ -535,6 +537,7 @@ class ResultSelectionDialog(QDialog):
         self.preview_structure_hash = ""
         self._current_formula = ""
         self._presentation_cache: dict = {}
+        self._comparison_data_cache: dict = {}
         self._detached_viewer = None
         self._preview_user_interacted = False
         self._preview_fit_timer = QTimer(self)
@@ -715,6 +718,9 @@ class ResultSelectionDialog(QDialog):
         self._feedback_details_button.clicked.connect(self._open_feedback_details)
         feedback_row.addWidget(self._feedback_details_button)
         preview_layout.addLayout(feedback_row)
+        self._comparison_label=PanelMetadataLabel()
+        self._comparison_label.setFixedHeight(self._comparison_label.fontMetrics().lineSpacing()+4)
+        self._comparison_label.setVisible(False);preview_layout.addWidget(self._comparison_label)
         preview_label = QLabel("STRUCTURE PREVIEW")
         preview_label.setObjectName("sectionLabel")
         toolbar = QHBoxLayout()
@@ -1533,7 +1539,7 @@ class ResultSelectionDialog(QDialog):
         self._preview_canvas.draw_idle()
 
     def _candidate_presentation(self, candidate: ResultCandidate):
-        from phase_studio.autosolve_window import prepare_structure_presentation
+        from phase_studio.viewer_alignment import present_structure,comparison_policy,panel_summary
 
         path = Path(candidate.structure_path)
         stat = path.stat() if path.is_file() else None
@@ -1543,15 +1549,21 @@ class ResultSelectionDialog(QDialog):
             candidate.jana_model_sha256, candidate.unit_cell, candidate.space_group,
             str(path), getattr(stat, "st_mtime_ns", 0), getattr(stat, "st_size", 0),
             self._view_mode, candidate.edma_asu_composition,
+            comparison_policy(),str(self._comparison_reference),
         )
         if cache_key in self._presentation_cache:
+            self._set_comparison_data(self._comparison_data_cache[cache_key])
             return self._presentation_cache[cache_key]
         composition_label = "EDMA asymmetric-unit composition"
         composition = candidate.edma_asu_composition
-        data = prepare_structure_presentation(
+        data = present_structure(
             path if candidate.usable_structure else None, self._view_mode,
             composition, composition_label,
+            policy=comparison_policy(),reference_path=self._comparison_reference,
+            metric_cell=self._preview_host.structure_cell,
         )
+        self._comparison_data_cache[cache_key]=data
+        self._set_comparison_data(data)
         result = (
             data["atoms"], data["coords"], data["bonds"], data["composition"],
             data["detected"], data["fit"], data["cell_segments"],
@@ -1570,6 +1582,7 @@ class ResultSelectionDialog(QDialog):
 
     def _render_preview(self, candidate: ResultCandidate) -> None:
         from phase_studio.autosolve_window import structure_site_summary
+        from .viewer_alignment import comparison_policy
         status = candidate_selection(candidate, jana=self._jana_context)
         if not status.geometry:
             self._show_empty_preview(candidate, status.reason)
@@ -1578,6 +1591,7 @@ class ResultSelectionDialog(QDialog):
         palette=getattr(QApplication.instance(),'_phase_color_palette','phase')
         if (previous == candidate and getattr(self,'_rendered_view_mode',None)==self._view_mode
                 and getattr(self,'_rendered_palette',None)==palette
+                and getattr(self,'_rendered_comparison_policy',None)==comparison_policy()
                 and getattr(self,'_resolved_preview',None) is not None):
             self._sync_detached_identity(candidate)
             return  # Identical immutable data: keep artists, camera and geometry.
@@ -1599,6 +1613,7 @@ class ResultSelectionDialog(QDialog):
             self._preview_user_interacted = False
         self._rendered_view_mode = self._view_mode
         self._rendered_palette = palette
+        self._rendered_comparison_policy=comparison_policy()
         self._current_candidate = candidate
         self._sync_detached_identity(candidate)
         self.preview_candidate_id = candidate.candidate_id
@@ -1637,6 +1652,8 @@ class ResultSelectionDialog(QDialog):
         else:
             axis.set_proj_type("ortho")
             axis.set_xticks([]); axis.set_yticks([]); axis.set_zticks([])
+            if old_axis is not None:
+                host.structure_elev,host.structure_azim=float(old_axis.elev),float(old_axis.azim)
             axis.view_init(elev=host.structure_elev, azim=host.structure_azim,
                            roll=float(old_axis.roll) if old_axis is not None else 0.)
             colors = [host._element_color(atom.element) for atom in atoms]
@@ -1740,3 +1757,20 @@ class ResultSelectionDialog(QDialog):
         from phase_studio.structure_camera import recolor_atoms
         recolor_atoms(self._preview_canvas, self._preview_host._element_color)
         self._rendered_palette = getattr(QApplication.instance(), '_phase_color_palette', 'phase')
+
+    def _set_comparison_data(self,data):
+        from .viewer_alignment import panel_summary,comparison_policy
+        self._current_comparison_data=data
+        self._comparison_label.setText(panel_summary(data))
+        self._comparison_label.setToolTip(json.dumps(data.get('alignment',{}),indent=2))
+        self._comparison_label.setVisible(comparison_policy()!='independent')
+
+    def _refresh_comparison_frame(self):
+        if self._closed:return
+        self._presentation_cache.clear();self._comparison_data_cache.clear()
+        self._rendered_comparison_policy=None
+        self._preview_user_interacted=False
+        if self.selected_candidate is not None:self._render_preview(self.selected_candidate)
+
+    def _comparison_provenance(self):
+        return getattr(self,'_current_comparison_data',{}).get('alignment',{})
