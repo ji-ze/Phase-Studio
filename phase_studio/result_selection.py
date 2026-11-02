@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QLabel, QPushButton, QSizePolicy, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
     QToolButton, QToolTip, QMessageBox,
+    QScrollArea, QFrame,
 )
 
 from phase_studio.map_quality import (
@@ -89,11 +90,10 @@ class _MetricHeader(QHeaderView):
             return True
         return super().viewportEvent(event)
 
-_MAP_FEEDBACK_COLUMN_LABEL = "Feedback Δ"
+_MAP_FEEDBACK_COLUMN_LABEL = "Feedback"
 _MAP_FEEDBACK_COLUMN_TOOLTIP = (
-    "Average reflection-intensity change applied by Map Feedback intensity "
-    "correction feeding into this cycle. Diagnostic only -- not used for "
-    "the automatic recommendation."
+    "Status of the recorded feedback step feeding this cycle, including powder and intensity operations. "
+    "N/A means detailed history is unavailable, never zero change. Cycle-level diagnostic, not a recommendation metric."
 )
 CAMERA_HELP_TEXT = (
     "Left-drag: rotate · Right/Middle/Shift-left-drag: pan · "
@@ -502,6 +502,9 @@ class ResultSelectionDialog(QDialog):
         authoritative_composition_label: str = "Composition",
         adjust_threshold: Optional[Callable[[ResultCandidate, bool], Optional[ResultCandidate]]] = None,
         adjust_threshold_async: Optional[Callable[[ResultCandidate, bool, Callable], object]] = None,
+        map_feedback_powder_enabled: bool = False,
+        feedback_directory: Optional[Path] = None,
+        feedback_reports_provider: Optional[Callable] = None,
     ) -> None:
         super().__init__(parent)
         self._jana_context = jana_context
@@ -518,6 +521,9 @@ class ResultSelectionDialog(QDialog):
         self._closed = False
         self._pending_thresholds: dict[tuple, object] = {}
         self._map_feedback_intensity_enabled = bool(map_feedback_intensity_enabled)
+        from .feedback_selection import FeedbackHistory
+        self._feedback_history = FeedbackHistory(feedback_directory,feedback_reports_provider)
+        self._feedback_configured = bool(map_feedback_intensity_enabled or map_feedback_powder_enabled)
         self._definition = definition
         self._reference_available = profile in {
             ValidationProfile.REFERENCE_AND_HOLDOUT, ValidationProfile.REFERENCE_ONLY,
@@ -553,10 +559,15 @@ class ResultSelectionDialog(QDialog):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(14, 8, 14, 7)
         content_layout.setSpacing(5)
-        outer_layout.addWidget(content, 1)
+        self._content_scroll = QScrollArea()
+        self._content_scroll.setWidgetResizable(True)
+        self._content_scroll.setFrameShape(QFrame.NoFrame)
+        self._content_scroll.setMinimumSize(0,0)
+        self._content_scroll.setWidget(content)
+        outer_layout.addWidget(self._content_scroll, 1)
 
         metric_columns = result_selection_metric_columns(definition)
-        show_feedback_column = self._map_feedback_intensity_enabled
+        show_feedback_column = self._feedback_configured or bool(self._feedback_history.reports())
 
         # --- Primary handoff decision, shown only when there is a
         # genuine choice to make; a single-source workflow opens directly on
@@ -693,6 +704,17 @@ class ResultSelectionDialog(QDialog):
         preview_section.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         preview_layout = QVBoxLayout(preview_section)
         preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(4)
+        from .viewer_metadata import PanelMetadataLabel
+        self._feedback_label = PanelMetadataLabel()
+        self._feedback_label.setObjectName('selectedMapFeedbackSummary')
+        self._feedback_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        feedback_row = QHBoxLayout()
+        feedback_row.addWidget(self._feedback_label,1)
+        self._feedback_details_button = QPushButton('Map Feedback details')
+        self._feedback_details_button.clicked.connect(self._open_feedback_details)
+        feedback_row.addWidget(self._feedback_details_button)
+        preview_layout.addLayout(feedback_row)
         preview_label = QLabel("STRUCTURE PREVIEW")
         preview_label.setObjectName("sectionLabel")
         toolbar = QHBoxLayout()
@@ -905,6 +927,60 @@ class ResultSelectionDialog(QDialog):
         self._apply_safe_initial_geometry()
         QTimer.singleShot(0, self._clamp_after_show)
         self._initializing_selection = False
+        self._feedback_timer = QTimer(self)
+        self._feedback_timer.timeout.connect(self.refresh_feedback)
+        self._feedback_timer.start(1000)
+
+    def refresh_feedback(self):
+        """Refresh only diagnostic widgets; never rerender, retune or reselect a candidate."""
+        if self._closed:return
+        from .feedback_selection import selected_input,compact_summary
+        reports=self._feedback_history.reports()
+        show=self._feedback_configured or bool(reports)
+        for view in self._views.values():
+            table=view.table
+            column=next((i for i in range(table.columnCount())
+                         if table.horizontalHeaderItem(i).text()==_MAP_FEEDBACK_COLUMN_LABEL),None)
+            if show and column is None:
+                column=table.columnCount();table.insertColumn(column)
+                table.setHorizontalHeaderItem(column,QTableWidgetItem(_MAP_FEEDBACK_COLUMN_LABEL))
+                table.horizontalHeader().setSectionResizeMode(column,QHeaderView.Interactive)
+                table.setColumnWidth(column,80)
+            if column is None:continue
+            table.horizontalHeaderItem(column).setToolTip(_MAP_FEEDBACK_COLUMN_TOOLTIP)
+            for row,candidate in enumerate(view.ordered):
+                data=selected_input(reports,candidate.cycle)
+                legacy=[]
+                for value,label in ((candidate.map_feedback_change_percent,'intensity-correction'),
+                                    (candidate.powder_feedback_change_percent,'powder-group')):
+                    if value is not None:legacy.append(f'Recorded legacy {label} mean feeding this cycle: {value:.12g}%. Separate population; detailed changes may be unavailable.')
+                if legacy:data=data|dict(text=data['text']+'\n'+'\n'.join(legacy))
+                marker={'Unavailable':'N/A','Not yet reached':'Later','Original input':'Original',
+                        'Scientific error':'Error'}.get(data['status'],data['status'])
+                item=table.item(row,column)
+                if item is None:
+                    item=QTableWidgetItem();item.setData(Qt.UserRole,row);table.setItem(row,column,item)
+                item.setText(marker);item.setToolTip(data['text']);item.setData(Qt.AccessibleDescriptionRole,data['text'])
+        candidate=self.selected_candidate
+        data=selected_input(reports,candidate.cycle) if candidate is not None else None
+        text=data['text'] if data else 'Select a completed candidate to inspect its reflection input.'
+        self._feedback_label.setText(compact_summary(data) if data else text)
+        self._feedback_label.setToolTip(text)
+        self._feedback_label.setAccessibleName(text)
+        self._feedback_details_button.setEnabled(bool(reports) and candidate is not None)
+        self._feedback_details_button.setToolTip('Inspect recorded operation history and cumulative input differences. '+self._feedback_history.error)
+
+    def _open_feedback_details(self):
+        from .feedback_diagnostics_ui import FeedbackDiagnosticsDialog
+        reports=self._feedback_history.reports()
+        candidate=self.selected_candidate
+        if not reports or candidate is None:return
+        dialog=FeedbackDiagnosticsDialog(self,reports,self._feedback_history.directory or Path('.'))
+        index=dialog.cycle.findData(candidate.cycle-1)
+        dialog.cycle.setCurrentIndex(index)
+        dialog.setWindowTitle(f'Map Feedback history · selected input cycle {candidate.cycle}')
+        self._feedback_dialog=dialog
+        dialog.show()
 
     def _apply_safe_initial_geometry(self) -> None:
         apply_safe_dialog_geometry(
@@ -913,7 +989,9 @@ class ResultSelectionDialog(QDialog):
         # This is the measured practical minimum for the compact header,
         # toolbar, 150 px scientific canvas, and fixed handoff footer.  On a
         # shorter work area, retain the largest safe initial height instead.
-        self.setMinimumHeight(min(670, self.height()))
+        # Reserve the added diagnostic strip on normal monitors; short
+        # work areas keep the footer fixed and scroll only the content.
+        self.setMinimumHeight(min(720,max(1,self.available_geometry_at_open.height()-48)))
 
     def _clamp_after_show(self) -> None:
         clamp_window_to_available_screen(
@@ -923,12 +1001,14 @@ class ResultSelectionDialog(QDialog):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
+        if hasattr(self,'_feedback_label'):
+            self._feedback_label.setFixedHeight((2 if self.height()<800 else 3)*self._feedback_label.fontMetrics().lineSpacing()+4)
         if hasattr(self, "_element_legend"):
             # Composition and EDMA state remain visible at every size; the
             # redundant color key yields first on short work areas.
-            self._element_legend.setVisible(self.height() >= 700)
+            self._element_legend.setVisible(self.height() >= 800)
         if hasattr(self, "_camera_hint"):
-            self._camera_hint.setVisible(self.height() >= 700)
+            self._camera_hint.setVisible(self.height() >= 800)
         if hasattr(self, "_reason_label"):
             # The recommendation is already identified in the summary/table.
             # On short work areas, yield this duplicate prose row to the
@@ -1276,6 +1356,7 @@ class ResultSelectionDialog(QDialog):
         self._sync_action_button()
 
     def _sync_action_button(self) -> None:
+        self.refresh_feedback()
         candidate = self.selected_candidate
         pending = candidate is not None and self._threshold_key(candidate) in self._pending_thresholds
         snapshot = self.selection_snapshot

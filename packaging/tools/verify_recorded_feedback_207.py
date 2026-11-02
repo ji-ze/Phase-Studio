@@ -5,7 +5,7 @@ from types import SimpleNamespace
 ROOT=Path(__file__).resolve().parents[2];sys.path.insert(0,str(ROOT))
 from phase_studio import app as a
 from phase_studio.hkl_diagnostics import read_diagnostic_reflections
-from phase_studio.feedback_diagnostics import FeedbackCapture,save_report
+from phase_studio.feedback_diagnostics import FeedbackCapture,save_report,save_original_reflections,input_comparison,written_input_difference
 parser=argparse.ArgumentParser(description=__doc__)
 parser.add_argument('run',type=Path)
 parser.add_argument('--output',type=Path,required=True)
@@ -22,6 +22,7 @@ out.mkdir(parents=True,exist_ok=True)
 mode=a.REFLECTION_DATA_MODE_INTENSITY_FWHM
 input_path=root/'cycle_001_superflip_embedded_reflections.hkl'
 rows=list(read_diagnostic_reflections(input_path,mode)[0])
+save_original_reflections(out,rows,mode)
 cell=a.parse_cif_cell_and_sg(root/'phase_studio_reference_for_metrics.cif')[0]
 cfg=SimpleNamespace(cycles=args.cycles,map_feedback_missing_enabled=False,map_feedback_missing_from_cycle=1,
  map_feedback_missing_percent_limit=0,map_feedback_intensity_enabled=False,map_feedback_intensity_from_cycle=1,
@@ -30,6 +31,7 @@ recorded=list(csv.DictReader((root/'metrics.csv').open()))
 evidence=[]
 hashes={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for p in [input_path,root/'metrics.csv',root/'phase_studio_reference_for_metrics.cif']}
 for cycle in range(1,args.cycles):
+ current_input=(root/f'cycle_{cycle:03d}_map_feedback_for_superflip.hkl') if cycle>args.start else root/'observed_unique_for_superflip.hkl'
  with FeedbackCapture(cycle,mode,rows,cfg) as capture:
   if cycle>=args.start:
    path=root/f'cycle_{cycle:03d}'/f'cycle_{cycle:03d}_deblurred.xplor'
@@ -62,6 +64,9 @@ for cycle in range(1,args.cycles):
    if old_metric is not None:assert math.isclose(old_metric,legacy,rel_tol=1e-10,abs_tol=1e-10),item
    rows=after
   else:report=capture.report()
+ report['cycle_input']=input_comparison(out,current_input,mode)
+ report['target_input']=input_comparison(out,actual if cycle>=args.start else current_input,mode)
+ report['written_input_difference']=written_input_difference(current_input,actual if cycle>=args.start else current_input,mode)
  report['origin']='Reconstructed using existing recorded maps; verified against persisted reflection values. Not newly captured historical in-memory arrays.'
  report['definitions']=report['origin']+' '+report['definitions']
  save_report(out,report)

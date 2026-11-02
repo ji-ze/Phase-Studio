@@ -11,6 +11,7 @@ from .feedback_diagnostics import TITLES,OPERATIONS,load_report,load_summaries,e
 
 FIELDS=[('h','h'),('k','k'),('l','l'),('before','I before'),('after','I after'),
     ('delta','ΔI'),('absolute_delta','|ΔI|'),('relative_percent','|ΔI| / I before (%)'),
+    ('signed_relative_percent','ΔI / I before (%)'),
     ('group','Overlap group'),('operation','Operation'),('source_cycle','After cycle'),('target_cycle','Input cycle')]
 
 
@@ -50,9 +51,24 @@ class FeedbackDiagnosticsDialog(QDialog):
         self.figure=Figure(figsize=(9,4));self.canvas=FigureCanvasQTAgg(self.figure);tabs.addTab(self.canvas,'Change by source cycle')
         self.table=QTableView();self.table.setAlternatingRowColors(True);self.table.setSortingEnabled(True)
         tabs.addTab(self.table,'Reflection changes')
+        from PySide6.QtWidgets import QWidget
+        cumulative_page=QWidget();cumulative_layout=QVBoxLayout(cumulative_page)
+        self.cumulative_label=QLabel();self.cumulative_label.setWordWrap(True)
+        self.cumulative_table=QTableView();self.cumulative_table.setSortingEnabled(True)
+        cumulative_layout.addWidget(self.cumulative_label);cumulative_layout.addWidget(self.cumulative_table,1)
+        tabs.addTab(cumulative_page,'Cumulative input vs original')
+        written_page=QWidget();written_layout=QVBoxLayout(written_page)
+        self.written_label=QLabel();self.written_label.setWordWrap(True)
+        self.written_table=QTableView();self.written_table.setSortingEnabled(True)
+        self.written_export=QPushButton('Export actual written-input CSV')
+        self.written_export.clicked.connect(self.export_written_csv)
+        written_layout.addWidget(self.written_label);written_layout.addWidget(self.written_export)
+        written_layout.addWidget(self.written_table,1);tabs.addTab(written_page,'Actual written inputs')
         buttons=QHBoxLayout()
         for text,slot in [('Export cycle JSON',self.export_json),('Export cycle CSV',self.export_cycle_csv)]:
             button=QPushButton(text);button.clicked.connect(slot);buttons.addWidget(button)
+        self.cumulative_export=QPushButton('Export cumulative CSV')
+        self.cumulative_export.clicked.connect(self.export_cumulative_csv);buttons.addWidget(self.cumulative_export)
         buttons.addStretch();close=QPushButton('Close');close.clicked.connect(self.close);buttons.addWidget(close);layout.addLayout(buttons)
         self.cycle.currentIndexChanged.connect(self.select_cycle);self.operation.currentIndexChanged.connect(self.select_cycle)
         self.refresh(reports)
@@ -62,6 +78,8 @@ class FeedbackDiagnosticsDialog(QDialog):
     def refresh(self,reports):
         selected=self.cycle.currentData();self.reports=reports
         self.cycle.blockSignals(True);self.cycle.clear()
+        if any(r.get('source_cycle')==1 and r.get('cycle_input') for r in reports):
+            self.cycle.addItem('Original input for cycle 1 · no preceding Map Feedback',0)
         for report in sorted(reports,key=lambda r:r['source_cycle']):
             target=report['target_cycle']
             self.cycle.addItem(f'Map Feedback after cycle {report["source_cycle"]} → '+(f'input for cycle {target}' if target else 'no next cycle'),report['source_cycle'])
@@ -80,17 +98,30 @@ class FeedbackDiagnosticsDialog(QDialog):
         self.figure.tight_layout();self.canvas.draw_idle()
 
     def select_cycle(self,*_):
-        self.summary.setRowCount(0);self.table.setModel(None)
-        for model in (getattr(self,'proxy',None),getattr(self,'model',None)):
+        self.summary.setRowCount(0);self.table.setModel(None);self.cumulative_table.setModel(None)
+        self.cumulative_label.setText('Cumulative comparison unavailable: original or actual input observations were not recorded.')
+        self.cumulative_export.setEnabled(False);self._cumulative_report=None
+        self.written_table.setModel(None);self.written_label.setText('Actual consecutive written-input comparison unavailable.')
+        self.written_export.setEnabled(False);self._written_report=None
+        for model in (getattr(self,'proxy',None),getattr(self,'model',None),
+                      getattr(self,'cumulative_proxy',None),getattr(self,'cumulative_model',None),
+                      getattr(self,'written_proxy',None),getattr(self,'written_model',None)):
             if model is not None:model.deleteLater()
-        self.proxy=None;self.model=None
-        summary=next((r for r in self.reports if r['source_cycle']==self.cycle.currentData()),None)
+        self.proxy=None;self.model=None;self.cumulative_proxy=None;self.cumulative_model=None
+        self.written_proxy=None;self.written_model=None
+        initial=self.cycle.currentData()==0
+        summary=next((r for r in self.reports if r['source_cycle']==(1 if initial else self.cycle.currentData())),None)
         if summary is None:
             self.notes.setPlainText('No recorded feedback diagnostics. Legacy means may exist in metrics.csv; missing reflection-level history is unavailable.')
             self.report=None;return
         try:self.report=load_report(summary)
         except (OSError,ValueError) as exc:
             self.notes.setPlainText('Recorded diagnostics unavailable: '+str(exc));self.report=None;return
+        if initial:
+            self.report=self.report|dict(source_cycle=0,target_cycle=1,operations=[],
+                target_input=self.report['cycle_input'],written_reflections=None,next_cycle_reflection_file=None,
+                written_input_difference=None,
+                definitions='Original input for cycle 1; no preceding Map Feedback operation. '+self.report['definitions'])
         written=self.report.get('written_reflections')
         output=self.report.get('next_cycle_reflection_file')
         file_note=(f'Written next-cycle reflections: {written}; file: {output}\n' if written is not None else '')
@@ -100,7 +131,7 @@ class FeedbackDiagnosticsDialog(QDialog):
         metrics=['status','reason','input_reflections','eligible_reflections','significance_eligible',
             'modified_reflections','unchanged_eligible','overlap_groups','eligible_groups','modified_groups',
             'mean_absolute_delta','median_absolute_delta','maximum_absolute_delta',
-            'mean_absolute_relative_percent','relative_population','conservation','maximum_group_conservation_error','unavailable_conservation_groups',
+            'mean_absolute_relative_percent','maximum_absolute_relative_percent','relative_population','conservation','maximum_group_conservation_error','unavailable_conservation_groups',
             'proposed_reflections','added_reflections','percentage_increase','legacy_mean_percent']
         self.summary.setColumnCount(len(visible)+1);self.summary.setRowCount(len(metrics))
         self.summary.setHorizontalHeaderLabels(['Quantity']+[TITLES[op['operation']] for op in visible])
@@ -114,6 +145,40 @@ class FeedbackDiagnosticsDialog(QDialog):
         self.model=ReflectionChanges(rows,self)
         self.proxy=QSortFilterProxyModel(self);self.proxy.setSourceModel(self.model);self.proxy.setSortRole(Qt.UserRole)
         self.table.setModel(self.proxy);self.table.sortByColumn(6,Qt.DescendingOrder);self.table.resizeColumnsToContents()
+        data=self.report.get('target_input') or self.report.get('cycle_input') or {}
+        comparison=data.get('cumulative')
+        if comparison:
+            cycle=self.report['target_cycle'] or self.report['source_cycle']
+            mean=comparison.get('mean_absolute_relative_percent')
+            maximum=comparison.get('maximum_absolute_relative_percent')
+            self.cumulative_label.setText(f'Written input for cycle {cycle} vs original measured observations. '
+                f'{comparison["modified_reflections"]} changed matched HKLs; {comparison["added_reflections"]} added; '
+                f'{comparison["removed_reflections"]} absent (not zero). Mean/max absolute relative change: '
+                f'{mean if mean is not None else "Unavailable"}% / {maximum if maximum is not None else "Unavailable"}%.\n'
+                +data.get('reason','')+'\nInput: '+data.get('file','Unavailable'))
+            self._cumulative_report=dict(source_cycle=0,target_cycle=cycle,
+                operations=[comparison|dict(operation='cumulative input vs original')])
+            rows=[r|dict(operation='cumulative input vs original',source_cycle=0,target_cycle=cycle)
+                  for r in comparison.get('rows',[])]
+            self.cumulative_model=ReflectionChanges(rows,self)
+            self.cumulative_proxy=QSortFilterProxyModel(self);self.cumulative_proxy.setSourceModel(self.cumulative_model)
+            self.cumulative_proxy.setSortRole(Qt.UserRole);self.cumulative_table.setModel(self.cumulative_proxy)
+            self.cumulative_table.sortByColumn(6,Qt.DescendingOrder);self.cumulative_table.resizeColumnsToContents()
+            self.cumulative_export.setEnabled(True)
+        written=self.report.get('written_input_difference') or {}
+        if written.get('status')=='Available':
+            self.written_label.setText(f'Actual written input {self.report["source_cycle"]} → {self.report["target_cycle"]}: '
+                f'{written["modified_reflections"]}/{written["input_reflections"]} changed matched reflections, '
+                f'{written["added_reflections"]} added, {written["removed_reflections"]} absent. '+written['reason'])
+            self._written_report=dict(source_cycle=self.report['source_cycle'],target_cycle=self.report['target_cycle'],
+                operations=[written|dict(operation='net written-input difference')])
+            rows=[r|dict(operation='net written-input difference',source_cycle=self.report['source_cycle'],
+                         target_cycle=self.report['target_cycle']) for r in written.get('rows',[])]
+            self.written_model=ReflectionChanges(rows,self)
+            self.written_proxy=QSortFilterProxyModel(self);self.written_proxy.setSourceModel(self.written_model)
+            self.written_proxy.setSortRole(Qt.UserRole);self.written_table.setModel(self.written_proxy)
+            self.written_table.sortByColumn(6,Qt.DescendingOrder);self.written_table.resizeColumnsToContents()
+            self.written_export.setEnabled(True)
 
     def open_run(self):
         folder=QFileDialog.getExistingDirectory(self,'Open recorded run',str(self.directory))
@@ -130,3 +195,13 @@ class FeedbackDiagnosticsDialog(QDialog):
         if self.report is not None:
             name,_=QFileDialog.getSaveFileName(self,'Export reflection changes','','CSV (*.csv)')
             if name:export_csv(name,self.report)
+
+    def export_cumulative_csv(self):
+        if self._cumulative_report is not None:
+            name,_=QFileDialog.getSaveFileName(self,'Export cumulative input differences','','CSV (*.csv)')
+            if name:export_csv(name,self._cumulative_report)
+
+    def export_written_csv(self):
+        if self._written_report is not None:
+            name,_=QFileDialog.getSaveFileName(self,'Export actual written-input differences','','CSV (*.csv)')
+            if name:export_csv(name,self._written_report)

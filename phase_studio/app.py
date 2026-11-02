@@ -7376,6 +7376,7 @@ def result_candidates_from_results(results: Sequence[CycleResult], *, include_un
                 map_path=str(map_path.resolve()), structure_path=str(structure_path.resolve()), metrics=quality,
                 usable_map=usable_map, usable_structure=usable_structure,
                 map_feedback_change_percent=result.intensity_correction_avg_change_percent,
+                powder_feedback_change_percent=result.powder_repartition_avg_change_percent,
                 superflip_initialization=initialization if source == "superflip" else "",
                 reflection_input_provenance=reflection_provenance,
                 edma_sigma=(
@@ -9510,8 +9511,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _publish_feedback_diagnostics(self, capture, directory):
         try:
-            from phase_studio.feedback_diagnostics import save_report
-            report = save_report(directory, capture.report())
+            from phase_studio.feedback_diagnostics import save_report, input_comparison, written_input_difference
+            detail = capture.report()
+            if capture.input_file is not None:
+                detail['cycle_input'] = input_comparison(directory, capture.input_file, capture.mode)
+                if detail['target_cycle'] is not None:
+                    detail['target_input'] = input_comparison(directory, capture.output_file or capture.input_file, capture.mode)
+                    detail['written_input_difference'] = written_input_difference(
+                        capture.input_file,capture.output_file or capture.input_file,capture.mode)
+            report = save_report(directory, detail)
             if any(op['status']=='Scientific error' for op in report['operations']):
                 self.log(f'Scientific diagnostic error after cycle {report["source_cycle"]}: group-wise intensity conservation failed. Diagnostics did not change any values.', level='ERROR')
             self.msg_queue.put(('feedback_diagnostics', report))
@@ -14566,6 +14574,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 cfg.crystal_metadata if cfg is not None else None
             ),
             adjust_threshold_async=self.request_result_candidate_retune,
+            map_feedback_powder_enabled=bool(cfg.redistribute_overlaps) if cfg is not None else False,
+            feedback_directory=cfg.work_dir if cfg is not None else None,
+            feedback_reports_provider=lambda: list(self.feedback_reports.values()),
         )
         # A run owns its explicit selection; QSettings and a previous run do not.
         session_key = (str(getattr(cfg, "run_id", "")),
@@ -15950,6 +15961,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 subsystem="Validation",
             )
             data_modes_needed = {configured_data_mode}
+            try:
+                from phase_studio.feedback_diagnostics import save_original_reflections
+                save_original_reflections(cfg.work_dir, refl, configured_data_mode, getattr(cfg,'run_id',None))
+            except Exception as exc:
+                self.log(f'Original-reflection diagnostic snapshot unavailable: {exc}',level='WARNING')
             observed_hkls: Dict[str, Path] = {}
             for data_mode in sorted(data_modes_needed):
                 observed_hkl = cfg.work_dir / observed_hkl_name_for_mode(data_mode)
@@ -16985,6 +17001,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             state.pending_intensity_correction_change_percent = None
             from phase_studio.feedback_diagnostics import FeedbackCapture
             with FeedbackCapture(cyc, configured_data_mode, state.current_reflections, cfg) as feedback_capture:
+                feedback_capture.input_file = observed_hkl_for_cycle
                 if cyc < cfg.cycles and not checkpoint.feedback_completed:
                     add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
                     correct_intensities = cfg.map_feedback_intensity_enabled and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0

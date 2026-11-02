@@ -541,6 +541,8 @@ class ResultCandidate:
     # Fresh-run ownership. Empty remains valid for imported/legacy fixtures;
     # production workflows stamp every completed candidate.
     run_id: str = ""
+    # Historical cycle-input diagnostic only; never a recommendation metric.
+    powder_feedback_change_percent: Optional[float] = None
 
     @property
     def label(self) -> str:

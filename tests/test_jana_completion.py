@@ -400,9 +400,8 @@ def main():
     check("split: live callout visible for SharpED", split_dialog._warning_callout.isVisible())
     split_dialog.close()
 
-    # Map Feedback intensity correction on: 4th column appears in both
-    # tables (cycle-level value, same figure in both source tables), with
-    # "—" for cycles where it was never computed.
+    # Feedback status is cycle-level and shared across families. Historical
+    # means remain labelled in tooltips, but cannot fabricate detailed history.
     mf_window, mf_results = build_window(appmod, launch_mode="standalone", cycles=2)
     mf_results[1].intensity_correction_avg_change_percent = -3.25
     mf_window.results = mf_results
@@ -413,7 +412,7 @@ def main():
     mf_dialog._apply_source("superflip")
     check(
         "split: Map Feedback column appears when intensity correction is enabled",
-        "Feedback Δ" in [
+        "Feedback" in [
             mf_dialog._views["superflip"].table.horizontalHeaderItem(i).text()
             for i in range(mf_dialog._views["superflip"].table.columnCount())
         ],
@@ -423,11 +422,14 @@ def main():
         mf_dialog._views["superflip"].table.item(row, feedback_column).text()
         for row in range(mf_dialog._views["superflip"].table.rowCount())
     ]
-    check("split: Map Feedback value renders for the cycle it was computed on", "-3.2%" in feedback_cell_values)
-    check("split: Map Feedback shows an em dash where unavailable", "—" in feedback_cell_values)
+    check("split: legacy intensity mean remains labelled on the correct cycle",
+          any('Recorded legacy intensity-correction mean feeding this cycle: -3.25%' in
+              mf_dialog._views['superflip'].table.item(row,feedback_column).toolTip()
+              for row in range(mf_dialog._views['superflip'].table.rowCount())))
+    check("split: missing detailed history is explicitly unavailable, never zero", set(feedback_cell_values)=={'N/A'})
     check(
         "split: Map Feedback column absent when intensity correction is off",
-        "Map Feedback change (%)" not in [
+        "Feedback" not in [
             split_dialog._views["superflip"].table.horizontalHeaderItem(i).text()
             for i in range(split_dialog._views["superflip"].table.columnCount())
         ],
