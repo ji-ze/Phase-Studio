@@ -4063,6 +4063,14 @@ def write_powder_repartitioning_log(
     except OSError:
         pass
 
+def validate_powder_reflections(reflections, data_mode):
+    if not reflection_mode_has_fwhm(data_mode):
+        raise ValueError('Powder overlap repartitioning requires declared FWHM data; measurement sigma cannot be used as a peak width.')
+    if any(not math.isfinite(float(r.value)) or r.value<0 or r.sigma is None or
+           not math.isfinite(float(r.sigma)) or r.sigma<=0 for r in reflections):
+        raise ValueError('Powder overlap repartitioning requires finite nonnegative values and finite positive measured FWHM for every record. Validate the peak list first.')
+
+
 def redistribute_overlap_reflections(
     reflections: Sequence[Reflection], data_mode: str, feedback_map: Path, cell: gemmi.UnitCell,
     wavelength: float, separation_factor: float, mix: float, log: Callable[[str], None],
@@ -4087,6 +4095,7 @@ def redistribute_overlap_reflections(
     percent change in intensity per overlap group -- or None if there were no
     overlap groups to redistribute."""
     mode = normalize_reflection_data_mode(data_mode)
+    validate_powder_reflections(reflections,mode)
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     groups = assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
     if not groups:
@@ -15941,7 +15950,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 uncertainty_export_reflections(refl,configured_data_mode,cfg.i_over_sigma_min,None,0)
             if reflection_mode_has_fwhm(configured_data_mode) and cfg.map_feedback_missing_enabled:
                 raise ValueError('Missing-reflection completion cannot assign measured FWHM to new HKL. Disable missing-reflection completion for FWHM input; intensity correction and overlap repartitioning remain available.')
-            current_reflections = list(refl)
+            current_reflections = filtered_reflections(refl,configured_data_mode,0)
+            self.log(f'Input data policy: {len(current_reflections)} valid nonnegative records; {len(refl)-len(current_reflections)} invalid value/width records excluded from execution and feedback.')
+            if reflection_mode_has_fwhm(configured_data_mode):
+                self.log('FWHM input: observed significance filtering disabled (threshold 0); measured peak widths preserved.')
             self.log(f"  Reflections: {len(refl_raw)} parsed / {len(refl)} unique", level="DETAIL")
             if str(cfg.referencefile_mode).strip().lower() in {"reference_xplor", "reference_density"} and cfg.superflip_reference_xplor is None and cfg.superflip_referencefile is None:
                 cfg.referencefile_mode = "omit"

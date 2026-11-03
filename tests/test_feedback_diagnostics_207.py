@@ -72,9 +72,9 @@ def test_missing_completion_and_no_map_signal():
     missing=c.operations['missing']
     assert len(output)==2 and missing['added_reflections']==1 and missing['percentage_increase']==100
     assert missing['proposed_reflections']==1 and missing['status']=='Applied'
-    rows.append(a.Reflection(2,0,0,20,.1))
-    with FeedbackCapture(5,a.REFLECTION_DATA_MODE_INTENSITY,rows,config()) as c,patch.object(a,'xplor_fft_predictions',return_value={}),patch.object(a,'assign_powder_overlap_groups',return_value={(1,0,0):1,(2,0,0):1}):
-        output,_=a.redistribute_overlap_reflections(rows,a.REFLECTION_DATA_MODE_INTENSITY,Path('unused'),gemmi.UnitCell(10,10,10,90,90,90),.39986,.2,1,lambda _:None)
+    rows=[a.Reflection(1,0,0,10,.1),a.Reflection(2,0,0,20,.1)]
+    with FeedbackCapture(5,a.REFLECTION_DATA_MODE_INTENSITY_FWHM,rows,config()) as c,patch.object(a,'xplor_fft_predictions',return_value={}),patch.object(a,'assign_powder_overlap_groups',return_value={(1,0,0):1,(2,0,0):1}):
+        output,_=a.redistribute_overlap_reflections(rows,a.REFLECTION_DATA_MODE_INTENSITY_FWHM,Path('unused'),gemmi.UnitCell(10,10,10,90,90,90),.39986,.2,1,lambda _:None)
     assert c.operations['powder']['eligible_groups']==0
     assert c.operations['powder']['modified_reflections']==0
 
@@ -85,6 +85,19 @@ def test_numerical_implementations_remain_identical_to_starting_source():
     for name,kind,count in [('apply_map_feedback_to_reflections','map',1),('redistribute_overlap_reflections','powder',2)]:
         get=lambda source:next(n for n in ast.parse(source).body if isinstance(n,ast.FunctionDef) and n.name==name)
         old,new=get(baseline),get(current)
+        if kind=='powder':
+            expected=ast.parse('validate_powder_reflections(reflections,mode)').body[0]
+            guards=[node for node in new.body if ast.dump(node)==ast.dump(expected)]
+            assert len(guards)==1
+            new.body.remove(guards[0])
+        else:
+            expected=ast.parse("if reflection_mode_has_fwhm(mode) and add_missing:\n    raise ValueError('Missing-reflection completion cannot assign measured FWHM to new HKL. Disable completion for FWHM input; no widths or uncertainties are invented.')").body[0]
+            guards=[node for node in new.body if ast.dump(node)==ast.dump(expected)]
+            assert len(guards)==1
+            new.body.remove(guards[0])
+            estimates=[node for node in ast.walk(new) if isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=='sigma' for target in node.targets)]
+            assert len(estimates)==1 and ast.dump(estimates[0].value)==ast.dump(ast.Constant(None))
+            estimates[0].value=ast.parse('estimate_sigma_for_reflection_value(current, value)',mode='eval').body
         hooks=[n for n in ast.walk(new) if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name) and n.value.func.id=='record_feedback_observation']
         assert len(hooks)==count
         for hook in hooks:assert ast.dump(hook)==ast.dump(ast.parse(f'record_feedback_observation({kind!r}, locals())').body[0])

@@ -115,3 +115,11 @@ def test_unknown_phases_and_zero_amplitude_uncertainty_export(tmp_path):
     for writer in (a.write_standardized_hkl_with_phase,a.write_shelx_fcf):
         with pytest.raises(ValueError,match='F=0'):writer(tmp_path/'export',[a.Reflection(1,0,0,0,1)],0,mode)
         assert not (tmp_path/'export').exists()
+
+
+def test_powder_boundary_cannot_reinterpret_measurement_sigma_or_invalid_values():
+    with pytest.raises(ValueError,match='measurement sigma'):
+        a.validate_powder_reflections([a.Reflection(1,0,0,10,1)],a.REFLECTION_DATA_MODE_INTENSITY)
+    for value,width in [(float('nan'),.1),(-1,.1),(10,None),(10,0),(10,float('inf'))]:
+        with pytest.raises(ValueError,match='finite'):
+            a.validate_powder_reflections([a.Reflection(1,0,0,value,width)],a.REFLECTION_DATA_MODE_INTENSITY_FWHM)

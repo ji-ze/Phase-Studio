@@ -327,6 +327,10 @@ class FeedbackTests(unittest.TestCase):
         w.powder_enabled_checkbox.setChecked(True)
         options = w._build_options('recycle')
         self.assertEqual(options.intensity_sigma_threshold, 0.0)
+        self.assertEqual(options.observed_filter_threshold,0.0)
+        handoff=self.j.build_jana_handoff_import(path,options,self.a.parse_inflip_settings(path))
+        self.assertEqual(handoff.values['i_over_sigma_min'],'0.0')
+        self.assertTrue(any('Observed significance filter explicitly set' in message for message in handoff.limitations))
         self.assertTrue(options.enable_powder_repartition)
         w.dialog.close()
 

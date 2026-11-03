@@ -2008,8 +2008,6 @@ class _JanaWorkflowWizard:
             summary_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.reflections_value = QLabel("Not available")
         self.format_value = QLabel("Not available")
-        self.observed_filter_value = QLabel("Not yet verified")
-        self.observed_filter_value.setWordWrap(True)
         self.data_type_value = QLabel("Not available / unverified")
         self.cell_value = QLabel("Not available")
         self.spacegroup_value = QLabel("Not available")
@@ -2020,7 +2018,6 @@ class _JanaWorkflowWizard:
         self.input_summary_layout.addRow("Reflections", self.reflections_value)
         self.input_summary_layout.addRow("Data type", self.data_type_value)
         self.input_summary_layout.addRow("Format", self.format_value)
-        self.input_summary_layout.addRow("Observed filter", self.observed_filter_value)
         self.input_summary_right_layout.addRow("Cell", self.cell_value)
         self.input_summary_right_layout.addRow("Space group", self.spacegroup_value)
         for title, summary, stretch in (("Reflection data", left_summary, 1), ("Crystal data", right_summary, 1)):
@@ -2161,10 +2158,9 @@ class _JanaWorkflowWizard:
                 self._sync_page3_for_data_type()
                 if self.stack.currentWidget() is self.page3:
                     self._refresh_page3_validation_message()
-            self.format_value.setText(format_reflection_data_mode(result.data_mode))
             from phase_studio.app import reflection_mode_has_fwhm
-            self.observed_filter_value.setText('Disabled: FWHM is not sigma; threshold 0' if reflection_mode_has_fwhm(result.data_mode)
-                else 'Uses the Phase Studio observed value/uncertainty threshold')
+            self.format_value.setText(format_reflection_data_mode(result.data_mode)+
+                (' · filter off (0)' if reflection_mode_has_fwhm(result.data_mode) else ''))
             # Use the diagnostic authority's verified column semantics, never
             # a filename or AUTO fallback, to classify the measurement input.
             report = result.diagnostics
