@@ -370,7 +370,7 @@ class SplitDistributionTests(unittest.TestCase):
                 # commit; all other numerical bodies retain the released baseline.
                 # Independent 6-mode goldens and real native checks are documented
                 # in FWHM_SCIENTIFIC_CORRECTION_2_0_7.md. This is not an exemption.
-                policy_ref='c45e508'
+                policy_ref='ca40e03'
                 policy_text=subprocess.check_output([git,'show',f'{policy_ref}:phase_studio/app.py'],cwd=ROOT).decode('utf8')
                 pinned=functions(policy_text)
                 policy_names={'parse_reflection_line','read_hkl','merge_duplicate_reflections',
@@ -379,7 +379,7 @@ class SplitDistributionTests(unittest.TestCase):
                     'write_standardized_hkl_with_phase','write_shelx_fcf',
                     'export_phased_reflections_from_map','estimate_sigma_for_reflection_value',
                     'write_superflip_input','validate_reflection_filter_policy','filtered_reflections',
-                    'uncertainty_export_reflections','powder_superflip_keywords'}
+                    'uncertainty_export_reflections','powder_superflip_keywords','validate_powder_reflections'}
                 old.update({name:pinned[name] for name in policy_names})
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",

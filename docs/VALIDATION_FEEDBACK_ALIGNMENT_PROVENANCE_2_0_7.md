@@ -1,5 +1,9 @@
 # Validation of feedback, comparison and provenance, 2.0.7
 
+This records the earlier diagnostics/provenance milestone. The later
+[FWHM scientific correction](FWHM_SCIENTIFIC_CORRECTION_2_0_7.md) intentionally
+changes the legacy filtering policy and carries its own final validation.
+
 ## Automated checks
 
 * Final complete suite: **666 passed, 4 skipped, 37 subtests passed**, 543.38 s.

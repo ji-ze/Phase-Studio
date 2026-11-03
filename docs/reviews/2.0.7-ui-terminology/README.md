@@ -1,5 +1,12 @@
 # UI terminology owner review, 2.0.7
 
+**Snapshot note:** this inventory predates the focused
+[FWHM scientific correction](../../FWHM_SCIENTIFIC_CORRECTION_2_0_7.md).
+That correction updates the actual data flow and directly related scientific
+guidance; it does not approve or apply the broader wording proposals. The old
+UI-001 behavior description is historical. Regenerate/reconcile the inventory
+against the final UI before certifying exhaustive terminology acceptance.
+
 Twenty priority proposals are ready for owner review. **All decisions are
 Pending; no proposed wording has been applied.** The critical finding is the
 legacy input ratio filter used on FWHM data. That needs a separate scientific

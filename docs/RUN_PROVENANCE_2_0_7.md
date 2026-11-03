@@ -1,5 +1,9 @@
 # Run provenance and scientific logging audit, 2.0.7
 
+**Historical audit:** the legacy FWHM finding below describes the pre-correction
+implementation. See [the focused scientific correction](FWHM_SCIENTIFIC_CORRECTION_2_0_7.md)
+for the current policy, actual data-flow fix and separate acceptance evidence.
+
 New runs produce a concise `log.txt`, full timestamped `diagnostic.log`,
 structured `events.jsonl`, atomic `run_manifest.json`, readable `summary.md`,
 `cycle_metrics.csv` and `checksums.sha256`. Session records live under
