@@ -52,7 +52,7 @@ def presentation_report(result):
     if cached is not None and cached[0] is report:
         return cached[1]
     raw = getattr(result,'reflections_raw',getattr(result,'reflections',()))
-    direct = np.asarray([a.reflection_amplitude_signal_to_noise(r) if (r.h,r.k,r.l)!=(0,0,0) else None for r in raw],dtype=float)
+    direct = np.asarray([a.reflection_amplitude_signal_to_noise(r,result.data_mode) if (r.h,r.k,r.l)!=(0,0,0) else None for r in raw],dtype=float)
     finite = direct[np.isfinite(direct)]
     stats = dict(report.statistics)
     stats.update(mean_f_over_sigma=float(np.mean(finite)) if len(finite) else None,
@@ -958,7 +958,7 @@ def validation_dialog(win, result):
         values = [r.h,r.k,r.l,r.value,r.sigma]
         if phase: values.append(r.phase)
         if sig:
-            values.append(a.reflection_amplitude_signal_to_noise(r) if amplitude else a.reflection_primary_signal_to_noise(r,result.data_mode))
+            values.append(a.reflection_amplitude_signal_to_noise(r,result.data_mode) if amplitude else a.reflection_primary_signal_to_noise(r,result.data_mode))
         values.append(a.reflection_d_spacing(result.cell,r.h,r.k,r.l) if (r.h,r.k,r.l)!=(0,0,0) else None)
         values.append(a.reflection_sintheta_over_lambda(result.cell,r.h,r.k,r.l) if (r.h,r.k,r.l)!=(0,0,0) else None)
         if derived.isChecked() and sig and amplitude:

@@ -107,6 +107,17 @@ class FeedbackTests(unittest.TestCase):
         new=ast.parse(Path(self.a.__file__).read_text(encoding='utf-8'))
         find=lambda tree:next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='apply_map_feedback_to_reflections')
         original,current=find(old),find(new)
+        # Authorised FWHM correction: permit exactly the new refusal to invent
+        # peak widths, and exactly removal of estimated measurement uncertainty.
+        # Every existing correction formula/control-flow node remains pinned.
+        width_guard=ast.parse("if reflection_mode_has_fwhm(mode) and add_missing:\n    raise ValueError('Missing-reflection completion cannot assign measured FWHM to new HKL. Disable completion for FWHM input; no widths or uncertainties are invented.')").body[0]
+        width_nodes=[node for node in current.body if ast.dump(node)==ast.dump(width_guard)]
+        self.assertEqual(len(width_nodes),1)
+        current.body.remove(width_nodes[0])
+        estimated=[node for node in ast.walk(current) if isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=='sigma' for target in node.targets)]
+        self.assertEqual(len(estimated),1)
+        self.assertEqual(ast.dump(estimated[0].value),ast.dump(ast.Constant(None)))
+        estimated[0].value=ast.parse('estimate_sigma_for_reflection_value(current, value)',mode='eval').body
         hooks=[n for n in current.body if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name) and n.value.func.id=='record_feedback_observation']
         self.assertEqual(len(hooks),1)
         self.assertEqual(ast.dump(hooks[0]),ast.dump(ast.parse("record_feedback_observation('map', locals())").body[0]))
@@ -245,6 +256,7 @@ class FeedbackTests(unittest.TestCase):
 
     def test_powder_panels_independent_and_no_fake_sigma(self):
         w = self.wizard()
+        self.assertEqual(w._observed_filter_threshold(),0.0)
         self.assertTrue(w.intensity_group.isVisible() and w.powder_group.isVisible())
         self.assertFalse(w.feedback_has_uncertainty)
         w.intensity_enabled_checkbox.setChecked(True)

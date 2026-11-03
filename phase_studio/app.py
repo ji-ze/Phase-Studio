@@ -326,6 +326,8 @@ ATOMIC_NUMBER_HINTS = {
 
 @dataclass
 class Reflection:
+    # Legacy storage name: sigma holds the declared auxiliary column. In a
+    # FWHM mode this is an angular width, never a measurement uncertainty.
     h: int
     k: int
     l: int
@@ -2548,7 +2550,8 @@ def parse_reflection_line(line: str, value_col: int, sigma_col: Optional[int]) -
         value = float(parts[value_col - 1])
         sigma = None
         if sigma_col is not None and sigma_col > 0 and len(parts) >= sigma_col:
-            sigma = float(parts[sigma_col - 1])
+            auxiliary=parts[sigma_col - 1]
+            sigma = None if auxiliary in {'?','.'} else float(auxiliary)
         phase = None
         if value_col == 4 and sigma_col == 6 and len(parts) >= 5:
             phase_token = parts[4].strip()
@@ -2561,9 +2564,12 @@ def parse_reflection_line(line: str, value_col: int, sigma_col: Optional[int]) -
 def read_hkl(hkl_path: Path, value_col: int = 4, sigma_col: Optional[int] = 5, include_000: bool = False) -> List[Reflection]:
     observe_reflection_read('start',hkl_path)
     reflections: List[Reflection] = []
+    phase_in_turns=False
     with hkl_path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
+            if line.lstrip().startswith('#') and 'phase(turns)' in line:phase_in_turns=True
             r = parse_reflection_line(line, value_col=value_col, sigma_col=sigma_col)
+            if r is not None and phase_in_turns and r.phase is not None:r=replace(r,phase=r.phase*360.)
             observe_reflection_read('line',hkl_path,line=line,reflection=r,include_000=include_000)
             if r is None:
                 continue
@@ -2583,7 +2589,7 @@ def reflection_columns_for_mode(data_mode: str) -> Tuple[int, Optional[int], boo
         return 4, 5, False
     return 4, 5, False
 
-def merge_duplicate_reflections(reflections: Sequence[Reflection]) -> List[Reflection]:
+def merge_duplicate_reflections(reflections: Sequence[Reflection], data_mode: str = REFLECTION_DATA_MODE_INTENSITY) -> List[Reflection]:
     buckets: Dict[Tuple[int, int, int], List[Reflection]] = collections.defaultdict(list)
     order: List[Tuple[int, int, int]] = []
     for r in reflections:
@@ -2597,7 +2603,20 @@ def merge_duplicate_reflections(reflections: Sequence[Reflection]) -> List[Refle
         if len(items) == 1:
             merged.append(items[0])
             continue
+        finite_items=[x for x in items if math.isfinite(float(x.value))]
+        if not finite_items:
+            merged.append(items[0])
+            continue
+        items=finite_items
         vals = np.asarray([float(x.value) for x in items], dtype=np.float64)
+        if reflection_mode_has_fwhm(data_mode):
+            widths=[x.sigma for x in items]
+            if any(w is None or not math.isfinite(float(w)) or float(w)<=0 for w in widths):
+                raise ValueError(f'Cannot merge FWHM duplicates {(h,k,l)} with missing/invalid widths. Supply an authoritative unique peak list.')
+            if not np.allclose(widths,widths[0],rtol=1e-7,atol=1e-12):
+                raise ValueError(f'Conflicting FWHM widths for duplicate HKL {(h,k,l)}. Supply an authoritative merged peak list; widths are not inverse-variance weights.')
+            merged.append(Reflection(h,k,l,float(np.mean(vals)),float(widths[0]),items[0].phase))
+            continue
         sigs = np.asarray([float(x.sigma) if x.sigma is not None else np.nan for x in items], dtype=np.float64)
         valid = np.isfinite(sigs) & (sigs > 0)
         if np.any(valid):
@@ -2895,6 +2914,8 @@ def canonical_hkl(hkl: Tuple[int, int, int], sg: Optional[gemmi.SpaceGroup] = No
     return min(equivalents)
 
 def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
+    if reflection_mode_has_fwhm(data_mode):
+        return None
     if r.sigma is None:
         return None
     sigma = float(r.sigma)
@@ -2905,15 +2926,12 @@ def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]
         amplitude = abs(value)
         if amplitude <= 0:
             return 0.0
-        if reflection_mode_has_fwhm(data_mode):
-            # The factor of 2 below propagates a genuine sigma(F) into an
-            # intensity-domain uncertainty (I=F^2 => dI=2F.dF); FWHM is not an
-            # uncertainty, so that propagation does not apply -- use F/FWHM directly.
-            return amplitude / sigma
         return amplitude / (2.0 * sigma)
     return value / sigma
 
-def reflection_amplitude_signal_to_noise(r: Reflection) -> Optional[float]:
+def reflection_amplitude_signal_to_noise(r: Reflection, data_mode: str = REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA) -> Optional[float]:
+    if reflection_mode_has_fwhm(data_mode):
+        return None
     if r.sigma is None:
         return None
     sigma = float(r.sigma)
@@ -3042,7 +3060,7 @@ def analyze_hkl_data(
     check_cancelled()
     validate_cell(cell)
     raw = _loaded.reflections if _loaded is not None else list(read_diagnostic_reflections(hkl_path, mode)[0])
-    unique = _loaded.unique_reflections if _loaded is not None else merge_duplicate_reflections(raw)
+    unique = _loaded.unique_reflections if _loaded is not None else merge_duplicate_reflections(raw, mode)
     gstar = reciprocal_metric_tensor(cell)
     unique_hkls = np.asarray([[int(r.h), int(r.k), int(r.l)] for r in unique], dtype=np.int32)
     unique_stls = hkl_stl_array_from_metric(gstar, unique_hkls)
@@ -3224,14 +3242,61 @@ def _passes_reflection_filters(
     i_over_sigma_min: float,
     cell: Optional[gemmi.UnitCell],
     resolution_d_min: float,
+    data_mode: str = REFLECTION_DATA_MODE_INTENSITY,
 ) -> bool:
-    if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
+    validate_reflection_filter_policy(data_mode,i_over_sigma_min)
+    if not math.isfinite(float(r.value)) or float(r.value)<0:
+        return False
+    if reflection_mode_has_fwhm(data_mode):
+        if r.sigma is None or not math.isfinite(float(r.sigma)) or r.sigma<=0:
+            return False
+    if i_over_sigma_min > 0:
+        if r.sigma is None or not math.isfinite(float(r.sigma)) or r.sigma<=0:
+            return False
         if float(r.value) / float(r.sigma) < i_over_sigma_min:
             return False
     d_min = max(0.0, float(resolution_d_min or 0.0))
     if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
         return False
     return True
+
+
+def validate_reflection_filter_policy(data_mode: str, threshold: float) -> None:
+    if not math.isfinite(float(threshold)) or threshold<0:
+        raise ValueError('The observed value/uncertainty threshold must be finite and nonnegative.')
+    if reflection_mode_has_fwhm(data_mode) and threshold>0:
+        raise ValueError('FWHM is a peak width, not sigma(I) or sigma(F). Set Minimum observed value/σ to 0 to disable significance filtering for FWHM input. Genuine widths remain available for powder overlap and Superflip.')
+
+
+def powder_superflip_keywords(extra_keywords: str, wavelength: float = 0.0) -> str:
+    lines=clean_extra_superflip_keywords(extra_keywords)
+    declared=[line.split() for line in lines if inflip_first_token(line)=='lambda']
+    if declared:
+        if len(declared)!=1 or len(declared[0])!=2 or not math.isfinite(float(declared[0][1])) or float(declared[0][1])<=0:
+            raise ValueError('Superflip FWHM input requires one finite positive lambda wavelength keyword.')
+    elif math.isfinite(float(wavelength)) and wavelength>0:
+        lines.append(f'lambda {wavelength:.12g}')
+    else:
+        raise ValueError('Superflip FWHM input requires a measured wavelength. Set Wavelength (Å) or supply a valid lambda keyword; peak widths are retained for native overlap grouping.')
+    return '\n'.join(lines)
+
+
+def filtered_reflections(reflections, data_mode, threshold, cell=None, resolution_d_min=0.0):
+    validate_reflection_filter_policy(data_mode,threshold)
+    if threshold>0 and reflections and not any(r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma>0 for r in reflections):
+        raise ValueError('Significance filtering requires genuine finite positive measurement uncertainties. Set Minimum observed value/σ to 0 for uncertainty-free input, or supply sigma(I)/sigma(F).')
+    return [r for r in reflections if _passes_reflection_filters(r,threshold,cell,resolution_d_min,data_mode)]
+
+
+def uncertainty_export_reflections(reflections,data_mode,threshold,cell,resolution_d_min):
+    if reflection_mode_has_fwhm(data_mode):
+        raise ValueError('Phased HKL/FCF export requires genuine sigma(I) or sigma(F); FWHM cannot supply it. Choose XPLOR, CCP4 or Jana map export, or provide a reflection list with measured uncertainties.')
+    rows=filtered_reflections(reflections,data_mode,threshold,cell,resolution_d_min)
+    if any(r.sigma is None or not math.isfinite(float(r.sigma)) or r.sigma<=0 for r in rows):
+        raise ValueError('Phased HKL/FCF export requires genuine positive finite measurement uncertainties for every exported record. Choose XPLOR, CCP4 or Jana map export, or supply the missing uncertainties.')
+    if reflection_mode_is_amplitude(data_mode) and any(r.value<=0 for r in rows):
+        raise ValueError('Cannot propagate sigma(F) to sigma(I) at F=0 using the first-order conversion. Choose a map export or supply measured intensity uncertainties.')
+    return rows
 
 
 def infer_dataitemwidths_from_hkl(hkl_path: Path, fallback: str = "4 14 14") -> str:
@@ -3273,28 +3338,28 @@ def infer_dataitemwidths_from_hkl(hkl_path: Path, fallback: str = "4 14 14") -> 
 
 
 def write_observed_reflections(out_hkl: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0, data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None, resolution_d_min: float = 0.0) -> int:
-    out_hkl.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
-    filtered = [
-        r for r in reflections
-        if _passes_reflection_filters(r, i_over_sigma_min, cell, resolution_d_min)
-    ]
+    filtered = filtered_reflections(reflections,mode,i_over_sigma_min,cell,resolution_d_min)
+    out_hkl.parent.mkdir(parents=True, exist_ok=True)
     with out_hkl.open("w", encoding="utf-8") as f:
         quantity = "Fobs" if reflection_mode_is_amplitude(mode) else "Iobs"
         sigma_name = "sigma(Fobs)" if reflection_mode_is_amplitude(mode) else "sigma(Iobs)"
         if reflection_mode_has_phase(mode):
-            f.write(f"# h k l {quantity} phase(deg) {sigma_name}\n")
+            f.write(f"# h k l {quantity} phase(turns) {sigma_name}\n")
             f.write("# Phase is converted from degrees to turns for Superflip; sigma is ignored by Superflip.\n")
+        elif reflection_mode_has_fwhm(mode):
+            f.write(f"# h k l {quantity} FWHM(degrees_2theta)\n")
+            f.write("# FWHM is a peak width used by Superflip, never a measurement uncertainty.\n")
         else:
             f.write(f"# h k l {quantity} {sigma_name}\n")
-            f.write("# Sigma is retained by Phase Studio and ignored by Superflip.\n")
+            f.write("# Genuine sigma is retained when available; 0 denotes unavailable dummy data ignored by Superflip.\n")
         n = 0
         for r in filtered:
             value = max(0.0, float(r.value))
-            sigma = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
+            sigma = float(r.sigma) if r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma>0 else 0.0
             if reflection_mode_has_phase(mode):
-                phase_turns = (0.0 if r.phase is None else float(r.phase)) / 360.0
-                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {phase_turns:14.9f} {sigma:14.7f}\n")
+                phase_text = f'{float(r.phase)/360.0:14.9f}' if r.phase is not None and math.isfinite(float(r.phase)) else '?'.rjust(14)
+                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {phase_text} {sigma:14.7f}\n")
             else:
                 f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {sigma:14.7f}\n")
             n += 1
@@ -3309,20 +3374,15 @@ def write_standardized_hkl_with_phase(
     FFT from a reconstructed XPLOR map (see xplor_fft_predictions); its phase is written
     instead of the reflection's own phase field, which is only ever the value supplied by
     the selected HKL mode (0.0 for most modes) and never reflects the reconstruction."""
-    out_hkl.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
-    d_min = max(0.0, float(resolution_d_min or 0.0))
+    filtered = uncertainty_export_reflections(reflections,mode,i_over_sigma_min,cell,resolution_d_min)
+    out_hkl.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with out_hkl.open("w", encoding="utf-8") as f:
         f.write("# h k l I sigma(I) phase(deg)\n")
         phase_note = "phase is calculated by FFT from the reconstructed map" if calc_by_hkl else "phase is 0.0 unless supplied by the selected HKL mode"
         f.write(f"# Phase Studio {__version__} standardized HKL export; {phase_note}.\n")
-        for r in reflections:
-            if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
-                if float(r.value) / float(r.sigma) < i_over_sigma_min:
-                    continue
-            if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
-                continue
+        for r in filtered:
             value = max(0.0, float(r.value))
             if not reflection_mode_is_amplitude(mode):
                 intensity = value
@@ -3347,9 +3407,9 @@ def write_shelx_fcf(
     (h, k, l) -> (F_squared_calc, phase_calc_deg) read by FFT from a reconstructed XPLOR
     map (see xplor_fft_predictions); without it, F_squared_calc is written equal to
     F_squared_meas and phase_calc to 0 as neutral placeholders (no reconstruction available)."""
-    out_fcf.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
-    d_min = max(0.0, float(resolution_d_min or 0.0))
+    filtered = uncertainty_export_reflections(reflections,mode,i_over_sigma_min,cell,resolution_d_min)
+    out_fcf.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with out_fcf.open("w", encoding="utf-8") as f:
         f.write(f"# Phase Studio {__version__} ShelX-compatible FCF export (list format 4).\n")
@@ -3361,12 +3421,7 @@ def write_shelx_fcf(
         for tag in ("_refln_index_h", "_refln_index_k", "_refln_index_l", "_refln_F_squared_meas",
                     "_refln_F_squared_sigma", "_refln_F_squared_calc", "_refln_phase_calc"):
             f.write(f"{tag}\n")
-        for r in reflections:
-            if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
-                if float(r.value) / float(r.sigma) < i_over_sigma_min:
-                    continue
-            if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
-                continue
+        for r in filtered:
             value = max(0.0, float(r.value))
             if not reflection_mode_is_amplitude(mode):
                 intensity = value
@@ -3394,6 +3449,7 @@ def export_phased_reflections_from_map(
     fmt = normalize_map_export_format(map_export_format)
     if fmt not in {"hkl_phases", "shelx_fcf"}:
         return None
+    uncertainty_export_reflections(reflections,data_mode,i_over_sigma_min,cell,resolution_d_min)
     calc_by_hkl = xplor_fft_predictions(xplor_map, [(int(r.h), int(r.k), int(r.l)) for r in reflections])
     if fmt == "hkl_phases":
         out_path = out_path_base.with_name(out_path_base.name + "_phased.hkl")
@@ -3418,15 +3474,8 @@ def value_from_intensity(intensity: float, data_mode: str) -> float:
     return intensity
 
 def estimate_sigma_for_reflection_value(reflections: Sequence[Reflection], value: float) -> Optional[float]:
-    ratios: List[float] = []
-    for r in reflections:
-        if r.sigma is None:
-            continue
-        if r.value > 0 and r.sigma > 0:
-            ratios.append(float(r.sigma) / float(r.value))
-    if not ratios:
-        return None
-    return max(0.0, float(value) * float(np.median(np.asarray(ratios, dtype=np.float64))))
+    """A map prediction has no measured uncertainty; never infer one from widths or ratios."""
+    return None
 
 def xplor_fft_intensity_phase(xplor_map: Path, hkl: Tuple[int, int, int]) -> Tuple[float, float]:
     xmap = read_xplor_map(xplor_map)
@@ -3815,6 +3864,8 @@ def apply_map_feedback_to_reflections(
     reflections are new, not changed, so they never contribute) -- or None
     when correct_intensities is off or nothing was corrected."""
     mode = normalize_reflection_data_mode(data_mode)
+    if reflection_mode_has_fwhm(mode) and add_missing:
+        raise ValueError('Missing-reflection completion cannot assign measured FWHM to new HKL. Disable completion for FWHM input; no widths or uncertainties are invented.')
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     if not current:
         return current, None
@@ -3879,7 +3930,7 @@ def apply_map_feedback_to_reflections(
                     continue
                 intensity = raw_i * scale
                 value = value_from_intensity(intensity, mode)
-                sigma = estimate_sigma_for_reflection_value(current, value)
+                sigma = None  # A map prediction has no measured uncertainty or peak width.
                 new_reflections.append(Reflection(key[0], key[1], key[2], value, sigma, phase if reflection_mode_has_phase(mode) else None))
                 existing.add(key)
                 added += 1
@@ -4768,7 +4819,7 @@ def _build_uncached_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResul
             data_mode = verified_mode
     value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
     reflections = list(read_diagnostic_reflections(hkl_path, data_mode)[0])
-    unique = merge_duplicate_reflections(reflections)
+    unique = merge_duplicate_reflections(reflections, data_mode)
     result = HklLoadResult(
         hkl_path=hkl_path,
         data_mode=data_mode,
@@ -5975,6 +6026,8 @@ def write_superflip_input(
     extra_superflip_keywords: str,
     log: Optional[Callable[[str], None]] = None,
 ) -> None:
+    if reflection_mode_has_fwhm(reflection_data_mode):
+        extra_superflip_keywords=powder_superflip_keywords(extra_superflip_keywords)
     inp_path.parent.mkdir(parents=True, exist_ok=True)
     ops = ref_ctx.spacegroup.operations()
     perform = str(perform_algorithm or "CF").strip().upper()
@@ -7820,7 +7873,7 @@ INPUT_TOOLTIPS = {
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
     "reflection_data_mode": "Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so uncertainty-based significance is unavailable.",
     "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle model instead.",
-    "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
+    "i_over_sigma_min": "Minimum I/sigma(I) for intensity input or F/sigma(F) for amplitude input. 0 disables the filter. FWHM is a peak width: FWHM input requires 0. Missing/invalid uncertainties cannot pass a positive threshold. Only finite nonnegative observed values are written; zero is retained when the filter is disabled.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
     "normalize": "Optional Superflip reflection normalization keyword. For this Windows executable, none is the safest default and local is omitted.",
     "nresshells": "Number of resolution shells used only when a supported Superflip normalization keyword is written.",
@@ -15494,6 +15547,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _validate_run_config(self, cfg: RunConfig) -> Tuple[List[str], str]:
         issues: List[str] = []
         details: List[str] = []
+        try:
+            reflection_mode=self._resolve_configured_data_mode(cfg)
+            validate_reflection_filter_policy(reflection_mode,cfg.i_over_sigma_min)
+            if reflection_mode_has_fwhm(reflection_mode):
+                powder_superflip_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength)
+                if cfg.map_feedback_missing_enabled:
+                    issues.append('Disable missing-reflection completion for FWHM input: new HKL have no measured peak widths. Intensity correction and powder overlap remain supported.')
+                if normalize_map_export_format(cfg.map_export_format) in {'hkl_phases','shelx_fcf'}:
+                    issues.append('FWHM cannot be exported as measurement uncertainty. Choose XPLOR, CCP4 or Jana map export instead of phased HKL/FCF.')
+        except ValueError as exc:
+            issues.append(str(exc))
         mode = normalize_input_source_mode(cfg.input_source_mode)
         ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
         if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
@@ -15868,7 +15932,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             configured_data_mode = self._resolve_configured_data_mode(cfg)
             value_col, sigma_col, include_000 = reflection_columns_for_mode(configured_data_mode)
             refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
-            refl = merge_duplicate_reflections(refl_raw)
+            validate_reflection_filter_policy(configured_data_mode,cfg.i_over_sigma_min)
+            if reflection_mode_has_fwhm(configured_data_mode):
+                powder_superflip_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength)
+            refl = merge_duplicate_reflections(refl_raw, configured_data_mode)
+            filtered_reflections(refl,configured_data_mode,cfg.i_over_sigma_min)
+            if normalize_map_export_format(cfg.map_export_format) in {'hkl_phases','shelx_fcf'}:
+                uncertainty_export_reflections(refl,configured_data_mode,cfg.i_over_sigma_min,None,0)
+            if reflection_mode_has_fwhm(configured_data_mode) and cfg.map_feedback_missing_enabled:
+                raise ValueError('Missing-reflection completion cannot assign measured FWHM to new HKL. Disable missing-reflection completion for FWHM input; intensity correction and overlap repartitioning remain available.')
             current_reflections = list(refl)
             self.log(f"  Reflections: {len(refl_raw)} parsed / {len(refl)} unique", level="DETAIL")
             if str(cfg.referencefile_mode).strip().lower() in {"reference_xplor", "reference_density"} and cfg.superflip_reference_xplor is None and cfg.superflip_referencefile is None:
@@ -16641,6 +16713,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             # inside run_sharped_deblur, on the map SharpED actually receives.
             sf_voxel = cfg.voxel
             sf_extra_superflip_keywords = cfg.extra_superflip_keywords
+            if reflection_mode_has_fwhm(configured_data_mode):
+                sf_extra_superflip_keywords=powder_superflip_keywords(sf_extra_superflip_keywords,cfg.powder_wavelength)
             effective_repeat = 1 if model_for_sf is not None else max(1, int(cfg.repeatmode))
 
             def make_superflip_progress_relay(detail: str) -> Optional[Callable[[str], None]]:

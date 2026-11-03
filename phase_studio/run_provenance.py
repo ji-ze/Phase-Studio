@@ -362,13 +362,11 @@ class RunProvenance:
             counts['parser_inventory']=safe(reads[-1])
             counts['parser_rejections']=reads[-1]['unparsed']+reads[-1]['origin_excluded']
         expected=[r for r in parsed_reflections if (r.h,r.k,r.l) not in state.omit_test_hkls and
-            _passes_reflection_filters(r,cfg.i_over_sigma_min,state.ref_ctx.cell,cfg.resolution_d_min)]
+            _passes_reflection_filters(r,cfg.i_over_sigma_min,state.ref_ctx.cell,cfg.resolution_d_min,mode)]
         counts['reconciled_by_existing_filter_and_holdout']=set((r.h,r.k,r.l) for r in expected)==kept
-        counts['filter_rules']=dict(legacy_value_divided_by_fifth_field_limit=cfg.i_over_sigma_min,
+        counts['filter_rules']=dict(policy_version='207-fwhm-corrected-v1',mode_native_value_over_uncertainty_limit=cfg.i_over_sigma_min,
             resolution_min_angstrom=cfg.resolution_d_min,data_mode=mode,
-            note='Fifth-field interpretation follows the declared mode. FWHM is not a measurement uncertainty; this records the legacy writer rule without changing it.')
-        if 'fwhm' in str(mode).lower() and cfg.i_over_sigma_min>0:
-            self.manifest['limitations'].append('Scientific audit finding: legacy writer value/fifth-field filter is active for FWHM data; it is not I/sigma(I). Filtering is unchanged pending separate scientific review.')
+            note='Positive threshold requires measured uncertainties; FWHM requires threshold 0. Finite nonnegative values only; FWHM widths must be finite positive. Zero values are retained when the threshold is disabled.')
         counts['actual_input']=file_identity(written,'initial written Superflip reflections')
         self.manifest['reflection_inventory']=counts
         self.manifest['input_roles']=dict(experimental=self.manifest['inputs']['hkl'],

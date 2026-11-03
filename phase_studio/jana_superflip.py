@@ -180,6 +180,9 @@ class JanaRunOptions:
     # 2.0.0 Autosolve: "A" (solve the phase problem) or "B" (predict the
     # structure model); empty for every other action.
     autosolve_option: str = ""
+    # Explicit Wizard choice, shown in the incoming-data summary. None retains
+    # the configured application filter for callers that do not make a choice.
+    observed_filter_threshold: Optional[float] = None
 
 
 @dataclass
@@ -299,6 +302,9 @@ def build_jana_handoff_import(
         handoff_values["first_cycle_modelfile"] = explicit_first_model
 
     limitations: list[str] = []
+    if options.observed_filter_threshold is not None:
+        handoff_values['i_over_sigma_min']=str(options.observed_filter_threshold)
+        limitations.append('Observed significance filter explicitly set by the Wizard to '+str(options.observed_filter_threshold)+'. FWHM is not a measurement uncertainty.')
     if explicit_reference:
         handoff_values["reference_cif"] = explicit_reference
         handoff_values["referencefile_mode"] = "reference_density" if Path(explicit_reference).suffix.lower() in {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"} else "reference_cif"
@@ -1479,6 +1485,10 @@ class _JanaWorkflowWizard:
             return ""
         return mode
 
+    def _observed_filter_threshold(self) -> Optional[float]:
+        from phase_studio.app import reflection_mode_has_fwhm
+        return 0.0 if reflection_mode_has_fwhm(self._detect_reflection_data_mode()) else None
+
     def _sync_page3_for_data_type(self) -> None:
         from phase_studio.app import (
             format_reflection_data_mode,
@@ -1998,6 +2008,8 @@ class _JanaWorkflowWizard:
             summary_layout.setLabelAlignment(Qt.AlignLeft | Qt.AlignTop)
         self.reflections_value = QLabel("Not available")
         self.format_value = QLabel("Not available")
+        self.observed_filter_value = QLabel("Not yet verified")
+        self.observed_filter_value.setWordWrap(True)
         self.data_type_value = QLabel("Not available / unverified")
         self.cell_value = QLabel("Not available")
         self.spacegroup_value = QLabel("Not available")
@@ -2008,6 +2020,7 @@ class _JanaWorkflowWizard:
         self.input_summary_layout.addRow("Reflections", self.reflections_value)
         self.input_summary_layout.addRow("Data type", self.data_type_value)
         self.input_summary_layout.addRow("Format", self.format_value)
+        self.input_summary_layout.addRow("Observed filter", self.observed_filter_value)
         self.input_summary_right_layout.addRow("Cell", self.cell_value)
         self.input_summary_right_layout.addRow("Space group", self.spacegroup_value)
         for title, summary, stretch in (("Reflection data", left_summary, 1), ("Crystal data", right_summary, 1)):
@@ -2149,6 +2162,9 @@ class _JanaWorkflowWizard:
                 if self.stack.currentWidget() is self.page3:
                     self._refresh_page3_validation_message()
             self.format_value.setText(format_reflection_data_mode(result.data_mode))
+            from phase_studio.app import reflection_mode_has_fwhm
+            self.observed_filter_value.setText('Disabled: FWHM is not sigma; threshold 0' if reflection_mode_has_fwhm(result.data_mode)
+                else 'Uses the Phase Studio observed value/uncertainty threshold')
             # Use the diagnostic authority's verified column semantics, never
             # a filename or AUTO fallback, to classify the measurement input.
             report = result.diagnostics
@@ -3993,6 +4009,7 @@ class _JanaWorkflowWizard:
             run_model = self.model.currentText().strip()
             return JanaRunOptions(
                 action=action,
+                observed_filter_threshold=self._observed_filter_threshold(),
                 cycles=effective_cycles(),
                 # The recommended workflow always retains both completed
                 # result families. Its initial Result Selection source is the

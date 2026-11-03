@@ -163,10 +163,12 @@ def _read_cached(identity, mode):
     records = []
     rejected = invalid = zeros = 0
     examples = []
+    phase_in_turns=False
     with Path(identity[0]).open(encoding='utf8', errors='replace') as stream:
         for number, line in enumerate(stream, 1):
             if number % 4096 == 0: check_cancelled()
             text = line.strip()
+            if text.startswith('#') and 'phase(turns)' in text:phase_in_turns=True
             if not text or text.startswith(a.COMMENT_PREFIXES):
                 continue
             parts = text.split()
@@ -185,6 +187,9 @@ def _read_cached(identity, mode):
             except ValueError:
                 bad_index = True
             reflection = None if bad_index else a.parse_reflection_line(line,value_col,sigma_col)
+            if reflection is not None and phase_in_turns and reflection.phase is not None:
+                from dataclasses import replace
+                reflection=replace(reflection,phase=reflection.phase*360.)
             if reflection is None:
                 rejected += 1
                 invalid += int(bad_index)
