@@ -55,6 +55,38 @@ class FeedbackTests(unittest.TestCase):
         self.assertTrue(all(r.sigma is None for r in out))
         self.assertAlmostEqual(change, (0+50+100/3)/3)
 
+    def test_actual_preparation_holdout_cannot_restore_invalid_fwhm_records(self):
+        from test_jana_completion import make_run_config,CIF
+        a=self.a
+        with patch.multiple(a.IterativeSuperflipPipelineQtGUI,load_settings=lambda self:None,
+                save_settings=lambda self:None,refresh_sharped_models=lambda self:None):
+            window=a.IterativeSuperflipPipelineQtGUI()
+        self.addCleanup(window.close);window.timer.stop()
+        run=self.root/'run';run.mkdir()
+        cfg=make_run_config(a,run,self.root/'unused.inflip')
+        source=self.root/'observations.hkl'
+        source.write_text(''.join(f'{h} 0 0 10 0.1\n' for h in range(1,101))+
+            '1001 0 0 -1 0.1\n1002 0 0 nan 0.1\n1003 0 0 10 0\n1004 0 0 10 ?\n')
+        before=source.read_bytes()
+        reference=self.root/'reference.cif';reference.write_text(CIF)
+        cfg.hkl=source;cfg.reference_cif=reference;cfg.input_source_mode=a.INPUT_MODE_EXTERNAL
+        cfg.reflection_data_mode=a.REFLECTION_DATA_MODE_INTENSITY_FWHM
+        cfg.i_over_sigma_min=0;cfg.resolution_d_min=0;cfg.powder_wavelength=1
+        cfg.compute_omit_maps=True;cfg.reconstruction_mode='superflip';cfg.modelfile_source='none'
+        cfg.referencefile_mode='omit';cfg.map_export_format='xplor';cfg.randomseed='12345'
+        cfg.cycles=1;cfg.sharped_map_value_exponent=1
+        captured=[]
+        with patch.object(window,'_run_pipeline_cycles',side_effect=lambda state:captured.append(state)),patch.object(
+                a,'run_command',side_effect=AssertionError('No native process may run in this preparation test')):
+            window.pipeline_worker(cfg)
+        self.assertEqual(len(captured),1,list(window.msg_queue.queue))
+        state=captured[0]
+        self.assertEqual(len(state.validation_context.original_measured_reflections),100)
+        self.assertEqual(len(state.current_reflections)+len(state.omit_test_hkls),100)
+        self.assertTrue(state.omit_test_hkls)
+        self.assertTrue(all(1<=r.h<=100 and math.isfinite(r.value) and r.sigma==.1 for r in state.current_reflections))
+        self.assertEqual(source.read_bytes(),before)
+
     def test_measured_intensity_significance(self):
         rows = [self.a.Reflection(i,0,0,v,s) for i,(v,s) in enumerate([(10,1),(20,10),(30,1)],1)]
         out,_ = self.feedback(rows, self.a.REFLECTION_DATA_MODE_INTENSITY, 2.5)

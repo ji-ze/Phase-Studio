@@ -123,3 +123,10 @@ def test_powder_boundary_cannot_reinterpret_measurement_sigma_or_invalid_values(
     for value,width in [(float('nan'),.1),(-1,.1),(10,None),(10,0),(10,float('inf'))]:
         with pytest.raises(ValueError,match='finite'):
             a.validate_powder_reflections([a.Reflection(1,0,0,value,width)],a.REFLECTION_DATA_MODE_INTENSITY_FWHM)
+
+
+def test_unresolved_layout_cannot_enter_a_scientific_writer(tmp_path):
+    for threshold in (0,2):
+        with pytest.raises(ValueError,match='exact reflection column'):
+            a.write_observed_reflections(tmp_path/'out',[a.Reflection(1,0,0,10,.1)],threshold,a.REFLECTION_DATA_MODE_AUTO)
+        assert not (tmp_path/'out').exists()

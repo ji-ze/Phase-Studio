@@ -3262,6 +3262,8 @@ def _passes_reflection_filters(
 
 
 def validate_reflection_filter_policy(data_mode: str, threshold: float) -> None:
+    if normalize_reflection_data_mode(data_mode)==REFLECTION_DATA_MODE_AUTO:
+        raise ValueError('Resolve the exact reflection column layout before filtering or export. Select I/sigma(I), F/sigma(F), a phased layout, or FWHM explicitly; numerical values alone do not establish uncertainty semantics.')
     if not math.isfinite(float(threshold)) or threshold<0:
         raise ValueError('The observed value/uncertainty threshold must be finite and nonnegative.')
     if reflection_mode_has_fwhm(data_mode) and threshold>0:
@@ -16150,14 +16152,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._queue_run_event("progress_setup", cfg.cycles)
             omit_test_hkls: FrozenSet[Tuple[int, int, int]] = frozenset()
             if cfg.compute_omit_maps:
-                omit_test_hkls = select_orbit_safe_holdout(refl, ref_ctx.spacegroup, cfg.randomseed)
+                omit_test_hkls = select_orbit_safe_holdout(current_reflections, ref_ctx.spacegroup, cfg.randomseed)
             validation_context = build_validation_context(
-                refl, configured_data_mode, ref_ctx, omit_test_hkls,
+                current_reflections, configured_data_mode, ref_ctx, omit_test_hkls,
             )
             self._queue_run_event("validation_profile", validation_context.profile.value)
             if omit_test_hkls:
                 current_reflections = [
-                    reflection for reflection in refl
+                    reflection for reflection in current_reflections
                     if (int(reflection.h), int(reflection.k), int(reflection.l)) not in omit_test_hkls
                 ]
             definition = profile_definition(validation_context.profile)
