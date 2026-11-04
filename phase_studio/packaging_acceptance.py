@@ -193,6 +193,7 @@ def run(directory):
                 snap('10-fullscreen',detached);detached.close()
                 assert selector._resolved_preview==before
                 report['rendered_atoms']=len(before.atoms);report['candidate_id']=selector.preview_candidate_id
+                _check_lambda_camera(a, backend, cif, report, directory, snap)
                 selector.close();backend.close()
             dialog=QFileDialog(wizard.dialog,'Phase Studio controlled file-dialog acceptance',str(directory));dialog.setFileMode(QFileDialog.ExistingFile)
             QTimer.singleShot(250,dialog.reject);dialog.exec();report['file_dialog_open_close']=True
@@ -285,3 +286,44 @@ def _check_feedback_significance(a, backend, wizard, report, directory, snap):
     report['map_feedback_significance'] = dict(checks=results,zero_bypasses_filter=True,
         fwhm_rejected=True,observations_unchanged=True,shared_unit='I/σ(I)')
     wizard.dialog.close()
+
+
+def _check_lambda_camera(a, backend, cif, report, directory, snap):
+    """Real gestures and native keyword propagation inside each frozen profile."""
+    from PySide6.QtCore import Qt, QPoint
+    from PySide6.QtTest import QTest
+    from unittest.mock import patch
+    source=directory/'lambda-camera.inflip'
+    source.write_text('cell 10 10 10 90 90 90\nspacegroup P1\ncomposition C2\ndataformat intensity fwhm\nfbegin\n1 0 0 10 .1\nendf\n')
+    source.with_suffix('.m90').write_text('lambda 1.541866\nend\n')
+    path_value=backend._path_value;combo_value=backend._combo_value
+    with patch.object(backend,'_path_value',side_effect=lambda key: str(source) if key=='jana_inflip' else ('' if key in ('hkl','reference_cif','first_cycle_modelfile') else path_value(key))),patch.object(backend,'_combo_value',side_effect=lambda key: a.INPUT_MODE_INFLIP if key=='input_source_mode' else combo_value(key)),patch.object(backend,'_resolve_crystal_metadata_from_inputs',return_value=a.resolve_crystal_metadata(a.METADATA_SOURCE_INFLIP,jana_inflip=source)):
+        backend.inputs['redistribute_overlaps'].setChecked(False)
+        cfg=backend.get_config()
+        assert not cfg.redistribute_overlaps and cfg.powder_wavelength==1.541866
+        assert a.powder_superflip_keywords('',cfg.powder_wavelength)=='lambda 1.541866'
+        report['native_fwhm_wavelength']={'value':cfg.powder_wavelength,'source':cfg.wavelength_source,'feedback':False}
+    atoms=a.parse_cif_atoms(cif)
+    for attribute in ('reference_atoms_for_plot','superflip_atoms_for_plot','deblur_atoms_for_plot'):
+        setattr(backend,attribute,list(atoms))
+    backend._update_structure_views();backend.show()
+    for _ in range(8):a.QApplication.processEvents()
+    trace=[]
+    for index in range(3):
+        canvas=backend.structure_canvas;axes=backend._structure_interactive_axes
+        for axis in axes:axis.view_init(23,41,roll=17)
+        canvas.draw();box=axes[index].get_window_extent();ratio=canvas.device_pixel_ratio
+        point=QPoint(int((box.x0+box.width*.4)/ratio),int((canvas.figure.bbox.height-box.y0-box.height*.5)/ratio))
+        QTest.mousePress(canvas,Qt.LeftButton,Qt.NoModifier,point)
+        for dx,dy in ((12,8),(27,19),(42,26)):
+            QTest.mouseMove(canvas,point+QPoint(dx,dy),30)
+            a.QApplication.processEvents()
+        QTest.mouseRelease(canvas,Qt.LeftButton,Qt.NoModifier,point+QPoint(42,26))
+        a.QApplication.processEvents()
+        values=[tuple(round(float(getattr(axis,k)),7) for k in ('elev','azim','roll')) for axis in axes]
+        assert values[0]!=(23.,41.,17.) and len(set(values))==1,values
+        trace.append(values)
+        backend._update_structure_views()
+        assert all(tuple(round(float(getattr(axis,k)),7) for k in ('elev','azim','roll'))==values[0] for axis in backend._structure_interactive_axes)
+    report['synchronized_qt_drag']=trace
+    snap('12-synchronized-camera',backend)

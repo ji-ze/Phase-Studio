@@ -6,7 +6,8 @@ from unittest.mock import patch
 import numpy as np
 ROOT=Path(__file__).resolve().parents[1];sys.path[:0]=[str(ROOT),str(ROOT/'tests')]
 from PySide6.QtWidgets import QApplication,QDialog,QToolButton,QFileDialog
-from PySide6.QtCore import QSettings,QRect
+from PySide6.QtCore import QSettings,QRect,Qt,QPoint
+from PySide6.QtTest import QTest
 from PySide6.QtGui import QScreen
 from phase_studio import app as a,structure_camera as camera
 from phase_studio.autosolve_window import AutosolveWindow
@@ -52,6 +53,17 @@ with tempfile.TemporaryDirectory() as tmp,patch.multiple(a.IterativeSuperflipPip
         protected=[reference,candidate,*[r.superflip_map for r in results],*[r.deblur_map for r in results]]
         hashes={p:hashlib.sha256(p.read_bytes()).hexdigest() for p in protected}
         canvases=[backend.structure_canvas,execution.structure_canvas,single.canvas,selector._preview_canvas]
+        # Send real Qt mouse gestures through every host's controller.
+        for canvas in canvases:
+            canvas.draw();axis=canvas.figure.axes[0]
+            axis.view_init(23,41,roll=17);canvas.draw()
+            box=axis.get_window_extent();ratio=canvas.device_pixel_ratio
+            point=QPoint(int((box.x0+box.width*.4)/ratio),int((canvas.figure.bbox.height-box.y0-box.height*.5)/ratio))
+            QTest.mousePress(canvas,Qt.LeftButton,Qt.NoModifier,point)
+            for dx,dy in ((12,8),(27,19),(42,26)):
+                QTest.mouseMove(canvas,point+QPoint(dx,dy),30);events()
+            QTest.mouseRelease(canvas,Qt.LeftButton,Qt.NoModifier,point+QPoint(42,26));events()
+            assert (axis.elev,axis.azim,axis.roll)!=(23,41,17),'Host ignored real Qt drag'
         for canvas in canvases:
             for axis in canvas.figure.axes:axis.view_init(27,61,roll=13)
         button=backend.findChild(QToolButton,'structureCameraMenu')

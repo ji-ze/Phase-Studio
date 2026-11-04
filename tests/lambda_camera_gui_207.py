@@ -39,7 +39,7 @@ report=a.ErrorReport('input_validation','input','Wavelength missing','Superflip 
 actions=window._error_actions(report)
 assert [action.label for action in actions]==['Set measured wavelength']
 actions[0].callback()
-window.resize(1600,1050);window._update_structure_views();window.show();events();window.structure_canvas.draw()
+window.resize(1600,1050);window._update_structure_views();window.show();events();window.resize(1600,1050);events();window.structure_canvas.draw()
 initial_paths={p:hashlib.sha256(p.read_bytes()).hexdigest() for p in {Path(r.superflip_edma_cif) for r in results}}
 for index in range(3):
     axes=window._structure_interactive_axes;canvas=window.structure_canvas

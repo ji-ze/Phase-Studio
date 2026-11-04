@@ -381,6 +381,10 @@ class SplitDistributionTests(unittest.TestCase):
                     'write_superflip_input','validate_reflection_filter_policy','filtered_reflections',
                     'uncertainty_export_reflections','powder_superflip_keywords','validate_powder_reflections'}
                 old.update({name:pinned[name] for name in policy_names})
+                # Only native wavelength metadata precedence changes here.
+                # Filtering, numerical grouping and uncertainty policy stay ca40e03.
+                lambda_text=subprocess.check_output([git,'show','05ec127:phase_studio/app.py'],cwd=ROOT).decode('utf8')
+                old['powder_superflip_keywords']=functions(lambda_text)['powder_superflip_keywords']
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
                         "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record",
