@@ -1493,8 +1493,9 @@ class ResultSelectionDialog(QDialog):
     def _preview_orientation_changed(self, elev: float, azim: float, _source_axis) -> None:
         host = self._preview_host
         host.structure_elev, host.structure_azim = float(elev), float(azim)
+        host.structure_roll = float(_source_axis.roll)
         for axis in host._structure_interactive_axes:
-            axis.view_init(elev=elev, azim=azim)
+            axis.view_init(elev=elev, azim=azim, roll=host.structure_roll)
         host._update_structure_depth_cue(elev, azim)
 
     def _preview_camera_interaction(self, kind: str) -> None:

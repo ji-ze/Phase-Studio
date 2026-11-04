@@ -65,12 +65,10 @@ def standard_powder_context(path):
             except (ValueError, IndexError):
                 context['error'] = 'Invalid incoming wavelength; supply a finite positive value in Å.'
             break
-    if context['wavelength'] is None and 'error' not in context:
-        companion = a.resolve_jana_m90_path(path)
-        if companion is not None:
-            value = a.parse_m90_wavelength(companion)
-            if math.isfinite(value) and value > 0:
-                context.update(wavelength=value, wavelength_source='matching Jana2020 .m90: '+companion.name)
+    if 'error' not in context:
+        value, source = a.resolve_powder_wavelength(0, path, None)
+        if value > 0:
+            context.update(wavelength=value, wavelength_source=source)
     if 'group' in columns:
         groups = {}
         try:

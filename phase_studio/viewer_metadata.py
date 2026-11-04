@@ -1,5 +1,5 @@
 """Bounded, accessible metadata owned by one structural panel."""
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QEvent
 from PySide6.QtWidgets import QLabel, QSizePolicy
 
 
@@ -23,6 +23,12 @@ class PanelMetadataLabel(QLabel):
         self.setToolTip(text)
         self.setAccessibleName(plain)
         self._wrap()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.FontChange, QEvent.StyleChange) and hasattr(self, "_full_text"):
+            self.setFixedHeight(self.fontMetrics().height()+2*self.fontMetrics().lineSpacing()+4)
+            self._wrap()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

@@ -425,7 +425,8 @@ class SingleStructureViewerWindow(QDialog):
 
     def _orientation_changed(self, elev: float, azim: float, axis) -> None:
         self._elev, self._azim = float(elev), float(azim)
-        axis.view_init(elev=self._elev, azim=self._azim)
+        self._roll = float(axis.roll)
+        axis.view_init(elev=self._elev, azim=self._azim, roll=self._roll)
 
     def _camera_interaction(self, kind: str) -> None:
         if kind in {"rotate", "pan", "zoom"}:

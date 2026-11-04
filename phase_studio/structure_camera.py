@@ -407,9 +407,8 @@ class StructureCameraController:
         rotation = trackball_rotation(self._sphere(x0,y0,axis), self._sphere(x1,y1,axis))
         basis = (rotation.T if inverted else rotation)@start_basis
         elev, azim, roll = camera_angles(basis)
-        self._orientation_changed(elev, azim, axis)
-        # Owner callbacks retain their established metadata/depth-cue hooks.
         axis.view_init(elev=elev, azim=azim, roll=roll)
+        self._orientation_changed(elev, azim, axis)
         self.canvas.draw_idle()
 
     def _motion(self, event) -> None:

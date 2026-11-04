@@ -2328,12 +2328,13 @@ class AutosolveWindow(QMainWindow):
 
     def _camera_orientation_changed(self, elev: float, azim: float, _source_axis) -> None:
         if self._ordinary_dual_workflow:
-            _source_axis.view_init(elev=elev, azim=azim)
+            _source_axis.view_init(elev=elev, azim=azim, roll=_source_axis.roll)
             self._update_structure_depth_cue(elev, azim)
             return
         self.structure_elev, self.structure_azim = float(elev), float(azim)
+        self.structure_roll = float(_source_axis.roll)
         for axis in self._structure_interactive_axes:
-            axis.view_init(elev=elev, azim=azim)
+            axis.view_init(elev=elev, azim=azim, roll=self.structure_roll)
         self._update_structure_depth_cue(elev, azim)
 
     def _camera_interaction(self, kind: str) -> None:

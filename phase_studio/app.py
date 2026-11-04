@@ -1034,6 +1034,7 @@ class RunConfig:
     edma_threshold_mode: str = "manual"
     run_id: str = ""
     setting_provenance: Optional[Dict[str, object]] = None
+    wavelength_source: str = "none"
 
 
 @dataclass
@@ -3276,9 +3277,10 @@ def powder_superflip_keywords(extra_keywords: str, wavelength: float = 0.0) -> s
     if declared:
         if len(declared)!=1 or len(declared[0])!=2 or not math.isfinite(float(declared[0][1])) or float(declared[0][1])<=0:
             raise ValueError('Superflip FWHM input requires one finite positive lambda wavelength keyword.')
-    elif math.isfinite(float(wavelength)) and wavelength>0:
-        lines.append(f'lambda {wavelength:.12g}')
-    else:
+    if math.isfinite(float(wavelength)) and wavelength>0:
+        lines = [line for line in lines if inflip_first_token(line) != "lambda"]
+        lines.insert(0, f'lambda {wavelength:.12g}')
+    elif not declared:
         raise ValueError('Superflip FWHM input requires a measured wavelength. Set Wavelength (Å) or supply a valid lambda keyword; peak widths are retained for native overlap grouping.')
     return '\n'.join(lines)
 
@@ -4813,7 +4815,7 @@ def _build_uncached_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResul
         powder_context = standard_powder_context(Path(request.jana_text))
         if powder_context.get('unsupported_layout'):
             raise ValueError(powder_context['error'])
-        if powder_context and not powder_context.get('error') and not powder_context.get('wavelength'):
+        if powder_context and not powder_context.get('error'):
             wavelength, source = resolve_powder_wavelength(
                 request.powder_wavelength, Path(request.jana_text),
                 Path(request.ref_text) if request.ref_text else None,
@@ -5716,29 +5718,29 @@ def resolve_powder_wavelength(
     file's _diffrn_radiation_wavelength CIF tag. Returns (value,
     source_description).
     """
-    if manual_value > 0:
-        return manual_value, "manual entry"
-    if jana_m90_path is not None and Path(jana_m90_path).is_file():
-        value = parse_m90_wavelength(Path(jana_m90_path))
-        if value > 0:
-            return value, f"Jana2020 .m90 file ({Path(jana_m90_path).name})"
-    if inflip_path is not None and inflip_path.is_file():
-        try:
-            settings = parse_inflip_settings(inflip_path)
-        except Exception:
-            settings = {}
-        value = parse_cif_number(settings.get("powder_wavelength", ""), 0.0)
-        if value > 0:
-            return value, f".inflip file ({inflip_path.name})"
-    if reference_cif_path is not None and reference_cif_path.is_file():
-        try:
-            raw = raw_cif_value(reference_cif_path, ["_diffrn_radiation_wavelength", "_diffrn_radiation.wavelength"])
-        except Exception:
-            raw = ""
-        value = parse_cif_number(raw, 0.0)
-        if value > 0:
-            return value, f"reference file ({reference_cif_path.name})"
-    return 0.0, "none"
+    candidates = []
+    def add(value, source):
+        if math.isfinite(value) and value > 0:
+            candidates.append((float(value), source))
+    add(float(manual_value), "manual entry")
+    companion = resolve_jana_m90_path(inflip_path)
+    # An explicitly supplied file must still belong to this exact input stem.
+    if companion is not None and (jana_m90_path is None or Path(jana_m90_path).resolve() == companion.resolve()):
+        add(parse_m90_wavelength(companion), f"Jana2020 .m90 file ({companion.name})")
+    if inflip_path is not None and Path(inflip_path).is_file():
+        settings = parse_inflip_settings(Path(inflip_path))
+        add(parse_cif_number(settings.get("powder_wavelength", ""), 0.0), f".inflip file ({Path(inflip_path).name})")
+    if reference_cif_path is not None and Path(reference_cif_path).is_file():
+        raw = raw_cif_value(Path(reference_cif_path), ["_diffrn_radiation_wavelength", "_diffrn_radiation.wavelength"])
+        add(parse_cif_number(raw, 0.0), f"reference file ({Path(reference_cif_path).name})")
+    if not candidates:
+        return 0.0, "none"
+    value, source = candidates[0]
+    conflicts = [f"{other_source}={other:.12g} A" for other, other_source in candidates[1:] if not math.isclose(value, other, rel_tol=1e-8, abs_tol=1e-10)]
+    if conflicts:
+        source += "; overridden conflicting wavelength: " + "; ".join(conflicts)
+    return value, source
+
 
 def normalize_output_format(value: str) -> str:
     fmt = str(value or "xplor").strip().lower()
@@ -9055,7 +9057,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Intensity correction</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>I/&sigma;(I) limit</b> selects positive observations strictly below the intensity-significance threshold; amplitudes use the first-order approximation F/[2&sigma;(F)], not recovered experimental intensity significance. Zero bypasses significance filtering for all map-supported reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
             <h3>Powder overlap repartitioning</h3>
-            <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
+            <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the matching Jana <code>.m90</code> header, then from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
         self._add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.", kind="warning")
         self._add_back_to_contents(map_feedback_layout)
@@ -11197,14 +11199,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             reachable = cycles_value >= from_cycle_value
             fields_active = checkbox_enabled and reachable
             for field_key in other_field_keys:
+                field_active = has_fwhm_data if field_key == "powder_wavelength" else fields_active
                 widget = self.inputs.get(field_key)
                 if hasattr(widget, "setEnabled"):
-                    widget.setEnabled(fields_active)  # type: ignore[attr-defined]
+                    widget.setEnabled(field_active)  # type: ignore[attr-defined]
                 label = self.input_labels.get(field_key)
                 if label is not None:
-                    label.setEnabled(fields_active)
+                    label.setEnabled(field_active)
                 if hasattr(widget, "setToolTip"):
-                    if not checkbox_enabled:
+                    if field_key == "powder_wavelength":
+                        tooltip = "Measured radiation wavelength in ?. Zero resolves matching .m90, then .inflip, then reference CIF. Required by native Superflip FWHM input even with Map Feedback off."
+                    elif not checkbox_enabled:
                         tooltip = f"Ignored: requires '{checkbox_label}' to be enabled."
                     elif not reachable:
                         tooltip = "Requires a subsequent reconstruction cycle."
@@ -12906,6 +12911,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return []
         if category == "input_validation":
             summary = report.summary.casefold()
+            if "wavelength" in summary:
+                def show_wavelength():
+                    self._open_configuration_page("Map feedback")
+                    self.inputs["powder_wavelength"].setFocus()
+                return [ErrorAction("Set measured wavelength", show_wavelength, True)]
             actions: List[ErrorAction] = []
             for token, key, label in (
                 (".inflip", "jana_inflip", "Select .inflip…"),
@@ -15213,8 +15223,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _classic_camera_orientation_changed(self, elev: float, azim: float, _source_axis) -> None:
         self.structure_elev, self.structure_azim = float(elev), float(azim)
-        _source_axis.view_init(elev=elev, azim=azim, roll=_source_axis.roll)
-        self._update_structure_depth_cue(elev, azim)
+        self._apply_structure_view(_source_axis, redraw=False)
 
     def _fit_classic_structure_view(self) -> None:
         for axis in self._structure_interactive_axes:
@@ -15229,15 +15238,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._fit_classic_structure_view()
 
     def _apply_structure_view(self, source_ax, *, redraw: bool = True) -> None:
-        """Mirror one panel's camera and zoom/pan onto every other panel."""
+        """Mirror orientation while preserving panel-local zoom and pan."""
         if source_ax is None or source_ax not in self._structure_interactive_axes:
             return
         elev = float(getattr(source_ax, "elev", self.structure_elev))
         azim = float(getattr(source_ax, "azim", self.structure_azim))
         self.structure_elev = elev
         self.structure_azim = azim
-        for axis in self.structure_axes:
-            axis.view_init(elev=elev, azim=azim)
+        self.structure_roll = float(source_ax.roll)
+        for axis in self._structure_interactive_axes:
+            axis.view_init(elev=elev, azim=azim, roll=self.structure_roll)
         self._update_structure_depth_cue(elev, azim)
         if redraw:
             self.structure_canvas.draw_idle()
@@ -15277,7 +15287,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         from phase_studio.viewer_alignment import comparison_policy,panel_summary
         previous=next(iter(getattr(self,'_structure_interactive_axes',[])),None)
         orientation=(previous.elev,previous.azim,previous.roll) if previous is not None else None
-        if orientation and comparison_policy()!='independent':self.structure_elev,self.structure_azim=orientation[:2]
+        if orientation:self.structure_elev,self.structure_azim=orientation[:2]
         self.structure_figure.clear()
         self.structure_figure.patch.set_facecolor("#ffffff")
         self.structure_axes = []
@@ -15377,6 +15387,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 self._classic_fit_limits[axis]=limits
                 if orientation:axis.view_init(*orientation[:2],roll=orientation[2])
             if orientation:self._update_structure_depth_cue(orientation[0],orientation[1])
+        if orientation:
+            for axis in self._structure_interactive_axes:
+                axis.view_init(*orientation[:2], roll=orientation[2])
+            self.structure_roll = orientation[2]
+            self._update_structure_depth_cue(*orientation[:2])
         self._classic_camera.refresh_axes()
         self.structure_canvas.draw_idle()
 
@@ -15409,9 +15424,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         resolved_wavelength, wavelength_source = resolve_powder_wavelength(
             self._dspin_value("powder_wavelength"), resolved_inputs.jana_inflip,
             resolved_inputs.external_reference_file,
+            resolve_jana_m90_path(resolved_inputs.jana_inflip),
         )
-        if self._check_value("redistribute_overlaps") and resolved_wavelength > 0 and wavelength_source != "manual entry":
-            self.log(f"Powder overlap repartitioning: wavelength {resolved_wavelength:g} A auto-detected from {wavelength_source}.", level="DETAIL")
+        if resolved_wavelength > 0:
+            self.log(f"Effective radiation wavelength {resolved_wavelength:g} A from {wavelength_source}.", level="DETAIL")
         return RunConfig(
             hkl=resolved_inputs.hkl,
             reference_cif=resolved_inputs.reference_cif,
@@ -15479,6 +15495,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             redistribute_overlaps=self._check_value("redistribute_overlaps"),
             powder_redistribution_from_cycle=self._spin_value("powder_redistribution_from_cycle"),
             powder_wavelength=resolved_wavelength,
+            wavelength_source=wavelength_source,
             powder_separation_factor=self._dspin_value("powder_separation_factor"),
             powder_redistribution_mix=self._dspin_value("powder_redistribution_mix"),
             run_sharped=self._check_value("run_sharped") and modelfile_source_value != "superflip_xplor",
