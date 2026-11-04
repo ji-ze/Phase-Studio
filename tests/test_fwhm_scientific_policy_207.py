@@ -91,7 +91,9 @@ def test_powder_correction_conserves_intensity_and_preserves_widths(tmp_path,mod
 
 def test_native_width_keyword_requires_real_wavelength():
     assert a.powder_superflip_keywords('',1.5406)=='lambda 1.5406'
-    assert a.powder_superflip_keywords('lambda 0.5',1.54)=='lambda 0.5'
+    # Effective resolved metadata wins over a stale incoming declaration.
+    assert a.powder_superflip_keywords('lambda 0.5',1.54)=='lambda 1.54'
+    assert a.powder_superflip_keywords('lambda 0.5',0)=='lambda 0.5'
     with pytest.raises(ValueError,match='wavelength'):a.powder_superflip_keywords('')
 
 
