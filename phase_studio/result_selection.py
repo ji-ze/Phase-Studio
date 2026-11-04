@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QLabel, QPushButton, QSizePolicy, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
     QToolButton, QToolTip, QMessageBox,
-    QScrollArea, QFrame,
+    QScrollArea, QFrame, QDialogButtonBox,
 )
 
 from phase_studio.map_quality import (
@@ -47,6 +47,25 @@ from phase_studio.structure_camera import (
     StructureCameraController, fit_projected_structure, set_structure_viewport_clip,
     structure_marker_sizes, camera_settings_button,
 )
+
+
+def show_candidate_details(parent,title,rows,*,confirm=False):
+    dialog=QDialog(parent);dialog.setWindowTitle(title)
+    layout=QVBoxLayout(dialog);form=QFormLayout()
+    form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    for name,value in rows:
+        label=QLabel(str(value));label.setTextFormat(Qt.PlainText);label.setWordWrap(True)
+        label.setMinimumWidth(0);label.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse|Qt.TextSelectableByKeyboard)
+        form.addRow(name,label)
+    scroll=QScrollArea();content=QWidget();content.setLayout(form);scroll.setWidget(content);scroll.setWidgetResizable(True)
+    layout.addWidget(scroll,1)
+    buttons=QDialogButtonBox((QDialogButtonBox.Save|QDialogButtonBox.Cancel) if confirm else QDialogButtonBox.Close)
+    buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject)
+    if confirm:buttons.button(QDialogButtonBox.Cancel).setDefault(True)
+    layout.addWidget(buttons)
+    apply_safe_dialog_geometry(dialog,760,650)
+    return dialog.exec()==QDialog.Accepted
 
 
 _COMPACT_METRIC_COLUMNS = {
@@ -503,11 +522,16 @@ class ResultSelectionDialog(QDialog):
         adjust_threshold: Optional[Callable[[ResultCandidate, bool], Optional[ResultCandidate]]] = None,
         adjust_threshold_async: Optional[Callable[[ResultCandidate, bool, Callable], object]] = None,
         map_feedback_powder_enabled: bool = False,
+        map_feedback_missing_enabled: bool = False,
         feedback_directory: Optional[Path] = None,
         feedback_reports_provider: Optional[Callable] = None,
         comparison_reference: Optional[Path] = None,
+        transfer_details_provider: Optional[Callable] = None,
     ) -> None:
         super().__init__(parent)
+        self._transfer_details_provider = transfer_details_provider
+        self._run_log_viewer = None
+        self._log_directory = Path(feedback_directory) if feedback_directory else None
         self._jana_context = jana_context
         self._preview_host = preview_host
         self._parse_structure = parse_structure
@@ -525,7 +549,7 @@ class ResultSelectionDialog(QDialog):
         self._map_feedback_intensity_enabled = bool(map_feedback_intensity_enabled)
         from .feedback_selection import FeedbackHistory
         self._feedback_history = FeedbackHistory(feedback_directory,feedback_reports_provider)
-        self._feedback_configured = bool(map_feedback_intensity_enabled or map_feedback_powder_enabled)
+        self._feedback_configured = bool(map_feedback_missing_enabled or map_feedback_intensity_enabled or map_feedback_powder_enabled)
         self._definition = definition
         self._reference_available = profile in {
             ValidationProfile.REFERENCE_AND_HOLDOUT, ValidationProfile.REFERENCE_ONLY,
@@ -610,6 +634,10 @@ class ResultSelectionDialog(QDialog):
             superflip_btn.toggled.connect(lambda checked: checked and self._apply_source("superflip"))
             sharped_btn.toggled.connect(lambda checked: checked and self._apply_source("deblurred"))
 
+        self._run_status_label = QLabel('')
+        self._run_status_label.setWordWrap(True)
+        self._run_status_label.setVisible(False)
+        content_layout.addWidget(self._run_status_label)
         summary_form = QGridLayout()
         summary_form.setHorizontalSpacing(12)
         summary_form.setVerticalSpacing(1)
@@ -805,6 +833,7 @@ class ResultSelectionDialog(QDialog):
         preview_layout.addWidget(view_controls)
         camera_hint = QLabel(CAMERA_HELP_TEXT)
         camera_hint.setObjectName("structureInteractionHint")
+        camera_hint.setWordWrap(True)
         camera_hint.setAlignment(Qt.AlignRight)
         camera_hint.setToolTip(CAMERA_HELP_TEXT)
         hint_font = camera_hint.font()
@@ -826,6 +855,13 @@ class ResultSelectionDialog(QDialog):
         self._candidate_info.setToolTip('Inspect the displayed candidate and its scientific output identity.')
         self._candidate_info.clicked.connect(self._show_candidate_details)
         metadata_row.addWidget(self._candidate_info)
+        self._why_cycle_button = QToolButton()
+        self._why_cycle_button.setText('Why this cycle?')
+        self._why_cycle_button.clicked.connect(self._show_recommendation_details)
+        self._execution_log_button = QToolButton()
+        self._execution_log_button.setText('View execution log')
+        self._execution_log_button.clicked.connect(self._open_execution_log)
+        self._execution_log_button.setEnabled(self._log_directory is not None)
         preview_layout.addLayout(metadata_row)
         self._element_legend = QLabel("")
         self._element_legend.setObjectName("elementLegend")
@@ -900,6 +936,8 @@ class ResultSelectionDialog(QDialog):
         button_row = QHBoxLayout()
         close_button = QPushButton("Return to Phase Studio")
         button_row.addWidget(close_button)
+        button_row.addWidget(self._why_cycle_button)
+        button_row.addWidget(self._execution_log_button)
         button_row.addStretch(1)
         button_row.addWidget(action_button)
         footer_layout.addLayout(button_row)
@@ -970,7 +1008,16 @@ class ResultSelectionDialog(QDialog):
         candidate=self.selected_candidate
         data=selected_input(reports,candidate.cycle) if candidate is not None else None
         text=data['text'] if data else 'Select a completed candidate to inspect its reflection input.'
-        self._feedback_label.setText(compact_summary(data) if data else text)
+        concise=compact_summary(data) if data else text
+        if candidate is not None and self._log_directory is not None and (not reports or data['status'] in ('Disabled','Original input')):
+            from .run_review import PersistedRunReview,disabled_feedback_summary
+            manifest=PersistedRunReview(self._log_directory).manifest
+            record=(manifest.get('cycles') or {}).get(str(candidate.cycle),{})
+            disabled=disabled_feedback_summary(manifest,record)
+            if disabled:
+                concise=disabled
+                text=disabled+'\n'+text
+        self._feedback_label.setText(concise)
         self._feedback_label.setToolTip(text)
         self._feedback_label.setAccessibleName(text)
         self._feedback_details_button.setEnabled(bool(reports) and candidate is not None)
@@ -1258,24 +1305,30 @@ class ResultSelectionDialog(QDialog):
         self._element_legend.clear()
         self._preview_canvas.draw_idle()
 
+    def _open_execution_log(self):
+        if self._log_directory is None:return
+        from .run_log_viewer import RunLogViewer
+        if self._run_log_viewer is None:
+            self._run_log_viewer=RunLogViewer(self,self._log_directory)
+        self._run_log_viewer.set_candidate(self.selected_candidate)
+        self._run_log_viewer.show();self._run_log_viewer.raise_()
+
+    def _show_recommendation_details(self):
+        from .run_review import recommendation_details
+        recommendation=self.active_recommendation
+        if recommendation is not None:
+            self._show_detail_rows('Why this cycle?', [('Selection rule and exact values',recommendation_details(recommendation))])
+
+    def _show_detail_rows(self,title,rows):
+        show_candidate_details(self,title,rows)
+
     def _show_candidate_details(self):
         rows=getattr(self,'_candidate_detail_rows',())
         if not rows:return
-        dialog=QDialog(self)
-        dialog.setWindowTitle('Displayed candidate details')
-        layout=QVBoxLayout(dialog)
-        form=QFormLayout()
-        for title,value in rows:
-            label=QLabel(str(value))
-            label.setTextFormat(Qt.PlainText)
-            label.setWordWrap(True)
-            label.setTextInteractionFlags(Qt.TextSelectableByMouse|Qt.TextSelectableByKeyboard)
-            form.addRow(title,label)
-        layout.addLayout(form)
-        close=QPushButton('Close');close.clicked.connect(dialog.accept)
-        layout.addWidget(close,alignment=Qt.AlignRight)
-        apply_safe_dialog_geometry(dialog,680,620)
-        dialog.exec()
+        candidate=self.selected_candidate
+        if self._transfer_details_provider and candidate:
+            rows=tuple(rows)+tuple(self._transfer_details_provider(candidate))
+        self._show_detail_rows('Displayed candidate and transfer identity',rows)
 
     @property
     def active_source(self) -> str:
@@ -1313,6 +1366,8 @@ class ResultSelectionDialog(QDialog):
             "Available" if self._reference_available else "Not available"
         )
         free_count = max((candidate.metrics.n_free_reflections for candidate in view.ordered), default=0)
+        if self._reference_available and not free_count:
+            self._summary_value_labels["Assessment"].setText(self._definition.assessment_label+" \u00b7 no holdout")
         self._summary_value_labels["Holdout"].setText(
             f"5% · {free_count} reflections" if free_count else "Not enabled"
         )
@@ -1362,6 +1417,12 @@ class ResultSelectionDialog(QDialog):
         self._sync_action_button()
 
     def _sync_action_button(self) -> None:
+        if self._run_log_viewer is not None:self._run_log_viewer.set_candidate(self.selected_candidate)
+        if self._log_directory is not None:
+            from .run_review import PersistedRunReview,workflow_status_text
+            manifest=PersistedRunReview(self._log_directory).manifest
+            self._run_status_label.setText(workflow_status_text(manifest) if manifest else 'Persisted workflow state unavailable.')
+            self._run_status_label.setVisible(bool(manifest))
         self.refresh_feedback()
         candidate = self.selected_candidate
         pending = candidate is not None and self._threshold_key(candidate) in self._pending_thresholds
@@ -1426,7 +1487,7 @@ class ResultSelectionDialog(QDialog):
                 self._selected_output_summary.setToolTip(explanation)
                 self._selected_output_summary.setText(self._selected_output_summary.text() + "<br>" + explanation)
             else:
-                self._selected_output_summary.setToolTip("The highlighted row is selected. The star indicates the independent scientific recommendation.")
+                self._selected_output_summary.setToolTip("The highlighted row is selected. The star indicates the scientific recommendation within this family; reference-backed ranking is not independent validation.")
         view = self._views.get(self._active_source)
         row = view.table.currentRow() if view is not None else -1
         count = len(view.ordered) if view is not None else 0
@@ -1727,6 +1788,11 @@ class ResultSelectionDialog(QDialog):
             if path.is_file():
                 cell, sg, _hm = parse_cif_cell_and_sg(path)
                 independent = len(edma_asu_atoms(parse_cif_atoms(path), cell, sg))
+                self._candidate_detail_rows += (
+                    ('Independent ASU sites',independent),
+                    ('Matched reference sites',candidate.metrics.reference_tp if candidate.metrics.reference_tp is not None else 'Unavailable'),
+                    ('Count definitions','Raw EDMA maxima are detected peaks. CIF sites are exported sites; independent ASU sites are symmetry-reduced crystallographic sites. Displayed positions may include symmetry/connectivity expansion. Jana m40 sites are the model sites imported by Jana. Matched reference sites are the reference-dependent TP metric, not a new atom count.'),
+                )
                 model_count = candidate.jana_model_site_count
                 self._threshold_status.setToolTip(
                     f"CIF EDMA sites: {detected_count}; independent ASU sites: {independent}; "

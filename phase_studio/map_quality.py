@@ -74,9 +74,9 @@ REFERENCE_PHASE = MetricDefinition("reference_phase_agreement", "Reference phase
 AMPLITUDE_RF = MetricDefinition("amplitude_rf", "Amplitude agreement R factor", False)
 AMPLITUDE_CC = MetricDefinition("amplitude_cc", "Amplitude CC", True)
 AMPLITUDE_SCALE = MetricDefinition("amplitude_scale", "Amplitude scale", True)
-R_WORK = MetricDefinition("r_work", "R_work", False)
+R_WORK = MetricDefinition("r_work", "Work-set amplitude R", False)
 R_FREE = MetricDefinition("r_free", "R_free", False)
-CC_WORK = MetricDefinition("cc_work", "CC_work", True)
+CC_WORK = MetricDefinition("cc_work", "Work-set amplitude CC", True)
 CC_FREE = MetricDefinition("cc_free", "CC_free", True)
 OMIT_CC = MetricDefinition("omit_map_correlation", "OMIT map correlation", True)
 TRIPLET_C3 = MetricDefinition("triplet_c3", "Weighted triplet C3", True)
@@ -103,7 +103,7 @@ PROFILE_DEFINITIONS = {
     ValidationProfile.REFERENCE_ONLY: ValidationProfileDefinition(
         ValidationProfile.REFERENCE_ONLY,
         "Reference-backed",
-        "Agreement with a supplied reference structure using measured reflections.",
+        "Reference-dependent assessment without an independent holdout. Recommendation is not independent validation or a refined structure.",
         (REFERENCE_F05, REFERENCE_RMSD, REFERENCE_PHASE),
         COMMON_REPORT_METRICS,
     ),

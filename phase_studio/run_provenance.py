@@ -235,6 +235,8 @@ def observe_pipeline(method):
 
 def active_provenance():return _active.get()[0]
 
+def active_provenance_cycle():return _active.get()[1]
+
 
 def record(provenance,method,*args,**kwargs):
     if provenance is None:return None
@@ -298,6 +300,16 @@ class RunProvenance:
             if severity in {'WARNING','ERROR','CRITICAL'}:
                 self.manifest['warnings'].append(dict(timestamp=record['timestamp'],cycle=cycle,component=component,
                     severity=severity,payload=safe(payload)))
+            lifecycle_codes = {'STOP_REQUESTED','FINISHING_CURRENT_CYCLE','CURRENT_CYCLE_COMPLETED',
+                'STOPPED_BY_USER','RESULTS_AVAILABLE','NO_RESULTS_AVAILABLE','CANCEL_REQUESTED','CANCELLED_BY_USER'}
+            if event_type in lifecycle_codes:
+                self.manifest.setdefault('lifecycle',[]).append(dict(code=event_type,cycle=cycle,
+                    timestamp=payload.get('source_timestamp') or record['timestamp']))
+                if self.manifest.get('finished') is None:
+                    if event_type in {'STOP_REQUESTED','FINISHING_CURRENT_CYCLE'}:
+                        self.manifest['status']='stopping_after_current_cycle'
+                    elif event_type=='CANCEL_REQUESTED':self.manifest['status']='cancelling'
+                self.checkpoint()
             # Root stream is the complete run-index stream, including explicit run IDs.
             with (self.directory/'events.jsonl').open('a',encoding='utf8') as stream:
                 stream.write(json.dumps(record,sort_keys=True,allow_nan=False)+'\n')
@@ -374,6 +386,8 @@ class RunProvenance:
             note='Positive threshold requires measured uncertainties; FWHM requires threshold 0. Finite nonnegative values only; FWHM widths must be finite positive. Zero values are retained when the threshold is disabled.')
         counts['actual_input']=file_identity(written,'initial written Superflip reflections')
         self.manifest['reflection_inventory']=counts
+        from .run_review import uncertainty_description
+        self.manifest['uncertainty_interpretation']=dict(declared_mode=mode,description=uncertainty_description(mode),experimental_origin_independently_verified=False)
         self.manifest['input_roles']=dict(experimental=self.manifest['inputs']['hkl'],
             evaluation_reference=self.manifest['inputs']['reference_cif'],
             initial_model=dict(explicit_file=self.manifest['inputs']['first_cycle_modelfile'],
@@ -508,6 +522,25 @@ class RunProvenance:
         self.event('cycle_pipeline_completed','Workflow',cycle,dict(status='completed'))
         self.checkpoint()
 
+    def recommendations(self,per_source):
+        from .map_quality import profile_definition
+        data={}
+        for source,recommendation in (per_source or {}).items():
+            candidate=recommendation.recommended_candidate
+            definition=profile_definition(recommendation.profile)
+            data[source]=dict(cycle=candidate.cycle if candidate else None,reason=recommendation.reason,
+                profile=definition.profile.value,rule=[dict(key=metric.key,label=metric.label,higher_is_better=metric.higher_is_better,
+                    value=candidate.metrics.value(metric.key) if candidate else None) for metric in definition.primary_metrics])
+        with self.lock:self.manifest['recommendations']=data
+        self.event('recommendations_updated','Results',None,data);self.checkpoint()
+
+    def export(self,status,candidate,destination,targets,reason=None):
+        item=dict(status=status,timestamp=timestamp(),cycle=candidate.cycle,family=candidate.source,
+            candidate_id=candidate.candidate_id,destination=str(Path(destination).resolve()),
+            files=[file_identity(path,'selected result export') for path in targets],reason=safe(reason))
+        with self.lock:self.manifest.setdefault('exports',[]).append(item)
+        self.event('export_'+status,'Results',candidate.cycle,item,severity='ERROR' if status=='failed' else 'INFO');self.checkpoint()
+
     def handoff(self,status,candidate,reason=None):
         item=dict(timestamp=timestamp(),status=status,cycle=candidate.cycle,family=candidate.source,
             candidate_id=candidate.candidate_id,map=file_identity(candidate.map_path,'selected map'),
@@ -577,6 +610,7 @@ class RunProvenance:
     def summary(self):
         m=self.manifest
         def show(value):return 'Unavailable' if value is None else str(value).replace('|','\\|').replace('\n',' ')
+        from .run_review import workflow_status_text
         lines=[f'# Phase Studio run {self.run_id}',f'\nStatus: {m["status"]}. Started: {m["started"]}. Finished: {show(m.get("finished"))}.',
             '\nEffective configuration and full hashes: `run_manifest.json`. Detailed chronology: `events.jsonl` and `diagnostic.log`.',
             '\n## Recorded scientific results',
@@ -593,7 +627,7 @@ class RunProvenance:
             'Effective referencefile/modelfile roles are recorded from each generated input; an atom count alone is not evidence of a phasing seed.',
             '\n## Execution summary',f'Completed cycles: {show(m.get("completed_cycles"))}; incomplete cycles: '+json.dumps(m['incomplete_cycles'],sort_keys=True),
             f'Observed session duration (s): {show(m.get("observed_session_seconds"))}; component totals (s, may overlap): '+json.dumps(m.get('observed_operation_seconds_by_component'),sort_keys=True)]
-        lines[3:3]=setup
+        lines[3:3]=[workflow_status_text(m),*setup]
         for _,record in sorted(m['cycles'].items(),key=lambda item:int(item[0])):
             result=record['result']
             preceding=m['cycles'].get(str(record['source_cycle']-1),{}).get('map_feedback') or {}
@@ -611,8 +645,11 @@ class RunProvenance:
         lines+=['\n## Input and execution','```json',json.dumps(safe(m.get('reflection_inventory')),indent=2),'```',
             '\n## Recommendation and later actions',
             'Recommendations remain governed by the existing validation-profile ranking. This logger does not rerank feedback changes.',
-            'No selection or handoff is implied by completing a run.',
-            json.dumps(safe(dict(selections=m['selections'],handoffs=m['handoffs'])),indent=2),
+            'Final selection: '+('Confirmed' if m['selections'] else 'Pending')+'. No selection or handoff is implied by completing a run.',
+            json.dumps(safe(m.get('recommendations',{})),indent=2),
+            'Metric interpretation: amplitude R/CC measure observed-versus-map amplitude agreement; imposed-amplitude agreement does not independently validate phases. Legacy r_work/cc_work use the work subset and are not conventional structural refinement R_work.',
+            'Uncertainty interpretation: '+str(m.get('uncertainty_interpretation') or 'Unavailable'),
+            json.dumps(safe(dict(selections=m['selections'],handoffs=m['handoffs'],exports=m.get('exports',[]))),indent=2),
             '\n## Reproducibility limits',*['- '+item for item in m['limitations']],
             '\nHashes identify completed files at the recorded checkpoint. Mutable live logs/events are not immutable scientific inputs.']
         lines+=['\n## Warnings and failures']
@@ -626,55 +663,72 @@ class RunProvenance:
         return '\n'.join(lines)+'\n'
 
     def export_sanitized(self,path):
-        """Local metadata-only ZIP; never includes CIF/HKL/maps, raw responses or credentials."""
-        self.checkpoint()
-        aliases={}
-        def path_alias(value):
-            normalized=value.replace('\\\\','\\')
-            if normalized not in aliases:aliases[normalized]=f'<LOCAL_PATH_{len(aliases)+1:04d}>'
-            return aliases[normalized]
-        def sanitize_text(text):
-            from .error_reporting import sanitize_error_details
-            text=sanitize_error_details(text)
-            for local,alias in sorted(aliases.items(),key=lambda item:-len(item[0])):text=text.replace(local,alias)
-            text=re.sub(r'[A-Za-z]:[\\/][^\r\n"<>]*',lambda match:path_alias(match.group()),text)
-            text=re.sub(r'/(?:Users|home)/[^\s"<>]+',lambda match:path_alias(match.group()),text)
-            text=re.sub(r'(?i)(job[_ -]?id["\s:=>]*)(\d+)',r'\1<REMOTE_ID>',text)
-            return text
-        def sanitized(value,key=''):
-            if re.search(r'(?i)(?:job|request|inference)[_ -]?id',key):return '<REMOTE_ID>'
-            if isinstance(value,dict):
-                return {path_alias(str(k)) if re.match(r'^[A-Za-z]:[\\/]|^/(?:Users|home)/',str(k)) else str(k):sanitized(v,str(k)) for k,v in value.items()}
-            if isinstance(value,list):return [sanitized(v,key) for v in value]
-            if isinstance(value,str):
-                if re.match(r'^[A-Za-z]:[\\/]|^/(?:Users|home)/',value):return path_alias(value)
-                return sanitize_text(value)
-            return value
-        data={}
+        """Use the same sanitizer for live and reopened persisted runs."""
         with self.lock:
-            for name in ('run_manifest.json','summary.md','events.jsonl','cycle_metrics.csv'):
-                source=self.session/name
-                if source.is_file():
-                    text=source.read_text(encoding='utf8')
-                    if name.endswith('.json'):data[name]=json.dumps(sanitized(json.loads(text)),indent=2,sort_keys=True,allow_nan=False)
-                    elif name.endswith('.jsonl'):
-                        data[name]=''.join(json.dumps(sanitized(json.loads(line)),sort_keys=True,allow_nan=False)+'\n' for line in text.splitlines() if line.strip())
-                    elif name.endswith('.csv'):
-                        reader=csv.DictReader(io.StringIO(text));buffer=io.StringIO()
-                        writer=csv.DictWriter(buffer,fieldnames=reader.fieldnames);writer.writeheader()
-                        writer.writerows(sanitized(row) for row in reader);data[name]=buffer.getvalue()
-                    else:data[name]=sanitize_text(text)
-            for name in ('log.txt','diagnostic.log'):
-                source=self.directory/name
-                if source.is_file():data[name]=sanitize_text(source.read_text(encoding='utf8'))
-        checksums=''.join(f'{hashlib.sha256(value.encode("utf8")).hexdigest()}  {key}\n' for key,value in sorted(data.items()))
-        with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED) as archive:
-            for key,value in sorted(data.items()):archive.writestr(key,value)
-            archive.writestr('checksums.sha256',checksums)
-            archive.writestr('README.txt','Sanitized metadata-only diagnostic bundle. No scientific input/output arrays or structures. Exact local paths and remote job identifiers removed.\n')
+            self.checkpoint()
+            export_persisted_diagnostics(self.session,path,logs_directory=self.directory)
 
     def close(self):
         with self.lock:
-            if self.manifest['status'] in {'prepared','running','resuming'}:
+            if self.manifest['status'] in {'prepared','running','resuming','stopping_after_current_cycle','cancelling'}:
                 self.manifest['status']='interrupted';self.manifest['finished']=timestamp();self.checkpoint()
             self._events.flush();self._events.close()
+
+
+def export_persisted_diagnostics(directory,path,*,logs_directory=None):
+    """Read-only metadata export; never opens a historical run for writing."""
+    directory=Path(directory)
+    logs_directory=Path(logs_directory) if logs_directory else directory
+    aliases={}
+    def path_alias(value):
+        normalized=value.replace('\\\\','\\')
+        if normalized not in aliases:aliases[normalized]=f'<LOCAL_PATH_{len(aliases)+1:04d}>'
+        return aliases[normalized]
+    def sanitize_text(text):
+        from .error_reporting import sanitize_error_details
+        text=sanitize_error_details(text)
+        for local,alias in sorted(aliases.items(),key=lambda item:-len(item[0])):text=text.replace(local,alias)
+        text=re.sub(r'[A-Za-z]:[\\/][^\r\n"<>]*',lambda match:path_alias(match.group()),text)
+        text=re.sub(r'/(?:Users|home)/[^\s"<>]+',lambda match:path_alias(match.group()),text)
+        text=re.sub(r'\\\\[A-Za-z0-9_.-]+\\[^\r\n"<>]+',lambda match:path_alias(match.group()),text)
+        text=re.sub(r'(?i)((?:job|request|inference)[_ -]?id[\"\s:=>]*)([A-Za-z0-9_.-]+)',r'\1<REMOTE_ID>',text)
+        text=re.sub(r'[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}', '<EMAIL>', text)
+        return text
+    def sanitized(value,key=''):
+        if _PRIVATE.search(str(key)):return '<redacted>'
+        if re.fullmatch(r'(?i)username|user_name|user_id|email|user_email|account_email|account_name|personal_name',str(key)):return '<PERSONAL_ID>'
+        if re.search(r'(?i)(?:job|request|inference)[_ -]?id',key):return '<REMOTE_ID>'
+        if isinstance(value,dict):
+            return {path_alias(str(k)) if re.match(r'^[A-Za-z]:[\\/]|^/(?:Users|home)/|^\\\\',str(k)) else str(k):sanitized(v,str(k)) for k,v in value.items()}
+        if isinstance(value,list):return [sanitized(v,key) for v in value]
+        if isinstance(value,str):
+            if re.match(r'^[A-Za-z]:[\\/]|^/(?:Users|home)/|^\\\\',value):return path_alias(value)
+            return sanitize_text(value)
+        return value
+    data={}
+    if True:  # Read finalized metadata and the current persisted log prefix.
+        for name in ('run_manifest.json','summary.md','events.jsonl','cycle_metrics.csv'):
+            source=directory/name
+            if source.is_file():
+                text=source.read_text(encoding='utf8',errors='replace')
+                if name.endswith('.json'):data[name]=json.dumps(sanitized(json.loads(text)),indent=2,sort_keys=True,allow_nan=False)
+                elif name.endswith('.jsonl'):
+                    from .run_review import PersistedRunReview
+                    history=PersistedRunReview(directory)
+                    data[name]=''.join(json.dumps(sanitized(event),sort_keys=True,allow_nan=False)+'\n' for event in history.records)
+                    if history.incomplete_records:
+                        data['export_notes.json']=json.dumps(dict(incomplete_event_lines_omitted=history.incomplete_records,
+                            original_preserved=True,reason='Incomplete or malformed persisted lines are not fabricated or repaired by review/export.'))
+                elif name.endswith('.csv'):
+                    reader=csv.DictReader(io.StringIO(text));buffer=io.StringIO()
+                    writer=csv.DictWriter(buffer,fieldnames=reader.fieldnames);writer.writeheader()
+                    writer.writerows(sanitized(row) for row in reader);data[name]=buffer.getvalue()
+                else:data[name]=sanitize_text(text)
+        for name in ('log.txt','diagnostic.log'):
+            source=logs_directory/name
+            if source.is_file():data[name]=sanitize_text(source.read_text(encoding='utf8'))
+    checksums=''.join(f'{hashlib.sha256(value.encode("utf8")).hexdigest()}  {key}\n' for key,value in sorted(data.items()))
+    with zipfile.ZipFile(path,'w',zipfile.ZIP_DEFLATED) as archive:
+        for key,value in sorted(data.items()):archive.writestr(key,value)
+        archive.writestr('checksums.sha256',checksums)
+        archive.writestr('README.txt','Sanitized metadata-only diagnostic bundle. No scientific input/output arrays or structures. Exact local paths and remote job identifiers removed.\n')

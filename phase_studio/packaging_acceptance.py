@@ -181,7 +181,7 @@ def run(directory):
                 profile=ValidationProfile.REFERENCE_FREE
                 selector=ResultSelectionDialog(backend,candidates,[],profile,profile_definition(profile),recommend_best_result(profile,candidates),recommend_best_result(profile,[]),
                     superflip_tab_available=True,sharped_tab_available=False,initial_source='superflip',map_feedback_intensity_enabled=False,jana_context=False,
-                    preview_host=create_result_preview_host(backend,gemmi.UnitCell(10,10,10,90,90,90),30,-60),parse_structure=a.parse_cif_atoms,reference_atoms=[],source_title=lambda source:'Superflip')
+                    preview_host=create_result_preview_host(backend,gemmi.UnitCell(10,10,10,90,90,90),30,-60),parse_structure=a.parse_cif_atoms,reference_atoms=[],source_title=lambda source:'Superflip',feedback_directory=directory/'review-run')
                 selector.show();selector.resize(1200,760);snap('09-result-selection',selector)
                 assert selector._resolved_preview is not None and selector._action_button.isEnabled()
                 before=selector._resolved_preview
@@ -193,7 +193,8 @@ def run(directory):
                 snap('10-fullscreen',detached);detached.close()
                 assert selector._resolved_preview==before
                 report['rendered_atoms']=len(before.atoms);report['candidate_id']=selector.preview_candidate_id
-                _check_lambda_camera(a, backend, cif, report, directory, snap)
+                cfg=_check_lambda_camera(a, backend, cif, report, directory, snap)
+                _check_final_review(a,backend,selector,candidates,map_path,cif,cfg,report,directory,snap)
                 selector.close();backend.close()
             dialog=QFileDialog(wizard.dialog,'Phase Studio controlled file-dialog acceptance',str(directory));dialog.setFileMode(QFileDialog.ExistingFile)
             QTimer.singleShot(250,dialog.reject);dialog.exec();report['file_dialog_open_close']=True
@@ -327,3 +328,57 @@ def _check_lambda_camera(a, backend, cif, report, directory, snap):
         assert all(tuple(round(float(getattr(axis,k)),7) for k in ('elev','azim','roll'))==values[0] for axis in backend._structure_interactive_axes)
     report['synchronized_qt_drag']=trace
     snap('12-synchronized-camera',backend)
+    return cfg
+
+
+def _check_final_review(a,backend,selector,candidates,map_path,cif,cfg,report,directory,snap):
+    from .run_provenance import safe
+    from .run_review import candidate_transfer_rows
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication,QDialog
+    cfg.cycles=5;cfg.work_dir=directory/'review-run';cfg.work_dir.mkdir();cfg.run_id='offline-review-fixture'
+    backend.last_run_config=cfg;backend._active_run_id=cfg.run_id
+    backend._jana_wizard_handoff_available=lambda:False
+    completed=[a.CycleResult(c.cycle,'none',None,None,map_path,cif,None,map_path,cif,None,
+        superflip_quality=c.metrics,deblur_quality=c.metrics,run_id=cfg.run_id) for c in candidates]
+    backend.results=completed[:2]
+    diagnostic=a.RunDiagnosticLog(cfg.work_dir/'log.txt',cfg);backend._run_diagnostic_log=diagnostic;p=diagnostic.provenance
+    for result in completed[:2]:p.manifest['cycles'][str(result.cycle)]=dict(status='completed',source_cycle=result.cycle,result=safe(result),reflection_input={})
+    backend._set_run_status('Running');backend._apply_cycle_progress_state(a.CycleProgressState(3,5,'Superflip',1,7,busy=True))
+    backend.stop_btn.click()
+    assert p.manifest['status']=='stopping_after_current_cycle' and p.manifest['finished'] is None
+    backend.results=completed
+    p.manifest['cycles']['3']=dict(status='completed',source_cycle=3,result=safe(completed[2]),reflection_input={})
+    state=SimpleNamespace(cfg=cfg,run_id=cfg.run_id,provenance=p,diagnostic_log=None,completed_cycles=2)
+    assert backend._finalize_completed_cycle(state,3,['Superflip'])
+    p.finish('stopped');backend._poll_queue()
+    assert p.manifest['status']=='stopped' and p.manifest['completed_cycles']==3
+    assert '3 of 5' in backend.log_text.toPlainText()
+    for c in candidates:p.event('log','Superflip',c.cycle,dict(message=f'Controlled cycle {c.cycle} scientific event',category='SCIENTIFIC_RESULT'))
+    p.checkpoint();selector._sync_action_button();selector.refresh_feedback();selector._execution_log_button.click()
+    viewer=selector._run_log_viewer;viewer.cycle_filter.setChecked(True);viewer.family_filter.setChecked(True)
+    viewer.kind.setCurrentIndex(viewer.kind.findData('scientific'));viewer.search.setText('Controlled')
+    assert f'Controlled cycle {selector.selected_candidate.cycle} scientific event' in viewer.text.toPlainText()
+    assert '3 of 5' in viewer.status.text()
+    snap('13-filtered-execution-log',viewer);snap('14-controlled-stop',backend)
+    def close_details():
+        for dialog in QApplication.topLevelWidgets():
+            if dialog.windowTitle() in ('Why this cycle?','Confirm selected result export'):
+                snap('15-'+('recommendation-reason' if dialog.windowTitle()=='Why this cycle?' else 'export-identity'),dialog);dialog.reject()
+    QTimer.singleShot(150,close_details);selector._why_cycle_button.click()
+    before=len(p.manifest['selections'])
+    QTimer.singleShot(150,close_details)
+    assert not a.confirm_candidate_transfer(selector,candidate_transfer_rows(selector.selected_candidate,cfg,directory/'exports'))
+    assert len(p.manifest['selections'])==before
+    report['persisted_result_log']=dict(nonmodal=not viewer.isModal(),cycle=viewer.cycle,family=viewer.family,search=True)
+    report['controlled_stop']=dict(status=p.manifest['status'],completed_cycles=3,planned_cycles=5,codes=[item['code'] for item in p.manifest['lifecycle']])
+    report['export_confirmation_cancel_keeps_selection_pending']=True
+    viewer.close();diagnostic.close()
+    backend._run_diagnostic_log=None;backend.last_run_config=None
+    original=(cfg.work_dir/'events.jsonl').read_bytes()
+    with patch.object(a.QFileDialog,'getExistingDirectory',return_value=str(cfg.work_dir)):
+        backend.execution_log_open_button.click()
+        historical=backend._execution_log_viewers[-1]
+        assert '3 of 5' in historical.status.text() and (cfg.work_dir/'events.jsonl').read_bytes()==original
+        historical.close()
+    report['saved_log_access_without_worker']=True

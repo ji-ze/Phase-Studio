@@ -584,6 +584,7 @@ class ExecutionLogRecord:
     timestamp: str = ""
     cycle: Optional[int] = None
     event_type: str = "log"
+    family: Optional[str] = None
 
 
 class RunDiagnosticLog:
@@ -697,7 +698,7 @@ class RunDiagnosticLog:
                 if record.category not in {'DIAGNOSTIC','TRACE'}:
                     self._stream.write(line);self._stream.flush()
                 record_provenance(self.provenance,'event',record.event_type,record.subsystem,record.cycle,
-                                  dict(message=text,category=record.category,source_timestamp=timestamp),record.level)
+                                  dict(message=text,category=record.category,source_timestamp=timestamp,family=record.family),record.level)
             except OSError:
                 # Logging is ancillary; worker/UI progress must continue.
                 pass
@@ -726,7 +727,10 @@ class RunDiagnosticLog:
             counts=record.get(key) or {}
             lines.append(f'EDMA {key.split("_")[0]}: raw={show(counts.get("raw_edma_sites"))}; CIF={show(counts.get("cif_sites"))}; Jana model={show(counts.get("jana_m40_sites"))}; threshold(sigma)={show(counts.get("threshold_sigma"))}')
         feedback=record.get('map_feedback') or {}
-        for operation in feedback.get('operations',[]):
+        from .run_review import disabled_feedback_summary
+        disabled=disabled_feedback_summary(self.provenance.manifest,record)
+        if disabled:lines.append(disabled)
+        for operation in (() if disabled else feedback.get('operations',[])):
             lines.append(f'Map Feedback after {cycle} -> input {feedback.get("target_cycle")}: {operation["operation"]} · {operation["status"]} · modified={show(operation.get("modified_reflections"))}; group conservation={show(operation.get("conservation"))}')
         lines+=['Cycle status: '+record['status'],'Detailed numeric changes: feedback_diagnostics/; full identities: run_manifest.json','='*60]
         with self._lock:
@@ -4285,20 +4289,14 @@ def parse_atom_label_list(value: str) -> List[str]:
     return labels
 
 def normalize_xplor_for_strict_reader(xplor_map: Path, output_map: Path, log: Optional[Callable[[str], None]] = None) -> Path:
-    xmap = read_xplor_map(xplor_map)
-    write_xplor_map(output_map, xmap, title=xmap.title, values_per_line=1)
-    if log:
-        log(f"XPLOR map normalized for strict Superflip/EDMA reader: {output_map.name}")
-    return output_map
+    from .artifact_io import normalize_map_atomically
+    return normalize_map_atomically(xplor_map, output_map, read_xplor_map, write_xplor_map, log, 'Superflip/EDMA strict reader')
+
 
 def normalize_xplor_for_superflip_modelfile(xplor_map: Path, output_map: Path, log: Optional[Callable[[str], None]] = None) -> Path:
-    # Superflip's ReadXPlor chooses E-format only when the first data row
-    # contains an uppercase "E"; SharpED maps use lowercase "e".
-    xmap = read_xplor_map(xplor_map)
-    write_xplor_map(output_map, xmap, title=xmap.title, values_per_line=1)
-    if log:
-        log(f"XPLOR modelfile normalized for Superflip reader: {output_map.name}")
-    return output_map
+    from .artifact_io import normalize_map_atomically
+    return normalize_map_atomically(xplor_map, output_map, read_xplor_map, write_xplor_map, log, 'Superflip modelfile reader')
+
 
 def normalize_xplor_for_edma(xplor_map: Path, output_map: Path, log: Optional[Callable[[str], None]] = None) -> Path:
     return normalize_xplor_for_strict_reader(xplor_map, output_map, log)
@@ -5073,7 +5071,7 @@ def _jana_original_m50(inflip_path: Path, output_m50: Path) -> Path:
     )
 
 
-def _publish_protocol_transaction(artifacts: Sequence[Tuple[Path, Path]]) -> None:
+def _publish_protocol_transaction(artifacts: Sequence[Tuple[Path, Path]], expected_hashes: Optional[Dict[Path, str]] = None) -> None:
     """Publish a validated protocol set and roll back if any replace fails."""
     prepared: List[Tuple[Path, Path]] = []
     backups: List[Tuple[Path, Optional[Path]]] = []
@@ -5084,10 +5082,10 @@ def _publish_protocol_transaction(artifacts: Sequence[Tuple[Path, Path]]) -> Non
             target = Path(target).resolve()
             _require_current_protocol_file(source, target.suffix or target.name)
             temporary = target.with_name(f".{target.name}.publish-{token}")
-            shutil.copyfile(source, temporary)
-            if file_sha256(temporary) != file_sha256(source):
-                raise RuntimeError(f"Jana2020 staged publication check failed: {target}")
             prepared.append((temporary, target))
+            shutil.copyfile(source, temporary)
+            if file_sha256(temporary) != file_sha256(source) or (expected_hashes is not None and file_sha256(temporary) != expected_hashes.get(target)):
+                raise RuntimeError(f"Jana2020 staged publication check failed: {target}")
         for temporary, target in prepared:
             backup: Optional[Path] = None
             if target.exists():
@@ -5749,6 +5747,11 @@ def configured_powder_wavelength(cfg) -> Tuple[float, str]:
         source = getattr(cfg, 'wavelength_source', 'none')
         return value, source if source and source != 'none' else 'configured effective wavelength'
     return resolve_powder_wavelength(0.0, cfg.jana_inflip, cfg.reference_cif)
+
+
+def confirm_candidate_transfer(parent,rows) -> bool:
+    from .result_selection import show_candidate_details
+    return show_candidate_details(parent,'Confirm selected result export',rows,confirm=True)
 
 
 def normalize_output_format(value: str) -> str:
@@ -7581,10 +7584,10 @@ def write_map_quality_report(
     path: Path,
     results: Sequence[CycleResult],
     selected_candidate: Optional[ResultCandidate] = None,
-) -> None:
+) -> Dict[str, ResultRecommendation]:
     candidates = result_candidates_from_results(results)
     if not results:
-        return
+        return {}
     profile = ValidationProfile(results[0].validation_profile)
     definition = profile_definition(profile)
     # One recommendation PER SOURCE (Superflip and SharpED are never ranked
@@ -7657,7 +7660,13 @@ def write_map_quality_report(
             f"{recommended.label if recommended is not None else 'unavailable'})"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
+    lines += ['', 'Scientific interpretation:',
+        'Amplitude R = sum(abs(Fobs - s*Fcalc))/sum(Fobs), with nonnegative least-squares scale s. Amplitude CC is Pearson correlation.',
+        'Superflip imposes measured amplitudes during charge flipping; near-perfect agreement is not independent phase validation or a refined structural R_work.',
+        'Legacy r_work/cc_work are work-subset amplitude diagnostics. Without holdout they use all measured reflections and can duplicate amplitude_rf/amplitude_cc.',
+        'Reference-backed metrics and recommendations depend on the supplied reference; they do not independently validate a crystal structure.']
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return per_source
 
 
 # -----------------------------------------------------------------------------
@@ -10056,9 +10065,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.execution_log_open_button = QToolButton()
         self.execution_log_open_button.setObjectName("diagnosticTextAction")
         self.execution_log_open_button.setText("Open log")
-        self.execution_log_open_button.setToolTip("Open the complete timestamped run diagnostic log.")
+        self.execution_log_open_button.setToolTip("Review the current or a saved run execution log, including after application restart.")
         self.execution_log_open_button.clicked.connect(self._open_run_diagnostic_log)
-        self.execution_log_open_button.setEnabled(False)
+        self.execution_log_open_button.setEnabled(True)
         log_actions.addWidget(self.execution_log_open_button)
         self.execution_log_export_button=QToolButton()
         self.execution_log_export_button.setObjectName('diagnosticTextAction')
@@ -10098,10 +10107,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_execution_log_expanded(not self.execution_log_expanded)
 
     def _open_run_diagnostic_log(self) -> None:
-        diagnostic = getattr(self, "_run_diagnostic_log", None)
-        path=getattr(diagnostic,'diagnostic_path',getattr(diagnostic,'path',None))
-        if path is not None and path.is_file():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        from .run_log_viewer import RunLogViewer
+        diagnostic=getattr(self,'_run_diagnostic_log',None)
+        path=getattr(diagnostic,'path',None)
+        directory=Path(path).parent if path and Path(path).is_file() else None
+        if directory is None:
+            name=QFileDialog.getExistingDirectory(self,'Open saved run execution log',str(Path.home()))
+            if not name:return
+            directory=Path(name)
+        viewer=RunLogViewer(self,directory)
+        self._execution_log_viewers=getattr(self,'_execution_log_viewers',[])
+        self._execution_log_viewers.append(viewer)
+        viewer.show();viewer.raise_()
 
     def _export_sanitized_run_diagnostics(self):
         provenance=getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None)
@@ -11217,7 +11234,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     label.setEnabled(field_active)
                 if hasattr(widget, "setToolTip"):
                     if field_key == "powder_wavelength":
-                        tooltip = "Measured radiation wavelength in ?. Zero resolves matching .m90, then .inflip, then reference CIF. Required by native Superflip FWHM input even with Map Feedback off."
+                        tooltip = "Measured radiation wavelength in \u00c5. Zero resolves matching .m90, then .inflip, then reference CIF. Required by native Superflip FWHM input even with Map Feedback off."
                     elif not checkbox_enabled:
                         tooltip = f"Ignored: requires '{checkbox_label}' to be enabled."
                     elif not reachable:
@@ -12016,7 +12033,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._run_diagnostic_log.close()
         self._run_diagnostic_log = RunDiagnosticLog(run_dir / "log.txt", cfg)
         if hasattr(self, "execution_log_open_button"):
-            self.execution_log_open_button.setEnabled(self._run_diagnostic_log.path.is_file())
+            self.execution_log_open_button.setEnabled(True)
         if self._run_diagnostic_log.fallback_reason:
             self._append_execution_log(
                 (
@@ -12098,6 +12115,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         *,
         level: str = "",
         subsystem: str = "",
+        event_type: str = "",
+        cycle: Optional[int] = None,
     ) -> bool:
         work_dir = self.last_run_config.work_dir if self.last_run_config is not None else None
         record = payload if isinstance(payload, ExecutionLogRecord) else classify_log_record(
@@ -12106,6 +12125,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             subsystem=subsystem,
             work_dir=work_dir,
         )
+        if event_type:
+            record = replace(record, event_type=event_type, cycle=cycle)
         diagnostic_log = getattr(self, "_run_diagnostic_log", None)
         if diagnostic_log is not None:
             diagnostic_log.write(record)
@@ -12210,7 +12231,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         "  Ignored duplicate/managed Superflip keyword",
     )
 
-    def log(self, message: str, *, level: str = "", subsystem: str = "") -> None:
+    def log(self, message: str, *, level: str = "", subsystem: str = "", event_type: str = "log", cycle: Optional[int] = None, family: Optional[str] = None) -> None:
         text = str(message)
         if text.startswith(self.LOG_ONCE_PER_WORKFLOW_PREFIXES):
             seen = getattr(self, "_workflow_log_once", None)
@@ -12227,7 +12248,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             subsystem=subsystem,
             work_dir=work_dir,
         )
-        self._queue_run_event('log',replace(record,cycle=getattr(self._run_event_context,'cycle',None)))
+        self._queue_run_event('log',replace(record,cycle=cycle if cycle is not None else getattr(self._run_event_context,'cycle',None),event_type=event_type,family=family))
 
     def _queue_run_event(
         self, kind: str, payload: object, run_id: Optional[str] = None,
@@ -12436,7 +12457,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.run_btn.setText("Run phasing")
         self._update_action_states()
         self._append_execution_log(
-            "Workflow cancelled by the user.", level="WARNING", subsystem="Workflow"
+            f"Workflow cancelled immediately by the user after {completed_cycles} of {total_cycles} cycles. " + ("Completed results remain available." if completed_cycles else "No completed cycle results are available."), level="WARNING", subsystem="Workflow", event_type="CANCELLED_BY_USER"
         )
 
     def _finish_cancelled_run_for_request(self) -> None:
@@ -12528,13 +12549,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.run_btn.setEnabled(True)
         self._update_action_states()
         self._append_execution_log(
-            f"Workflow stopped after cycle {completed} as requested.",
+            f"Stopped by user after cycle {completed} of {total_cycles}.",
             level="WARNING",
-            subsystem="Workflow",
+            subsystem="Workflow", event_type="STOPPED_BY_USER", cycle=completed,
         )
         self._append_execution_log(
-            "Completed results are available.",
-            subsystem="Workflow",
+            ("Completed results are available." if completed else "No completed cycle results are available."),
+            subsystem="Workflow", event_type="RESULTS_AVAILABLE" if completed else "NO_RESULTS_AVAILABLE", cycle=completed,
         )
         # A partially completed workflow is still a usable result set: the
         # Jana2020 hand-off stays available for whatever finished.
@@ -12688,7 +12709,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._annotate_cycle_progress("Stopping after current cycle…")
         self._update_action_states()
         self._show_stopping_badge()
-        self.log("Stop after current cycle requested.", level="DETAIL")
+        cycle = getattr(self._cycle_progress_state, 'cycle_index', None)
+        self._append_execution_log("Stop after current cycle requested.", level="STEP", event_type="STOP_REQUESTED", cycle=cycle)
+        self._append_execution_log("Finishing the current cycle before stopping; completed results will be retained.", level="STEP", event_type="FINISHING_CURRENT_CYCLE", cycle=cycle)
 
     def request_autosolve_pass_now(self) -> None:
         """AutosolveWindow's "Pass to Jana2020": stop the active work
@@ -12749,10 +12772,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         self._update_action_states()
         self._show_stopping_badge()
-        self.log(
+        self._append_execution_log(
             "Stopping unfinished calculation for Jana2020 handoff."
             if self._handoff_pending else "Immediate stop requested.",
-            level="DETAIL",
+            level="STEP", event_type="CANCEL_REQUESTED", cycle=getattr(self._cycle_progress_state,"cycle_index",None),
         )
 
     def _requested_workflow_stop_kind(self) -> str:
@@ -14617,9 +14640,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             if answer != QMessageBox.Yes:
                 return False
+        from .run_review import candidate_transfer_rows
+        from .result_selection import candidate_selection
+        rows=candidate_transfer_rows(candidate,self.last_run_config,destination)
+        if not confirm_candidate_transfer(self,rows):
+            return False
+        snapshot=candidate_selection(candidate,jana=False)
+        if not snapshot.ready:
+            self._append_execution_log('Export refused: '+snapshot.reason,level='ERROR',subsystem='Results')
+            return False
+        expected={target.resolve(): digest for target,digest in zip(targets,[candidate.map_sha256,*([candidate.structure_sha256] if candidate.usable_structure else [])])}
+        if not all(expected.values()):
+            self._append_execution_log('Export requires sealed map/model identities. Reopen the completed candidate before saving.',level='ERROR',subsystem='Results')
+            return False
+        provenance=getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None)
+        record_provenance(provenance,'selection',candidate,'confirmed standalone export')
+        if self.last_run_config is not None:
+            try:write_map_quality_report(self.last_run_config.work_dir/'map_quality_assessment.txt',self.results,candidate)
+            except OSError as exc:self._append_execution_log('Selection report update failed: '+str(exc),level='WARNING',subsystem='Results')
         destination.mkdir(parents=True, exist_ok=True)
-        for source, target in zip(sources, targets):
-            shutil.copy2(source, target)
+        try:
+            _publish_protocol_transaction([(source,target) for source,target in zip(sources,targets) if source.resolve()!=target.resolve()],expected_hashes=expected)
+        except Exception as exc:
+            record_provenance(provenance,'export','failed',candidate,destination,targets,reason=str(exc))
+            raise
+        record_provenance(provenance,'export','completed',candidate,destination,targets)
         self._append_execution_log(
             f"[Results] Saved {candidate.label} · {len(targets)} file(s) · {destination}",
             level="SUCCESS",
@@ -14713,6 +14758,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         preview_host = create_result_preview_host(
             self, self.structure_cell, self.structure_elev, self.structure_azim,
         )
+        from .run_review import candidate_transfer_rows
         dialog = ResultSelectionDialog(
             dialog_parent if dialog_parent is not None else self,
             superflip_candidates,
@@ -14738,9 +14784,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             ),
             adjust_threshold_async=self.request_result_candidate_retune,
             map_feedback_powder_enabled=bool(cfg.redistribute_overlaps) if cfg is not None else False,
+            map_feedback_missing_enabled=bool(cfg.map_feedback_missing_enabled) if cfg is not None else False,
             feedback_directory=cfg.work_dir if cfg is not None else None,
             feedback_reports_provider=lambda: list(self.feedback_reports.values()),
             comparison_reference=cfg.reference_cif if cfg is not None else self._structure_source_paths.get('reference'),
+            transfer_details_provider=lambda candidate: candidate_transfer_rows(candidate,cfg,jana=is_jana),
         )
         # A run owns its explicit selection; QSettings and a previous run do not.
         session_key = (str(getattr(cfg, "run_id", "")),
@@ -14786,12 +14834,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         active_recommendation = dialog.active_recommendation
         if active_recommendation is not None:
             self.result_recommendation = active_recommendation.with_selected(chosen)
+        if not is_jana:
+            return self._export_selected_candidate(chosen)
         if cfg is not None:
             write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", self.results, chosen)
-        if not is_jana:
-            record_provenance(getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None),'selection',chosen,'standalone export selected; export completion not implied')
-            self._export_selected_candidate(chosen)
-            return True
 
         result = self._cycle_result_for_candidate(chosen)
         if result is None:
@@ -16309,18 +16355,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         pending_results.sort(key=lambda item: item.cycle)
         with profile_stage(state.performance_profiler, "Reports and CSV"):
             write_metrics_csv(state.cfg.work_dir / "metrics.csv", pending_results)
-            write_map_quality_report(
+            recommendations = write_map_quality_report(
                 state.cfg.work_dir / "map_quality_assessment.txt", pending_results
             )
         state.all_results[:] = pending_results
         record_provenance(getattr(state,'provenance',None),'completed_cycle',state,result)
+        record_provenance(getattr(state,'provenance',None),'recommendations',recommendations)
         for source, quality in (
             ("superflip", result.superflip_quality), ("deblurred", result.deblur_quality),
         ):
             if quality is not None:
                 self.log(
                     format_validation_log_line(result.cycle, source, result.validation_profile, quality),
-                    subsystem="Validation",
+                    subsystem="Validation", family=source,
                 )
         self._queue_run_event("result", result, state.run_id)
 
@@ -16344,7 +16391,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             cycle, state.cfg.cycles, progress_stages, "Finalizing cycle",
             detail="completed", complete=True,
         )
-        self.log(f"Cycle {cycle} complete.", level="SUCCESS")
+        self.log(f"Cycle {cycle} complete.", level="SUCCESS", event_type="CURRENT_CYCLE_COMPLETED", cycle=cycle)
         return self._emit_requested_workflow_stop(state.completed_cycles)
 
     def _run_configured_sharped_stage(

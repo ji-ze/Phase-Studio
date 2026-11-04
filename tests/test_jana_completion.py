@@ -518,7 +518,9 @@ def main():
     # or recomputing their contents.
     export_dir = Path(tempfile.mkdtemp()) / "export"
     original_directory_picker = QFileDialog.getExistingDirectory
+    original_confirmation = appmod.confirm_candidate_transfer
     try:
+        appmod.confirm_candidate_transfer = lambda *args, **kwargs: True
         QFileDialog.getExistingDirectory = lambda *_args, **_kwargs: str(export_dir)
         candidate = standalone._result_candidates()[0]
         original_map = Path(candidate.map_path).read_bytes()
@@ -528,6 +530,7 @@ def main():
         check("standalone export copies the selected real model", (export_dir / Path(candidate.structure_path).name).read_bytes() == original_model)
     finally:
         QFileDialog.getExistingDirectory = original_directory_picker
+        appmod.confirm_candidate_transfer = original_confirmation
 
     # Accepted Jana selection delegates the selected existing CycleResult and
     # source to the established handoff implementation.

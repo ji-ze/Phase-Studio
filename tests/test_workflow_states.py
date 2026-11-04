@@ -183,7 +183,7 @@ def main():
     )
     check(
         "graceful stop says the workflow stopped as requested",
-        "Workflow stopped after cycle 2 as requested." in log_text,
+        f"Stopped by user after cycle 2 of {win.last_run_config.cycles}." in log_text,
     )
     check(
         "graceful stop says completed results are available",
@@ -245,7 +245,7 @@ def main():
     check("early Pass remains one-shot when duplicate terminal events are queued",
           len(early_opened) == 1)
     check("early Pass uses a distinct STOPPED handoff terminal presentation",
-          win._run_status == "STOPPED" and "Workflow cancelled by the user." not in early_log)
+          win._run_status == "STOPPED" and "Workflow cancelled immediately by the user" not in early_log)
     check("early Pass preserves the completed result registry", len(win.results) == 1)
     check("early Pass clears pending only after Result Selection has launched", not win._handoff_pending)
     QDialog.exec = lambda self: QDialog.Rejected
@@ -262,11 +262,11 @@ def main():
     check("immediate stop badge reads CANCELLED", win.status_badge.text() == "CANCELLED")
     check(
         "immediate stop says the workflow was cancelled by the user",
-        "Workflow cancelled by the user." in log_text,
+        "Workflow cancelled immediately by the user" in log_text,
     )
     check(
         "immediate stop is never reported as STOPPED",
-        "stopped after cycle" not in log_text.lower(),
+        "stopped by user after cycle" not in log_text.lower(),
     )
 
     # =====================================================================
