@@ -15236,7 +15236,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.draw_idle()
 
     def _reset_classic_structure_view(self) -> None:
-        self.structure_elev, self.structure_azim = 20.0, 35.0
+        self.structure_elev, self.structure_azim, self.structure_roll = 20.0, 35.0, 0.0
         for axis in self._structure_interactive_axes:
             axis.view_init(elev=self.structure_elev, azim=self.structure_azim)
         self._fit_classic_structure_view()
@@ -15290,7 +15290,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _update_structure_views(self) -> None:
         from phase_studio.viewer_alignment import comparison_policy,panel_summary
         previous=next(iter(getattr(self,'_structure_interactive_axes',[])),None)
-        orientation=(previous.elev,previous.azim,previous.roll) if previous is not None else None
+        orientation=(previous.elev,previous.azim,previous.roll) if previous is not None else (self.structure_elev,self.structure_azim,getattr(self,"structure_roll",0.0))
         if orientation:self.structure_elev,self.structure_azim=orientation[:2]
         self.structure_figure.clear()
         self.structure_figure.patch.set_facecolor("#ffffff")

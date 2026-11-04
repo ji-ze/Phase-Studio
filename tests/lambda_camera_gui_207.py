@@ -46,6 +46,7 @@ for index in range(3):
     for axis in axes:axis.view_init(elev=23,azim=41,roll=17)
     canvas.draw();box=axes[index].get_window_extent();ratio=canvas.device_pixel_ratio
     p=QPoint(int((box.x0+box.width*.4)/ratio),int((canvas.figure.bbox.height-box.y0-box.height*.5)/ratio))
+    artists=tuple(map(id,window._structure_depth_artists))
     before=angles(axes[index]);limits=[window._structure_axis_limits(axis) for axis in axes]
     QTest.mousePress(canvas,Qt.LeftButton,Qt.NoModifier,p)
     for dx,dy in [(12,8),(27,19),(42,26)]:QTest.mouseMove(canvas,p+QPoint(dx,dy),30);events()
@@ -55,11 +56,23 @@ for index in range(3):
         folder=Path(os.environ['PS207_GUI_CAPTURE']);folder.mkdir(parents=True,exist_ok=True)
         window.grab().save(str(folder/f'drag-panel-{index}.png'))
         (folder/f'drag-panel-{index}.json').write_text(json.dumps([angles(axis) for axis in axes]))
+    assert tuple(map(id,window._structure_depth_artists))==artists,'Rotation rebuilt geometry'
     assert angles(axes[index])!=before,'Qt drag did not rotate active rendered axis'
     assert len({angles(axis) for axis in axes})==1,('Rendered panels diverged',index,[angles(axis) for axis in axes])
     assert [window._structure_axis_limits(axis) for axis in axes]==limits,'Rotation changed local limits'
     expected=angles(axes[index]);window._update_structure_views();events()
     assert all(angles(axis)==expected for axis in window._structure_interactive_axes),'Result refresh reset camera'
+# A completely empty result must not erase the shared roll before the next result.
+expected=angles(window._structure_interactive_axes[0])
+for attribute in ('reference_atoms_for_plot','superflip_atoms_for_plot','deblur_atoms_for_plot'):setattr(window,attribute,[])
+window._update_structure_views();events();assert not window._structure_interactive_axes
+for attribute in ('reference_atoms_for_plot','superflip_atoms_for_plot','deblur_atoms_for_plot'):setattr(window,attribute,list(atoms))
+window._update_structure_views();events()
+assert all(angles(axis)==expected for axis in window._structure_interactive_axes),'Empty panels erased the shared camera'
+original_mode=window.structure_view_mode
+for mode in ('cell',original_mode):
+    window.structure_view_mode=mode;window._update_structure_views();events()
+    assert all(angles(axis)==expected for axis in window._structure_interactive_axes),'Display mode reset camera'
 label=window.structure_metadata_labels[0]
 label.setStyleSheet('font-size: 18pt');label.setText('Composition: '+('C123 N45 O67 S89 · independent heavy ASU sites · '*8));events()
 need=label.fontMetrics().height()+(label.text().count('\n'))*label.fontMetrics().lineSpacing()
