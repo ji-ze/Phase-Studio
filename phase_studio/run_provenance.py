@@ -323,6 +323,11 @@ class RunProvenance:
                 ('reference_cif','external reference'),('first_cycle_modelfile','explicit initial model')]:
                 path=getattr(cfg,key,None)
                 self.manifest['inputs'][key]=file_identity(path,role)
+            from .app import resolve_jana_m90_path
+            companion = resolve_jana_m90_path(getattr(cfg, 'jana_inflip', None))
+            self.manifest['inputs']['jana_m90'] = file_identity(companion, 'matching Jana wavelength header')
+            self.manifest['radiation_wavelength'] = dict(value=getattr(cfg, 'powder_wavelength', 0.0),
+                units='angstrom', source=getattr(cfg, 'wavelength_source', 'none'))
             if 'original_input_identities' not in self.manifest:
                 self.manifest['original_input_identities']=json.loads(json.dumps(self.manifest['inputs']))
             for key,role in [('superflip_exe','Superflip'),('edma_exe','EDMA')]:

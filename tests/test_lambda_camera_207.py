@@ -46,3 +46,21 @@ def test_unrelated_m90_cannot_supply_wavelength(tmp_path):
     source=tmp_path/'project.inflip';source.write_text('dataformat intensity fwhm\n')
     unrelated=tmp_path/'unrelated.m90';unrelated.write_text('lambda 1.541866\nend\n')
     assert a.resolve_powder_wavelength(0,source,None,unrelated)==(0.,'none')
+
+
+@pytest.mark.parametrize('value,source',[(1.1,'manual entry'),(1.541866,'Jana2020 .m90 file (project.m90)')])
+def test_autosolve_keeps_resolved_value_and_source(tmp_path,value,source):
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    cfg=SimpleNamespace(powder_wavelength=value,wavelength_source=source,jana_inflip=tmp_path/'project.inflip',reference_cif=None)
+    cfg.jana_inflip.write_text('lambda .71073\n')
+    with patch.object(a,'resolve_powder_wavelength',side_effect=AssertionError('Resolved run value must not be replaced')):
+        assert a.configured_powder_wavelength(cfg)==(value,source)
+
+
+def test_autosolve_unresolved_value_uses_matching_m90(tmp_path):
+    from types import SimpleNamespace
+    source=tmp_path/'project.inflip';source.write_text('dataformat intensity fwhm\n')
+    source.with_suffix('.m90').write_text('lambda 1.541866\nend\n')
+    cfg=SimpleNamespace(powder_wavelength=0,wavelength_source='none',jana_inflip=source,reference_cif=None)
+    assert a.configured_powder_wavelength(cfg)[0]==1.541866

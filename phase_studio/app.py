@@ -5742,6 +5742,15 @@ def resolve_powder_wavelength(
     return value, source
 
 
+def configured_powder_wavelength(cfg) -> Tuple[float, str]:
+    """Reuse the run's already resolved measurement, including manual overrides."""
+    value = float(getattr(cfg, 'powder_wavelength', 0.0))
+    if math.isfinite(value) and value > 0:
+        source = getattr(cfg, 'wavelength_source', 'none')
+        return value, source if source and source != 'none' else 'configured effective wavelength'
+    return resolve_powder_wavelength(0.0, cfg.jana_inflip, cfg.reference_cif)
+
+
 def normalize_output_format(value: str) -> str:
     fmt = str(value or "xplor").strip().lower()
     if fmt in {"jana", "xplor", "ccp4", "m80"}:
@@ -14176,10 +14185,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         cfg = state.cfg
         data_mode = self._resolve_configured_data_mode(cfg)
         if reflection_mode_has_fwhm(data_mode):
-            m90_path = resolve_jana_m90_path(cfg.jana_inflip)
-            wavelength, wavelength_source = resolve_powder_wavelength(
-                0.0, cfg.jana_inflip, cfg.reference_cif, jana_m90_path=m90_path,
-            )
+            wavelength, wavelength_source = configured_powder_wavelength(cfg)
             if wavelength <= 0:
                 return None, (
                     "The reflection data carries FWHM values (powder data), but no radiation "
@@ -14193,13 +14199,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """The established Autosolve Map Feedback configuration, unchanged."""
         cfg = self._resume_state.cfg
         if kind == guided.CORRECTION_POWDER:
-            m90_path = resolve_jana_m90_path(cfg.jana_inflip)
-            wavelength, _source = resolve_powder_wavelength(
-                0.0, cfg.jana_inflip, cfg.reference_cif, jana_m90_path=m90_path,
-            )
+            wavelength, wavelength_source = configured_powder_wavelength(cfg)
             cfg.redistribute_overlaps = True
             cfg.powder_redistribution_from_cycle = start_cycle
             cfg.powder_wavelength = wavelength
+            cfg.wavelength_source = wavelength_source
             cfg.powder_separation_factor = 0.200
             cfg.powder_redistribution_mix = 0.3
         else:
@@ -15427,7 +15431,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             resolve_jana_m90_path(resolved_inputs.jana_inflip),
         )
         if resolved_wavelength > 0:
-            self.log(f"Effective radiation wavelength {resolved_wavelength:g} A from {wavelength_source}.", level="DETAIL")
+            self.log(f"Effective radiation wavelength {resolved_wavelength:g} A from {wavelength_source}.", level="WARNING" if "conflicting wavelength" in wavelength_source else "INFO")
         return RunConfig(
             hkl=resolved_inputs.hkl,
             reference_cif=resolved_inputs.reference_cif,
