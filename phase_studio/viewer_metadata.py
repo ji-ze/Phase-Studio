@@ -7,12 +7,19 @@ class PanelMetadataLabel(QLabel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._full_text = ''
+        self._max_lines = 3
         self.setTextFormat(Qt.PlainText)
         self.setAlignment(Qt.AlignHCenter | Qt.AlignTop)
         self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         self.setMinimumWidth(0)
         self.setContentsMargins(4, 2, 4, 2)
-        self.setFixedHeight(self.fontMetrics().lineSpacing()*3+4)
+        self.setMaxLines(3)
+
+    def setMaxLines(self, count):
+        self._max_lines = max(1, int(count))
+        metrics = self.fontMetrics()
+        self.setFixedHeight(metrics.height()+(self._max_lines-1)*metrics.lineSpacing()+4)
+        self._wrap()
 
     def setText(self, text):
         from PySide6.QtGui import QTextDocument
@@ -27,8 +34,7 @@ class PanelMetadataLabel(QLabel):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() in (QEvent.FontChange, QEvent.StyleChange) and hasattr(self, "_full_text"):
-            self.setFixedHeight(self.fontMetrics().height()+2*self.fontMetrics().lineSpacing()+4)
-            self._wrap()
+            self.setMaxLines(self._max_lines)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -39,7 +45,7 @@ class PanelMetadataLabel(QLabel):
         width = max(1, self.width()-8)
         words = self._full_text.replace('EDMA asymmetric-unit composition:', 'EDMA ASU:').split()
         lines = []
-        while words and len(lines) < 2:
+        while words and len(lines) < self._max_lines-1:
             line = words.pop(0)
             while words and metrics.horizontalAdvance(line+' '+words[0]) <= width:
                 line += ' '+words.pop(0)

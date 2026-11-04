@@ -1102,7 +1102,7 @@ class AutosolveWindow(QMainWindow):
         root.addWidget(self.structure_canvas, 14)
         from .viewer_metadata import PanelMetadataLabel
         self.comparison_status=PanelMetadataLabel()
-        self.comparison_status.setFixedHeight(self.comparison_status.fontMetrics().lineSpacing()+4)
+        self.comparison_status.setMaxLines(1)
         self.comparison_status.setVisible(False);root.addWidget(self.comparison_status)
         self.search_placeholder = QLabel(
             "<b>Searching for a solution</b><br><br>"

@@ -719,7 +719,7 @@ class ResultSelectionDialog(QDialog):
         feedback_row.addWidget(self._feedback_details_button)
         preview_layout.addLayout(feedback_row)
         self._comparison_label=PanelMetadataLabel()
-        self._comparison_label.setFixedHeight(self._comparison_label.fontMetrics().lineSpacing()+4)
+        self._comparison_label.setMaxLines(1)
         self._comparison_label.setVisible(False);preview_layout.addWidget(self._comparison_label)
         preview_label = QLabel("STRUCTURE PREVIEW")
         preview_label.setObjectName("sectionLabel")
@@ -1008,7 +1008,7 @@ class ResultSelectionDialog(QDialog):
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
         if hasattr(self,'_feedback_label'):
-            self._feedback_label.setFixedHeight((2 if self.height()<800 else 3)*self._feedback_label.fontMetrics().lineSpacing()+4)
+            self._feedback_label.setMaxLines(2 if self.height()<800 else 3)
         if hasattr(self, "_element_legend"):
             # Composition and EDMA state remain visible at every size; the
             # redundant color key yields first on short work areas.
