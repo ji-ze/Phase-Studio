@@ -62,3 +62,23 @@ def test_native_superflip_phase_interoperability(tmp_path):
         assert intensity > 0
         # Native map serialization has six significant digits.
         assert phase == pytest.approx(90,abs=1e-4)
+
+
+@pytest.mark.parametrize('spacegroup', ['P 21','P 31','P 41','P 61'])
+def test_synthesis_symmetry_matches_direct_atomic_sum(spacegroup):
+    sg = gemmi.SpaceGroup(spacegroup)
+    positions = [op.apply_to_xyz([.13,.21,.32]) for op in sg.operations()]
+    def coefficient(hkl):
+        return sum(np.exp(2j*math.pi*np.dot(hkl,p)) for p in positions)
+    hkl = (1,2,1)
+    f = coefficient(hkl)
+    row = a.Reflection(*hkl,float(abs(f)),None,None)
+    result, _ = a.synthesize_xplor_map_from_phases([row],a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        (16,0,15,16,0,15,16,0,15),(10,10,12,90,90,120),'ZYX',
+        {hkl:float(np.angle(f,deg=True))},'independent symmetry',sg)
+    equivalents = {tuple(op.apply_to_hkl(hkl)) for op in sg.operations()}
+    predictions = a.xplor_fft_predictions_from_map(result,list(equivalents))
+    for key in equivalents:
+        intensity,phase = predictions[key]
+        actual = math.sqrt(intensity)*np.exp(1j*math.radians(phase))
+        assert actual == pytest.approx(coefficient(key),abs=1e-12)

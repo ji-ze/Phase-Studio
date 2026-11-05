@@ -394,6 +394,14 @@ class SplitDistributionTests(unittest.TestCase):
                 for name in ('normalize_xplor_for_strict_reader','normalize_xplor_for_superflip_modelfile',
                              '_publish_protocol_transaction','write_map_quality_report'):
                     old[name]=io_functions[name]
+                # Independent direct-sum/Gemmi/native-Superflip checks establish
+                # the intentional phase-sign correction. Pin exactly these three
+                # numerical bodies; all other historical comparisons remain strict.
+                phase_text=subprocess.check_output([git,'show','7396e0f:phase_studio/app.py'],cwd=ROOT).decode('utf8')
+                phase_functions=functions(phase_text)
+                for name in ('xplor_fft_intensity_phase','xplor_fft_predictions_from_map',
+                             'synthesize_xplor_map_from_phases'):
+                    old[name]=phase_functions[name]
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
                         "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record",
