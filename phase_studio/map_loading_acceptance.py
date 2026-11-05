@@ -51,6 +51,7 @@ def _run(directory, configuration):
     with patch.multiple(a.IterativeSuperflipPipelineQtGUI,load_settings=lambda self:None,
             save_settings=lambda self:None,refresh_sharped_models=lambda self:None), \
             patch.object(a,'run_sharped_deblur',forbidden),patch.object(a,'run_superflip_cycle',forbidden), \
+            patch.object(a.SharpEDServerClient,'upload',forbidden),patch.object(a.SharpEDServerClient,'execute',forbidden), \
             patch.object(QScreen,'availableGeometry',return_value=QRect(0,0,1920,1040)):
         for index,item in enumerate(spec['records']):
             mp=Path(item['map']);cif=Path(item['structure'])
