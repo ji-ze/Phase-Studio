@@ -249,3 +249,20 @@ source uses single-precision angles and metric tensors. This is consistent with
 native rounding sensitivity, but the exact floating-point path has not been
 independently replicated. It remains an explicit numerical acceptance limitation,
 not a group-membership PASS, and is not hidden with a widened tolerance.
+
+Explicit native group IDs remain supported for read-only diagnostics without
+being reinterpreted as sigma or recomputed from wavelength. Extraction has an
+explicit diagnostic-only path for these records; execution still rejects a
+layout for which the application's numerical writer has no group-preserving
+mode. Unsupported diagnostic layouts are rejected by the diagnostic schema
+before extraction. Regression tests retain the original group counts and verify
+that significance remains unavailable. The Wizard test separately verifies that
+native ignored fields provide no sigma and that parsed explicit measured-F/sigma
+records enable the legitimate uncertainty gate.
+
+The first complete scientific snapshot run reported 816 passed, six failed,
+four skipped and 37 passing subtests. Those failures were retained as evidence;
+they do not constitute final acceptance. Two native Windows credential/path-lock
+checks subsequently passed outside sandbox restrictions. Final acceptance must
+rerun the entire suite after the diagnostic/guard corrections in that native
+environment; no skips or relaxed scientific tolerances substitute for it.

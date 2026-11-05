@@ -323,6 +323,12 @@ class FeedbackTests(unittest.TestCase):
         w = self.wizard(False)
         self.assertTrue(w.missing_group.isVisible() and w.intensity_group.isVisible())
         self.assertFalse(w.powder_group.isVisible())
+        self.assertFalse(w.feedback_has_uncertainty)  # Native trailing numbers are not sigma.
+        self.assertFalse(w.intensity_sigma_spin.isEnabled())
+        external=self.root/'explicit-measured-F-sigma.hkl'
+        external.write_text('# h k l F sigma(F)\n1 0 0 12 .1\n',encoding='utf8')
+        w.input_reflections=self.a.read_hkl(external,4,5)
+        w._sync_page3_for_data_type()
         self.assertTrue(w.feedback_has_uncertainty)
         w.intensity_enabled_checkbox.setChecked(True)
         self.assertTrue(w.intensity_sigma_spin.isEnabled())

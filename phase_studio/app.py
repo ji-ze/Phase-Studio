@@ -4464,13 +4464,15 @@ def clean_extra_superflip_keywords(value: str, log: Optional[Callable[[str], Non
         safe.append(line)
     return safe
 
-def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Path:
+def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path, for_execution: bool = True) -> Path:
     lines = Path(inflip_path).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     reflections: List[str] = []
     declared_items = next((tuple(part.lower() for part in split_inflip_line(line)[1:])
                            for line in lines if inflip_first_token(line) == 'dataformat'), ())
     supported_items = {(quantity,) + suffix for quantity in ('intensity','amplitude')
                        for suffix in ((),('dummy',),('phase',),('phase','dummy'),('fwhm',))}
+    if not for_execution:
+        supported_items.update({('intensity','group'),('amplitude','group')})
     if declared_items and declared_items not in supported_items:
         raise ValueError('Unsupported native reflection dataformat layout. Select intensity/amplitude with optional phase/dummy or measured FWHM in the supported order. Mixed uncertainty/width, explicit group and reordered columns require an authoritative conversion before import; no column meanings are inferred.')
     dummy_columns = [3 + index for index, item in enumerate(declared_items) if item == 'dummy']
@@ -4821,7 +4823,11 @@ def resolve_hkl_analysis_inputs(request: HklAnalysisRequest) -> Tuple[Path, str,
     if use_inflip_hkl:
         if jana_path is None or not jana_path.is_file():
             raise FileNotFoundError("Jana2020 .inflip is required to test or analyze embedded HKL data.")
-        hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
+        from phase_studio.powder_diagnostics import standard_powder_context
+        diagnostic_context = standard_powder_context(jana_path)
+        if diagnostic_context.get('unsupported_layout'):
+            raise ValueError(diagnostic_context['error'])
+        hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir, for_execution=False)
         source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
     else:
         if not request.hkl_text:
