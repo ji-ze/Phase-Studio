@@ -6,6 +6,15 @@ import pytest
 from phase_studio import app as a
 
 
+def test_exact_overlap_boundary_is_inclusive():
+    cell=gemmi.UnitCell(10,10,10,90,90,90)
+    # Independent Bragg angles for d=10 and d=5 Angstrom at lambda=1.
+    boundary=math.degrees(2*math.asin(1/10))-math.degrees(2*math.asin(1/20))
+    rows=[a.Reflection(1,0,0,10,boundary),a.Reflection(2,0,0,20,boundary)]
+    groups=a.assign_powder_overlap_groups(rows,cell,1.,1.)
+    assert groups=={(1,0,0):1,(2,0,0):1}
+
+
 @pytest.mark.parametrize('mode',[a.REFLECTION_DATA_MODE_INTENSITY_FWHM,a.REFLECTION_DATA_MODE_AMPLITUDE_FWHM])
 @pytest.mark.parametrize('mix',[0,.25,1])
 @pytest.mark.parametrize('observed,map_values', [([10.,90.],[9.,1.]),([0.,100.],[1.,0.]),

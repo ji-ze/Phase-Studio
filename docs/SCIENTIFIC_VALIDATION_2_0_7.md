@@ -229,3 +229,23 @@ exhaustive terminology acceptance remain explicitly unresolved. Existing
 authority scripts exercise additional deterministic branches, but neither mocks
 nor saved-response replay can close these external scientific gates. This report
 does not declare exhaustive validation complete or 2.0.7 release-ready.
+
+### Overlap boundary correction and native precision limit
+
+Feedback grouping used a strict less-than comparison, while native Fortran
+separates peaks only when the gap is strictly greater than the width threshold.
+Equality therefore belongs to an overlap group. An independent Bragg-law fixture
+failed before correcting feedback to the inclusive boundary; diagnostic grouping
+already used the inclusive rule. Twenty-five conservation/boundary cases pass.
+
+Native pilot logs confirm receipt of 4690 Selexipag records (894 separated,
+3796 overlapping, 794 groups) and 631 Ochlor records (438 separated, 193 overlapping,
+91 groups). A full Selexipag comparison additionally exposes a precision-sensitive
+membership difference: double-precision application geometry gives 3795 members
+in the same 794 groups. One neighboring gap is 0.002880787185093 degrees versus a
+0.00288-degree threshold, a difference of 7.87e-7 degrees. This is below a
+single-precision ULP near the approximately 15.63-degree Bragg position; native
+source uses single-precision angles and metric tensors. This is consistent with
+native rounding sensitivity, but the exact floating-point path has not been
+independently replicated. It remains an explicit numerical acceptance limitation,
+not a group-membership PASS, and is not hidden with a widened tolerance.

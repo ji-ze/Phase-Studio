@@ -139,6 +139,23 @@ class FeedbackTests(unittest.TestCase):
         new=ast.parse(Path(self.a.__file__).read_text(encoding='utf-8'))
         find=lambda tree:next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='apply_map_feedback_to_reflections')
         original,current=find(old),find(new)
+        # The missing-completion orbit/extinction fix is independently checked
+        # with real maps. Pin the complete corrected function, then normalize
+        # only that reviewed branch for the historical correction-formula guard.
+        reviewed=ast.parse(subprocess.check_output(['git','show','5d75bbf:phase_studio/app.py']).decode('utf8'))
+        self.assertEqual(ast.dump(current),ast.dump(find(reviewed)))
+        self.assertEqual(current.args.args[-1].arg,'spacegroup')
+        self.assertEqual(ast.dump(current.args.defaults[-1]),ast.dump(ast.Constant(None)))
+        current.args.args.pop();current.args.defaults.pop()
+        missing_test=ast.dump(ast.parse('add_missing and missing_percent_limit > 0',mode='eval').body)
+        old_missing=next(n for n in original.body if isinstance(n,ast.If) and ast.dump(n.test)==missing_test)
+        new_missing=next(n for n in current.body if isinstance(n,ast.If) and ast.dump(n.test)==missing_test)
+        restored=ast.parse(ast.unparse(old_missing)).body[0]
+        sigma_nodes=[n for n in ast.walk(restored) if isinstance(n,ast.Assign) and
+                     any(isinstance(t,ast.Name) and t.id=='sigma' for t in n.targets)]
+        self.assertEqual(len(sigma_nodes),1)
+        sigma_nodes[0].value=ast.Constant(None)
+        current.body[current.body.index(new_missing)]=restored
         # Authorised FWHM correction: permit exactly the new refusal to invent
         # peak widths, and exactly removal of estimated measurement uncertainty.
         # Every existing correction formula/control-flow node remains pinned.

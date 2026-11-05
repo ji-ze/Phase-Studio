@@ -3993,7 +3993,7 @@ def assign_powder_overlap_groups(
 ) -> Dict[Tuple[int, int, int], int]:
     """Group reflections whose Bragg peaks overlap in a powder pattern: sorted by
     2theta, neighbors are joined transitively into the same group while
-    delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2, matching Superflip's
+    delta(2theta) <= separation_factor * (FWHM1 + FWHM2) / 2, matching Superflip's
     own fwhmseparation convention. FWHM is read from each reflection's sigma
     field (that is where the 'hkl I/F fwhm' data modes store it). A reflection
     with no FWHM value or an inaccessible 2theta is left ungrouped (group 0).
@@ -4016,7 +4016,7 @@ def assign_powder_overlap_groups(
     for previous, current in zip(entries, entries[1:]):
         delta = current[1] - previous[1]
         threshold = separation_factor * (previous[2] + current[2]) / 2.0
-        if delta < threshold:
+        if delta <= threshold:
             current_component.append(current)
         else:
             if len(current_component) > 1:
