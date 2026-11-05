@@ -3490,7 +3490,9 @@ def xplor_fft_intensity_phase(xplor_map: Path, hkl: Tuple[int, int, int]) -> Tup
     grid = tuple(int(v) for v in xmap.grid)
     nx, ny, nz = grid[0], grid[3], grid[6]
     data = np.asarray(xmap.data, dtype=np.float64).reshape((nz, ny, nx))
-    coeffs = np.fft.fftn(data)
+    # Crystallographic F(h) uses exp(+2*pi*i*h.r), opposite to numpy.fftn.
+    # For a real density conjugation preserves magnitudes and corrects phases.
+    coeffs = np.fft.fftn(data).conjugate()
     h, k, l = hkl
     coeff = coeffs[int(l) % nz, int(k) % ny, int(h) % nx]
     intensity = float(abs(coeff) ** 2)
@@ -3510,7 +3512,8 @@ def xplor_fft_predictions_from_map(
     grid = tuple(int(v) for v in xmap.grid)
     nx, ny, nz = grid[0], grid[3], grid[6]
     data = np.asarray(xmap.data, dtype=np.float64).reshape((nz, ny, nx))
-    coeffs = np.fft.fftn(data)
+    # Match native Superflip/Gemmi phases, not NumPy's negative-exponent phase.
+    coeffs = np.fft.fftn(data).conjugate()
     predictions: Dict[Tuple[int, int, int], Tuple[float, float]] = {}
     for h, k, l in hkls:
         coeff = coeffs[int(l) % nz, int(k) % ny, int(h) % nx]
@@ -3563,7 +3566,9 @@ def synthesize_xplor_map_from_phases(
         mate = ((-lz) % nz, (-ky) % ny, (-hx) % nx)
         if mate not in direct:
             coeffs[mate] = np.conj(coeffs[lz, ky, hx])
-    data = np.fft.ifftn(coeffs).real
+    # rho(r) = sum_h F(h) exp(-2*pi*i*h.r) / N. Retain the existing
+    # discrete-map normalization while using the crystallographic phase sign.
+    data = np.fft.fftn(coeffs).real / coeffs.size
     return XplorMap(
         title=title,
         grid=tuple(int(v) for v in grid),
