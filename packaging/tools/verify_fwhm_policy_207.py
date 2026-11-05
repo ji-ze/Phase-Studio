@@ -7,7 +7,7 @@ from phase_studio import app as a
 
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 
-def native_case(executable,out,mode,uncertainty_free=False):
+def native_case(executable,out,mode,uncertainty_free=False,export_ccp4=False,export_jana=False,output_format='xplor'):
     folder=out/(mode.replace(' ','_').replace('/','_')+('_no_sigma' if uncertainty_free else ''));folder.mkdir(parents=True,exist_ok=True)
     rows=[a.Reflection(h,k,l,value,None if uncertainty_free else .1,90. if a.reflection_mode_has_phase(mode) else None)
           for h,k,l,value in [(1,0,0,10),(0,1,0,12),(0,0,1,8),(1,1,0,0),(1,0,1,.01)]]
@@ -20,8 +20,8 @@ def native_case(executable,out,mode,uncertainty_free=False):
     inp=folder/'check.inflip'
     a.write_superflip_input(inp_path=inp,prefix='check',ref_ctx=context,observed_hkl=observed,
         model_file=None,output_xplor='check.xplor',reference_file=None,reference_format='cif',
-        perform_algorithm='fourier',output_format='xplor',write_auxiliary_outputs=False,
-        export_superflip_xplor=True,export_superflip_ccp4=False,export_superflip_jana=False,
+        perform_algorithm='fourier',output_format=output_format,write_auxiliary_outputs=False,
+        export_superflip_xplor=True,export_superflip_ccp4=export_ccp4,export_superflip_jana=export_jana,
         voxel='0.5',bestdensities_count=1,bestdensities_metric='symmetry',bestdensities_symmetry=True,
         polish=False,maxcycles=1,repeatmode=1,randomseed='12345',delta='AUTO',weakratio='0',biso='0',
         reflection_data_mode=mode,normalize='none',nresshells=1,missing='zero',searchsymmetry='no',

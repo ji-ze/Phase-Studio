@@ -6143,13 +6143,20 @@ def write_superflip_input(
     with inp_path.open("w", encoding="utf-8") as f:
         f.write(f"title {prefix}\nperform {perform}\n")
         output_files: List[str] = []
-        if write_auxiliary_outputs or export_superflip_jana:
+        if write_auxiliary_outputs or export_superflip_jana or fmt == 'jana':
             output_files.extend([f"{prefix}.m81", f"{prefix}.m80"])
-        if export_superflip_ccp4:
+        if export_superflip_ccp4 or fmt == 'ccp4':
             output_files.append(f"{prefix}.ccp4")
+        if fmt == 'm80' and f'{prefix}.m80' not in output_files:
+            output_files.append(f'{prefix}.m80')
         if export_superflip_xplor or output_xplor not in output_files:
             output_files.append(output_xplor)
-        f.write("outputfile " + " ".join(output_files) + f"\noutputformat {fmt}\n")
+        # Superflip consumes one positional format for each output filename;
+        # a single format applies only to the first file, not to every output.
+        output_formats = ['xplor' if name == output_xplor else
+                          {'.m81':'jana','.m80':'m80','.ccp4':'ccp4'}[Path(name).suffix.lower()]
+                          for name in output_files]
+        f.write("outputfile " + " ".join(output_files) + "\noutputformat " + " ".join(output_formats) + "\n")
         if reference_file is not None:
             f.write(f"referencefile {reference_file.name}\n")
         if model_file is not None:

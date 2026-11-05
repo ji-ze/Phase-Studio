@@ -294,3 +294,30 @@ Snapshot 047115e completed the full suite: 823 passed, four skipped and 37 subte
 passed in 640.34 seconds. Its build controller was stopped before distribution
 acceptance when this additional independently reproduced scale defect was found.
 That passing snapshot is historical evidence, not final validation of the new fix.
+
+### Confirmed P0/P1: positional native output formats
+
+The native writer emitted several `outputfile` names but only one `outputformat`.
+Superflip applies that format to the first file and guesses subsequent formats
+by extension. Consequently optional Jana/CCP4 exports could contain XPLOR text,
+or selecting another primary format could turn the mandatory `.xplor` into binary
+or a reflection list and break downstream processing. All six new actual-native
+export configurations failed before correction.
+
+Each output now receives its own positional format: m81/jana, m80/m80,
+ccp4/ccp4 and the mandatory XPLOR/xplor. A requested primary native format adds
+the correctly named optional product while retaining internal XPLOR. All six
+actual native cases pass. Jana m81 output matches an independently generated
+single-file native Jana control byte-for-byte. Gemmi reads the binary CCP4
+output and all voxels agree with XPLOR within a per-voxel bound derived from
+native Fortran E12.5 text rounding and float32 binary precision. No arbitrary
+relative tolerance replaces the serialization error bound.
+
+The holdout correction was also evaluated against both published v2.0.6 and
+047115e on identical complete serialized density arrays. Across four scale/data
+cases, only R_free differs; every other computed metric is exactly equal.
+Additional actual next-cycle runs cover powder repartitioning and saved-SharpED
+map initialization with missing completion (4540 original, 45 predictions added,
+4585 written). These are new native Superflip/EDMA executions from replayed maps,
+not new inference. Model normalization preserves the complete density array and
+original sources remain unchanged.
