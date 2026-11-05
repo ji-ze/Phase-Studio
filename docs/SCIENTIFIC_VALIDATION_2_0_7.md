@@ -109,6 +109,11 @@ file and actual I/F values. Legitimate explicitly supplied external I/sigma or
 F/sigma inputs retain their uncertainty semantics. An actionable error requires
 measured uncertainties for a positive threshold or uncertainty-bearing export.
 No scientific meaning is inferred from a dummy field's numeric value.
+The same rule applies to undeclared trailing fields in native `dataformat
+intensity`/`amplitude`: the Superflip manual explicitly says additional numbers
+are ignored. They cannot establish measurement sigma. Canonical supported native
+column orders are validated before extraction; mixed sigma/width, group and
+reordered layouts are rejected explicitly instead of guessing positional meanings.
 
 Native `dataformat amplitude phase` with five total fields also left phase in
 turns instead of converting to degrees, because the old conversion required six

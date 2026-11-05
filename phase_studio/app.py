@@ -4469,7 +4469,17 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Pat
     reflections: List[str] = []
     declared_items = next((tuple(part.lower() for part in split_inflip_line(line)[1:])
                            for line in lines if inflip_first_token(line) == 'dataformat'), ())
+    supported_items = {(quantity,) + suffix for quantity in ('intensity','amplitude')
+                       for suffix in ((),('dummy',),('phase',),('phase','dummy'),('fwhm',))}
+    if declared_items and declared_items not in supported_items:
+        raise ValueError('Unsupported native reflection dataformat layout. Select intensity/amplitude with optional phase/dummy or measured FWHM in the supported order. Mixed uncertainty/width, explicit group and reordered columns require an authoritative conversion before import; no column meanings are inferred.')
     dummy_columns = [3 + index for index, item in enumerate(declared_items) if item == 'dummy']
+    if declared_items and 'fwhm' not in declared_items:
+        # Superflip has no measured-sigma data item. Undeclared trailing numeric
+        # fields are no stronger evidence of sigma than an explicit dummy field.
+        auxiliary_column = 5 if 'phase' in declared_items else 4
+        if auxiliary_column not in dummy_columns:
+            dummy_columns.append(auxiliary_column)
     phase_is_superflip_turns = any(
         inflip_first_token(line) == "dataformat"
         and "phase" in {part.lower() for part in split_inflip_line(line)[1:]}

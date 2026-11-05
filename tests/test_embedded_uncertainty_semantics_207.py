@@ -3,9 +3,10 @@ from phase_studio import app as a
 
 
 @pytest.mark.parametrize('quantity',['amplitude','intensity'])
-def test_native_dummy_is_not_a_measurement_uncertainty(tmp_path,quantity):
+@pytest.mark.parametrize('auxiliary',[' dummy',''])
+def test_native_dummy_is_not_a_measurement_uncertainty(tmp_path,quantity,auxiliary):
     source=tmp_path/'source.inflip'
-    source.write_text(f'dataformat {quantity} dummy\nfbegin\n1 0 0 12 0.1\nendf\n')
+    source.write_text(f'dataformat {quantity}{auxiliary}\nfbegin\n1 0 0 12 0.1\nendf\n')
     extracted=a.extract_embedded_hkl_from_inflip(source,tmp_path/'work')
     row=a.read_hkl(extracted)[0]
     assert row.value==12
@@ -25,3 +26,13 @@ def test_native_phases_without_sigma_are_converted_to_degrees(tmp_path,auxiliary
     row=a.read_hkl(path,4,6,True)[0]
     assert row.phase==90
     assert row.sigma is None
+
+
+@pytest.mark.parametrize('layout',['intensity sigma fwhm','amplitude dummy fwhm','phase amplitude','intensity group'])
+def test_unsupported_native_columns_are_rejected_before_extraction(tmp_path,layout):
+    source=tmp_path/'source.inflip'
+    source.write_text(f'dataformat {layout}\nfbegin\n1 0 0 12 1 2\nendf\n')
+    output=tmp_path/'work'
+    with pytest.raises(ValueError,match='Unsupported native reflection dataformat'):
+        a.extract_embedded_hkl_from_inflip(source,output)
+    assert not output.exists()
