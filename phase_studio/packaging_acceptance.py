@@ -120,6 +120,7 @@ def run(directory):
                 report['wizard_navigation']=True;report['superflip_resolution']=True
         if not report.get('ok'):
             from . import app as a,hkl_diagnostics as hd,hkl_diagnostics_ui as hu,structure_camera as camera,result_selection as selection
+            _check_scientific_interchange(a, report, directory)
             from matplotlib.figure import Figure
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             import numpy as np,gemmi
@@ -218,6 +219,24 @@ def run(directory):
         settle()
         if screen_patch is not None:screen_patch.stop()
     return 0 if report.get('ok') else 1
+
+
+def _check_scientific_interchange(a, report, directory):
+    """Actual bundled numerical execution; no native or remote process mocks."""
+    import numpy as np
+    data=np.zeros((8,8,8));data[0,0,1]=1.
+    xmap=a.XplorMap('off-origin phase probe',(8,0,7,8,0,7,8,0,7),
+                    (10,10,10,90,90,90),'ZYX',data.ravel())
+    intensity,phase=a.xplor_fft_predictions_from_map(xmap,[(1,0,0)])[(1,0,0)]
+    assert abs(intensity-1)<1e-12 and abs(phase-45)<1e-12
+    source=directory/'scientific-native-dummy.inflip'
+    source.write_text('dataformat amplitude phase dummy\nfbegin\n1 0 0 12 .25 123\nendf\n',encoding='utf8')
+    extracted=a.extract_embedded_hkl_from_inflip(source,directory/'scientific-input')
+    row=a.read_hkl(extracted,4,6,True)[0]
+    assert row.phase==90 and row.sigma is None
+    report['scientific_interchange']={'execution':'actual bundled NumPy FFT and native-format parsing',
+        'off_origin_phase_deg':phase,'intensity':intensity,'native_phase_deg':row.phase,
+        'native_dummy_uncertainty':row.sigma,'live_inference':False}
 
 
 def _check_feedback_significance(a, backend, wizard, report, directory, snap):

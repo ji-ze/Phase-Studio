@@ -154,3 +154,73 @@ and final full regression/frozen profiles remain pending in this investigation.
 Live inference, interactive Jana acceptance, full-window DPI and terminology gates
 must be reported separately; none is established by file generation or mocks.
 Original experimental files and the published 2.0.6 release remain protected.
+
+## Input matrix and external dependencies
+
+| Acquisition / columns | Local native verdict | Limits |
+|---|---|---|
+| Single crystal I + sigma(I) | PASS, synthetic | Explicit measured-sigma declaration required |
+| Single crystal F + sigma(F) | PASS, synthetic | Input gate uses F/sigma(F); feedback intensity gate uses F/[2sigma(F)] |
+| Single crystal I without sigma | PASS, synthetic | Positive uncertainty gates and sigma exports unavailable |
+| Single crystal F with dummy/unavailable sigma | PASS, synthetic | Native dummy is not measured sigma |
+| Powder I + FWHM | PASS, synthetic and real pilots | Measured wavelength; no missing-width fabrication |
+| Powder F + FWHM | PASS, synthetic | Conservation checked in I = F squared; no real F/FWHM fixture |
+| Powder I + sigma(I) | PASS for extracted HKL native execution | No overlap operation without measured widths |
+| Powder F + sigma(F) | PASS for extracted HKL native execution | No overlap operation without measured widths |
+| Single crystal I + FWHM | BLOCKED acquisition applicability | FWHM modes encode powder angular widths; no independent acquisition-type flag establishes rejection of a mislabeled acquisition |
+| Single crystal F + FWHM | BLOCKED acquisition applicability | Same limitation; never count this as single-crystal acceptance |
+
+The detailed matrix records exact source, configuration and native artifact
+hashes under `build/scientific-validation-2.0.7/input_format_matrix.json`.
+Six explicit modes plus uncertainty-free I/F have each undergone native FOURIER,
+twelve-cycle CF and EDMA at two thresholds (eight CF and sixteen EDMA cases).
+Unsupported mixed sigma/FWHM layouts are not implemented as a combined measured
+uncertainty/width representation. No column may acquire either meaning merely
+because it is numeric.
+
+Actual-data execution pilots on the corrected source additionally completed:
+
+| Data | Reflections parsed/written | Measured lambda (A) | CF / EDMA time (s) | EDMA sites |
+|---|---:|---:|---:|---:|
+| Selexipag | 4690 / 4690 | 0.39986, supplied reference CIF | 3.19 / 7.69 | 520 |
+| Ochlor | 631 / 631 | 1.541866, matching m90 | 0.74 / 2.02 | 262 |
+
+These use twenty CF cycles, one repeat, fixed seed, no supplied reference/model,
+and EDMA threshold 0.5 sigma. They demonstrate native compatibility and finite
+outputs; convergence, chemical correctness and numerical equivalence to the
+historical AAR/50-repeat/2000-cycle settings are **not** established. Timings are
+single observations on a shared host, not comparative performance benchmarks.
+The historical Selexipag inventory recheck independently retained all 4690 valid
+records, accounting for all 277 formerly excluded rows (136 zero, 141 positive),
+and preserved all 746 historical files byte-for-byte. Its old input omitted
+lambda; native default use must not be confused with the measured 0.39986 A
+used in the new pilot.
+
+## Outstanding coverage and release verdicts
+
+Machine-readable final-regression results must be read for their exact source
+commit; an interrupted earlier snapshot is not a passed final suite. Frozen
+profiles must also execute the bundled FFT/phase/dummy probe and match source
+module bytecode before a new test distribution is accepted.
+
+| Branch | Current release verdict | Reason / remaining evidence |
+|---|---|---|
+| Powder workflows | NO-GO | Local native/math evidence exists; complete inference-assisted workflow coverage not established |
+| Single-crystal workflows | NO-GO | Same end-to-end and acquisition applicability limits |
+| I + sigma | GO WITH WARNINGS for local processing | Genuine-sigma provenance and final regression gates remain prerequisites |
+| F + sigma | GO WITH WARNINGS for local processing | First-order propagated significance is unreliable near F=0; native phase correction verified |
+| I + FWHM | GO WITH WARNINGS for local processing | Width/wavelength requirements enforced; real pilots are not solved structures |
+| F + FWHM | GO WITH WARNINGS for local processing | No independent real amplitude/FWHM dataset available |
+| SharpED inference | NO-GO | LIVE INFERENCE BLOCKED: no confirmed authorized cost-free test capacity; no new jobs submitted |
+| EDMA processing | GO WITH WARNINGS | Real native executions and saved-map replay; site counts do not validate element assignment |
+| Map Feedback | GO WITH WARNINGS for local processing | Independent correction/conservation and orbit tests; exhaustive inference-driven transitions not established |
+| Iterative workflows | NO-GO | Regression simulations/replay do not establish every native/inference combination |
+| Jana2020 output | NO-GO for live acceptance | Generated/protocol identity checks are distinct from interactive native refinement/continuation |
+
+The full noncritical workflow pairwise matrix, all live model families, native
+multi-cycle inference transitions, independent element/structure accuracy,
+comparative CPU/memory/I/O performance, full-window/manual DPI, live Jana and
+exhaustive terminology acceptance remain explicitly unresolved. Existing
+authority scripts exercise additional deterministic branches, but neither mocks
+nor saved-response replay can close these external scientific gates. This report
+does not declare exhaustive validation complete or 2.0.7 release-ready.
