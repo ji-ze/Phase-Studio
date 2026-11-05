@@ -564,6 +564,19 @@ class SplitDistributionTests(unittest.TestCase):
                         [git, "show", f"{baseline_ref}:phase_studio/{module}"], cwd=ROOT,
                     ).decode())
                     current_functions = functions((ROOT / "phase_studio" / module).read_text(encoding="utf-8"))
+                    if module=='xplor_io.py':
+                        text=(ROOT/'phase_studio'/module).read_text(encoding='utf8')
+                        nodes={n.name:n for n in ast.parse(text).body if isinstance(n,ast.FunctionDef)}
+                        for function,call in [('read_xplor_map','validate_xplor_layout(grid, axis_order)'),
+                                              ('write_xplor_map',"validate_xplor_layout(grid, xmap.axis_order or 'ZYX')")]:
+                            expected=ast.parse(call).body[0]
+                            hooks=[n for n in nodes[function].body if ast.dump(n)==ast.dump(expected)]
+                            self.assertEqual(len(hooks),1)
+                            nodes[function].body.remove(hooks[0])
+                            current_functions[function]=ast.dump(nodes[function],include_attributes=False)
+                        reviewed=functions(subprocess.check_output(
+                            [git,'show','eaf6708:phase_studio/xplor_io.py'],cwd=ROOT).decode('utf8'))
+                        self.assertEqual(current_functions['validate_xplor_layout'],reviewed['validate_xplor_layout'])
                     for name in names:
                         self.assertIn(name, released)
                         self.assertEqual(released[name], current_functions.get(name), f"{module}:{name}")
