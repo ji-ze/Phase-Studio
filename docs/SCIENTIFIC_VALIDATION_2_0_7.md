@@ -90,6 +90,32 @@ floating-point allowance. The six-digit XPLOR serialization measurably perturbs
 weak Fourier components in high-dynamic-range maps; the oracle therefore uses
 the actual serialized map, retaining the strict output-rounding bound.
 
+## Additional reproduced defects
+
+Duplicate inverse-variance averaging squared sigma directly. Finite uncertainties
+1e-200 and 1e200 produced nonfinite merged values/uncertainties; averaging two
+finite values of 1e308 also overflowed. Normalize weights by the smallest usable
+sigma before squaring and normalize their sum before multiplying observations.
+The formula is algebraically identical; independent expected values are 12 and
+`sigma/sqrt(1.25)` for measurements 10±sigma and 20±2sigma. Three new cases failed
+before and pass after. This corrects numerical corruption without changing FWHM
+weighting or the distinction between I and F.
+
+Native `.inflip` dummy columns were copied into the application's sigma slot.
+Even a declared `dataformat amplitude dummy` could consequently participate in
+significance filtering and sigma-labeled exports. The extraction boundary now
+marks declared dummy fields unavailable (`?`), preserving the original source
+file and actual I/F values. Legitimate explicitly supplied external I/sigma or
+F/sigma inputs retain their uncertainty semantics. An actionable error requires
+measured uncertainties for a positive threshold or uncertainty-bearing export.
+No scientific meaning is inferred from a dummy field's numeric value.
+
+Native `dataformat amplitude phase` with five total fields also left phase in
+turns instead of converting to degrees, because the old conversion required six
+fields. Conversion now accepts the phase-bearing five-field input. Four focused
+dummy/phase cases failed before and pass after correction. Full-suite validation
+of these latest changes remains required.
+
 ## Acceptance boundaries
 
 The previous snapshot `51a2c40` completed 735 pytest tests with 4 skipped and 37

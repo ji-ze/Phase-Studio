@@ -2626,9 +2626,13 @@ def merge_duplicate_reflections(reflections: Sequence[Reflection], data_mode: st
         valid = np.isfinite(sigs) & (sigs > 0)
         if np.any(valid):
             w = np.zeros_like(vals)
-            w[valid] = 1.0 / np.square(sigs[valid])
-            value = float(np.sum(w * vals) / np.sum(w))
-            sigma = float(math.sqrt(1.0 / np.sum(w)))
+            # Scale inverse-variance weights before squaring: finite sigma can
+            # otherwise overflow/underflow in sigma**2 and corrupt valid data.
+            sigma_scale = float(np.min(sigs[valid]))
+            w[valid] = np.square(sigma_scale / sigs[valid])
+            weight_sum = float(np.sum(w))
+            value = float(np.sum((w / weight_sum) * vals))
+            sigma = sigma_scale / math.sqrt(weight_sum)
         else:
             value = float(np.mean(vals))
             sigma = None
@@ -4463,6 +4467,9 @@ def clean_extra_superflip_keywords(value: str, log: Optional[Callable[[str], Non
 def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Path:
     lines = Path(inflip_path).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     reflections: List[str] = []
+    declared_items = next((tuple(part.lower() for part in split_inflip_line(line)[1:])
+                           for line in lines if inflip_first_token(line) == 'dataformat'), ())
+    dummy_columns = [3 + index for index, item in enumerate(declared_items) if item == 'dummy']
     phase_is_superflip_turns = any(
         inflip_first_token(line) == "dataformat"
         and "phase" in {part.lower() for part in split_inflip_line(line)[1:]}
@@ -4480,12 +4487,22 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Pat
             record = line.rstrip()
             if phase_is_superflip_turns:
                 fields = record.split()
-                if len(fields) >= 6:
+                if len(fields) >= 5:
                     try:
                         fields[4] = f"{float(fields[4]) * 360.0:.9f}"
                         record = " ".join(fields)
                     except ValueError:
                         pass
+            # A native dummy column is ignored by Superflip and does not declare
+            # measured sigma. Preserve the original file, but mark its auxiliary
+            # unavailable in our extracted reflection representation. Explicit
+            # external I/sigma or F/sigma input retains genuine uncertainties.
+            if dummy_columns:
+                fields = record.split()
+                for column in dummy_columns:
+                    if column < len(fields):
+                        fields[column] = '?'
+                record = ' '.join(fields)
             reflections.append(record)
     if not reflections:
         raise ValueError(f"No fbegin/endf reflection block was found in Jana2020 .inflip: {inflip_path}")
@@ -4493,6 +4510,7 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Pat
     out = output_dir / f"{Path(inflip_path).stem}_embedded_reflections.hkl"
     out.write_text(
         "# Reflections exported from the Jana2020 .inflip fbegin/endf block.\n"
+        + ("# Native dummy columns are unavailable uncertainties (?); supply an explicit measured-sigma HKL file for significance filtering or sigma exports.\n" if dummy_columns else "")
         + ("# Input Superflip phase turns were converted to degrees by Phase Studio.\n" if phase_is_superflip_turns else "")
         + "\n".join(reflections)
         + "\n",
