@@ -25,7 +25,8 @@ def test_wizard_diagnostics_snapshot_current_reference_and_wavelength(tmp_path, 
     assert request.ref_text == str(reference) and request.powder_wavelength == .61
     assert request.metadata.source == a.METADATA_SOURCE_INFLIP
     overlap = dict(result.diagnostics.overlap)
-    assert overlap['wavelength'] == .61 and overlap['wavelength_source'] == 'manual entry'
+    assert overlap['wavelength'] == .61
+    assert overlap['wavelength_source'] == 'manual entry; overridden conflicting wavelength: reference file (reference.cif)=0.39986 A'
 
 
 def test_reference_wavelength_fallback_and_cache(tmp_path):
