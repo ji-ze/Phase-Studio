@@ -7,6 +7,26 @@ from unittest.mock import patch
 
 
 def run(directory, configuration):
+    target=Path(directory).resolve()
+    existed=target.exists()
+    try:
+        return _run(directory,configuration)
+    except Exception:
+        import traceback
+        from .error_reporting import sanitize_error_details
+        report={'passed':False,'frozen':bool(getattr(sys,'frozen',False)),
+                'details':sanitize_error_details(traceback.format_exc()),'inference_submitted_by_this_probe':False}
+        if not existed and target.is_dir():
+            (target/'report.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf8')
+        from PySide6.QtWidgets import QApplication
+        qt=QApplication.instance()
+        if qt:
+            for widget in qt.topLevelWidgets():widget.close()
+            qt.processEvents()
+        return 1
+
+
+def _run(directory, configuration):
     import gemmi
     import numpy as np
     from PySide6.QtCore import QSettings,QRect
