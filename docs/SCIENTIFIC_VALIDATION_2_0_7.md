@@ -1,7 +1,10 @@
 # Scientific validation of 2.0.7 — investigation in progress
 
-This campaign is not complete. Release verdict: **NO-GO** pending the final
-native, workflow, full-regression and frozen-profile gates. PR #21 must remain
+Release verdict: **NO-GO** pending remaining scientific workflow and interactive
+acceptance gaps. The immutable scientific snapshot `2eae1ec` completed 834 tests
+(4 skipped, 37 successful subtests), nine independent authorities, native-format
+checks and both frozen profiles; each profile loaded eight actual inferred maps.
+Subsequent UI changes require their own final regression/build evidence. PR #21 must remain
 draft. The initial prohibition on paid jobs was subsequently superseded by the
 user's explicit authorization of real and additional automatic inference tests.
 Previously saved SharpED responses remain replay evidence; new jobs are tracked
@@ -32,7 +35,7 @@ Independent evidence on the clean pre-fix source `51a2c40`:
 | Complete non-Nyquist 1D Fourier series, peak x=1/8 | grid index 1 | index 7 | index 1 |
 
 The native difference from 90 degrees is 2.66e-6 degrees, within the 1e-4-degree
-tolerance justified by the native text map's six significant digits. Synthetic
+tolerance justified by the native text map's Fortran E12.5 five-significant-digit serialization. Synthetic
 in-memory direct-sum checks use absolute complex tolerance 1e-12; synthesis uses
 1e-14. The native map is identical before and after (SHA-256
 `dfe318eab055ee5272c99e7224daae0594bd6481244e786bb662765db29df09c`).
@@ -218,13 +221,13 @@ module bytecode before a new test distribution is accepted.
 | F + sigma | GO WITH WARNINGS for local processing | First-order propagated significance is unreliable near F=0; native phase correction verified |
 | I + FWHM | GO WITH WARNINGS for local processing | Width/wavelength requirements enforced; real pilots are not solved structures |
 | F + FWHM | GO WITH WARNINGS for local processing | No independent real amplitude/FWHM dataset available |
-| SharpED inference | NO-GO pending full matrix | Live PEAK A completed; broader real-model/data and frozen map-loading checks are in progress |
+| SharpED inference | GO WITH WARNINGS for tested execution/loading matrix | All four current models on powder and single-crystal inputs completed; all eight actual maps loaded in both frozen profiles; chemical accuracy remains unverified |
 | EDMA processing | GO WITH WARNINGS | Real native executions and saved-map replay; site counts do not validate element assignment |
 | Map Feedback | GO WITH WARNINGS for local processing | Independent correction/conservation and orbit tests; exhaustive inference-driven transitions not established |
 | Iterative workflows | NO-GO | Regression simulations/replay do not establish every native/inference combination |
 | Jana2020 output | NO-GO for live acceptance | Generated/protocol identity checks are distinct from interactive native refinement/continuation |
 
-The full noncritical workflow pairwise matrix, all live model families, native
+The full noncritical workflow pairwise matrix, exhaustive native
 multi-cycle inference transitions, independent element/structure accuracy,
 comparative CPU/memory/I/O performance, full-window/manual DPI, live Jana and
 exhaustive terminology acceptance remain explicitly unresolved. Existing
@@ -346,3 +349,14 @@ closed hidden Why-this-cycle dialog before rejecting the visible confirmation.
 The callback now acts only on visible dialogs. Source acceptance completes through
 the actual confirmation cancellation and original assertions; no numerical or
 geometry assertion is weakened.
+
+The bounded live matrix subsequently completed jobs 1868–1875: PEAK A, SEED,
+UNIVERSAL and PEAK B for O chlor and the saved single-crystal dataset. Each
+actual returned map passed parsing and local native EDMA; actual PEAK A to
+Superflip to SEED transitions ran on both datasets. Both frozen profiles at
+`2eae1ec` loaded all eight map/CIF identities. Job 1868's inference ran from
+`cf5bb9a`; the aggregate's `2eae1ec` source identifies later postprocessing and
+must not be represented as the source of that first API call. The other seven
+jobs used `2eae1ec`. No credentials are included in evidence. These successes
+verify execution, transfer, native processing and rendering, not model chemical
+accuracy, a solved structure, exhaustive workflow coverage or live Jana refinement.

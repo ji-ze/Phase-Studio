@@ -1566,7 +1566,7 @@ class _JanaWorkflowWizard:
             and (getattr(self, "hkl_load_result", None) is None
                  or not getattr(self.hkl_load_result, "format_verified", False))
         ):
-            return "Map Feedback is unavailable until the incoming HKL column format has been verified. Review Input summary / Validate HKL."
+            return "Map Feedback is unavailable until the incoming HKL column format has been verified. Review Input summary / View data."
         # Map feedback only affects SUBSEQUENT cycles -- an enabled method
         # whose "Start after cycle" leaves no later cycle to apply to would
         # silently do nothing; block Run rather than accept a setting that
@@ -1955,7 +1955,7 @@ class _JanaWorkflowWizard:
             return section, body_layout
 
         # Compact single-row-per-field summary with the diagnostic actions
-        # (Validate HKL / Analyze completeness) as a small button column on the
+        # (View data / Analyze data) as a small button column on the
         # right rather than a third row underneath the metadata -- keeps the
         # whole section short enough that it, the Reference/model section and
         # all three Workflow cards fit on the first page without scrolling.
@@ -2038,8 +2038,8 @@ class _JanaWorkflowWizard:
         analysis_label = QLabel("Input analysis")
         analysis_label.setStyleSheet("color:#33456e; font-weight:600;")
         self.hkl_buttons_column.addWidget(analysis_label)
-        self.validate_hkl_button = QPushButton("Validate HKL")
-        self.analyze_completeness_button = QPushButton("Analyze completeness")
+        self.validate_hkl_button = QPushButton("View data")
+        self.analyze_completeness_button = QPushButton("Analyze data")
         self.hkl_buttons_column.addWidget(self.validate_hkl_button)
         self.hkl_buttons_column.addWidget(self.analyze_completeness_button)
         self.hkl_buttons_column.addStretch(1)
@@ -2142,8 +2142,8 @@ class _JanaWorkflowWizard:
                     result = build_hkl_load_result(request)
             except Exception:
                 # Per spec: never show a raw exception in this summary. The
-                # existing structured error dialog still covers Validate HKL /
-                # Analyze completeness themselves if the reflection block truly
+                # existing structured error dialog still covers View data /
+                # Analyze data themselves if the reflection block truly
                 # cannot be analyzed.
                 return
             self.reflections_value.setText(f"{len(result.reflections):,} HKL records · {len(result.unique_reflections):,} unique indices")

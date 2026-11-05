@@ -82,8 +82,8 @@ https://jana.fzu.cz/
 2. Configure the Superflip and EDMA executable paths if necessary.
 3. Choose an input mode.
 4. Select the source of crystallographic metadata.
-5. Use **Validate HKL** to verify the reflection-data interpretation.
-6. Use **Analyze completeness** to inspect resolution-dependent data quality.
+5. Use **View data** to verify the reflection-data interpretation.
+6. Use **Analyze data** to inspect resolution-dependent data quality.
 7. Configure the reconstruction workflow and optional processing steps.
 8. If SharpED is enabled, enter an API token and select a model.
 9. Click **Run phasing**.
@@ -159,7 +159,7 @@ powder repartitioning or suspect-intensity correction in result provenance.
 
 ### HKL Validation
 
-**Validate HKL** checks how the selected reflection file is parsed and reports, among other items:
+**View data** checks how the selected reflection file is parsed and reports, among other items:
 
 - parsed and unique reflection counts,
 - σ(Fobs) availability,
@@ -169,7 +169,7 @@ powder repartitioning or suspect-intensity correction in result provenance.
 
 ### HKL Completeness
 
-**Analyze completeness** provides:
+**Analyze data** provides:
 
 - completeness vs. `sinθ/λ`,
 - mean `I/σ(I)` vs. `sinθ/λ`,

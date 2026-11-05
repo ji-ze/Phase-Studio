@@ -96,7 +96,7 @@ def _top(win, dialog, result, report, completeness=False):
     subtitle = report.data_type
     if 'synthetic' in report.source_note.lower():
         subtitle += ' · SYNTHETIC CONTROLLED FIXTURE'
-    layout.addWidget(win._diagnostic_header('HKL COMPLETENESS' if completeness else 'HKL VALIDATION',subtitle,status,compact=True))
+    layout.addWidget(win._diagnostic_header('ANALYZE DATA' if completeness else 'VIEW DATA',subtitle,status,compact=True))
     top = QWidget()
     body = QVBoxLayout(top)
     body.setContentsMargins(0,0,0,0)
@@ -898,7 +898,7 @@ def validation_dialog(win, result):
     report = presentation_report(result)
     dialog = QDialog(win)
     dialog.setObjectName('hklValidationDialog')
-    dialog.setWindowTitle('HKL Validation')
+    dialog.setWindowTitle('View data')
     layout = _top(win,dialog,result,report)
     integrity_keys = ('systematic_absent_entries','exact_duplicate_entries','conflicting_duplicate_groups',
                       'invalid_values','invalid_auxiliary','rejected_records','invalid_indices','invalid_reciprocal_values',

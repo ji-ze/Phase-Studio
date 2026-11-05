@@ -5,6 +5,7 @@ title: Phase Studio
 version: 2.0.7
 authors:
   - family-names: Zelenka
+    email: zelenka@fzu.cz
     given-names: Jiří
     affiliation: "Fyzikální ústav AV ČR, v. v. i. (Institute of Physics of the Czech Academy of Sciences)"
 repository-code: "https://github.com/ji-ze/Phase-Studio"

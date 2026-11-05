@@ -31,15 +31,15 @@ Input composition is the Superflip search composition. EDMA ASU composition is c
 
 A **Reference model** is evaluation/metadata context; **Initial model (cycle 1)** supplies a deliberate seed. An initial model may change cycle 1 from random phases. Later-cycle provenance identifies the actual reused source; cycle number alone cannot prove which seed was used.
 
-<!-- PAGE {"title": "2 · Validate HKL before phasing", "image": "screenshots/workflow/hkl-validation.png", "crop": "validation"} -->
-Validate HKL reports how rows/columns, uncertainties, phases and symmetry-unique reflections were interpreted. Check the selected layout and samples, not only a green status.
+<!-- PAGE {"title": "2 · View data before phasing", "image": "screenshots/workflow/hkl-validation.png", "crop": "validation"} -->
+View data reports how rows/columns, uncertainties, phases and symmetry-unique reflections were interpreted. Check the selected layout and samples, not only a green status.
 
 Amplitude formats use F and σ(F); intensity formats use I and σ(I). Intensity is converted to amplitude when required by crystallographic comparisons; phase-bearing formats keep their specified convention. FWHM formats store a peak width and do not supply a significance uncertainty.
 
 Standalone manual metadata needs positive cell lengths, angles strictly between 0° and 180°, a resolvable space group and composition. Manual empty/Not set values are not physical metadata.
 
 <!-- PAGE {"title": "3 · Understand completeness", "image": "screenshots/workflow/hkl-completeness.png"} -->
-Analyze completeness enumerates theoretical symmetry-unique reflections within the observed reciprocal-space/resolution bounds and compares observed unique coverage in sinθ/λ bins. It reports dmin and the available coverage/statistical summaries, including the 98% cumulative point where defined.
+Analyze data enumerates theoretical symmetry-unique reflections within the observed reciprocal-space/resolution bounds and compares observed unique coverage in sinθ/λ bins. It reports dmin and the available coverage/statistical summaries, including the 98% cumulative point where defined.
 
 Intensity/uncertainty curves depend on the selected format and available uncertainty. A width column cannot substitute for σ(I). Coverage outside the analyzed bounds is not demonstrated by the plot.
 

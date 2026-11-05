@@ -11,6 +11,9 @@ from unittest.mock import patch
 
 
 def run(directory):
+    if os.environ.get('PHASE_STUDIO_INPUT_UI_ACCEPTANCE')=='1':
+        from .input_ui_acceptance import run as run_input_ui
+        return run_input_ui(directory)
     if os.environ.get('PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'):
         from .map_loading_acceptance import run as run_map_loading
         return run_map_loading(directory,os.environ['PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'])

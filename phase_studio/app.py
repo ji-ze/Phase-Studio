@@ -1218,6 +1218,8 @@ class HklAnalysis:
     source_note: str
     diagnostics: object = None
     format_verified: bool = True
+    d_full_100: Optional[float] = None
+
 
 @dataclass
 class HklAnalysisRequest:
@@ -3154,6 +3156,7 @@ def analyze_hkl_data(
         )
     theory_sorted = sorted((stl, key) for key, stl in theory_stl_by_key.items())
     d_full_98: Optional[float] = None
+    d_full_100: Optional[float] = None
     theory_idx = 0
     theory_cum_count = 0
     observed_cum_count = 0
@@ -3168,6 +3171,8 @@ def analyze_hkl_data(
             if observed_stl is not None and observed_stl <= edge + 1e-12:
                 observed_cum_count += 1
             theory_idx += 1
+        if theory_cum_count and observed_cum_count == theory_cum_count:
+            d_full_100 = 1.0 / (2.0 * edge) if edge > 0 else None
         if theory_cum_count and 100.0 * observed_cum_count / theory_cum_count >= 98.0:
             d_full_98 = 1.0 / (2.0 * edge) if edge > 0 else None
     analysis = HklAnalysis(
@@ -3180,6 +3185,7 @@ def analyze_hkl_data(
         reflections_unique=unique,
         d_min=d_min,
         d_full_98=d_full_98,
+        d_full_100=d_full_100,
         bins=bins,
         source_note=source_note,
         format_verified=_loaded.format_verified if _loaded is not None else format_verified,
@@ -9060,7 +9066,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>1. Select the input</h3>
             <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
             <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana2020 .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
-            <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
+            <p>For external reflections, select the exact HKL column order first. Use <b>View data</b> to verify how columns were parsed and <b>Analyze data</b> to inspect completeness and data quality before reconstruction.</p>
             <h3>2. Choose a reconstruction preset</h3>
             <p><b>Workflow preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
             <ul><li><b>Recommended</b> (default): a general-purpose baseline that matches the built-in defaults.</li>
@@ -9088,7 +9094,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
             <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
             <p><b>HKL format</b> is the exact displayed column order. <b>Set from .inflip</b> imports Jana's dataformat. For example, <b>h k l · F · phase · σ(F)</b> means Miller indices, amplitude, phase in degrees, and amplitude uncertainty. FWHM formats contain peak width rather than measurement uncertainty, so validation and completeness show intensity and peak width separately; no uncertainty-based significance is inferred.</p>
-            <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
+            <p><b>View data</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze data</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
             <h3>Crystal metadata</h3>
             <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana2020 .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
             <p>When <b>Manual</b> is selected: <b>a, b, c</b> (&Aring;) and <b>alpha, beta, gamma</b> (&deg;) are the unit-cell parameters; <b>Number</b> (1-230) or <b>Symbol</b> identifies the space group; <b>Composition</b> uses Superflip syntax, for example <code>Ag196 S108 O40 B1000</code>.</p>
@@ -9153,23 +9159,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             developer ONEDIR package containing Phase_studio.exe and its complete _internal runtime. Do not replace the scientific Superflip executable.</p>
         """)
         self._add_back_to_contents(jana_integration_layout)
-        about_layout = self._add_help_section(basic_help_tab, "about", "About Phase Studio", f"""
-            <h2>Phase Studio</h2>
-            <p>Phase Studio is a crystallographic reconstruction workflow integrating Superflip, SharpED and EDMA with Jana2020-oriented workflows.</p>
-            <h3>Developed at</h3>
-            <p>Department of Structure Analysis<br>Institute of Physics of the Czech Academy of Sciences</p>
-            <h3>Phase Studio author and lead developer</h3>
-            <p><b>Jiří Zelenka</b><br><a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>
-            <p>Fyzikální ústav AV ČR, v. v. i. (Institute of Physics of the Czech Academy of Sciences).</p>
-            <p>Phase Studio is free open-source software under the MIT license. Scientific publications reporting work performed with Phase Studio should cite Jiří Zelenka, Phase Studio, version {__version__}, <a href="https://github.com/ji-ze/Phase-Studio">the software repository</a>. Citation is the project's scientific-attribution policy, separate from the MIT license.</p>
-            <h3>SharpED developers — separate hosted service</h3>
-            <p><b>Jiří Zelenka</b></p>
-            <p><b>Jan Rohlíček</b><br><a href="mailto:rohlicek@fzu.cz">rohlicek@fzu.cz</a></p>
-            <p><b>Monika Kučeráková</b></p><p><b>Zdeněk Buk</b></p>
-            <p>SharpED account, personal API token and the applicable access entitlement/service terms are required for inference. A free Phase Studio license does not include a SharpED subscription or free inference entitlement.</p>
-            <p><b>General contact</b><br><a href="mailto:sharped@fzu.cz">sharped@fzu.cz</a></p>
-            <h3>Project resources</h3>
-        """)
+        from phase_studio.legal_content import overview_html
+        about_layout = self._add_help_section(basic_help_tab, "about", "About Phase Studio", overview_html(__version__))
         for resource_name, resource_url, resource_tip in (
             ("Department of Structure Analysis", "https://www.fzu.cz/en/research/divisions-and-departments/division-3/department-19", "Open the department website"),
             ("SharpED project and API token", "https://sharped.fzu.cz/", "Open the SharpED project and API-token page"),
@@ -10251,8 +10242,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if hasattr(hkl_row, "on_change"):
             hkl_row.on_change = self._hkl_path_changed
         hkl_button_row = QHBoxLayout()
-        self.test_hkl_btn = QPushButton("Validate HKL")
-        self.analyze_hkl_btn = QPushButton("Analyze completeness")
+        self.test_hkl_btn = QPushButton("View data")
+        self.analyze_hkl_btn = QPushButton("Analyze data")
         self.test_hkl_btn.setToolTip("Parse the selected HKL or Jana2020 .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
         self.analyze_hkl_btn.setToolTip("Open completeness and data-statistics plots for the selected HKL data.")
         self.test_hkl_btn.clicked.connect(self.test_hkl_load_dialog)
@@ -11916,7 +11907,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return completeness_dialog(self, analysis)
 
     def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
-        dialog = self._build_hkl_completeness_dialog(analysis)
+        from phase_studio.input_analysis_ui import analyze_data_dialog
+        dialog = analyze_data_dialog(self, analysis)
         # The builder fits the work area, then restores and clamps the
         # user's saved geometry. A deferred second fit would overwrite it.
         dialog.exec()
@@ -17622,11 +17614,14 @@ class PhaseStudioSplash(QSplashScreen):
         title_stack.setSpacing(2)
         title = QLabel("PHASE STUDIO")
         title.setObjectName("splashTitle")
+        title.ensurePolished()
         title.setFont(phase_studio_brand_font(title.font()))
+        title.setStyleSheet('font-family: "Science Gothic"; font-weight:400; letter-spacing:0px;')
         title.setProperty("resolvedBrandFontFamily", QFontInfo(title.font()).family())
         subtitle = QLabel(
             '<span style="color:#52658b;">by </span>'
-            '<span style="color:#2264b8; font-weight:600;">SharpED</span>'
+            '<span style="color:#001170; font-family:Science Gothic; font-weight:400;">Sharp</span>'
+            '<span style="color:#1fa5ff; font-family:Science Gothic; font-weight:400;">ED</span>'
         )
         subtitle.setObjectName("splashSubtitle")
         subtitle.setTextFormat(Qt.RichText)
