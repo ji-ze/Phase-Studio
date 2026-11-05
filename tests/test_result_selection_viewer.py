@@ -9,6 +9,8 @@ from unittest.mock import patch
 import numpy as np
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+if os.name == "nt":
+    os.environ["QT_QPA_FONTDIR"] = str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "Fonts")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -68,7 +70,7 @@ _atom_site_fract_z
 
 
 def main():
-    from PySide6.QtCore import QPoint, QRect, Qt
+    from PySide6.QtCore import QPoint, QRect, Qt, QSettings
     from PySide6.QtWidgets import QApplication, QDialog, QSizePolicy
     import phase_studio.app as appmod
     import phase_studio.autosolve_window as viewer
@@ -76,6 +78,13 @@ def main():
     import test_jana_completion as tjc
 
     app = QApplication.instance() or QApplication([sys.argv[0]])
+    # This authority tests independent molecule geometry, not a workstation's
+    # saved comparison frame. Keep its writes out of real user preferences.
+    settings_root = Path(tempfile.mkdtemp()) / 'settings'
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(settings_root))
+    app._phase_comparison_policy = 'independent'
+    check('authority uses an explicit independent comparison frame', app._phase_comparison_policy == 'independent')
     appmod.IterativeSuperflipPipelineQtGUI.save_settings = lambda self: None
     appmod.IterativeSuperflipPipelineQtGUI.load_settings = lambda self: None
     appmod.IterativeSuperflipPipelineQtGUI.refresh_sharped_models = lambda self: None
