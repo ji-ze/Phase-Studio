@@ -266,3 +266,31 @@ they do not constitute final acceptance. Two native Windows credential/path-lock
 checks subsequently passed outside sandbox restrictions. Final acceptance must
 rerun the entire suite after the diagnostic/guard corrections in that native
 environment; no skips or relaxed scientific tolerances substitute for it.
+
+### Confirmed P0: fitting the holdout scale to the holdout itself
+
+Both the legacy `compute_rfree` helper and map-quality R_free fitted a separate
+least-squares scale using free-set amplitudes. This consumes test information
+and can conceal an amplitude prediction error completely. In an independent
+six-frequency density fixture, work predictions are exact and every free
+prediction is twice its observation. Work-only scale is 1 and free R must be 1;
+the old map metric instead returned approximately 1.37e-7 (text-map rounding
+around an incorrectly perfect zero). This is a computational defect, not a label
+correction. [REFMAC's scaling documentation](https://www.ccp4.ac.uk/html/refmac5/keywords/xray-principal.html)
+specifies working-set scaling by default; the application offers no deliberate
+free-set scaling policy.
+
+The corrected paths evaluate free residuals at the scale fitted solely from work
+reflections. Missing/undefined work scale gives an unavailable R_free rather
+than fitting it from free data. The existing minimum of three free reflections
+remains. Independent map FFT and exact prediction tests check work/free scale
+differences, perturbed free observations, R_free greater than 1 and absent work
+data. The five focused tests pass. Work/measured amplitude metrics, correlations,
+triplet/reference metrics and ranking definitions are unchanged; holdout-based
+scores and recommendations may legitimately change. Historical no-holdout replay
+does not validate this correction by itself.
+
+Snapshot 047115e completed the full suite: 823 passed, four skipped and 37 subtests
+passed in 640.34 seconds. Its build controller was stopped before distribution
+acceptance when this additional independently reproduced scale defect was found.
+That passing snapshot is historical evidence, not final validation of the new fix.

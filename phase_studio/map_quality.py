@@ -273,6 +273,22 @@ def scaled_amplitude_metrics(observed: Sequence[float], calculated: Sequence[flo
     return ScaledAmplitudeMetrics(r_factor, correlation, scale, len(pairs))
 
 
+def amplitude_r_factor_at_scale(observed, calculated, scale):
+    """Evaluate held-out amplitudes without fitting parameters to the free set."""
+    if scale is None or not np.isfinite(scale) or scale < 0:
+        return None
+    pairs=[(float(fo),float(fc)) for fo,fc in zip(observed,calculated)
+           if np.isfinite(fo) and np.isfinite(fc) and fo>=0 and fc>=0]
+    if not pairs:
+        return None
+    fo=np.asarray([p[0] for p in pairs],dtype=np.float64)
+    fc=np.asarray([p[1] for p in pairs],dtype=np.float64)
+    denominator=float(np.sum(fo))
+    if denominator<=1e-15:
+        return None
+    return float(np.sum(np.abs(fo-float(scale)*fc))/denominator)
+
+
 @dataclass(frozen=True)
 class MapQualityMetrics:
     reference_f05: Optional[float] = None
@@ -482,7 +498,11 @@ def compute_map_quality(
         amplitude_scale=measured_metrics.scale,
         r_work=work_metrics.r_factor,
         # Preserve the existing R_free minimum-sample rule.
-        r_free=free_metrics.r_factor if free_metrics.count >= 3 else None,
+        r_free=amplitude_r_factor_at_scale(
+            [r.amplitude for r in context.free_reflections if r.hkl in amplitudes],
+            [amplitudes[r.hkl] for r in context.free_reflections if r.hkl in amplitudes],
+            work_metrics.scale,
+        ) if free_metrics.count >= 3 else None,
         cc_work=work_metrics.correlation,
         cc_free=free_metrics.correlation,
         triplet_c3=triplet_c3,

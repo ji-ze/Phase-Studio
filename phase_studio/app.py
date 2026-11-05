@@ -81,6 +81,7 @@ try:
         profile_definition,
         recommend_best_result,
         scaled_amplitude_metrics,
+        amplitude_r_factor_at_scale,
         with_holdout_metrics,
         with_reference_metrics,
     )
@@ -97,6 +98,7 @@ except Exception:
         profile_definition,
         recommend_best_result,
         scaled_amplitude_metrics,
+        amplitude_r_factor_at_scale,
         with_holdout_metrics,
         with_reference_metrics,
     )
@@ -3664,23 +3666,25 @@ def select_omit_test_set(reflections: Sequence[Reflection], seed_text: str, frac
 
 def compute_rfree(reflections: Sequence[Reflection], test_hkls: FrozenSet[Tuple[int, int, int]], data_mode: str, predictions: Dict[Tuple[int, int, int], Tuple[float, float]]) -> Optional[float]:
     """Crystallographic R_free: sum(|Fobs - k*Fcalc|) / sum(|Fobs|) over only the
-    excluded test-set reflections, with k the least-squares scale factor between
-    them. Fcalc/phase_calc come from `predictions` (see xplor_fft_predictions),
+    excluded test-set reflections, with k fitted only to the working set.
+    Fcalc/phase_calc come from `predictions` (see xplor_fft_predictions),
     read from a map that never saw the test set during reconstruction."""
     fobs: List[float] = []
     fcalc: List[float] = []
+    work_fobs: List[float] = []
+    work_fcalc: List[float] = []
     for r in reflections:
         hkl = (int(r.h), int(r.k), int(r.l))
-        if hkl not in test_hkls:
-            continue
         prediction = predictions.get(hkl)
         if prediction is None:
             continue
-        fobs.append(math.sqrt(reflection_value_as_intensity(r, data_mode)))
-        fcalc.append(math.sqrt(max(0.0, prediction[0])))
+        target_observed,target_calculated=(fobs,fcalc) if hkl in test_hkls else (work_fobs,work_fcalc)
+        target_observed.append(math.sqrt(reflection_value_as_intensity(r, data_mode)))
+        target_calculated.append(math.sqrt(max(0.0, prediction[0])))
     if len(fobs) < 3:
         return None
-    return scaled_amplitude_metrics(fobs, fcalc).r_factor
+    scale=scaled_amplitude_metrics(work_fobs,work_fcalc).scale
+    return amplitude_r_factor_at_scale(fobs,fcalc,scale)
 
 
 def select_orbit_safe_holdout(
