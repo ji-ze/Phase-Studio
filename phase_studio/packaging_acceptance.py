@@ -237,6 +237,14 @@ def _check_scientific_interchange(a, report, directory):
     report['scientific_interchange']={'execution':'actual bundled NumPy FFT and native-format parsing',
         'off_origin_phase_deg':phase,'intensity':intensity,'native_phase_deg':row.phase,
         'native_dummy_uncertainty':row.sigma,'live_inference':False}
+    x=np.arange(32)
+    coefficients=[1.,2.,3.,2.,4.,6.]
+    density=sum(2*fc*np.cos(2*np.pi*h*x/32)/32 for h,fc in enumerate(coefficients,1))
+    measured=[a.FrozenReflection(h,0,0,fo) for h,fo in enumerate([1.,2.,3.,1.,2.,3.],1)]
+    context=a.make_validation_context(measured,free_hkls=[(h,0,0) for h in (4,5,6)])
+    metrics=a.compute_map_quality(density,(32,0,31,1,0,0,1,0,0),(10,10,10,90,90,90),'ZYX',context)
+    assert abs(metrics.r_work)<1e-12 and abs(metrics.r_free-1)<1e-12
+    report['scientific_interchange']['work_scaled_free_r']=metrics.r_free
 
 
 def _check_feedback_significance(a, backend, wizard, report, directory, snap):

@@ -411,12 +411,14 @@ class SplitDistributionTests(unittest.TestCase):
                 old['resolve_hkl_analysis_inputs']=functions(native_text)['resolve_hkl_analysis_inputs']
                 boundary_text=subprocess.check_output([git,'show','2232071:phase_studio/app.py'],cwd=ROOT).decode('utf8')
                 old['assign_powder_overlap_groups']=functions(boundary_text)['assign_powder_overlap_groups']
+                holdout_text=subprocess.check_output([git,'show','8a40fa1:phase_studio/app.py'],cwd=ROOT).decode('utf8')
+                old['compute_rfree']=functions(holdout_text)['compute_rfree']
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
                         "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record",
                         # Explicitly extended for immutable validation holdouts;
                         # the existing correction formula remains unchanged.
-                        "apply_map_feedback_to_reflections", "compute_rfree", "atom_recall_precision",
+                        "apply_map_feedback_to_reflections", "atom_recall_precision",
                         # Explicit profile-aware per-cycle/source reporting.
                         "write_metrics_csv"}
             if filename == "jana_superflip.py":

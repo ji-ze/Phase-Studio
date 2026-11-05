@@ -125,13 +125,24 @@ def test_persisted_export_is_read_only_and_redacts_sensitive_fields(tmp_path):
     assert 'a'*64 in combined and '1.25' in combined and source.read_bytes()==before
 
 
-def test_numerical_metrics_and_recommendation_bodies_unchanged():
+def test_metric_bodies_only_change_reviewed_holdout_scale():
     import ast,subprocess
     old=subprocess.check_output(['git','show','62582d2:phase_studio/map_quality.py'],text=True)
     current=Path(a.__file__).with_name('map_quality.py').read_text(encoding='utf8')
     def funcs(text):return {n.name:ast.dump(n,include_attributes=False) for n in ast.parse(text).body if isinstance(n,ast.FunctionDef)}
     before,after=funcs(old),funcs(current)
-    for name in ('scaled_amplitude_metrics','compute_map_quality','recommend_best_result'):assert before[name]==after[name]
+    for name in ('scaled_amplitude_metrics','recommend_best_result'):assert before[name]==after[name]
+    reviewed=subprocess.check_output(['git','show','8a40fa1:phase_studio/map_quality.py'],text=True)
+    reviewed_functions=funcs(reviewed)
+    for name in ('compute_map_quality','amplitude_r_factor_at_scale'):
+        assert after[name]==reviewed_functions[name]
+    get=lambda text:next(n for n in ast.parse(text).body if isinstance(n,ast.FunctionDef) and n.name=='compute_map_quality')
+    old_node,new_node=get(old),get(current)
+    free_keyword=lambda node:[n for n in ast.walk(node) if isinstance(n,ast.keyword) and n.arg=='r_free']
+    before_free,after_free=free_keyword(old_node),free_keyword(new_node)
+    assert len(before_free)==len(after_free)==1
+    before_free[0].value=after_free[0].value
+    assert ast.dump(old_node)==ast.dump(new_node)  # Every other metric expression stays historical.
 
 
 @pytest.mark.parametrize('scale',['1','1.25','1.5','2'])
