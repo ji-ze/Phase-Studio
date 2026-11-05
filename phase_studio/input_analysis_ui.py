@@ -1,6 +1,7 @@
 """Unified data analysis, reusing the immutable diagnostic authority."""
 from pathlib import Path
 import math
+import json
 import numpy as np
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget,
@@ -9,7 +10,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTabWi
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from .input_analysis import (analysis_rows, significance_cutoff, strict_full_resolution,
-                             export_rows, CUTOFF_METHOD, CC_UNAVAILABLE, import_half_dataset_statistics)
+                             export_rows, CUTOFF_METHOD, CC_UNAVAILABLE, import_half_dataset_statistics,
+                             analysis_payload, grouped_resolution_markers)
 from .hkl_diagnostics_ui import (presentation_report, _detail_dialog, number, _overlap_metrics,
                                  overlap_group_dialog, _PlotHover, _BinPoint)
 
@@ -90,7 +92,8 @@ def analyze_data_dialog(win, analysis):
     pages[1].insertWidget(0,definitions)
     for threshold,limit in limits.items():
         if limit:
-            note(1,f'Mean I/σ(I) = {threshold}: {limit["d"]:.7g} Å; adjacent-shell bracket {limit["d_low"]} to {limit["d_high"]} Å (not a confidence interval).')
+            upper = str(limit['d_high']) if limit['d_high'] is not None else '∞'
+            note(1,f'Mean I/σ(I) = {threshold}: {limit["d"]:.7g} Å; adjacent-shell bracket {limit["d_low"]} to {upper} Å (not a confidence interval).')
     note(1,CC_UNAVAILABLE)
     external_status = note(6,'External half-dataset statistics may be imported with source, method and independence evidence. The application validates the interchange, not the truth of the producer’s provenance claim.')
     import_cc = QPushButton('Import external CC1/2 statistics')
@@ -243,7 +246,7 @@ def analyze_data_dialog(win, analysis):
                 if axis_mode.currentIndex()==0: ax.invert_xaxis()
                 ax.set_ylabel(selected_key.replace('_',' '))
                 markers = [('d_min',analysis.d_min),('d98',analysis.d_full_98),('d_full',d_full)] + [(f'I/σ={n}',limits[n]['d'] if limits[n] else None) for n in (2,3)]
-                for label,d in markers:
+                for label,d in grouped_resolution_markers(markers):
                     if d and math.isfinite(d):
                         position = d if axis_mode.currentIndex()==0 else 1/(2*d)
                         ax.axvline(position,linestyle=':',alpha=.4,label=label)
@@ -279,7 +282,8 @@ def analyze_data_dialog(win, analysis):
         if not external_cc: return
         cc_rows = [dict(r,center=(r['lo']+r['hi'])/2,mean_significance=r['cc_half'],significance_count=r['paired_orbits']) for r in external_cc['shells']]
         limit = significance_cutoff(cc_rows,cc_threshold.value())
-        cc_limit.setText('Imported CC1/2 criterion: '+(f'{limit["d"]:.7g} Å · bracket {limit["d_low"]} to {limit["d_high"]} Å' if limit else 'Unavailable — no supported sustained crossing.'))
+        upper = str(limit['d_high']) if limit and limit['d_high'] is not None else '∞'
+        cc_limit.setText('Imported CC1/2 criterion: '+(f'{limit["d"]:.7g} Å · bracket {limit["d_low"]} to {upper} Å' if limit else 'Unavailable — no supported sustained crossing.'))
     import_cc.clicked.connect(update_cc_limit)
     cc_threshold.valueChanged.connect(update_cc_limit)
     tabs.currentChanged.connect(render)
@@ -287,6 +291,13 @@ def analyze_data_dialog(win, analysis):
         for index in tuple(rendered): render(index,True)
     for control in (axis_mode,frequency,counts,plot_pair,histogram_range): control.currentIndexChanged.connect(refresh)
     buttons = QHBoxLayout()
+    json_button = QPushButton('Export diagnostics JSON')
+    def save_diagnostics():
+        filename,_ = QFileDialog.getSaveFileName(dialog,'Export diagnostics','','JSON (*.json)')
+        if filename:
+            Path(filename).write_text(json.dumps(analysis_payload(analysis,report,rows,limits,external_cc),indent=2,ensure_ascii=False,allow_nan=False),encoding='utf8')
+    json_button.clicked.connect(save_diagnostics)
+    buttons.addWidget(json_button)
     csv_button = QPushButton('Export graph data CSV')
     def save_csv():
         filename,_ = QFileDialog.getSaveFileName(dialog,'Export analysis data','','CSV (*.csv)')

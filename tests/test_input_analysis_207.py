@@ -8,7 +8,8 @@ import pytest
 import gemmi
 from phase_studio import app as a
 from phase_studio.input_analysis import (analysis_rows, significance_cutoff,
-    strict_full_resolution, export_rows, import_half_dataset_statistics)
+    strict_full_resolution, export_rows, import_half_dataset_statistics, analysis_payload,
+    grouped_resolution_markers)
 from phase_studio.hkl_diagnostics_ui import presentation_report
 import test_hkl_diagnostics as fixtures
 
@@ -153,3 +154,20 @@ def test_existing_analysis_math_unchanged_except_new_strict_coverage():
             node.keywords=[k for k in node.keywords if k.arg!='d_full_100']
     assert removed==1
     assert ast.dump(current)==ast.dump(old)
+
+
+def test_coincident_marker_labels_and_complete_export(fixture):
+    markers=grouped_resolution_markers([('d_min',1.2),('d98',1.2),('d_full',1.2),('absent',None)])
+    assert markers==[['d_min / d98 / d_full',1.2]]
+    load=fixture.load('1 2 1 10 .02\n')
+    analysis=a.analyze_hkl_data(load.hkl_path,load.data_mode,load.cell,load.spacegroup,load.spacegroup_hm,_loaded=load)
+    report=presentation_report(analysis)
+    rows=analysis_rows(analysis,report)
+    payload=analysis_payload(analysis,report,rows,{2:None,3:None})
+    serialized=json.loads(json.dumps(payload,allow_nan=False))
+    assert serialized['resolution']['d_min']==analysis.d_min
+    assert serialized['resolution']['d98']==analysis.d_full_98
+    assert serialized['resolution']['d_full']==analysis.d_full_100
+    assert serialized['shells']==rows
+    assert serialized['diagnostics']['counts']==[list(v) for v in report.counts]
+    assert serialized['external_half_dataset_statistics'] is None

@@ -5,6 +5,7 @@ No filtering or reconstruction configuration changes occur in this module.
 import csv
 import math
 import json
+from dataclasses import asdict
 import numpy as np
 
 CC_UNAVAILABLE = 'CC1/2 unavailable — unmerged observations or validated half-dataset statistics required.'
@@ -102,3 +103,27 @@ def import_half_dataset_statistics(path):
             raise ValueError('Each CC1/2 shell requires at least three independently paired orbits.')
         previous = hi
     return data
+
+
+def analysis_payload(analysis, report, rows, limits, external_cc=None):
+    """One full-precision diagnostic export, including original advanced fields."""
+    return dict(diagnostics=asdict(report),
+        crystal=dict(cell=list(analysis.cell.parameters),spacegroup=analysis.spacegroup_hm),
+        resolution=dict(d_min=analysis.d_min,d98=analysis.d_full_98,d_full=analysis.d_full_100,
+                        significance_cutoffs=limits,cutoff_method=CUTOFF_METHOD),
+        shells=rows,external_half_dataset_statistics=external_cc or None,
+        external_independence_verified_by_application=False)
+
+
+def grouped_resolution_markers(markers):
+    """Combine coincident display labels; diagnostic numerical values stay separate."""
+    groups=[]
+    for label,d in markers:
+        if not d or not math.isfinite(d):continue
+        for group in groups:
+            if math.isclose(group[1],d,rel_tol=1e-10,abs_tol=1e-12):
+                group[0]+=' / '+label
+                break
+        else:
+            groups.append([label,d])
+    return groups
