@@ -413,6 +413,8 @@ class SplitDistributionTests(unittest.TestCase):
                 old['assign_powder_overlap_groups']=functions(boundary_text)['assign_powder_overlap_groups']
                 holdout_text=subprocess.check_output([git,'show','8a40fa1:phase_studio/app.py'],cwd=ROOT).decode('utf8')
                 old['compute_rfree']=functions(holdout_text)['compute_rfree']
+                export_text=subprocess.check_output([git,'show','7011573:phase_studio/app.py'],cwd=ROOT).decode('utf8')
+                old['write_superflip_input']=functions(export_text)['write_superflip_input']
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
                         "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record",

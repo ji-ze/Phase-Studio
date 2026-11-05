@@ -141,6 +141,9 @@ def check_ui():
             assert QToolTip.isVisible()
             tooltip = next(t for t in app.topLevelWidgets() if t.windowType() == Qt.ToolTip and t.isVisible())
             assert tooltip.height() < 45 and tooltip.width() < 500, tooltip.size().toTuple()
+            # End the synthetic hover before requesting hide: otherwise Qt may
+            # deliver its pending hover-tooltip event during the hide wait.
+            QTest.mouseMove(w.dialog,QPoint(2,2))
             QToolTip.hideText()
             QTest.qWait(350)
             assert not QToolTip.isVisible()
