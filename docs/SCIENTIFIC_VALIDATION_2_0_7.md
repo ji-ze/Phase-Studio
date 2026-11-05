@@ -54,6 +54,42 @@ Evidence and reproducible probes are under ignored
 Primary references: [Gemmi scattering documentation](https://gemmi.readthedocs.io/en/stable/scattering.html)
 and the [Superflip manual](https://superflip.fzu.cz/download/superflip_user_manual.pdf).
 
+## Confirmed P0: missing completion reintroduced excluded orbits
+
+Missing-reflection completion excluded only exact holdout HKL and had no space
+group argument. With actual FFT predictions from a controlled map it added
+`(-1,0,0)` while `(1,0,0)` was held out, together with forbidden P21 reflections
+`(0,-1,0)` and `(0,1,0)`. This contaminates the independence of the holdout and
+violates systematic extinctions. Symmetry-equivalent spellings of measured HKL
+could also be counted as new missing measurements.
+
+The correction passes the actual run space group into completion, rejects its
+systematic absences, excludes entire measured and holdout symmetry/Friedel
+orbits, and adds at most one representative of each remaining orbit. Predicted
+records still receive no fabricated measurement uncertainty. The regression uses
+an intentionally symmetry-inconsistent real density file: forbidden map signal
+must not make a forbidden reflection eligible. No API or FFT mock is involved.
+
+## Native execution and powder conservation checks so far
+
+New real Superflip FOURIER and twelve-cycle CF executions completed for each of
+I/sigma, F/sigma, phased I/sigma, phased F/sigma, I/FWHM and F/FWHM. Each CF map
+was processed by actual EDMA at thresholds 0.5 and 2.0 sigma: twelve EDMA
+executions. These sparse P1 fixtures establish native execution compatibility,
+finite map output and parseable CIF output, not successful experimental structure
+solution, correct chemical assignments or interactive Jana acceptance.
+
+Twenty-four additional overlap cases cover I/FWHM and F/FWHM, mix 0/0.25/1,
+zero members, zero map signal and extreme intensity ratios. The independent
+oracle directly sums the serialized density with complex exponentials, without
+calling the application's FFT predictor. Both redistributed member intensities
+and group totals are recomputed from the actual written HKL, squaring F where
+appropriate. Bounds follow seven-decimal column rounding: 5e-8 for I and
+`2*F*5e-8 + (5e-8)^2` for intensity derived from F, plus a total-scaled 1e-12
+floating-point allowance. The six-digit XPLOR serialization measurably perturbs
+weak Fourier components in high-dynamic-range maps; the oracle therefore uses
+the actual serialized map, retaining the strict output-rounding bound.
+
 ## Acceptance boundaries
 
 The previous snapshot `51a2c40` completed 735 pytest tests with 4 skipped and 37

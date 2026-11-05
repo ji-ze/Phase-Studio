@@ -3869,6 +3869,7 @@ def apply_map_feedback_to_reflections(
     intensity_max_i_over_sigma: float,
     log: Callable[[str], None],
     excluded_hkls: FrozenSet[Tuple[int, int, int]] = frozenset(),
+    spacegroup: Optional[gemmi.SpaceGroup] = None,
 ) -> Tuple[List[Reflection], Optional[float]]:
     """Returns (updated_reflections, intensity_correction_avg_change_percent),
     the latter being the mean, across reflections actually corrected this
@@ -3928,9 +3929,23 @@ def apply_map_feedback_to_reflections(
     if add_missing and missing_percent_limit > 0:
         max_add = int(math.floor(len(current) * max(0.0, float(missing_percent_limit)) / 100.0))
         if max_add > 0:
+            # A missing measurement is a missing symmetry/Friedel orbit, not
+            # merely an absent spelling of an HKL. In particular, never leak a
+            # held-out orbit back into the reconstruction through its mate.
+            sg = spacegroup if spacegroup is not None else gemmi.SpaceGroup('P 1')
+            operations = list(sg.operations())
+            def orbit_key(hkl):
+                equivalents = []
+                for operation in operations:
+                    mate = tuple(int(v) for v in operation.apply_to_hkl(hkl))
+                    equivalents.extend((mate, tuple(-v for v in mate)))
+                return min(equivalents)
+            unavailable_orbits = {orbit_key(key) for key in excluded_hkls}
+            unavailable_orbits.update(orbit_key((int(r.h), int(r.k), int(r.l))) for r in current)
             candidates = [
                 hkl for hkl in candidate_missing_hkls_from_bounds(current, cell, resolution_d_min)
-                if hkl not in excluded_hkls
+                if orbit_key(hkl) not in unavailable_orbits
+                and not sg.operations().is_systematically_absent(hkl)
             ]
             candidate_predictions = xplor_fft_predictions(feedback_map, candidates)
             ranked = sorted(candidate_predictions.items(), key=lambda item: item[1][0], reverse=True)
@@ -3939,13 +3954,14 @@ def apply_map_feedback_to_reflections(
             for key, (raw_i, phase) in ranked:
                 if added >= max_add:
                     break
-                if key in existing or raw_i <= 0:
+                if key in existing or orbit_key(key) in unavailable_orbits or not math.isfinite(raw_i) or raw_i <= 0:
                     continue
                 intensity = raw_i * scale
                 value = value_from_intensity(intensity, mode)
                 sigma = None  # A map prediction has no measured uncertainty or peak width.
                 new_reflections.append(Reflection(key[0], key[1], key[2], value, sigma, phase if reflection_mode_has_phase(mode) else None))
                 existing.add(key)
+                unavailable_orbits.add(orbit_key(key))
                 added += 1
             current = new_reflections
     log(
@@ -17325,6 +17341,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                                 cfg.map_feedback_intensity_max_i_over_sigma,
                                 self.log,
                                 excluded_hkls=state.omit_test_hkls,
+                                spacegroup=ref_ctx.spacegroup,
                             )
                         if redistribute:
                             feedback_reflections, powder_change = redistribute_overlap_reflections(
