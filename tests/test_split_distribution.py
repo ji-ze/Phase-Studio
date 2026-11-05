@@ -406,8 +406,9 @@ class SplitDistributionTests(unittest.TestCase):
                 semantics_functions=functions(semantics_text)
                 for name in ('merge_duplicate_reflections','extract_embedded_hkl_from_inflip'):
                     old[name]=semantics_functions[name]
-                native_text=subprocess.check_output([git,'show','551e5ab:phase_studio/app.py'],cwd=ROOT).decode('utf8')
+                native_text=subprocess.check_output([git,'show','12559f2:phase_studio/app.py'],cwd=ROOT).decode('utf8')
                 old['extract_embedded_hkl_from_inflip']=functions(native_text)['extract_embedded_hkl_from_inflip']
+                old['resolve_hkl_analysis_inputs']=functions(native_text)['resolve_hkl_analysis_inputs']
                 boundary_text=subprocess.check_output([git,'show','2232071:phase_studio/app.py'],cwd=ROOT).decode('utf8')
                 old['assign_powder_overlap_groups']=functions(boundary_text)['assign_powder_overlap_groups']
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
