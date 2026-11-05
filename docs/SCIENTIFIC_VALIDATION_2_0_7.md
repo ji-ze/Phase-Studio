@@ -116,6 +116,30 @@ fields. Conversion now accepts the phase-bearing five-field input. Four focused
 dummy/phase cases failed before and pass after correction. Full-suite validation
 of these latest changes remains required.
 
+XPLOR reading accepted non-ZYX axes and nonzero grid origins but interpreted the
+flat density as zero-origin ZYX. This can move density and change phases without
+changing dimensions or statistics. Two hand-written nonconstant cubic fixtures
+reproduced silent acceptance. Read and write boundaries now explicitly reject
+unsupported layouts with a conversion instruction; they do not relabel the
+header. Full-cell zero-origin ZYX remains the supported representation used by
+the native and saved fixtures. Arbitrary-axis/submap conversion is not newly
+implemented. Seventy-three focused map, tiling, scaling and numerical checks
+passed after the guard.
+
+An actual-map Map Feedback applicability cross-product exercised eight families
+(six explicit layouts plus uncertainty-free I/F), eight operation combinations
+and thresholds 0/2: 56 executions passed and 72 incompatible configurations were
+rejected correctly. These are local synthetic FFT calculations, not inference
+jobs. Thirty-six further intensity-correction cases independently recompute map
+coefficients and scaling, I/σ(I) versus F/[2σ(F)] gates, and damping 0/0.5/1.
+
+New native EDMA runs on saved real cycle-1 maps produced 127/28 sites from the
+Superflip map and 93/68 sites from the SharpED map at thresholds 0.5/2.0. These
+counts demonstrate threshold-dependent extraction, not chemical correctness or
+new server inference. All 110 original files were hashed before and after and
+remained byte-identical. The saved map's provenance and multipart identity checks
+are separately documented in `FINAL_REVIEW_CORRECTIONS_2_0_7.md`.
+
 ## Acceptance boundaries
 
 The previous snapshot `51a2c40` completed 735 pytest tests with 4 skipped and 37

@@ -29,6 +29,16 @@ def _xplor_numbers(line: str, cast: Callable[[str], object]) -> List[object]:
 XPLOR_FLOAT_RE = re.compile(r"[+-]?(?:(?:\d+\.\d*)|(?:\.\d+)|(?:\d+))(?:[EeDd][+-]?\d+)?")
 
 
+def validate_xplor_layout(grid, axis_order):
+    """The array consumers require a full unit cell with canonical coordinates."""
+    if (str(axis_order).strip().upper() != 'ZYX' or len(grid) != 9 or
+            any(int(grid[index]) <= 0 or int(grid[index+1]) != 0 or
+                int(grid[index+2]) != int(grid[index])-1 for index in (0,3,6))):
+        raise RuntimeError('Unsupported XPLOR map layout: a full-cell zero-origin ZYX map is required. '
+                           'Convert axis order and grid origin with a crystallographic map tool before import; '
+                           'changing the header alone would move density and corrupt phases.')
+
+
 def _xplor_float_values(line: str) -> List[float]:
     text = str(line or "")
     values: List[float] = []
@@ -78,6 +88,7 @@ def read_xplor_map(path: Path) -> XplorMap:
     if i >= len(lines):
         raise RuntimeError(f"Cannot read XPLOR axis order in {path}")
     axis_order = lines[i].strip() or "ZYX"
+    validate_xplor_layout(grid, axis_order)
     i += 1
 
     nx = int(grid[0])
@@ -119,6 +130,7 @@ def read_xplor_map(path: Path) -> XplorMap:
 def write_xplor_map(path: Path, xmap: XplorMap, title: Optional[str] = None, values_per_line: int = 6) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     grid = tuple(int(v) for v in xmap.grid)
+    validate_xplor_layout(grid, xmap.axis_order or 'ZYX')
     nx, ny, nz = grid[0], grid[3], grid[6]
     layer_size = nx * ny
     data = np.asarray(xmap.data, dtype=np.float64).reshape(-1)
