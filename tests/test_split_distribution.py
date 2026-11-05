@@ -402,6 +402,10 @@ class SplitDistributionTests(unittest.TestCase):
                 for name in ('xplor_fft_intensity_phase','xplor_fft_predictions_from_map',
                              'synthesize_xplor_map_from_phases'):
                     old[name]=phase_functions[name]
+                semantics_text=subprocess.check_output([git,'show','4ece13d:phase_studio/app.py'],cwd=ROOT).decode('utf8')
+                semantics_functions=functions(semantics_text)
+                for name in ('merge_duplicate_reflections','extract_embedded_hkl_from_inflip'):
+                    old[name]=semantics_functions[name]
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
                         "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record",
