@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+_APPLICATION = None
+
 
 def run(directory, configuration):
     target=Path(directory).resolve()
@@ -27,6 +29,7 @@ def run(directory, configuration):
 
 
 def _run(directory, configuration):
+    global _APPLICATION
     import gemmi
     import numpy as np
     from PySide6.QtCore import QSettings,QRect
@@ -39,6 +42,7 @@ def _run(directory, configuration):
     spec=json.loads(Path(configuration).read_text(encoding='utf8'))
     os.environ['PHASE_STUDIO_STARTUP_PROBE']='1'
     qt=QApplication.instance() or QApplication([]);a.apply_phase_studio_style(qt)
+    _APPLICATION=qt
     QSettings.setDefaultFormat(QSettings.IniFormat)
     QSettings.setPath(QSettings.IniFormat,QSettings.UserScope,str(target/'settings'))
     report={'frozen':bool(getattr(sys,'frozen',False)),'operation':'actual result-map reading and EDMA-derived structure GUI loading',
@@ -91,4 +95,6 @@ def _run(directory, configuration):
             selector.close();backend.close();qt.processEvents()
     report['passed']=bool(report['records']) and all(r['passed'] for r in report['records'])
     (target/'report.json').write_text(json.dumps(report,indent=2)+'\n',encoding='utf8')
+    from matplotlib import pyplot as plt
+    plt.close('all');qt.processEvents()
     return 0 if report['passed'] else 1
