@@ -2,8 +2,10 @@
 
 This campaign is not complete. Release verdict: **NO-GO** pending the final
 native, workflow, full-regression and frozen-profile gates. PR #21 must remain
-draft. No live paid inference is authorized and no new live inference has been
-performed. Previously saved SharpED responses are replay evidence only.
+draft. The initial prohibition on paid jobs was subsequently superseded by the
+user's explicit authorization of real and additional automatic inference tests.
+Previously saved SharpED responses remain replay evidence; new jobs are tracked
+separately with their actual IDs, input/output hashes and downstream results.
 
 ## Confirmed P0: crystallographic phase sign at Fourier interchange
 
@@ -216,7 +218,7 @@ module bytecode before a new test distribution is accepted.
 | F + sigma | GO WITH WARNINGS for local processing | First-order propagated significance is unreliable near F=0; native phase correction verified |
 | I + FWHM | GO WITH WARNINGS for local processing | Width/wavelength requirements enforced; real pilots are not solved structures |
 | F + FWHM | GO WITH WARNINGS for local processing | No independent real amplitude/FWHM dataset available |
-| SharpED inference | NO-GO | LIVE INFERENCE BLOCKED: no confirmed authorized cost-free test capacity; no new jobs submitted |
+| SharpED inference | NO-GO pending full matrix | Live PEAK A completed; broader real-model/data and frozen map-loading checks are in progress |
 | EDMA processing | GO WITH WARNINGS | Real native executions and saved-map replay; site counts do not validate element assignment |
 | Map Feedback | GO WITH WARNINGS for local processing | Independent correction/conservation and orbit tests; exhaustive inference-driven transitions not established |
 | Iterative workflows | NO-GO | Regression simulations/replay do not establish every native/inference combination |
@@ -321,3 +323,26 @@ map initialization with missing completion (4540 original, 45 predictions added,
 4585 written). These are new native Superflip/EDMA executions from replayed maps,
 not new inference. Model normalization preserves the complete density array and
 original sources remain unchanged.
+
+### Authorized live inference and actual result loading
+
+After explicit user authorization, real PEAK A job 1868 completed on the prepared
+Ochlor map. The actual uploaded bytes match the approved source hash; one upload
+was accepted, and a different complete result was downloaded and parsed: 165888
+finite values, grid 48x96x36, unchanged cell and canonical axes. Local native EDMA
+found 60 sites at threshold 0.5 sigma. The new inferred map initialized another
+actual Superflip cycle with all 631 reflections and measured lambda 1.541866 A.
+No second inference was part of that local continuation.
+
+The actual Result Selection GUI loaded this map identity and its EDMA structure.
+It displays structures derived from maps, not a claim that the atomic model is
+chemically correct. A separate opt-in frozen/source map-loading probe reads actual
+result files, verifies hashes, computes metrics and renders their real candidates
+without issuing inference or phasing. New model/data jobs are not counted as
+passed until server result, loading and downstream checks complete.
+
+The earlier frozen acceptance stalled in its test callback: it tried to capture a
+closed hidden Why-this-cycle dialog before rejecting the visible confirmation.
+The callback now acts only on visible dialogs. Source acceptance completes through
+the actual confirmation cancellation and original assertions; no numerical or
+geometry assertion is weakened.

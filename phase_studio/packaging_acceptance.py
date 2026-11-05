@@ -11,6 +11,9 @@ from unittest.mock import patch
 
 
 def run(directory):
+    if os.environ.get('PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'):
+        from .map_loading_acceptance import run as run_map_loading
+        return run_map_loading(directory,os.environ['PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'])
     if os.environ.get('PHASE_STUDIO_EDMA_ACCEPTANCE_INPUT'):
         from .edma_acceptance import run_saved_map_check
         return run_saved_map_check(directory, os.environ['PHASE_STUDIO_EDMA_ACCEPTANCE_INPUT'])
@@ -390,7 +393,7 @@ def _check_final_review(a,backend,selector,candidates,map_path,cif,cfg,report,di
     snap('13-filtered-execution-log',viewer);snap('14-controlled-stop',backend)
     def close_details():
         for dialog in QApplication.topLevelWidgets():
-            if dialog.windowTitle() in ('Why this cycle?','Confirm selected result export'):
+            if dialog.isVisible() and dialog.windowTitle() in ('Why this cycle?','Confirm selected result export'):
                 snap('15-'+('recommendation-reason' if dialog.windowTitle()=='Why this cycle?' else 'export-identity'),dialog);dialog.reject()
     QTimer.singleShot(150,close_details);selector._why_cycle_button.click()
     before=len(p.manifest['selections'])
