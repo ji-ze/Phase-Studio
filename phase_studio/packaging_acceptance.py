@@ -13,7 +13,13 @@ from unittest.mock import patch
 def run(directory):
     if os.environ.get('PHASE_STUDIO_INPUT_UI_ACCEPTANCE')=='1':
         from .input_ui_acceptance import run as run_input_ui
-        return run_input_ui(directory)
+        try:
+            return run_input_ui(directory)
+        except Exception as error:
+            output=Path(directory)
+            output.mkdir(parents=True,exist_ok=True)
+            (output/'report.json').write_text(json.dumps(dict(passed=False,error=str(error),error_type=type(error).__name__)),encoding='utf8')
+            raise SystemExit(1)
     if os.environ.get('PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'):
         from .map_loading_acceptance import run as run_map_loading
         return run_map_loading(directory,os.environ['PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'])

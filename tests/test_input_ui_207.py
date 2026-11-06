@@ -1,5 +1,6 @@
 """Exercise actual styled widgets, effective fonts and legal bytes at four scales."""
 import json
+import hashlib
 import os
 from pathlib import Path
 import subprocess
@@ -17,6 +18,8 @@ def test_input_about_and_splash_acceptance(scale,tmp_path):
     assert result.returncode==0,result.stdout+result.stderr
     report=json.loads((output/'report.json').read_text())
     assert report['passed'] and report['splash_font']['family']=='Science Gothic'
+    for name,digest in report['legal_file_sha256'].items():
+        assert digest==hashlib.sha256((root/name).read_bytes()).hexdigest()
     assert len(report['profiles'])==2
     for profile in report['profiles']:
         assert profile['legal_exact']

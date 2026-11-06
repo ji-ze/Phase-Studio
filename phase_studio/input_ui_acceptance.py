@@ -18,7 +18,7 @@ def run(directory):
     from . import app as a
     from . import hkl_diagnostics as diagnostics
     from .about_ui import AboutDialog
-    from .legal_content import source_text, overview_html
+    from .legal_content import source_text, overview_html, legal_directory
     from .input_analysis_ui import analyze_data_dialog, TABS
     directory = Path(directory).absolute()
     directory.mkdir(parents=True,exist_ok=True)
@@ -29,6 +29,15 @@ def run(directory):
     QSettings.setDefaultFormat(QSettings.IniFormat)
     QSettings.setPath(QSettings.IniFormat,QSettings.UserScope,str(directory/'settings'))
     report = dict(frozen=bool(getattr(sys,'frozen',False)),scale=os.environ.get('QT_SCALE_FACTOR','1'),passed=False,profiles=[])
+    legal_hashes={}
+    for name in ('AUTHORS.md','LICENSE','CITATION.cff','THIRD_PARTY_NOTICES.md'):
+        path=legal_directory()/name
+        assert path.is_file(), 'Missing bundled legal authority: '+name
+        legal_hashes[name]=hashlib.sha256(path.read_bytes()).hexdigest()
+    assert source_text('LICENSE').startswith('MIT License')
+    assert 'Permission is hereby granted, free of charge' in source_text('LICENSE')
+    assert 'cff-version: 1.2.0' in source_text('CITATION.cff')
+    report['legal_file_sha256']=legal_hashes
     def settle():
         for _ in range(20): q.processEvents()
     def snap(name,widget):
