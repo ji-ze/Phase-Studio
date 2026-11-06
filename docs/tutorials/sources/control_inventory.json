@@ -565,7 +565,7 @@
     "page": "_build_input_tab",
     "source_line": 9739,
     "type": "_add_combo",
-    "tooltip": "Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so sigma-based statistics are hidden or relabeled I/FWHM.",
+    "tooltip": "Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so uncertainty-based significance is unavailable.",
     "enabled": true,
     "default": "h k l · I · σ(I)",
     "values": [

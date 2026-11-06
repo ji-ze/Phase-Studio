@@ -1,0 +1,594 @@
+{
+  "application": {
+    "build_date": null,
+    "build_id": null,
+    "distribution_profile": "development",
+    "git_commit": "a91d12948616775498b8c4e29d3a4eb0bff471ad",
+    "implementation": "CPython",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "python": "3.12.13 (main, Jun 11 2026, 04:05:29) [MSC v.1944 64 bit (AMD64)]",
+    "release_asset_sha256": null,
+    "reproducibility_note": "Missing build metadata is unavailable, not inferred from file dates. Executable hashes do not establish bitwise reproducibility.",
+    "runtime_sources_sha256": "4f254bbbe7c2413e34f0687098169e756a7f1bf52f573deb7a5f6a9f12baf8b8",
+    "source_dirty": true,
+    "version": "2.0.7"
+  },
+  "artifact_directory": "<LOCAL_PATH_0001>",
+  "completed_cycles": 2,
+  "configured_cycles": 2,
+  "cycles": {
+    "1": {
+      "artifacts": {
+        "deblur_edma_cif": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "deblur_edma_cif",
+          "sha256": null,
+          "status": "Unavailable"
+        },
+        "deblur_map": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "deblur_map",
+          "sha256": null,
+          "status": "Unavailable"
+        },
+        "superflip_edma_cif": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "superflip_edma_cif",
+          "sha256": null,
+          "status": "Unavailable"
+        },
+        "superflip_map": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "superflip_map",
+          "sha256": null,
+          "status": "Unavailable"
+        }
+      },
+      "completed": "2026-11-02T10:42:04.307+00:00",
+      "generated_keywords": [
+        "perform CF",
+        "randomseed AUTO"
+      ],
+      "generated_superflip_input": {
+        "bytes": 57,
+        "format": ".inflip",
+        "mtime_ns": 1793616124256746600,
+        "path": "<LOCAL_PATH_0002>",
+        "role": "actual generated Superflip input",
+        "sha256": "2e2befbfd8673c4a1d1edd68da745060ba95ff30597952eef9c94fdcf0cc9459",
+        "status": "Available"
+      },
+      "initialization_model": {
+        "bytes": null,
+        "path": null,
+        "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+        "role": "actual initialization model/map",
+        "sha256": null,
+        "status": "Unavailable"
+      },
+      "initialization_source": "Synthetic fixture",
+      "map_feedback": {
+        "diagnostic_record": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "authoritative Map Feedback diagnostics",
+          "sha256": null,
+          "status": "Unavailable"
+        },
+        "next_input": {
+          "bytes": 14,
+          "format": ".hkl",
+          "mtime_ns": 1793616124107120900,
+          "path": "<LOCAL_PATH_0003>",
+          "role": "next-cycle written reflections",
+          "sha256": "bde4428fd71de2b2904ad99c747de0e824fa0585866db4eb3cc1bd61ad8483c0",
+          "status": "Available"
+        },
+        "next_input_records": 1,
+        "operations": [],
+        "source_cycle": 1,
+        "target_cycle": 2
+      },
+      "recorded": "2026-11-02T10:42:04.256+00:00",
+      "reference_and_seed_roles": {
+        "initial_model_or_phases": false,
+        "modelfile": null,
+        "qualification": "Superflip referencefile is documented to align resulting density. It is distinct from modelfile initialization. Reference-backed evaluation/recommendation is not independent validation.",
+        "randomseed": "AUTO",
+        "reference_density_alignment": false,
+        "reference_ranked_superflip_density": false,
+        "referencefile": null
+      },
+      "reflection_input": {
+        "bytes": 14,
+        "format": ".hkl",
+        "mtime_ns": 1793616124107120900,
+        "path": "<LOCAL_PATH_0003>",
+        "records": null,
+        "role": "actual Superflip input",
+        "sha256": "bde4428fd71de2b2904ad99c747de0e824fa0585866db4eb3cc1bd61ad8483c0",
+        "status": "Available"
+      },
+      "reflection_mode": "intensity",
+      "result": {
+        "cycle": 1,
+        "deblur_edma_cif": null,
+        "deblur_edma_enabled": true,
+        "deblur_edma_sigma": null,
+        "deblur_heavy_atom_count": null,
+        "deblur_map": null,
+        "deblur_metric": null,
+        "deblur_precision": null,
+        "deblur_quality": {
+          "amplitude_cc": null,
+          "amplitude_rf": null,
+          "amplitude_scale": null,
+          "cc_free": null,
+          "cc_work": null,
+          "entropy_normalized": null,
+          "map_concentration": null,
+          "n_free_reflections": 0,
+          "n_measured_reflections": 0,
+          "n_triplets": 0,
+          "n_work_reflections": 0,
+          "negative_density_mass": null,
+          "omit_map_correlation": null,
+          "r_free": null,
+          "r_work": null,
+          "reference_f05": 0.5,
+          "reference_fp": 1,
+          "reference_phase_agreement": null,
+          "reference_precision": null,
+          "reference_recall": null,
+          "reference_rmsd": 0.2,
+          "reference_tp": 2,
+          "standardized_peakiness": null,
+          "triplet_c3": null,
+          "unavailable_reason": ""
+        },
+        "deblur_recall": null,
+        "intensity_correction_avg_change_percent": null,
+        "model_in": null,
+        "model_metric": null,
+        "model_source": "Synthetic fixture",
+        "omit_deblur_correlation": null,
+        "omit_deblur_rfree": null,
+        "omit_superflip_correlation": null,
+        "omit_superflip_rfree": null,
+        "powder_repartition_avg_change_percent": null,
+        "recycle_map_correlation": null,
+        "run_id": "",
+        "sharped_model": "",
+        "superflip_derived_sg": "",
+        "superflip_edma_cif": null,
+        "superflip_edma_enabled": true,
+        "superflip_edma_sigma": null,
+        "superflip_fom": null,
+        "superflip_heavy_atom_count": null,
+        "superflip_map": null,
+        "superflip_mean_cycles": null,
+        "superflip_metric": null,
+        "superflip_peaks": null,
+        "superflip_precision": null,
+        "superflip_quality": {
+          "amplitude_cc": null,
+          "amplitude_rf": null,
+          "amplitude_scale": null,
+          "cc_free": null,
+          "cc_work": null,
+          "entropy_normalized": null,
+          "map_concentration": null,
+          "n_free_reflections": 0,
+          "n_measured_reflections": 0,
+          "n_triplets": 0,
+          "n_work_reflections": 0,
+          "negative_density_mass": null,
+          "omit_map_correlation": null,
+          "r_free": null,
+          "r_work": null,
+          "reference_f05": 0.5,
+          "reference_fp": 1,
+          "reference_phase_agreement": null,
+          "reference_precision": null,
+          "reference_recall": null,
+          "reference_rmsd": 0.2,
+          "reference_tp": 2,
+          "standardized_peakiness": null,
+          "triplet_c3": null,
+          "unavailable_reason": ""
+        },
+        "superflip_recall": null,
+        "superflip_ref_match": null,
+        "superflip_rvalue": null,
+        "superflip_saved_run": null,
+        "superflip_success_rate": null,
+        "superflip_symm": null,
+        "validation_profile": "reference_free"
+      },
+      "run_id": "SYNTHETIC-NO-EXECUTION",
+      "schema": 1,
+      "source_cycle": 1,
+      "status": "completed",
+      "target_cycle": 2
+    },
+    "2": {
+      "artifacts": {
+        "deblur_edma_cif": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "deblur_edma_cif",
+          "sha256": null,
+          "status": "Unavailable"
+        },
+        "deblur_map": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "deblur_map",
+          "sha256": null,
+          "status": "Unavailable"
+        },
+        "superflip_edma_cif": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "superflip_edma_cif",
+          "sha256": null,
+          "status": "Unavailable"
+        },
+        "superflip_map": {
+          "bytes": null,
+          "path": null,
+          "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+          "role": "superflip_map",
+          "sha256": null,
+          "status": "Unavailable"
+        }
+      },
+      "completed": "2026-11-02T10:42:04.371+00:00",
+      "generated_keywords": [
+        "perform CF",
+        "randomseed AUTO"
+      ],
+      "generated_superflip_input": {
+        "bytes": 57,
+        "format": ".inflip",
+        "mtime_ns": 1793616124336197200,
+        "path": "<LOCAL_PATH_0004>",
+        "role": "actual generated Superflip input",
+        "sha256": "2e2befbfd8673c4a1d1edd68da745060ba95ff30597952eef9c94fdcf0cc9459",
+        "status": "Available"
+      },
+      "initialization_model": {
+        "bytes": null,
+        "path": null,
+        "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+        "role": "actual initialization model/map",
+        "sha256": null,
+        "status": "Unavailable"
+      },
+      "initialization_source": "Synthetic fixture",
+      "recorded": "2026-11-02T10:42:04.336+00:00",
+      "reference_and_seed_roles": {
+        "initial_model_or_phases": false,
+        "modelfile": null,
+        "qualification": "Superflip referencefile is documented to align resulting density. It is distinct from modelfile initialization. Reference-backed evaluation/recommendation is not independent validation.",
+        "randomseed": "AUTO",
+        "reference_density_alignment": false,
+        "reference_ranked_superflip_density": false,
+        "referencefile": null
+      },
+      "reflection_input": {
+        "bytes": 14,
+        "format": ".hkl",
+        "mtime_ns": 1793616124107120900,
+        "path": "<LOCAL_PATH_0003>",
+        "records": 1,
+        "role": "actual Superflip input",
+        "sha256": "bde4428fd71de2b2904ad99c747de0e824fa0585866db4eb3cc1bd61ad8483c0",
+        "status": "Available"
+      },
+      "reflection_mode": "intensity",
+      "result": {
+        "cycle": 2,
+        "deblur_edma_cif": null,
+        "deblur_edma_enabled": true,
+        "deblur_edma_sigma": null,
+        "deblur_heavy_atom_count": null,
+        "deblur_map": null,
+        "deblur_metric": null,
+        "deblur_precision": null,
+        "deblur_quality": {
+          "amplitude_cc": null,
+          "amplitude_rf": null,
+          "amplitude_scale": null,
+          "cc_free": null,
+          "cc_work": null,
+          "entropy_normalized": null,
+          "map_concentration": null,
+          "n_free_reflections": 0,
+          "n_measured_reflections": 0,
+          "n_triplets": 0,
+          "n_work_reflections": 0,
+          "negative_density_mass": null,
+          "omit_map_correlation": null,
+          "r_free": null,
+          "r_work": null,
+          "reference_f05": 0.5,
+          "reference_fp": 1,
+          "reference_phase_agreement": null,
+          "reference_precision": null,
+          "reference_recall": null,
+          "reference_rmsd": 0.2,
+          "reference_tp": 2,
+          "standardized_peakiness": null,
+          "triplet_c3": null,
+          "unavailable_reason": ""
+        },
+        "deblur_recall": null,
+        "intensity_correction_avg_change_percent": null,
+        "model_in": null,
+        "model_metric": null,
+        "model_source": "Synthetic fixture",
+        "omit_deblur_correlation": null,
+        "omit_deblur_rfree": null,
+        "omit_superflip_correlation": null,
+        "omit_superflip_rfree": null,
+        "powder_repartition_avg_change_percent": null,
+        "recycle_map_correlation": null,
+        "run_id": "",
+        "sharped_model": "",
+        "superflip_derived_sg": "",
+        "superflip_edma_cif": null,
+        "superflip_edma_enabled": true,
+        "superflip_edma_sigma": null,
+        "superflip_fom": null,
+        "superflip_heavy_atom_count": null,
+        "superflip_map": null,
+        "superflip_mean_cycles": null,
+        "superflip_metric": null,
+        "superflip_peaks": null,
+        "superflip_precision": null,
+        "superflip_quality": {
+          "amplitude_cc": null,
+          "amplitude_rf": null,
+          "amplitude_scale": null,
+          "cc_free": null,
+          "cc_work": null,
+          "entropy_normalized": null,
+          "map_concentration": null,
+          "n_free_reflections": 0,
+          "n_measured_reflections": 0,
+          "n_triplets": 0,
+          "n_work_reflections": 0,
+          "negative_density_mass": null,
+          "omit_map_correlation": null,
+          "r_free": null,
+          "r_work": null,
+          "reference_f05": 0.5,
+          "reference_fp": 1,
+          "reference_phase_agreement": null,
+          "reference_precision": null,
+          "reference_recall": null,
+          "reference_rmsd": 0.2,
+          "reference_tp": 2,
+          "standardized_peakiness": null,
+          "triplet_c3": null,
+          "unavailable_reason": ""
+        },
+        "superflip_recall": null,
+        "superflip_ref_match": null,
+        "superflip_rvalue": null,
+        "superflip_saved_run": null,
+        "superflip_success_rate": null,
+        "superflip_symm": null,
+        "validation_profile": "reference_free"
+      },
+      "run_id": "SYNTHETIC-NO-EXECUTION",
+      "schema": 1,
+      "source_cycle": 2,
+      "status": "completed",
+      "target_cycle": null
+    }
+  },
+  "effective_config": {
+    "cycles": 2,
+    "damping_factor": 0.3,
+    "hkl": "<LOCAL_PATH_0003>",
+    "randomseed": "AUTO",
+    "reconstruction_mode": "Superflip",
+    "run_id": "SYNTHETIC-NO-EXECUTION",
+    "setting_provenance": {
+      "cycles": {
+        "source": "Controlled fixture"
+      }
+    },
+    "sharped_model": "Synthetic example; no remote request",
+    "work_dir": "<LOCAL_PATH_0005>"
+  },
+  "external_programs": {
+    "EDMA": {
+      "bytes": null,
+      "path": null,
+      "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+      "role": "EDMA",
+      "sha256": null,
+      "status": "Unavailable",
+      "version": null,
+      "version_detection": "Unavailable: no executable version resource; program was not launched for diagnostics."
+    },
+    "Superflip": {
+      "bytes": null,
+      "path": null,
+      "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+      "role": "Superflip",
+      "sha256": null,
+      "status": "Unavailable",
+      "version": null,
+      "version_detection": "Unavailable: no executable version resource; program was not launched for diagnostics."
+    }
+  },
+  "finished": "2026-11-02T10:42:04.399+00:00",
+  "handoffs": [],
+  "incomplete_cycles": {},
+  "input_roles": {},
+  "inputs": {
+    "first_cycle_modelfile": {
+      "bytes": null,
+      "path": null,
+      "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+      "role": "explicit initial model",
+      "sha256": null,
+      "status": "Unavailable"
+    },
+    "hkl": {
+      "bytes": 14,
+      "format": ".hkl",
+      "mtime_ns": 1793616124107120900,
+      "path": "<LOCAL_PATH_0003>",
+      "role": "reflection source, possibly extracted/copied",
+      "sha256": "bde4428fd71de2b2904ad99c747de0e824fa0585866db4eb3cc1bd61ad8483c0",
+      "status": "Available"
+    },
+    "jana_inflip": {
+      "bytes": null,
+      "path": null,
+      "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+      "role": "original Jana input",
+      "sha256": null,
+      "status": "Unavailable"
+    },
+    "reference_cif": {
+      "bytes": null,
+      "path": null,
+      "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+      "role": "external reference",
+      "sha256": null,
+      "status": "Unavailable"
+    }
+  },
+  "limitations": [
+    "SYNTHETIC EXAMPLE: fabricated metric values; no scientific program or remote inference executed. Configuration is a minimal example, not a complete runnable project.",
+    "Remote immutable checkpoint identity unavailable unless the server supplies it.",
+    "No bitwise-reproducibility claim. Automatic random seeds may be uncontrolled.",
+    "The manifest is an audit record, not a replacement for the execution checkpoint/recovery authority."
+  ],
+  "missing_value_semantics": "JSON null means unavailable or inapplicable, never measured zero. Status/reason fields distinguish these cases.",
+  "observed_operation_seconds_by_component": {},
+  "observed_session_seconds": 0.2873395000351593,
+  "operations": [],
+  "original_input_identities": {
+    "first_cycle_modelfile": {
+      "bytes": null,
+      "path": null,
+      "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+      "role": "explicit initial model",
+      "sha256": null,
+      "status": "Unavailable"
+    },
+    "hkl": {
+      "bytes": 14,
+      "format": ".hkl",
+      "mtime_ns": 1793616124107120900,
+      "path": "<LOCAL_PATH_0003>",
+      "role": "reflection source, possibly extracted/copied",
+      "sha256": "bde4428fd71de2b2904ad99c747de0e824fa0585866db4eb3cc1bd61ad8483c0",
+      "status": "Available"
+    },
+    "jana_inflip": {
+      "bytes": null,
+      "path": null,
+      "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+      "role": "original Jana input",
+      "sha256": null,
+      "status": "Unavailable"
+    },
+    "reference_cif": {
+      "bytes": null,
+      "path": null,
+      "reason": "argument should be a str or an os.PathLike object where __fspath__ returns a str, not 'NoneType'",
+      "role": "external reference",
+      "sha256": null,
+      "status": "Unavailable"
+    }
+  },
+  "previous_session_status": "prepared",
+  "reflection_reads": [],
+  "reproducibility": {
+    "bitwise_reproducible": false,
+    "configuration": "effective settings recorded",
+    "external_binaries": "one or more identities unavailable",
+    "random_seed": "uncontrolled/automatic",
+    "remote_checkpoint": "unavailable"
+  },
+  "requested_config": {
+    "cycles": 2,
+    "damping_factor": 0.3,
+    "hkl": "<LOCAL_PATH_0003>",
+    "randomseed": "AUTO",
+    "reconstruction_mode": "Superflip",
+    "run_id": "SYNTHETIC-NO-EXECUTION",
+    "setting_provenance": {
+      "cycles": {
+        "source": "Controlled fixture"
+      }
+    },
+    "sharped_model": "Synthetic example; no remote request",
+    "work_dir": "<LOCAL_PATH_0005>"
+  },
+  "resolved_overrides": {},
+  "run_id": "SYNTHETIC-NO-EXECUTION",
+  "schema": 1,
+  "selections": [],
+  "setting_origins": {
+    "cycles": {
+      "source": "Controlled fixture"
+    }
+  },
+  "sharped": {
+    "endpoint": null,
+    "immutable_checkpoint": null,
+    "immutable_checkpoint_status": "Unavailable until explicitly supplied by a server response",
+    "inference_parameters": {
+      "sharped_elements": null,
+      "sharped_map_value_exponent": null,
+      "sharped_max_polls": null,
+      "sharped_max_upload_mb": null,
+      "sharped_outres": null,
+      "sharped_poll_seconds": null,
+      "sharped_timeout_seconds": null
+    },
+    "selected_model_display": "Synthetic example; no remote request"
+  },
+  "sharped_requests": [],
+  "snapshot_timestamp": "2026-11-02T10:42:04.425+00:00",
+  "started": "2026-11-02T10:42:04.112+00:00",
+  "status": "completed",
+  "units": {
+    "durations": "seconds",
+    "phase_agreement": "dimensionless as computed",
+    "relative_intensity_change": "percent; denominator defined in feedback record",
+    "rmsd": "angstrom",
+    "timestamps": "ISO 8601 UTC, millisecond precision"
+  },
+  "unsealed_artifacts": [],
+  "warnings": [],
+  "xplor_blending": {
+    "applicability": "Only the existing XPLOR-model damping branch; CIF/none and other reconstruction branches may bypass it.",
+    "configured_inverse": 0.3,
+    "effective_factor": 3.3333333333333335,
+    "formula": "((factor - 1) * previous + new) / factor",
+    "new_map_coefficient": 0.3,
+    "previous_map_coefficient": 0.7000000000000001
+  }
+}

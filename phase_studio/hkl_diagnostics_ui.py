@@ -52,7 +52,7 @@ def presentation_report(result):
     if cached is not None and cached[0] is report:
         return cached[1]
     raw = getattr(result,'reflections_raw',getattr(result,'reflections',()))
-    direct = np.asarray([a.reflection_amplitude_signal_to_noise(r) if (r.h,r.k,r.l)!=(0,0,0) else None for r in raw],dtype=float)
+    direct = np.asarray([a.reflection_amplitude_signal_to_noise(r,result.data_mode) if (r.h,r.k,r.l)!=(0,0,0) else None for r in raw],dtype=float)
     finite = direct[np.isfinite(direct)]
     stats = dict(report.statistics)
     stats.update(mean_f_over_sigma=float(np.mean(finite)) if len(finite) else None,
@@ -96,7 +96,7 @@ def _top(win, dialog, result, report, completeness=False):
     subtitle = report.data_type
     if 'synthetic' in report.source_note.lower():
         subtitle += ' · SYNTHETIC CONTROLLED FIXTURE'
-    layout.addWidget(win._diagnostic_header('HKL COMPLETENESS' if completeness else 'HKL VALIDATION',subtitle,status,compact=True))
+    layout.addWidget(win._diagnostic_header('ANALYZE DATA' if completeness else 'VIEW DATA',subtitle,status,compact=True))
     top = QWidget()
     body = QVBoxLayout(top)
     body.setContentsMargins(0,0,0,0)
@@ -140,7 +140,30 @@ def _top(win, dialog, result, report, completeness=False):
     layout.addWidget(top)
     dialog.hkl_input_summary = summary
     dialog.hkl_interpretation = interpretation
+    metadata_source = result.source_note.split('; cell/symmetry source: ')[-1]
+    provenance = QLabel('Cell / symmetry source: ' + Path(metadata_source).name)
+    provenance.setWordWrap(True)
+    provenance.setTextInteractionFlags(Qt.TextSelectableByMouse)
+    provenance.setToolTip(result.source_note + '\nThis diagnostic snapshot does not replace current manual overrides. Re-run validation after changing inputs.')
+    if isinstance(summary.layout(), QGridLayout):
+        grid = summary.layout()
+        grid.addWidget(provenance, grid.rowCount(), 0, 1, grid.columnCount())
+    else:
+        summary.layout().addWidget(provenance)
+    dialog.hkl_metadata_provenance = provenance
+    if completeness and report.data_type.startswith('Powder'):
+        coverage_note = QLabel('Powder indexed HKL coverage is not independent experimental completeness; peaks may overlap.')
+        coverage_note.setWordWrap(True)
+        coverage_note.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        coverage_note.setFixedHeight(2 * coverage_note.fontMetrics().lineSpacing() + 4)
+        layout.addWidget(coverage_note)
+        dialog.hkl_powder_coverage_note = coverage_note
     overlap = dict(report.overlap)
+    if overlap.get('wavelength'):
+        wavelength_note = QLabel(f'Effective wavelength: {overlap["wavelength"]:.8g} Å · {overlap.get("wavelength_source", "input metadata")}')
+        wavelength_note.setWordWrap(True)
+        layout.addWidget(wavelength_note)
+        dialog.hkl_effective_wavelength = wavelength_note
     if report.data_type.startswith('Powder') and report.fwhm_units=='degrees_2theta' and not overlap['available'] and not overlap.get('wavelength') and 'Wavelength missing' in overlap['reason']:
         prompt = QLabel('Wavelength required for peak overlap. Enter the measured wavelength; overlap numbers and graphs are hidden until it is known.')
         prompt.setWordWrap(True)
@@ -875,7 +898,7 @@ def validation_dialog(win, result):
     report = presentation_report(result)
     dialog = QDialog(win)
     dialog.setObjectName('hklValidationDialog')
-    dialog.setWindowTitle('HKL Validation')
+    dialog.setWindowTitle('View data')
     layout = _top(win,dialog,result,report)
     integrity_keys = ('systematic_absent_entries','exact_duplicate_entries','conflicting_duplicate_groups',
                       'invalid_values','invalid_auxiliary','rejected_records','invalid_indices','invalid_reciprocal_values',
@@ -935,7 +958,7 @@ def validation_dialog(win, result):
         values = [r.h,r.k,r.l,r.value,r.sigma]
         if phase: values.append(r.phase)
         if sig:
-            values.append(a.reflection_amplitude_signal_to_noise(r) if amplitude else a.reflection_primary_signal_to_noise(r,result.data_mode))
+            values.append(a.reflection_amplitude_signal_to_noise(r,result.data_mode) if amplitude else a.reflection_primary_signal_to_noise(r,result.data_mode))
         values.append(a.reflection_d_spacing(result.cell,r.h,r.k,r.l) if (r.h,r.k,r.l)!=(0,0,0) else None)
         values.append(a.reflection_sintheta_over_lambda(result.cell,r.h,r.k,r.l) if (r.h,r.k,r.l)!=(0,0,0) else None)
         if derived.isChecked() and sig and amplitude:
@@ -1482,6 +1505,9 @@ def completeness_dialog(win, analysis):
     splitter.setChildrenCollapsible(False)
     tabs = QTabWidget()
     tabs.setObjectName('hklPlotTabs')
+    # The enclosing splitter owns the plot height; switching pages must not
+    # reallocate space according to their different canvas minimum sizes.
+    tabs.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Ignored)
     main = QWidget()
     main_layout = QVBoxLayout(main)
     main_layout.setContentsMargins(0,0,0,0)
@@ -1903,7 +1929,7 @@ def completeness_dialog(win, analysis):
                 item.setData(Qt.UserRole+1,i)
                 table.setItem(i,j,item)
         table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
-        bins_title.setText(scientific_text('RESOLUTION BINS · '+('d (Å)' if resolution_axis.currentData() else 'sinθ/λ (Å⁻¹)')+' · ' + ('overlap: original records; undefined denominator = N/A' if is_overlap else 'undefined coverage = n/a')))
+        bins_title.setText(scientific_text('RESOLUTION BINS · '+('d (Å)' if resolution_axis.currentData() else 'sinθ/λ (Å⁻¹)')+' · ' + ('overlap records' if is_overlap else 'indexed coverage')))
         bins_title.setToolTip('Intervals are (lower, upper], identical to the plot. Cross-bin groups contribute each record in its own interval. Group counts are omitted: no new group-to-bin convention. Intensity fraction uses finite nonnegative input intensity within the interval.')
         dialog.hkl_bin_columns = selected_columns
         table.setSortingEnabled(True)

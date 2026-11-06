@@ -356,7 +356,7 @@ computation the main GUI's own `_collect_hkl_analysis_request()` /
 "Jana2020 .inflip" input mode -- one implementation, reachable without
 constructing a window.
 
-The Wizard's "Validate HKL" / "Analyze completeness" buttons still construct
+The Wizard's "View data" / "Analyze data" buttons still construct
 a hidden, never-shown `IterativeSuperflipPipelineQtGUI()` (`_get_backing_
 window()`) -- but now *only* to reuse those two methods' actual dialog
 presentation (plots, diagnostic-dialog chrome shared with the main app), not

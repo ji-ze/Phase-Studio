@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QLabel, QPushButton, QSizePolicy, QSplitter, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
     QToolButton, QToolTip, QMessageBox,
+    QScrollArea, QFrame, QDialogButtonBox,
 )
 
 from phase_studio.map_quality import (
@@ -46,6 +47,25 @@ from phase_studio.structure_camera import (
     StructureCameraController, fit_projected_structure, set_structure_viewport_clip,
     structure_marker_sizes, camera_settings_button,
 )
+
+
+def show_candidate_details(parent,title,rows,*,confirm=False):
+    dialog=QDialog(parent);dialog.setWindowTitle(title)
+    layout=QVBoxLayout(dialog);form=QFormLayout()
+    form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+    for name,value in rows:
+        label=QLabel(str(value));label.setTextFormat(Qt.PlainText);label.setWordWrap(True)
+        label.setMinimumWidth(0);label.setSizePolicy(QSizePolicy.Ignored,QSizePolicy.Preferred)
+        label.setTextInteractionFlags(Qt.TextSelectableByMouse|Qt.TextSelectableByKeyboard)
+        form.addRow(name,label)
+    scroll=QScrollArea();content=QWidget();content.setLayout(form);scroll.setWidget(content);scroll.setWidgetResizable(True)
+    layout.addWidget(scroll,1)
+    buttons=QDialogButtonBox((QDialogButtonBox.Save|QDialogButtonBox.Cancel) if confirm else QDialogButtonBox.Close)
+    buttons.accepted.connect(dialog.accept);buttons.rejected.connect(dialog.reject)
+    if confirm:buttons.button(QDialogButtonBox.Cancel).setDefault(True)
+    layout.addWidget(buttons)
+    apply_safe_dialog_geometry(dialog,760,650)
+    return dialog.exec()==QDialog.Accepted
 
 
 _COMPACT_METRIC_COLUMNS = {
@@ -89,11 +109,10 @@ class _MetricHeader(QHeaderView):
             return True
         return super().viewportEvent(event)
 
-_MAP_FEEDBACK_COLUMN_LABEL = "Feedback Δ"
+_MAP_FEEDBACK_COLUMN_LABEL = "Feedback"
 _MAP_FEEDBACK_COLUMN_TOOLTIP = (
-    "Average reflection-intensity change applied by Map Feedback intensity "
-    "correction feeding into this cycle. Diagnostic only -- not used for "
-    "the automatic recommendation."
+    "Status of the recorded feedback step feeding this cycle, including powder and intensity operations. "
+    "N/A means detailed history is unavailable, never zero change. Cycle-level diagnostic, not a recommendation metric."
 )
 CAMERA_HELP_TEXT = (
     "Left-drag: rotate · Right/Middle/Shift-left-drag: pan · "
@@ -502,13 +521,23 @@ class ResultSelectionDialog(QDialog):
         authoritative_composition_label: str = "Composition",
         adjust_threshold: Optional[Callable[[ResultCandidate, bool], Optional[ResultCandidate]]] = None,
         adjust_threshold_async: Optional[Callable[[ResultCandidate, bool, Callable], object]] = None,
+        map_feedback_powder_enabled: bool = False,
+        map_feedback_missing_enabled: bool = False,
+        feedback_directory: Optional[Path] = None,
+        feedback_reports_provider: Optional[Callable] = None,
+        comparison_reference: Optional[Path] = None,
+        transfer_details_provider: Optional[Callable] = None,
     ) -> None:
         super().__init__(parent)
+        self._transfer_details_provider = transfer_details_provider
+        self._run_log_viewer = None
+        self._log_directory = Path(feedback_directory) if feedback_directory else None
         self._jana_context = jana_context
         self._preview_host = preview_host
         self._parse_structure = parse_structure
         self._reference_atoms = reference_atoms
         self._source_title = source_title
+        self._comparison_reference = comparison_reference
         self._authoritative_composition = str(authoritative_composition or "")
         self._authoritative_composition_label = str(
             authoritative_composition_label or "Composition"
@@ -518,6 +547,9 @@ class ResultSelectionDialog(QDialog):
         self._closed = False
         self._pending_thresholds: dict[tuple, object] = {}
         self._map_feedback_intensity_enabled = bool(map_feedback_intensity_enabled)
+        from .feedback_selection import FeedbackHistory
+        self._feedback_history = FeedbackHistory(feedback_directory,feedback_reports_provider)
+        self._feedback_configured = bool(map_feedback_missing_enabled or map_feedback_intensity_enabled or map_feedback_powder_enabled)
         self._definition = definition
         self._reference_available = profile in {
             ValidationProfile.REFERENCE_AND_HOLDOUT, ValidationProfile.REFERENCE_ONLY,
@@ -529,6 +561,7 @@ class ResultSelectionDialog(QDialog):
         self.preview_structure_hash = ""
         self._current_formula = ""
         self._presentation_cache: dict = {}
+        self._comparison_data_cache: dict = {}
         self._detached_viewer = None
         self._preview_user_interacted = False
         self._preview_fit_timer = QTimer(self)
@@ -553,10 +586,15 @@ class ResultSelectionDialog(QDialog):
         content_layout = QVBoxLayout(content)
         content_layout.setContentsMargins(14, 8, 14, 7)
         content_layout.setSpacing(5)
-        outer_layout.addWidget(content, 1)
+        self._content_scroll = QScrollArea()
+        self._content_scroll.setWidgetResizable(True)
+        self._content_scroll.setFrameShape(QFrame.NoFrame)
+        self._content_scroll.setMinimumSize(0,0)
+        self._content_scroll.setWidget(content)
+        outer_layout.addWidget(self._content_scroll, 1)
 
         metric_columns = result_selection_metric_columns(definition)
-        show_feedback_column = self._map_feedback_intensity_enabled
+        show_feedback_column = self._feedback_configured or bool(self._feedback_history.reports())
 
         # --- Primary handoff decision, shown only when there is a
         # genuine choice to make; a single-source workflow opens directly on
@@ -596,6 +634,10 @@ class ResultSelectionDialog(QDialog):
             superflip_btn.toggled.connect(lambda checked: checked and self._apply_source("superflip"))
             sharped_btn.toggled.connect(lambda checked: checked and self._apply_source("deblurred"))
 
+        self._run_status_label = QLabel('')
+        self._run_status_label.setWordWrap(True)
+        self._run_status_label.setVisible(False)
+        content_layout.addWidget(self._run_status_label)
         summary_form = QGridLayout()
         summary_form.setHorizontalSpacing(12)
         summary_form.setVerticalSpacing(1)
@@ -693,6 +735,20 @@ class ResultSelectionDialog(QDialog):
         preview_section.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         preview_layout = QVBoxLayout(preview_section)
         preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(4)
+        from .viewer_metadata import PanelMetadataLabel
+        self._feedback_label = PanelMetadataLabel()
+        self._feedback_label.setObjectName('selectedMapFeedbackSummary')
+        self._feedback_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        feedback_row = QHBoxLayout()
+        feedback_row.addWidget(self._feedback_label,1)
+        self._feedback_details_button = QPushButton('Map Feedback details')
+        self._feedback_details_button.clicked.connect(self._open_feedback_details)
+        feedback_row.addWidget(self._feedback_details_button)
+        preview_layout.addLayout(feedback_row)
+        self._comparison_label=PanelMetadataLabel()
+        self._comparison_label.setMaxLines(1)
+        self._comparison_label.setVisible(False);preview_layout.addWidget(self._comparison_label)
         preview_label = QLabel("STRUCTURE PREVIEW")
         preview_label.setObjectName("sectionLabel")
         toolbar = QHBoxLayout()
@@ -777,6 +833,7 @@ class ResultSelectionDialog(QDialog):
         preview_layout.addWidget(view_controls)
         camera_hint = QLabel(CAMERA_HELP_TEXT)
         camera_hint.setObjectName("structureInteractionHint")
+        camera_hint.setWordWrap(True)
         camera_hint.setAlignment(Qt.AlignRight)
         camera_hint.setToolTip(CAMERA_HELP_TEXT)
         hint_font = camera_hint.font()
@@ -798,6 +855,13 @@ class ResultSelectionDialog(QDialog):
         self._candidate_info.setToolTip('Inspect the displayed candidate and its scientific output identity.')
         self._candidate_info.clicked.connect(self._show_candidate_details)
         metadata_row.addWidget(self._candidate_info)
+        self._why_cycle_button = QToolButton()
+        self._why_cycle_button.setText('Why this cycle?')
+        self._why_cycle_button.clicked.connect(self._show_recommendation_details)
+        self._execution_log_button = QToolButton()
+        self._execution_log_button.setText('View execution log')
+        self._execution_log_button.clicked.connect(self._open_execution_log)
+        self._execution_log_button.setEnabled(self._log_directory is not None)
         preview_layout.addLayout(metadata_row)
         self._element_legend = QLabel("")
         self._element_legend.setObjectName("elementLegend")
@@ -872,6 +936,8 @@ class ResultSelectionDialog(QDialog):
         button_row = QHBoxLayout()
         close_button = QPushButton("Return to Phase Studio")
         button_row.addWidget(close_button)
+        button_row.addWidget(self._why_cycle_button)
+        button_row.addWidget(self._execution_log_button)
         button_row.addStretch(1)
         button_row.addWidget(action_button)
         footer_layout.addLayout(button_row)
@@ -905,6 +971,69 @@ class ResultSelectionDialog(QDialog):
         self._apply_safe_initial_geometry()
         QTimer.singleShot(0, self._clamp_after_show)
         self._initializing_selection = False
+        self._feedback_timer = QTimer(self)
+        self._feedback_timer.timeout.connect(self.refresh_feedback)
+        self._feedback_timer.start(1000)
+
+    def refresh_feedback(self):
+        """Refresh only diagnostic widgets; never rerender, retune or reselect a candidate."""
+        if self._closed:return
+        from .feedback_selection import selected_input,compact_summary
+        reports=self._feedback_history.reports()
+        show=self._feedback_configured or bool(reports)
+        for view in self._views.values():
+            table=view.table
+            column=next((i for i in range(table.columnCount())
+                         if table.horizontalHeaderItem(i).text()==_MAP_FEEDBACK_COLUMN_LABEL),None)
+            if show and column is None:
+                column=table.columnCount();table.insertColumn(column)
+                table.setHorizontalHeaderItem(column,QTableWidgetItem(_MAP_FEEDBACK_COLUMN_LABEL))
+                table.horizontalHeader().setSectionResizeMode(column,QHeaderView.Interactive)
+                table.setColumnWidth(column,80)
+            if column is None:continue
+            table.horizontalHeaderItem(column).setToolTip(_MAP_FEEDBACK_COLUMN_TOOLTIP)
+            for row,candidate in enumerate(view.ordered):
+                data=selected_input(reports,candidate.cycle)
+                legacy=[]
+                for value,label in ((candidate.map_feedback_change_percent,'intensity-correction'),
+                                    (candidate.powder_feedback_change_percent,'powder-group')):
+                    if value is not None:legacy.append(f'Recorded legacy {label} mean feeding this cycle: {value:.12g}%. Separate population; detailed changes may be unavailable.')
+                if legacy:data=data|dict(text=data['text']+'\n'+'\n'.join(legacy))
+                marker={'Unavailable':'N/A','Not yet reached':'Later','Original input':'Original',
+                        'Scientific error':'Error'}.get(data['status'],data['status'])
+                item=table.item(row,column)
+                if item is None:
+                    item=QTableWidgetItem();item.setData(Qt.UserRole,row);table.setItem(row,column,item)
+                item.setText(marker);item.setToolTip(data['text']);item.setData(Qt.AccessibleDescriptionRole,data['text'])
+        candidate=self.selected_candidate
+        data=selected_input(reports,candidate.cycle) if candidate is not None else None
+        text=data['text'] if data else 'Select a completed candidate to inspect its reflection input.'
+        concise=compact_summary(data) if data else text
+        if candidate is not None and self._log_directory is not None and (not reports or data['status'] in ('Disabled','Original input')):
+            from .run_review import PersistedRunReview,disabled_feedback_summary
+            manifest=PersistedRunReview(self._log_directory).manifest
+            record=(manifest.get('cycles') or {}).get(str(candidate.cycle),{})
+            disabled=disabled_feedback_summary(manifest,record)
+            if disabled:
+                concise=disabled
+                text=disabled+'\n'+text
+        self._feedback_label.setText(concise)
+        self._feedback_label.setToolTip(text)
+        self._feedback_label.setAccessibleName(text)
+        self._feedback_details_button.setEnabled(bool(reports) and candidate is not None)
+        self._feedback_details_button.setToolTip('Inspect recorded operation history and cumulative input differences. '+self._feedback_history.error)
+
+    def _open_feedback_details(self):
+        from .feedback_diagnostics_ui import FeedbackDiagnosticsDialog
+        reports=self._feedback_history.reports()
+        candidate=self.selected_candidate
+        if not reports or candidate is None:return
+        dialog=FeedbackDiagnosticsDialog(self,reports,self._feedback_history.directory or Path('.'))
+        index=dialog.cycle.findData(candidate.cycle-1)
+        dialog.cycle.setCurrentIndex(index)
+        dialog.setWindowTitle(f'Map Feedback history · selected input cycle {candidate.cycle}')
+        self._feedback_dialog=dialog
+        dialog.show()
 
     def _apply_safe_initial_geometry(self) -> None:
         apply_safe_dialog_geometry(
@@ -913,7 +1042,9 @@ class ResultSelectionDialog(QDialog):
         # This is the measured practical minimum for the compact header,
         # toolbar, 150 px scientific canvas, and fixed handoff footer.  On a
         # shorter work area, retain the largest safe initial height instead.
-        self.setMinimumHeight(min(670, self.height()))
+        # Reserve the added diagnostic strip on normal monitors; short
+        # work areas keep the footer fixed and scroll only the content.
+        self.setMinimumHeight(min(720,max(1,self.available_geometry_at_open.height()-48)))
 
     def _clamp_after_show(self) -> None:
         clamp_window_to_available_screen(
@@ -923,12 +1054,14 @@ class ResultSelectionDialog(QDialog):
 
     def resizeEvent(self, event) -> None:  # noqa: N802 - Qt override
         super().resizeEvent(event)
+        if hasattr(self,'_feedback_label'):
+            self._feedback_label.setMaxLines(2 if self.height()<800 else 3)
         if hasattr(self, "_element_legend"):
             # Composition and EDMA state remain visible at every size; the
             # redundant color key yields first on short work areas.
-            self._element_legend.setVisible(self.height() >= 700)
+            self._element_legend.setVisible(self.height() >= 800)
         if hasattr(self, "_camera_hint"):
-            self._camera_hint.setVisible(self.height() >= 700)
+            self._camera_hint.setVisible(self.height() >= 800)
         if hasattr(self, "_reason_label"):
             # The recommendation is already identified in the summary/table.
             # On short work areas, yield this duplicate prose row to the
@@ -1172,24 +1305,30 @@ class ResultSelectionDialog(QDialog):
         self._element_legend.clear()
         self._preview_canvas.draw_idle()
 
+    def _open_execution_log(self):
+        if self._log_directory is None:return
+        from .run_log_viewer import RunLogViewer
+        if self._run_log_viewer is None:
+            self._run_log_viewer=RunLogViewer(self,self._log_directory)
+        self._run_log_viewer.set_candidate(self.selected_candidate)
+        self._run_log_viewer.show();self._run_log_viewer.raise_()
+
+    def _show_recommendation_details(self):
+        from .run_review import recommendation_details
+        recommendation=self.active_recommendation
+        if recommendation is not None:
+            self._show_detail_rows('Why this cycle?', [('Selection rule and exact values',recommendation_details(recommendation))])
+
+    def _show_detail_rows(self,title,rows):
+        show_candidate_details(self,title,rows)
+
     def _show_candidate_details(self):
         rows=getattr(self,'_candidate_detail_rows',())
         if not rows:return
-        dialog=QDialog(self)
-        dialog.setWindowTitle('Displayed candidate details')
-        layout=QVBoxLayout(dialog)
-        form=QFormLayout()
-        for title,value in rows:
-            label=QLabel(str(value))
-            label.setTextFormat(Qt.PlainText)
-            label.setWordWrap(True)
-            label.setTextInteractionFlags(Qt.TextSelectableByMouse|Qt.TextSelectableByKeyboard)
-            form.addRow(title,label)
-        layout.addLayout(form)
-        close=QPushButton('Close');close.clicked.connect(dialog.accept)
-        layout.addWidget(close,alignment=Qt.AlignRight)
-        apply_safe_dialog_geometry(dialog,680,620)
-        dialog.exec()
+        candidate=self.selected_candidate
+        if self._transfer_details_provider and candidate:
+            rows=tuple(rows)+tuple(self._transfer_details_provider(candidate))
+        self._show_detail_rows('Displayed candidate and transfer identity',rows)
 
     @property
     def active_source(self) -> str:
@@ -1227,6 +1366,8 @@ class ResultSelectionDialog(QDialog):
             "Available" if self._reference_available else "Not available"
         )
         free_count = max((candidate.metrics.n_free_reflections for candidate in view.ordered), default=0)
+        if self._reference_available and not free_count:
+            self._summary_value_labels["Assessment"].setText(self._definition.assessment_label+" \u00b7 no holdout")
         self._summary_value_labels["Holdout"].setText(
             f"5% · {free_count} reflections" if free_count else "Not enabled"
         )
@@ -1276,6 +1417,13 @@ class ResultSelectionDialog(QDialog):
         self._sync_action_button()
 
     def _sync_action_button(self) -> None:
+        if self._run_log_viewer is not None:self._run_log_viewer.set_candidate(self.selected_candidate)
+        if self._log_directory is not None:
+            from .run_review import PersistedRunReview,workflow_status_text
+            manifest=PersistedRunReview(self._log_directory).manifest
+            self._run_status_label.setText(workflow_status_text(manifest) if manifest else 'Persisted workflow state unavailable.')
+            self._run_status_label.setVisible(bool(manifest))
+        self.refresh_feedback()
         candidate = self.selected_candidate
         pending = candidate is not None and self._threshold_key(candidate) in self._pending_thresholds
         snapshot = self.selection_snapshot
@@ -1339,7 +1487,7 @@ class ResultSelectionDialog(QDialog):
                 self._selected_output_summary.setToolTip(explanation)
                 self._selected_output_summary.setText(self._selected_output_summary.text() + "<br>" + explanation)
             else:
-                self._selected_output_summary.setToolTip("The highlighted row is selected. The star indicates the independent scientific recommendation.")
+                self._selected_output_summary.setToolTip("The highlighted row is selected. The star indicates the scientific recommendation within this family; reference-backed ranking is not independent validation.")
         view = self._views.get(self._active_source)
         row = view.table.currentRow() if view is not None else -1
         count = len(view.ordered) if view is not None else 0
@@ -1406,8 +1554,9 @@ class ResultSelectionDialog(QDialog):
     def _preview_orientation_changed(self, elev: float, azim: float, _source_axis) -> None:
         host = self._preview_host
         host.structure_elev, host.structure_azim = float(elev), float(azim)
+        host.structure_roll = float(_source_axis.roll)
         for axis in host._structure_interactive_axes:
-            axis.view_init(elev=elev, azim=azim)
+            axis.view_init(elev=elev, azim=azim, roll=host.structure_roll)
         host._update_structure_depth_cue(elev, azim)
 
     def _preview_camera_interaction(self, kind: str) -> None:
@@ -1452,7 +1601,7 @@ class ResultSelectionDialog(QDialog):
         self._preview_canvas.draw_idle()
 
     def _candidate_presentation(self, candidate: ResultCandidate):
-        from phase_studio.autosolve_window import prepare_structure_presentation
+        from phase_studio.viewer_alignment import present_structure,comparison_policy,panel_summary
 
         path = Path(candidate.structure_path)
         stat = path.stat() if path.is_file() else None
@@ -1462,15 +1611,21 @@ class ResultSelectionDialog(QDialog):
             candidate.jana_model_sha256, candidate.unit_cell, candidate.space_group,
             str(path), getattr(stat, "st_mtime_ns", 0), getattr(stat, "st_size", 0),
             self._view_mode, candidate.edma_asu_composition,
+            comparison_policy(),str(self._comparison_reference),
         )
         if cache_key in self._presentation_cache:
+            self._set_comparison_data(self._comparison_data_cache[cache_key])
             return self._presentation_cache[cache_key]
         composition_label = "EDMA asymmetric-unit composition"
         composition = candidate.edma_asu_composition
-        data = prepare_structure_presentation(
+        data = present_structure(
             path if candidate.usable_structure else None, self._view_mode,
             composition, composition_label,
+            policy=comparison_policy(),reference_path=self._comparison_reference,
+            metric_cell=self._preview_host.structure_cell,
         )
+        self._comparison_data_cache[cache_key]=data
+        self._set_comparison_data(data)
         result = (
             data["atoms"], data["coords"], data["bonds"], data["composition"],
             data["detected"], data["fit"], data["cell_segments"],
@@ -1489,6 +1644,7 @@ class ResultSelectionDialog(QDialog):
 
     def _render_preview(self, candidate: ResultCandidate) -> None:
         from phase_studio.autosolve_window import structure_site_summary
+        from .viewer_alignment import comparison_policy
         status = candidate_selection(candidate, jana=self._jana_context)
         if not status.geometry:
             self._show_empty_preview(candidate, status.reason)
@@ -1497,6 +1653,7 @@ class ResultSelectionDialog(QDialog):
         palette=getattr(QApplication.instance(),'_phase_color_palette','phase')
         if (previous == candidate and getattr(self,'_rendered_view_mode',None)==self._view_mode
                 and getattr(self,'_rendered_palette',None)==palette
+                and getattr(self,'_rendered_comparison_policy',None)==comparison_policy()
                 and getattr(self,'_resolved_preview',None) is not None):
             self._sync_detached_identity(candidate)
             return  # Identical immutable data: keep artists, camera and geometry.
@@ -1518,6 +1675,7 @@ class ResultSelectionDialog(QDialog):
             self._preview_user_interacted = False
         self._rendered_view_mode = self._view_mode
         self._rendered_palette = palette
+        self._rendered_comparison_policy=comparison_policy()
         self._current_candidate = candidate
         self._sync_detached_identity(candidate)
         self.preview_candidate_id = candidate.candidate_id
@@ -1556,16 +1714,19 @@ class ResultSelectionDialog(QDialog):
         else:
             axis.set_proj_type("ortho")
             axis.set_xticks([]); axis.set_yticks([]); axis.set_zticks([])
+            if old_axis is not None:
+                host.structure_elev,host.structure_azim=float(old_axis.elev),float(old_axis.azim)
             axis.view_init(elev=host.structure_elev, azim=host.structure_azim,
                            roll=float(old_axis.roll) if old_axis is not None else 0.)
             colors = [host._element_color(atom.element) for atom in atoms]
             count_scale = max(0.30, min(1.0, (320.0 / max(1, len(atoms))) ** 0.32))
             sizes = structure_marker_sizes(len(atoms))
-            axis.scatter(
+            scatter = axis.scatter(
                 coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors,
                 edgecolors="#ffffff", linewidths=max(0.08, 0.18 * count_scale),
                 depthshade=False,
             )
+            scatter._phase_elements = tuple(atom.element for atom in atoms)
             if bonds:
                 axis.add_collection3d(Line3DCollection(
                     [np.asarray([coords[i], coords[j]]) for i, j in bonds],
@@ -1627,6 +1788,11 @@ class ResultSelectionDialog(QDialog):
             if path.is_file():
                 cell, sg, _hm = parse_cif_cell_and_sg(path)
                 independent = len(edma_asu_atoms(parse_cif_atoms(path), cell, sg))
+                self._candidate_detail_rows += (
+                    ('Independent ASU sites',independent),
+                    ('Matched reference sites',candidate.metrics.reference_tp if candidate.metrics.reference_tp is not None else 'Unavailable'),
+                    ('Count definitions','Raw EDMA maxima are detected peaks. CIF sites are exported sites; independent ASU sites are symmetry-reduced crystallographic sites. Displayed positions may include symmetry/connectivity expansion. Jana m40 sites are the model sites imported by Jana. Matched reference sites are the reference-dependent TP metric, not a new atom count.'),
+                )
                 model_count = candidate.jana_model_site_count
                 self._threshold_status.setToolTip(
                     f"CIF EDMA sites: {detected_count}; independent ASU sites: {independent}; "
@@ -1655,5 +1821,23 @@ class ResultSelectionDialog(QDialog):
         self._schedule_preview_fit()
 
     def _refresh_viewer_palette(self):
-        if self._current_candidate is not None:
-            self._render_preview(self._current_candidate)
+        from phase_studio.structure_camera import recolor_atoms
+        recolor_atoms(self._preview_canvas, self._preview_host._element_color)
+        self._rendered_palette = getattr(QApplication.instance(), '_phase_color_palette', 'phase')
+
+    def _set_comparison_data(self,data):
+        from .viewer_alignment import panel_summary,comparison_policy
+        self._current_comparison_data=data
+        self._comparison_label.setText(panel_summary(data))
+        self._comparison_label.setToolTip(json.dumps(data.get('alignment',{}),indent=2))
+        self._comparison_label.setVisible(comparison_policy()!='independent')
+
+    def _refresh_comparison_frame(self):
+        if self._closed:return
+        self._presentation_cache.clear();self._comparison_data_cache.clear()
+        self._rendered_comparison_policy=None
+        self._preview_user_interacted=False
+        if self.selected_candidate is not None:self._render_preview(self.selected_candidate)
+
+    def _comparison_provenance(self):
+        return getattr(self,'_current_comparison_data',{}).get('alignment',{})

@@ -170,11 +170,40 @@ def camera_settings_button(parent):
     palettes=menu.addMenu('Element colors')
     palette_group=QActionGroup(palettes)
     app=QApplication.instance()
-    app._phase_color_palette=str(settings.value('viewer/elementPalette','phase'))
+    from .viewer_alignment import POLICIES
+    frames=menu.addMenu('Comparison frame');frame_group=QActionGroup(frames)
+    if not hasattr(app,'_phase_comparison_policy'):
+        app._phase_comparison_policy=str(settings.value('viewer/comparisonFrame','independent'))
+    def frame_changed(value):
+        settings.setValue('viewer/comparisonFrame',value);settings.sync();app._phase_comparison_policy=value
+        for widget in app.allWidgets():
+            callback=getattr(widget,'_refresh_comparison_frame',None)
+            if callback is not None:callback()
+    for title,value in POLICIES:
+        item=frames.addAction(title);item.setCheckable(True);frame_group.addAction(item);item.setData(value)
+        item.setChecked(app._phase_comparison_policy==value)
+        item.setToolTip('Presentation only: valid symmetry operations and whole-component lattice translations. Scientific coordinates and handoff outputs are unchanged.')
+        item.triggered.connect(lambda _checked=False,v=value:frame_changed(v))
+    export_frame=frames.addAction('Export presentation provenance…')
+    export_frame.setEnabled(callable(getattr(parent,'_comparison_provenance',None)))
+    def export_provenance():
+        import json
+        from pathlib import Path
+        from PySide6.QtWidgets import QFileDialog,QMessageBox
+        path,_=QFileDialog.getSaveFileName(parent,'Export presentation-only transforms','','JSON (*.json)')
+        if path:
+            try:
+                record=dict(schema=1,presentation_only=True,comparison_policy=app._phase_comparison_policy,
+                            panels=parent._comparison_provenance())
+                Path(path).write_text(json.dumps(record,indent=2,allow_nan=False),encoding='utf8')
+            except (OSError,ValueError,TypeError) as exc:QMessageBox.warning(parent,'Export unavailable',str(exc))
+    export_frame.triggered.connect(export_provenance)
+    if not hasattr(app, '_phase_color_palette'):
+        app._phase_color_palette=str(settings.value('viewer/elementPalette','phase'))
     def palette_changed(value):
         settings.setValue('viewer/elementPalette',value);settings.sync()
         app._phase_color_palette=value
-        for window in app.topLevelWidgets():
+        for window in app.allWidgets():
             callback=getattr(window,'_refresh_viewer_palette',None)
             if callback is not None:callback()
     for title,value in (('Current Phase Studio palette','phase'),('Conventional CPK-style palette','cpk')):
@@ -187,15 +216,40 @@ def camera_settings_button(parent):
         try:value=float(settings.value('viewer/rotationSensitivity',1.))
         except (ValueError,TypeError):value=1.
         for item in sensitivity_group.actions():item.setChecked(item.data()==value)
-        for item in palette_group.actions():item.setChecked(item.data()==str(settings.value('viewer/elementPalette','phase')))
+        for item in palette_group.actions():item.setChecked(item.data()==app._phase_color_palette)
+        for item in frame_group.actions():item.setChecked(item.data()==app._phase_comparison_policy)
     menu.aboutToShow.connect(refresh_visual_preferences)
     refresh_visual_preferences()
     # Retain the Python wrappers as well as Qt ownership across popup cycles.
-    button._camera_submenus=(sensitivity,palettes)
-    button._camera_action_groups=(sensitivity_group,palette_group)
-    button._camera_menu_actions=tuple(menu.actions())+tuple(sensitivity.actions())+tuple(palettes.actions())
+    button._camera_submenus=(sensitivity,palettes,frames)
+    button._camera_action_groups=(sensitivity_group,palette_group,frame_group)
+    button._camera_menu_actions=tuple(menu.actions())+tuple(sensitivity.actions())+tuple(palettes.actions())+tuple(frames.actions())
     button.setMenu(menu)
     return button
+
+
+def recolor_atoms(canvas, color_for, depth_artists=(), update_depth=None):
+    """Recolor persistent artists without touching geometry or any camera state."""
+    from matplotlib.colors import to_rgb
+    depths = {id(item.scatter): item for item in depth_artists}
+    elements = []
+    for axis in canvas.figure.axes:
+        for scatter in axis.collections:
+            symbols = getattr(scatter, '_phase_elements', ())
+            if not symbols:
+                continue
+            elements.extend(symbols)
+            colors = np.asarray([to_rgb(color_for(symbol)) for symbol in symbols])
+            blend = getattr(scatter, '_phase_white_blend', 0.)
+            colors += (1. - colors) * blend
+            depth = depths.get(id(scatter))
+            if depth is not None:
+                depth.atom_base_colors = colors
+                update_depth(depth, axis.elev, axis.azim)
+            else:
+                scatter.set_facecolor(colors)
+    canvas.draw_idle()
+    return elements
 
 
 def camera_basis(elev, azim, roll=0):
@@ -353,9 +407,8 @@ class StructureCameraController:
         rotation = trackball_rotation(self._sphere(x0,y0,axis), self._sphere(x1,y1,axis))
         basis = (rotation.T if inverted else rotation)@start_basis
         elev, azim, roll = camera_angles(basis)
-        self._orientation_changed(elev, azim, axis)
-        # Owner callbacks retain their established metadata/depth-cue hooks.
         axis.view_init(elev=elev, azim=azim, roll=roll)
+        self._orientation_changed(elev, azim, axis)
         self.canvas.draw_idle()
 
     def _motion(self, event) -> None:

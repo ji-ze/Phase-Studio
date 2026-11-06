@@ -185,10 +185,10 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
             from PySide6.QtWidgets import QPushButton
             next(b for b in about.findChildren(QPushButton) if b.text() == 'Official GitHub Releases').click()
             open_url.assert_called_once_with(QUrl(RELEASES_URL))
-        about.credits_button.click();settle()
+        about.tabs.setCurrentIndex(2);settle()
         assert (ROOT/'LICENSE').read_text(encoding='utf8') in about.credits.toPlainText()
         assert area.contains(about.frameGeometry())
-        about.credits_button.click();QTest.keyClick(about, Qt.Key_Escape);settle()
+        about.tabs.setCurrentIndex(0);QTest.keyClick(about, Qt.Key_Escape);settle()
         assert not about.isVisible()
         about = show_about_dialog(w.dialog, jana=False);settle()
         assert about.mode_label.text() == 'Standalone application'

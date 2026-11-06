@@ -36,9 +36,9 @@ Reproduce an existing Jana2020 Superflip calculation, verify reflection parsing,
 2. Select the Jana `.inflip` input mode.
 3. Choose the `.inflip` file.
 4. Confirm the Superflip and EDMA executable paths on **Advanced → Setup**.
-5. Click **Validate HKL**.
+5. Click **View data**.
 6. Confirm that the reflection format and parsed columns are correct.
-7. Click **Analyze completeness** and inspect the resolution-dependent statistics.
+7. Click **Analyze data** and inspect the resolution-dependent statistics.
 8. Open **Basic → Workflow**.
 9. Set **Cycles** to `1`.
 10. Select no next-cycle model.
@@ -99,7 +99,7 @@ Use the exact option labels shown by the current GUI.
 1. Load the Jana `.inflip` project in **Basic → Input**.
 2. Select a dedicated working directory on **Basic → Output**.
 3. Verify the active crystallographic metadata.
-4. Click **Validate HKL** and **Analyze completeness**.
+4. Click **View data** and **Analyze data**.
 5. Open **Basic → Workflow**.
 6. Select the desired number of cycles.
 7. Select the appropriate next-cycle model source.
@@ -170,9 +170,9 @@ Run Phase Studio without a Jana `.inflip` file using external reflection data an
 5. Select **Reference file** as the metadata source.
 6. Choose the reference structure under **Reference and initial model** on the same **Basic → Input** page.
 7. Verify that the unit cell, space group, and composition were read correctly.
-8. Click **Validate HKL**.
+8. Click **View data**.
 9. Confirm the reflection interpretation and unique-reflection count.
-10. Click **Analyze completeness**.
+10. Click **Analyze data**.
 11. Inspect:
     - `d_min`,
     - 98% cumulative completeness,
@@ -236,8 +236,8 @@ Run Phase Studio when only reflection data are available and no reference struct
    - space-group information,
    - composition.
 5. Check that the manual metadata are accepted by the GUI.
-6. Run **Validate HKL**.
-7. Run **Analyze completeness**.
+6. Run **View data**.
+7. Run **Analyze data**.
 8. Configure the reconstruction workflow.
 9. Start the pipeline.
 

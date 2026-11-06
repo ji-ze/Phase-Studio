@@ -308,8 +308,17 @@ class SingleStructureViewerWindow(QDialog):
         self.render()
 
     def _refresh_viewer_palette(self):
+        from phase_studio.structure_camera import recolor_atoms
+        elements = recolor_atoms(self.canvas, self._color_for)
+        self.legend_label.setText('<b>Elements:</b> ' + ' &nbsp; '.join(
+            f'<span style="color:{self._color_for(e)}">&#9632;</span> {e}' for e in sorted(set(elements))))
+
+    def _refresh_comparison_frame(self):
         self._geometry_signature=None
         self.render()
+
+    def _comparison_provenance(self):
+        return (self._presentation() or {}).get('alignment',{})
 
     def render(self) -> None:
         data = self._presentation() or {}
@@ -356,8 +365,9 @@ class SingleStructureViewerWindow(QDialog):
             sizes = np.asarray([
                 max(3.0, min(90.0, float(data.get("atom_size", 34.0)) * count_scale))
             ] * len(atoms))
-            axis.scatter(coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors,
+            scatter = axis.scatter(coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=colors,
                          edgecolors="#ffffff", linewidths=0.2, depthshade=False)
+            scatter._phase_elements = tuple(str(getattr(atom, 'element', 'C')) for atom in atoms)
             bonds = list(data.get("bonds", ()))
             if bonds:
                 axis.add_collection3d(Line3DCollection(
@@ -415,7 +425,8 @@ class SingleStructureViewerWindow(QDialog):
 
     def _orientation_changed(self, elev: float, azim: float, axis) -> None:
         self._elev, self._azim = float(elev), float(azim)
-        axis.view_init(elev=self._elev, azim=self._azim)
+        self._roll = float(axis.roll)
+        axis.view_init(elev=self._elev, azim=self._azim, roll=self._roll)
 
     def _camera_interaction(self, kind: str) -> None:
         if kind in {"rotate", "pan", "zoom"}:

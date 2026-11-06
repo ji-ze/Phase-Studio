@@ -1,0 +1,202 @@
+[
+  {
+    "id": "UI-001",
+    "setting": "i_over_sigma_min",
+    "current": "Minimum observed value/σ",
+    "suggested": "Minimum intensity significance I/σ(I) [only when uncertainties are available]",
+    "severity": "Critical scientific correction",
+    "reason": "The legacy writer actually divides value by the fifth field even in FWHM mode. A wording-only fix cannot repair that scientific defect. Separate mode-aware filtering decision required; existing algorithm unchanged. FWHM is an angular peak width, not uncertainty.",
+    "backend_symbols": "_passes_reflection_filters; write_observed_reflections",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-002",
+    "setting": "reference_cif",
+    "current": "Reference model",
+    "suggested": "Reference structure (evaluation and optional Superflip density alignment)",
+    "severity": "Important clarification",
+    "reason": "Reference-backed validation is not independent evidence. Superflip referencefile also aligns resulting density. Distinguish evaluation, referencefile and modelfile roles.",
+    "backend_symbols": "pipeline_worker; resolve_superflip_referencefile",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-003",
+    "setting": "damping_factor",
+    "current": "XPLOR damping (1/x)",
+    "suggested": "New-map weight for XPLOR recycling",
+    "severity": "Important clarification",
+    "reason": "The GUI inverse x is clipped to [0.001,1], converted to f=1/x, and the blend is (1-x) previous + x new where applicable. A help formula is clearer than the reciprocal alone.",
+    "backend_symbols": "effective_xplor_damping_factor; blend_xplor_maps",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-004",
+    "setting": "map_feedback_intensity_damping",
+    "current": "Correction damping",
+    "suggested": "Intensity-correction weight",
+    "severity": "Important clarification",
+    "reason": "Correction damping and XPLOR damping are different operations. Explain the existing applied intensity formula and limiting branch rather than implying equal meanings of damping.",
+    "backend_symbols": "apply_map_feedback_to_reflections",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-005",
+    "setting": "map_feedback_intensity_max_i_over_sigma",
+    "current": "I/σ(I) limit",
+    "suggested": "Correct reflections below I/σ(I)",
+    "severity": "Important clarification",
+    "reason": "Strictly-below weak-reflection gate; amplitude-mode significance uses F/[2σ(F)]. This differs from the input-filter cutoff and is unavailable for FWHM significance. Equality matters.",
+    "backend_symbols": "map_feedback_significance; apply_map_feedback_to_reflections",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-006",
+    "setting": "powder_redistribution_mix",
+    "current": "Map ratio mix",
+    "suggested": "Map-predicted fraction of overlap repartitioning",
+    "severity": "Important clarification",
+    "reason": "Mix=0 preserves observed ratios; mix=1 uses map ratios. Group sums remain fixed. It does not set a global map amplitude scale.",
+    "backend_symbols": "redistribute_overlap_reflections",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-007",
+    "setting": "powder_separation_factor",
+    "current": "Separation factor",
+    "suggested": "Overlap-group separation factor",
+    "severity": "Important clarification",
+    "reason": "Dimensionless factor used with angular separation and FWHM, not a physical separation in angstrom. Retain a tooltip defining the actual grouping inequality and units.",
+    "backend_symbols": "assign_powder_overlap_groups",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-008",
+    "setting": "map_feedback_missing_percent_limit",
+    "current": "Maximum added reflections (%)",
+    "suggested": "Maximum added HKL (% of the existing reflection set)",
+    "severity": "Important clarification",
+    "reason": "Name the actual denominator and distinguish absent original HKL from newly allowed/missing HKL and from reflections crossing the writer filter. Confirm denominator in the existing completion branch before accepting replacement.",
+    "backend_symbols": "complete_missing_reflections_from_map",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-009",
+    "setting": "compute_omit_maps",
+    "current": "Compute OMIT validation maps (5% holdout)",
+    "suggested": "Compute maps with a 5% reflection holdout",
+    "severity": "Important clarification",
+    "reason": "Reflection holdout is distinct from an atom-omission model-bias experiment. Keep the existing OMIT term only with its specific reflection-based definition and immutable holdout explanation.",
+    "backend_symbols": "prepare_omit_holdout; map_quality.with_holdout_metrics",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-010",
+    "setting": "compute_omit_rfree",
+    "current": "Calculate R_free on the 5% holdout",
+    "suggested": "Calculate holdout R on the excluded 5% reflections",
+    "severity": "Important clarification",
+    "reason": "Do not imply independently refined R_free or independent validation when a reference/remote prediction influences evaluation. State amplitude/intensity convention and denominator used by compute_rfree.",
+    "backend_symbols": "compute_rfree; compute_omit_metrics",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-011",
+    "setting": "plimit_superflip",
+    "current": "Superflip threshold",
+    "suggested": "Superflip EDMA peak threshold (σ)",
+    "severity": "Consistency improvement",
+    "reason": "The two EDMA controls should both state density-standard-deviation units. This sigma is not an intensity measurement uncertainty.",
+    "backend_symbols": "run_edma_on_xplor",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-012",
+    "setting": "plimit_deblur",
+    "current": "SharpED threshold (σ)",
+    "suggested": "SharpED EDMA peak threshold (σ)",
+    "severity": "Consistency improvement",
+    "reason": "Identify peak extraction rather than implying a SharpED inference threshold. Existing EDMA sigma threshold behavior remains unchanged.",
+    "backend_symbols": "run_edma_on_xplor",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-013",
+    "setting": "edma_numberofatoms",
+    "current": "Atom-count mode",
+    "suggested": "EDMA site-count selection",
+    "severity": "Important clarification",
+    "reason": "Raw maxima, retained CIF sites, independent ASU sites and Jana m40 sites can differ. A detected peak is not a chemically validated atom.",
+    "backend_symbols": "run_edma_on_xplor; edma_peak_protocol",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-014",
+    "setting": "biso",
+    "current": "Biso",
+    "suggested": "Superflip map-sharpening Biso (Å²)",
+    "severity": "Important clarification",
+    "reason": "This overall map parameter is distinct from atom-specific physical displacement parameters. EDMA peak density must never be called an ADP. Verify the executable-specific keyword convention.",
+    "backend_symbols": "write_superflip_inflip; physical_displacement",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-015",
+    "setting": "normalize",
+    "current": "Normalization",
+    "suggested": "Requested normalization (backend compatibility applies)",
+    "severity": "Important clarification",
+    "reason": "The existing compatibility path may omit normalize atoms rather than send it. A requested GUI value is not proof of the effective generated keyword; show that distinction in help.",
+    "backend_symbols": "write_superflip_inflip; clean_extra_superflip_keywords",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-016",
+    "setting": "randomseed",
+    "current": "Random seed",
+    "suggested": "Superflip random seed (AUTO uses system time)",
+    "severity": "Important clarification",
+    "reason": "AUTO is uncontrolled unless the backend reports and provenance captures the actual seed. A saved configuration alone does not guarantee exact reproduction.",
+    "backend_symbols": "write_superflip_inflip",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-017",
+    "setting": "sharped_model",
+    "current": "Model",
+    "suggested": "SharpED model selection",
+    "severity": "Important clarification",
+    "reason": "A catalog/display name is not an immutable model/checkpoint identity. Record actual API model identifier and server-supplied version separately.",
+    "backend_symbols": "sharped_server_client.model_selection; _upload_job",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-018",
+    "setting": "sharped_outres",
+    "current": "Output resolution (Å)",
+    "suggested": "SharpED requested output resolution (Å)",
+    "severity": "Important clarification",
+    "reason": "Inference request parameter is not measured experimental resolution, dmin, d98 or a guaranteed attained resolution.",
+    "backend_symbols": "sharped_server_client._upload_job",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-019",
+    "setting": "bestdensities_metric",
+    "current": "Density selection metric",
+    "suggested": "Superflip best-density selection criterion",
+    "severity": "Important clarification",
+    "reason": "This selects retained native density attempts. It differs from Phase Studio candidate recommendation and from map feedback magnitude. reference and symmetry are distinct criteria.",
+    "backend_symbols": "write_superflip_inflip; result_selection recommendation",
+    "owner_decision": "Pending"
+  },
+  {
+    "id": "UI-020",
+    "setting": "workflow_preset",
+    "current": "Workflow preset",
+    "suggested": "Starting-parameter preset",
+    "severity": "Optional stylistic improvement",
+    "reason": "Recommended can imply scientific endorsement. Presets are editable initial values; preserve all numerical values and clearly state their scope and that existing untouched settings can persist.",
+    "backend_symbols": "_apply_workflow_preset",
+    "owner_decision": "Pending"
+  }
+]

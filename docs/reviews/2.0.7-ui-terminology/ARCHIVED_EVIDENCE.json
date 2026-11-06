@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "artifact_snapshot_commit": "9458722d48f1ed0a0e198ff95635f7897782559e",
+  "first_inventory_commit": "a1c6b0255eb0868561d4eb9ddbb6260c3b86cd2e",
+  "archive_format": "zip-stored-v1",
+  "archive_sha256": "ad08e33db66d1b9a97c5269d44a86a65630d98cc8fab0a01c6b3554b8c2ee7ad",
+  "files": [
+    {
+      "path": "docs/reviews/2.0.7-ui-terminology/SETTINGS_INVENTORY.md",
+      "bytes": 41601,
+      "sha256": "6164a1defde55cec134c5d51e7bc26e5c9b6d93399ca1031990849c0e8523aa9",
+      "git_blob_sha256": "65b3940618dc9409d56c6eb6ca526f68abcd62f4c8537b18a0ff596f79a735d5",
+      "restore_line_endings": "crlf"
+    },
+    {
+      "path": "docs/reviews/2.0.7-ui-terminology/UI_TEXT_INVENTORY.md",
+      "bytes": 812713,
+      "sha256": "c89e1abce7729c0cb0c9d10cb2d1f9bbc5c43a8d38f9048ab8187d795fefa30c",
+      "git_blob_sha256": "c89e1abce7729c0cb0c9d10cb2d1f9bbc5c43a8d38f9048ab8187d795fefa30c",
+      "restore_line_endings": "lf"
+    },
+    {
+      "path": "docs/reviews/2.0.7-ui-terminology/backend-traces.json",
+      "bytes": 519765,
+      "sha256": "ad414b53b40b7ce837bb8c32e6daa6b5fff3859d948271e1e09f0d080e93ba74",
+      "git_blob_sha256": "7cbea8458e44bf4d2f7c4f37d142ab31682fd67d4bc7cc15d13868ab7d89c7f8",
+      "restore_line_endings": "crlf"
+    },
+    {
+      "path": "docs/reviews/2.0.7-ui-terminology/runtime-widgets.json",
+      "bytes": 326317,
+      "sha256": "b14df125fdeec0ef617b17371f15e55700f416ce357167a74904adb425045b34",
+      "git_blob_sha256": "417ab1cf65b1931dbde6a12aa3dbbe966d06df6d2068d80e9102a991f4bb4e95",
+      "restore_line_endings": "crlf"
+    },
+    {
+      "path": "docs/reviews/2.0.7-ui-terminology/secondary-controls.json",
+      "bytes": 2734,
+      "sha256": "e4b46c835c22b986742310b013195a4fe3b3f097c366898e9f8de48e481ad6fc",
+      "git_blob_sha256": "2aba1f4b38b5768b794adfa5c042e0aca92852d143859121a9ae7156f97855c9",
+      "restore_line_endings": "crlf"
+    },
+    {
+      "path": "docs/reviews/2.0.7-ui-terminology/settings-source.json",
+      "bytes": 63088,
+      "sha256": "726a11ecd021b851851b9a5a22581011798cf4bdf6322835a8e721203be86c23",
+      "git_blob_sha256": "2cf490d5e10d1137d05c0c2a441d4f85bf8280fb25c62fc7d62e8fd85c70cfda",
+      "restore_line_endings": "crlf"
+    },
+    {
+      "path": "docs/reviews/2.0.7-ui-terminology/settings.json",
+      "bytes": 96758,
+      "sha256": "81bae53d857b402c6d0b7d3e2cc549e66909f131b5dc141799721199796dc19c",
+      "git_blob_sha256": "9ba17b700b73b3874f4c07a75dfb5f11c3f4207e38800afca6fd76ab6f336e5f",
+      "restore_line_endings": "crlf"
+    },
+    {
+      "path": "docs/reviews/2.0.7-ui-terminology/static-literals.json",
+      "bytes": 6173704,
+      "sha256": "0f5437d908c1b13863bd95017e70854432d3235e6a2aea7dadab78973c675c18",
+      "git_blob_sha256": "ed861c02c17fdb46a21977f5613ecd68dc046da6b1e966cdf657865363edaca8",
+      "restore_line_endings": "crlf"
+    }
+  ]
+}

@@ -67,8 +67,9 @@ def run_checks():
   assert w.backing_window_holder['win'] is None
   calls=[]
   class Diagnostics:
-   def test_hkl_load_dialog(self):calls.append('validate')
-   def open_hkl_completeness_dialog(self):calls.append('completeness')
+   def _start_hkl_background_task(self,label,worker,kind):
+    assert callable(worker)
+    calls.append('validate' if kind=='hkl_load_result' else 'completeness')
   w._get_backing_window=lambda:Diagnostics()
   w.validate_hkl_button.click();w.analyze_completeness_button.click();assert calls==['validate','completeness']
   tile=tiles[0];tile._on_click=lambda:calls.append('activate')

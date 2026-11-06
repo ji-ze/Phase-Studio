@@ -22,6 +22,7 @@ jobs:
     outputs:
       version: ${{ steps.identity.outputs.version }}
       commit: ${{ steps.identity.outputs.commit }}
+      updater_artifact_id: ${{ steps.upload_updater.outputs.artifact-id }}
     env:
       QT_QPA_PLATFORM: offscreen
       PHASE_STUDIO_STARTUP_PROBE: '1'
@@ -39,10 +40,12 @@ jobs:
         shell: pwsh
         env:
           REQUESTED_SHA: ${{ inputs.source_ref }}
+          ACCEPTED_SHA: ${{ vars.RELEASE_ACCEPTANCE_SHA }}
         run: |
           if ($env:REQUESTED_SHA -notmatch '^[a-fA-F0-9]{40}$') { throw 'A reviewed full commit SHA is required.' }
           $commit = (git rev-parse HEAD).Trim()
           if ($commit -ne $env:REQUESTED_SHA) { throw 'Checkout identity differs.' }
+          if ($env:ACCEPTED_SHA -ne $commit) { throw 'Required P0/manual scientific acceptance for this exact SHA is not recorded.' }
           git merge-base --is-ancestor $commit origin/main
           if ($LASTEXITCODE) { throw 'Stable releases must use a reviewed commit integrated into main.' }
           $version = (python -c "from phase_studio.version import VERSION; print(VERSION)").Trim()
@@ -73,7 +76,7 @@ jobs:
           }
           python -c "import phase_studio; print(phase_studio.__file__)"
           if ($LASTEXITCODE) { throw 'Phase Studio import verification failed.' }
-          foreach ($test in @('test_scientific_core.py','test_jana_completion.py','test_workflow_states.py','test_result_selection_viewer.py','test_review_edma.py','test_fullscreen_viewer.py')) {
+          foreach ($test in @('test_scientific_core.py','test_jana_completion.py','test_workflow_states.py','test_result_selection_viewer.py','test_review_edma.py','test_fullscreen_viewer.py','test_displacement_parameters.py','test_autosolve_orchestration.py','test_execution_logging.py')) {
             python "tests/$test"
             if ($LASTEXITCODE) { throw "Acceptance failed: $test" }
           }
@@ -89,6 +92,8 @@ jobs:
         run: |
           python packaging/tools/verify_update_build.py --dist dist --version $env:RELEASE_VERSION
           if ($LASTEXITCODE) { throw 'Frozen verification failed.' }
+          python packaging/tools/accept_frozen_gui.py --standalone "dist/release/PhaseStudio-$env:RELEASE_VERSION-x64.exe" --jana "dist/PhaseStudio-Jana2020-$env:RELEASE_VERSION/Phase_studio.exe" --output build/frozen-gui-before-signing
+          if ($LASTEXITCODE) { throw 'Frozen GUI acceptance failed.' }
           $legacy = "dist/release/RELEASE_NOTES_$($env:RELEASE_VERSION.Replace('.','_')).md"
           Move-Item -LiteralPath $legacy -Destination "dist/release/RELEASE_NOTES_$env:RELEASE_VERSION.md"
       - uses: actions/upload-artifact@v4
@@ -97,13 +102,25 @@ jobs:
           path: dist/release/
           if-no-files-found: error
           retention-days: 7
-  sign:
+      - uses: actions/upload-artifact@v4
+        id: upload_updater
+        with:
+          name: unsigned-updater
+          path: build/updater/PhaseStudioUpdater.exe
+          if-no-files-found: error
+          retention-days: 7
+  sign-updater:
     needs: build
     runs-on: windows-latest
     environment: phase-studio-release-signing
     permissions:
       contents: read
       actions: read
+    outputs:
+      helper_sha256: ${{ steps.helper_hash.outputs.sha256 }}
+    env:
+      CERT_SUBJECT: ${{ vars.SIGNPATH_CERTIFICATE_SUBJECT }}
+      CERT_THUMBPRINTS: ${{ vars.SIGNPATH_CERTIFICATE_THUMBPRINTS }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -112,12 +129,154 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install cryptography==50.0.2
+      - name: Require approved external SignPath configuration
+        shell: pwsh
+        env:
+          API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+          ORGANIZATION: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          PROJECT: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          POLICY: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          HELPER_CONFIG: ${{ vars.SIGNPATH_UPDATER_ARTIFACT_CONFIGURATION_SLUG }}
+          APP_CONFIG: ${{ vars.SIGNPATH_APPLICATION_ARTIFACT_CONFIGURATION_SLUG }}
+        run: |
+          foreach ($name in @('API_TOKEN','ORGANIZATION','PROJECT','POLICY','HELPER_CONFIG','APP_CONFIG','CERT_SUBJECT','CERT_THUMBPRINTS')) {
+            if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Required approved signing setting missing: $name" }
+          }
       - uses: actions/download-artifact@v4
         with:
-          name: unsigned-windows-packages
+          name: unsigned-updater
+          path: unsigned-helper
+      - name: Request approved updater Authenticode signing
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_UPDATER_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.updater_artifact_id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-helper
+      - name: Verify updater payload, trust chains and timestamp
+        id: helper_hash
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          python packaging/tools/verify_signing_transform.py --unsigned unsigned-helper/PhaseStudioUpdater.exe --signed signed-helper/PhaseStudioUpdater.exe
+          if ($LASTEXITCODE) { throw 'Signing changed the updater payload.' }
+          python packaging/tools/verify_authenticode.py --file signed-helper/PhaseStudioUpdater.exe --version $env:VERSION --subject $env:CERT_SUBJECT --thumbprints $env:CERT_THUMBPRINTS --report helper-authenticode.json
+          if ($LASTEXITCODE) { throw 'Signed updater trust verification failed.' }
+          "sha256=$((Get-FileHash signed-helper/PhaseStudioUpdater.exe -Algorithm SHA256).Hash.ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-updater
+          path: signed-helper/PhaseStudioUpdater.exe
+          if-no-files-found: error
+          retention-days: 7
+  embed-signed-updater:
+    needs: [build, sign-updater]
+    runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      application_artifact_id: ${{ steps.upload_apps.outputs.artifact-id }}
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PHASE_STUDIO_STARTUP_PROBE: '1'
+      CERT_SUBJECT: ${{ vars.SIGNPATH_CERTIFICATE_SUBJECT }}
+      CERT_THUMBPRINTS: ${{ vars.SIGNPATH_CERTIFICATE_THUMBPRINTS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r packaging/release-requirements-2.0.2.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-updater
+          path: signed-helper
+      - name: Build applications around the final signed helper bytes
+        shell: pwsh
+        env:
+          HELPER_SHA256: ${{ needs.sign-updater.outputs.helper_sha256 }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          ./packaging/build_windows.ps1 -Target All -SignedUpdaterPath signed-helper/PhaseStudioUpdater.exe -SignedUpdaterSha256 $env:HELPER_SHA256 -CertificateSubject $env:CERT_SUBJECT -CertificateThumbprints $env:CERT_THUMBPRINTS
+          if ($LASTEXITCODE) { throw 'Signed-helper build failed.' }
+          python packaging/tools/verify_update_build.py --dist dist --version $env:VERSION
+          if ($LASTEXITCODE) { throw 'Signed helper embedding or ownership inventory failed.' }
+          python packaging/tools/accept_frozen_gui.py --standalone "dist/release/PhaseStudio-$env:VERSION-x64.exe" --jana "dist/PhaseStudio-Jana2020-$env:VERSION/Phase_studio.exe" --output build/frozen-gui-signed-helper
+          if ($LASTEXITCODE) { throw 'Signed-helper frozen GUI acceptance failed.' }
+          $legacy = "dist/release/RELEASE_NOTES_$($env:VERSION.Replace('.','_')).md"
+          Move-Item -LiteralPath $legacy -Destination "dist/release/RELEASE_NOTES_$env:VERSION.md"
+      - uses: actions/upload-artifact@v4
+        id: upload_apps
+        with:
+          name: unsigned-applications-with-signed-updater
+          path: |
+            dist/release/PhaseStudio-*-x64.exe
+            dist/release/PhaseStudio-Jana2020-*.zip
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: dist/release/RELEASE_NOTES_*.md
+          if-no-files-found: error
+          retention-days: 7
+  sign:
+    needs: [build, embed-signed-updater]
+    runs-on: windows-latest
+    environment: phase-studio-release-signing
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CERT_SUBJECT: ${{ vars.SIGNPATH_CERTIFICATE_SUBJECT }}
+      CERT_THUMBPRINTS: ${{ vars.SIGNPATH_CERTIFICATE_THUMBPRINTS }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.build.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -r packaging/release-requirements-2.0.2.txt
+      - uses: actions/download-artifact@v4
+        with:
+          name: unsigned-applications-with-signed-updater
+          path: unsigned-applications
+      - name: Request approved application Authenticode signing
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_APPLICATION_ARTIFACT_CONFIGURATION_SLUG }}
+          github-artifact-id: ${{ needs.embed-signed-updater.outputs.application_artifact_id }}
+          wait-for-completion: true
+          output-artifact-directory: release
+      - name: Verify final signed package payloads before Ed25519 metadata
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          python packaging/tools/verify_signing_transform.py --unsigned unsigned-applications --signed release --version $env:VERSION
+          if ($LASTEXITCODE) { throw 'SignPath changed application or third-party payloads.' }
+          python packaging/tools/verify_authenticode.py --directory release --version $env:VERSION --subject $env:CERT_SUBJECT --thumbprints $env:CERT_THUMBPRINTS --report final-authenticode.json
+          if ($LASTEXITCODE) { throw 'Final Authenticode verification failed.' }
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
           path: release
-      - name: Sign using the previously provisioned key
+      - name: Sign final package hashes with the existing Ed25519 key
         env:
           PHASE_STUDIO_UPDATE_SIGNING_KEY: ${{ secrets.PHASE_STUDIO_UPDATE_SIGNING_KEY }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
@@ -144,7 +303,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: python -m pip install cryptography==50.0.2
+      - run: python -m pip install -r packaging/release-requirements-2.0.2.txt
       - uses: actions/download-artifact@v4
         with:
           name: authenticated-windows-release
@@ -155,8 +314,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
           RELEASE_COMMIT: ${{ needs.build.outputs.commit }}
+          CERT_SUBJECT: ${{ vars.SIGNPATH_CERTIFICATE_SUBJECT }}
+          CERT_THUMBPRINTS: ${{ vars.SIGNPATH_CERTIFICATE_THUMBPRINTS }}
         run: |
           if ($env:GITHUB_REPOSITORY -ne 'ji-ze/Phase-Studio') { throw 'Wrong publishing repository.' }
+          python packaging/tools/verify_authenticode.py --directory release --version $env:RELEASE_VERSION --subject $env:CERT_SUBJECT --thumbprints $env:CERT_THUMBPRINTS --report publication-authenticode.json
+          if ($LASTEXITCODE) { throw 'Production Authenticode gate failed; refuse publication.' }
           python packaging/tools/update_signing.py verify --directory release --version $env:RELEASE_VERSION
           if ($LASTEXITCODE) { throw 'Signed asset contract failed.' }
           $tag = "v$env:RELEASE_VERSION"
@@ -173,5 +336,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'Download verification failed; release stays draft.' }
           python packaging/tools/update_signing.py verify --directory verified-download --version $env:RELEASE_VERSION
           if ($LASTEXITCODE) { throw 'Uploaded assets differ; release stays draft.' }
+          python packaging/tools/verify_authenticode.py --directory verified-download --version $env:RELEASE_VERSION --subject $env:CERT_SUBJECT --thumbprints $env:CERT_THUMBPRINTS --report downloaded-authenticode.json
+          if ($LASTEXITCODE) { throw 'Downloaded Authenticode verification failed; release stays draft.' }
           gh release edit $tag --draft=false
           if ($LASTEXITCODE) { throw 'Publication failed.' }

@@ -79,11 +79,11 @@ Choose **Input mode: External HKL + CIF reference**, select the HKL, choose **HK
 The **Reference model** supplies metadata/evaluation context; it is not automatically the **Initial model (cycle 1)**. Leave that initial-model field empty for this demonstration. Validate the interpreted columns before phasing. Your real experiment must use its own correct cell, symmetry, composition and column meaning.
 
 <!-- PAGE {"title": "8 · Validate the HKL interpretation", "image": "screenshots/workflow/hkl-validation.png", "crop": "validation"} -->
-Click **Validate HKL**. Check parsed/unique counts, indices, values, uncertainty and any phase column. A successful parse means the selected format can be read; it does not certify measurement quality, correctness of the space group or completeness.
+Click **View data**. Check parsed/unique counts, indices, values, uncertainty and any phase column. A successful parse means the selected format can be read; it does not certify measurement quality, correctness of the space group or completeness.
 
 For the teaching file, the displayed values are synthetic intensities with σ(I). **F** is an amplitude, **I** is an intensity, and **FWHM** is a peak width. Choose the format that matches your file, not whichever gives a desirable score.
 
-**Analyze completeness** checks coverage within the observed reciprocal-space/resolution range using the selected symmetry. The complete guide explains its plots and limitations.
+**Analyze data** checks coverage within the observed reciprocal-space/resolution range using the selected symmetry. The complete guide explains its plots and limitations.
 
 <!-- PAGE {"title": "9 · Configure a short local run", "image": "screenshots/standalone/standalone-workflow.png", "crop": "configuration"} -->
 For the first teaching calculation choose **Phasing method: Superflip**, **Cycles: 1**, enable **Run EDMA on Superflip map**, and disable **Run SharpED** and **Run EDMA on SharpED map**. Use **Output → Working directory** for a new project folder.
@@ -119,7 +119,7 @@ Enlarged genuine application capture. For meaning, settings and fixture limitati
 
 **Found but incompatible / cannot launch:** choose a compatible installation and repair missing supporting runtime files. Phase Studio does not accept a file solely because its name ends in `.exe`.
 
-**Unsupported input / missing metadata:** check Input mode, HKL format, cell, symmetry and composition. Empty/manual unset fields are not valid crystallographic metadata. Validate HKL before running.
+**Unsupported input / missing metadata:** check Input mode, HKL format, cell, symmetry and composition. Empty/manual unset fields are not valid crystallographic metadata. View data before running.
 
 **No atomic sites:** inspect the map and selected threshold, whether EDMA was enabled and whether extraction completed. Adjusting a completed candidate reruns EDMA only. Do not assume empty output means a correct absence of atoms.
 

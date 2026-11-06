@@ -180,6 +180,9 @@ class JanaRunOptions:
     # 2.0.0 Autosolve: "A" (solve the phase problem) or "B" (predict the
     # structure model); empty for every other action.
     autosolve_option: str = ""
+    # Explicit Wizard choice, shown in the incoming-data summary. None retains
+    # the configured application filter for callers that do not make a choice.
+    observed_filter_threshold: Optional[float] = None
 
 
 @dataclass
@@ -299,6 +302,9 @@ def build_jana_handoff_import(
         handoff_values["first_cycle_modelfile"] = explicit_first_model
 
     limitations: list[str] = []
+    if options.observed_filter_threshold is not None:
+        handoff_values['i_over_sigma_min']=str(options.observed_filter_threshold)
+        limitations.append('Observed significance filter explicitly set by the Wizard to '+str(options.observed_filter_threshold)+'. FWHM is not a measurement uncertainty.')
     if explicit_reference:
         handoff_values["reference_cif"] = explicit_reference
         handoff_values["referencefile_mode"] = "reference_density" if Path(explicit_reference).suffix.lower() in {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"} else "reference_cif"
@@ -739,7 +745,7 @@ def run_final_jana_handoff(
     log(f"Final Jana inflip: {calc_m80}")
     log(f"Final Jana handoff model: {selected_map}")
     try:
-        return run_process([str(original), str(calc_m80)], cwd=cwd, log=log)
+        return run_process([str(original), calc_m80.name], cwd=cwd, log=log)
     finally:
         try:
             calc_m80.unlink()
@@ -753,7 +759,8 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
     Both workflows call the active Jana scientific Superflip with Jana2020's own .inflip essentially
     unmodified (only reference/model overrides and, for the SharpED workflow, the
     XPLOR output keyword are injected in place, under the exact same file name Jana
-    supplied) so Superflip's own output-file naming is never disturbed. Phase
+    supplied, addressed relative to the existing project CWD when local) so
+    Superflip's own output-file naming is never disturbed. Phase
     recycling (multiple cycles) is handled separately by the full Phase Studio
     pipeline; this function always performs exactly one Superflip call.
     """
@@ -774,6 +781,11 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
     if not inflip_path.is_file():
         raise FileNotFoundError(f"Jana2020 .inflip file not found: {inflip_path}")
     base_name = inflip_path.stem
+    # The legacy Fortran argv decoder can lose Unicode directory characters.
+    # Keep the exact original file, addressed relative to its existing CWD.
+    args=list(args)
+    if inflip_path.parent.resolve()==cwd.resolve():
+        args[inflip_arg[0]]=inflip_path.name
     original_lines = read_text_lines(inflip_path)
     original_bytes = inflip_path.read_bytes()
 
@@ -823,8 +835,7 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
 
     try:
         if modified:
-            # Write back to the exact same file name Jana2020 supplied (args is
-            # passed through unchanged below) so Superflip's own implicit
+            # Write back to the exact same file name Jana2020 supplied so its implicit
             # output-file naming, which some builds derive from the input file
             # name, is not disturbed.
             write_text_lines(inflip_path, modified_lines)
@@ -1426,6 +1437,23 @@ class _JanaWorkflowWizard:
 
         QTimer.singleShot(0, self.stack._grow_to_current_page)
 
+    def _hkl_diagnostic_request(self):
+        """Snapshot the Wizard inputs, independently of cached Advanced widgets."""
+        from phase_studio.app import build_hkl_analysis_request_from_inflip, parse_inflip_settings
+        if self.inflip_path is None:
+            raise ValueError("No incoming Jana2020 .inflip was supplied.")
+        parsed = parse_inflip_settings(self.inflip_path)
+        imported = build_jana_handoff_import(self.inflip_path, JanaRunOptions(action="edit"), parsed)
+        reference = self.reference_file.text().strip()
+        work_dir = imported.values.get("work_dir", "")
+        request = build_hkl_analysis_request_from_inflip(
+            self.inflip_path, Path(reference).expanduser() if reference else None,
+            Path(work_dir) if work_dir else None,
+        )
+        if hasattr(self, "powder_wavelength_spin"):
+            request.powder_wavelength = self.powder_wavelength_spin.value()
+        return request
+
     def _get_backing_window(self):
         win = self.backing_window_holder.get("win")
         if win is not None:
@@ -1461,6 +1489,10 @@ class _JanaWorkflowWizard:
         if not mode:
             return ""
         return mode
+
+    def _observed_filter_threshold(self) -> Optional[float]:
+        from phase_studio.app import reflection_mode_has_fwhm
+        return 0.0 if reflection_mode_has_fwhm(self._detect_reflection_data_mode()) else None
 
     def _sync_page3_for_data_type(self) -> None:
         from phase_studio.app import (
@@ -1539,7 +1571,7 @@ class _JanaWorkflowWizard:
             and (getattr(self, "hkl_load_result", None) is None
                  or not getattr(self.hkl_load_result, "format_verified", False))
         ):
-            return "Map Feedback is unavailable until the incoming HKL column format has been verified. Review Input summary / Validate HKL."
+            return "Map Feedback is unavailable until the incoming HKL column format has been verified. Review Input summary / View data."
         # Map feedback only affects SUBSEQUENT cycles -- an enabled method
         # whose "Start after cycle" leaves no later cycle to apply to would
         # silently do nothing; block Run rather than accept a setting that
@@ -1928,7 +1960,7 @@ class _JanaWorkflowWizard:
             return section, body_layout
 
         # Compact single-row-per-field summary with the diagnostic actions
-        # (Validate HKL / Analyze completeness) as a small button column on the
+        # (View data / Analyze data) as a small button column on the
         # right rather than a third row underneath the metadata -- keeps the
         # whole section short enough that it, the Reference/model section and
         # all three Workflow cards fit on the first page without scrolling.
@@ -2011,8 +2043,8 @@ class _JanaWorkflowWizard:
         analysis_label = QLabel("Input analysis")
         analysis_label.setStyleSheet("color:#33456e; font-weight:600;")
         self.hkl_buttons_column.addWidget(analysis_label)
-        self.validate_hkl_button = QPushButton("Validate HKL")
-        self.analyze_completeness_button = QPushButton("Analyze completeness")
+        self.validate_hkl_button = QPushButton("View data")
+        self.analyze_completeness_button = QPushButton("Analyze data")
         self.hkl_buttons_column.addWidget(self.validate_hkl_button)
         self.hkl_buttons_column.addWidget(self.analyze_completeness_button)
         self.hkl_buttons_column.addStretch(1)
@@ -2115,8 +2147,8 @@ class _JanaWorkflowWizard:
                     result = build_hkl_load_result(request)
             except Exception:
                 # Per spec: never show a raw exception in this summary. The
-                # existing structured error dialog still covers Validate HKL /
-                # Analyze completeness themselves if the reflection block truly
+                # existing structured error dialog still covers View data /
+                # Analyze data themselves if the reflection block truly
                 # cannot be analyzed.
                 return
             self.reflections_value.setText(f"{len(result.reflections):,} HKL records · {len(result.unique_reflections):,} unique indices")
@@ -2131,7 +2163,9 @@ class _JanaWorkflowWizard:
                 self._sync_page3_for_data_type()
                 if self.stack.currentWidget() is self.page3:
                     self._refresh_page3_validation_message()
-            self.format_value.setText(format_reflection_data_mode(result.data_mode))
+            from phase_studio.app import reflection_mode_has_fwhm
+            self.format_value.setText(format_reflection_data_mode(result.data_mode)+
+                (' · filter off (0)' if reflection_mode_has_fwhm(result.data_mode) else ''))
             # Use the diagnostic authority's verified column semantics, never
             # a filename or AUTO fallback, to classify the measurement input.
             report = result.diagnostics
@@ -2167,14 +2201,22 @@ class _JanaWorkflowWizard:
 
         def validate_hkl_clicked() -> None:
             try:
-                self._get_backing_window().test_hkl_load_dialog()
+                from phase_studio.app import build_hkl_load_result
+                request = self._hkl_diagnostic_request()
+                self._get_backing_window()._start_hkl_background_task(
+                    "HKL validation", lambda: build_hkl_load_result(request), "hkl_load_result"
+                )
             except Exception as exc:
                 report = build_error_report(exc, subsystem="HKL", operation="HKL validation")
                 show_phase_studio_error(self.dialog, report)
 
         def analyze_completeness_clicked() -> None:
             try:
-                self._get_backing_window().open_hkl_completeness_dialog()
+                from phase_studio.hkl_diagnostics import cached_analysis
+                request = self._hkl_diagnostic_request()
+                self._get_backing_window()._start_hkl_background_task(
+                    "HKL completeness analysis", lambda: cached_analysis(request), "hkl_completeness_result"
+                )
             except Exception as exc:
                 report = build_error_report(exc, subsystem="HKL", operation="HKL completeness")
                 show_phase_studio_error(self.dialog, report)
@@ -3968,6 +4010,7 @@ class _JanaWorkflowWizard:
             run_model = self.model.currentText().strip()
             return JanaRunOptions(
                 action=action,
+                observed_filter_threshold=self._observed_filter_threshold(),
                 cycles=effective_cycles(),
                 # The recommended workflow always retains both completed
                 # result families. Its initial Result Selection source is the

@@ -59,6 +59,7 @@ def main():
         thread.join()
     log.close()
     text = (run_dir / "log.txt").read_text(encoding="utf-8")
+    detailed = (run_dir / "diagnostic.log").read_text(encoding="utf-8")
 
     check("run diagnostic log is anchored inside the isolated run directory",
           (run_dir / "log.txt").is_file())
@@ -74,9 +75,10 @@ def main():
               "SharpED endpoint: https://sharped.example.test",
           )))
     check("every concurrent record has a millisecond timestamp and category",
-          len(re.findall(r"^\d{2}:\d{2}:\d{2}\.\d{3} \[", text, re.MULTILINE)) == len(records))
+          len(re.findall(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+00:00 \[", detailed, re.MULTILINE)) == len(records))
     check("persistent diagnostics retain paths and hashes hidden from the GUI",
-          "SHA-256 abcdef" in text and str(run_dir / "map.xplor") in text)
+          "SHA-256 abcdef" in detailed and str(run_dir / "map.xplor") in detailed
+          and "SHA-256 abcdef" not in text)
     check("program installation remains byte-identical and receives no generated files",
           before_install == {p.relative_to(install): p.read_bytes() for p in install.rglob("*") if p.is_file()})
 

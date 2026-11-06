@@ -1,0 +1,12 @@
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="PhaseStudio-2.0.7-x64.exe">
+      <authenticode-sign/>
+    </pe-file>
+    <zip-file path="PhaseStudio-Jana2020-2.0.7.zip">
+      <pe-file path="PhaseStudio-Jana2020-2.0.7/Phase_studio.exe">
+        <authenticode-sign/>
+      </pe-file>
+    </zip-file>
+  </zip-file>
+</artifact-configuration>

@@ -11,6 +11,18 @@ from unittest.mock import patch
 
 
 def run(directory):
+    if os.environ.get('PHASE_STUDIO_INPUT_UI_ACCEPTANCE')=='1':
+        from .input_ui_acceptance import run as run_input_ui
+        try:
+            return run_input_ui(directory)
+        except Exception as error:
+            output=Path(directory)
+            output.mkdir(parents=True,exist_ok=True)
+            (output/'report.json').write_text(json.dumps(dict(passed=False,error=str(error),error_type=type(error).__name__)),encoding='utf8')
+            raise SystemExit(1)
+    if os.environ.get('PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'):
+        from .map_loading_acceptance import run as run_map_loading
+        return run_map_loading(directory,os.environ['PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'])
     if os.environ.get('PHASE_STUDIO_EDMA_ACCEPTANCE_INPUT'):
         from .edma_acceptance import run_saved_map_check
         return run_saved_map_check(directory, os.environ['PHASE_STUDIO_EDMA_ACCEPTANCE_INPUT'])
@@ -120,6 +132,7 @@ def run(directory):
                 report['wizard_navigation']=True;report['superflip_resolution']=True
         if not report.get('ok'):
             from . import app as a,hkl_diagnostics as hd,hkl_diagnostics_ui as hu,structure_camera as camera,result_selection as selection
+            _check_scientific_interchange(a, report, directory)
             from matplotlib.figure import Figure
             from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
             import numpy as np,gemmi
@@ -181,7 +194,7 @@ def run(directory):
                 profile=ValidationProfile.REFERENCE_FREE
                 selector=ResultSelectionDialog(backend,candidates,[],profile,profile_definition(profile),recommend_best_result(profile,candidates),recommend_best_result(profile,[]),
                     superflip_tab_available=True,sharped_tab_available=False,initial_source='superflip',map_feedback_intensity_enabled=False,jana_context=False,
-                    preview_host=create_result_preview_host(backend,gemmi.UnitCell(10,10,10,90,90,90),30,-60),parse_structure=a.parse_cif_atoms,reference_atoms=[],source_title=lambda source:'Superflip')
+                    preview_host=create_result_preview_host(backend,gemmi.UnitCell(10,10,10,90,90,90),30,-60),parse_structure=a.parse_cif_atoms,reference_atoms=[],source_title=lambda source:'Superflip',feedback_directory=directory/'review-run')
                 selector.show();selector.resize(1200,760);snap('09-result-selection',selector)
                 assert selector._resolved_preview is not None and selector._action_button.isEnabled()
                 before=selector._resolved_preview
@@ -193,6 +206,8 @@ def run(directory):
                 snap('10-fullscreen',detached);detached.close()
                 assert selector._resolved_preview==before
                 report['rendered_atoms']=len(before.atoms);report['candidate_id']=selector.preview_candidate_id
+                cfg=_check_lambda_camera(a, backend, cif, report, directory, snap)
+                _check_final_review(a,backend,selector,candidates,map_path,cif,cfg,report,directory,snap)
                 selector.close();backend.close()
             dialog=QFileDialog(wizard.dialog,'Phase Studio controlled file-dialog acceptance',str(directory));dialog.setFileMode(QFileDialog.ExistingFile)
             QTimer.singleShot(250,dialog.reject);dialog.exec();report['file_dialog_open_close']=True
@@ -216,6 +231,32 @@ def run(directory):
         settle()
         if screen_patch is not None:screen_patch.stop()
     return 0 if report.get('ok') else 1
+
+
+def _check_scientific_interchange(a, report, directory):
+    """Actual bundled numerical execution; no native or remote process mocks."""
+    import numpy as np
+    data=np.zeros((8,8,8));data[0,0,1]=1.
+    xmap=a.XplorMap('off-origin phase probe',(8,0,7,8,0,7,8,0,7),
+                    (10,10,10,90,90,90),'ZYX',data.ravel())
+    intensity,phase=a.xplor_fft_predictions_from_map(xmap,[(1,0,0)])[(1,0,0)]
+    assert abs(intensity-1)<1e-12 and abs(phase-45)<1e-12
+    source=directory/'scientific-native-dummy.inflip'
+    source.write_text('dataformat amplitude phase dummy\nfbegin\n1 0 0 12 .25 123\nendf\n',encoding='utf8')
+    extracted=a.extract_embedded_hkl_from_inflip(source,directory/'scientific-input')
+    row=a.read_hkl(extracted,4,6,True)[0]
+    assert row.phase==90 and row.sigma is None
+    report['scientific_interchange']={'execution':'actual bundled NumPy FFT and native-format parsing',
+        'off_origin_phase_deg':phase,'intensity':intensity,'native_phase_deg':row.phase,
+        'native_dummy_uncertainty':row.sigma,'live_inference':False}
+    x=np.arange(32)
+    coefficients=[1.,2.,3.,2.,4.,6.]
+    density=sum(2*fc*np.cos(2*np.pi*h*x/32)/32 for h,fc in enumerate(coefficients,1))
+    measured=[a.FrozenReflection(h,0,0,fo) for h,fo in enumerate([1.,2.,3.,1.,2.,3.],1)]
+    context=a.make_validation_context(measured,free_hkls=[(h,0,0) for h in (4,5,6)])
+    metrics=a.compute_map_quality(density,(32,0,31,1,0,0,1,0,0),(10,10,10,90,90,90),'ZYX',context)
+    assert abs(metrics.r_work)<1e-12 and abs(metrics.r_free-1)<1e-12
+    report['scientific_interchange']['work_scaled_free_r']=metrics.r_free
 
 
 def _check_feedback_significance(a, backend, wizard, report, directory, snap):
@@ -285,3 +326,98 @@ def _check_feedback_significance(a, backend, wizard, report, directory, snap):
     report['map_feedback_significance'] = dict(checks=results,zero_bypasses_filter=True,
         fwhm_rejected=True,observations_unchanged=True,shared_unit='I/σ(I)')
     wizard.dialog.close()
+
+
+def _check_lambda_camera(a, backend, cif, report, directory, snap):
+    """Real gestures and native keyword propagation inside each frozen profile."""
+    from PySide6.QtCore import Qt, QPoint
+    from PySide6.QtTest import QTest
+    from unittest.mock import patch
+    source=directory/'lambda-camera.inflip'
+    source.write_text('cell 10 10 10 90 90 90\nspacegroup P1\ncomposition C2\ndataformat intensity fwhm\nfbegin\n1 0 0 10 .1\nendf\n')
+    source.with_suffix('.m90').write_text('lambda 1.541866\nend\n')
+    path_value=backend._path_value;combo_value=backend._combo_value
+    with patch.object(backend,'_path_value',side_effect=lambda key: str(source) if key=='jana_inflip' else ('' if key in ('hkl','reference_cif','first_cycle_modelfile') else path_value(key))),patch.object(backend,'_combo_value',side_effect=lambda key: a.INPUT_MODE_INFLIP if key=='input_source_mode' else combo_value(key)),patch.object(backend,'_resolve_crystal_metadata_from_inputs',return_value=a.resolve_crystal_metadata(a.METADATA_SOURCE_INFLIP,jana_inflip=source)):
+        backend.inputs['redistribute_overlaps'].setChecked(False)
+        cfg=backend.get_config()
+        assert not cfg.redistribute_overlaps and cfg.powder_wavelength==1.541866
+        assert a.powder_superflip_keywords('',cfg.powder_wavelength)=='lambda 1.541866'
+        report['native_fwhm_wavelength']={'value':cfg.powder_wavelength,'source':cfg.wavelength_source,'feedback':False}
+    atoms=a.parse_cif_atoms(cif)
+    for attribute in ('reference_atoms_for_plot','superflip_atoms_for_plot','deblur_atoms_for_plot'):
+        setattr(backend,attribute,list(atoms))
+    backend._update_structure_views();backend.show()
+    for _ in range(8):a.QApplication.processEvents()
+    trace=[]
+    for index in range(3):
+        canvas=backend.structure_canvas;axes=backend._structure_interactive_axes
+        for axis in axes:axis.view_init(23,41,roll=17)
+        canvas.draw();box=axes[index].get_window_extent();ratio=canvas.device_pixel_ratio
+        point=QPoint(int((box.x0+box.width*.4)/ratio),int((canvas.figure.bbox.height-box.y0-box.height*.5)/ratio))
+        QTest.mousePress(canvas,Qt.LeftButton,Qt.NoModifier,point)
+        for dx,dy in ((12,8),(27,19),(42,26)):
+            QTest.mouseMove(canvas,point+QPoint(dx,dy),30)
+            a.QApplication.processEvents()
+        QTest.mouseRelease(canvas,Qt.LeftButton,Qt.NoModifier,point+QPoint(42,26))
+        a.QApplication.processEvents()
+        values=[tuple(round(float(getattr(axis,k)),7) for k in ('elev','azim','roll')) for axis in axes]
+        assert values[0]!=(23.,41.,17.) and len(set(values))==1,values
+        trace.append(values)
+        backend._update_structure_views()
+        assert all(tuple(round(float(getattr(axis,k)),7) for k in ('elev','azim','roll'))==values[0] for axis in backend._structure_interactive_axes)
+    report['synchronized_qt_drag']=trace
+    snap('12-synchronized-camera',backend)
+    return cfg
+
+
+def _check_final_review(a,backend,selector,candidates,map_path,cif,cfg,report,directory,snap):
+    from .run_provenance import safe
+    from .run_review import candidate_transfer_rows
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication,QDialog
+    cfg.cycles=5;cfg.work_dir=directory/'review-run';cfg.work_dir.mkdir();cfg.run_id='offline-review-fixture'
+    backend.last_run_config=cfg;backend._active_run_id=cfg.run_id
+    backend._jana_wizard_handoff_available=lambda:False
+    completed=[a.CycleResult(c.cycle,'none',None,None,map_path,cif,None,map_path,cif,None,
+        superflip_quality=c.metrics,deblur_quality=c.metrics,run_id=cfg.run_id) for c in candidates]
+    backend.results=completed[:2]
+    diagnostic=a.RunDiagnosticLog(cfg.work_dir/'log.txt',cfg);backend._run_diagnostic_log=diagnostic;p=diagnostic.provenance
+    for result in completed[:2]:p.manifest['cycles'][str(result.cycle)]=dict(status='completed',source_cycle=result.cycle,result=safe(result),reflection_input={})
+    backend._set_run_status('Running');backend._apply_cycle_progress_state(a.CycleProgressState(3,5,'Superflip',1,7,busy=True))
+    backend.stop_btn.click()
+    assert p.manifest['status']=='stopping_after_current_cycle' and p.manifest['finished'] is None
+    backend.results=completed
+    p.manifest['cycles']['3']=dict(status='completed',source_cycle=3,result=safe(completed[2]),reflection_input={})
+    state=SimpleNamespace(cfg=cfg,run_id=cfg.run_id,provenance=p,diagnostic_log=None,completed_cycles=2)
+    assert backend._finalize_completed_cycle(state,3,['Superflip'])
+    p.finish('stopped');backend._poll_queue()
+    assert p.manifest['status']=='stopped' and p.manifest['completed_cycles']==3
+    assert '3 of 5' in backend.log_text.toPlainText()
+    for c in candidates:p.event('log','Superflip',c.cycle,dict(message=f'Controlled cycle {c.cycle} scientific event',category='SCIENTIFIC_RESULT'))
+    p.checkpoint();selector._sync_action_button();selector.refresh_feedback();selector._execution_log_button.click()
+    viewer=selector._run_log_viewer;viewer.cycle_filter.setChecked(True);viewer.family_filter.setChecked(True)
+    viewer.kind.setCurrentIndex(viewer.kind.findData('scientific'));viewer.search.setText('Controlled')
+    assert f'Controlled cycle {selector.selected_candidate.cycle} scientific event' in viewer.text.toPlainText()
+    assert '3 of 5' in viewer.status.text()
+    snap('13-filtered-execution-log',viewer);snap('14-controlled-stop',backend)
+    def close_details():
+        for dialog in QApplication.topLevelWidgets():
+            if dialog.isVisible() and dialog.windowTitle() in ('Why this cycle?','Confirm selected result export'):
+                snap('15-'+('recommendation-reason' if dialog.windowTitle()=='Why this cycle?' else 'export-identity'),dialog);dialog.reject()
+    QTimer.singleShot(150,close_details);selector._why_cycle_button.click()
+    before=len(p.manifest['selections'])
+    QTimer.singleShot(150,close_details)
+    assert not a.confirm_candidate_transfer(selector,candidate_transfer_rows(selector.selected_candidate,cfg,directory/'exports'))
+    assert len(p.manifest['selections'])==before
+    report['persisted_result_log']=dict(nonmodal=not viewer.isModal(),cycle=viewer.cycle,family=viewer.family,search=True)
+    report['controlled_stop']=dict(status=p.manifest['status'],completed_cycles=3,planned_cycles=5,codes=[item['code'] for item in p.manifest['lifecycle']])
+    report['export_confirmation_cancel_keeps_selection_pending']=True
+    viewer.close();diagnostic.close()
+    backend._run_diagnostic_log=None;backend.last_run_config=None
+    original=(cfg.work_dir/'events.jsonl').read_bytes()
+    with patch.object(a.QFileDialog,'getExistingDirectory',return_value=str(cfg.work_dir)):
+        backend.execution_log_open_button.click()
+        historical=backend._execution_log_viewers[-1]
+        assert '3 of 5' in historical.status.text() and (cfg.work_dir/'events.jsonl').read_bytes()==original
+        historical.close()
+    report['saved_log_access_without_worker']=True

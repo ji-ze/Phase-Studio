@@ -23,7 +23,15 @@ def register_science_gothic_font() -> tuple[str, ...]:
     global _science_gothic_font_id, _science_gothic_families
     if _science_gothic_font_id is not None:
         return _science_gothic_families
-    _science_gothic_font_id = QFontDatabase.addApplicationFont(str(SCIENCE_GOTHIC_ASSET))
+    # Qt's Windows filename-based font loader can reject a valid Unicode
+    # installation path. Python reads the original bytes using Unicode APIs;
+    # loading those bytes also supports extended-length Windows paths.
+    try:
+        data = SCIENCE_GOTHIC_ASSET.read_bytes()
+    except OSError:
+        _science_gothic_font_id = -1
+    else:
+        _science_gothic_font_id = QFontDatabase.addApplicationFontFromData(data)
     if _science_gothic_font_id >= 0:
         _science_gothic_families = tuple(
             str(family) for family in QFontDatabase.applicationFontFamilies(_science_gothic_font_id)

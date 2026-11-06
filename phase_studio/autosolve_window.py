@@ -597,6 +597,12 @@ def build_complete_molecule_view(
             next_frontier: List[int] = []
             for fi in frontier:
                 point = comp_coords[fi]
+                # Query the cached home-cell neighbourhood in the frontier
+                # atom's own cell. A finite molecule may cross more than one
+                # cell face; a pool anchored at the original cell cuts it off.
+                lattice_shift = np.floor(frac_of @ (point - vec)).astype(np.int64)
+                cartesian_shift = orth @ lattice_shift
+                point = point - cartesian_shift
                 near = grid.candidates(point)
                 if near.size == 0:
                     continue
@@ -615,15 +621,15 @@ def build_complete_molecule_view(
                     if previous is None or np.linalg.norm(pool_coords[pi] - point) < np.linalg.norm(pool_coords[previous] - point):
                         best_by_seed[candidate_seed] = pi
                 for pi in best_by_seed.values():
-                    key = key_of(pool_atoms[pi].element, pool_coords[pi])
+                    key = key_of(pool_atoms[pi].element, pool_coords[pi] + cartesian_shift)
                     if key in accepted:
                         continue
                     accepted.add(key)
                     placed_seed.add(pool_seed[pi])
                     placed_seed_op[pool_seed[pi]] = pool_op[pi]
                     source = pool_atoms[pi]
-                    comp_atoms.append(AtomSite(label=source.label, element=source.element, frac=pool_frac_array[pi].copy(), density=source.density))
-                    comp_coords.append(pool_coords[pi])
+                    comp_atoms.append(AtomSite(label=source.label, element=source.element, frac=pool_frac_array[pi] + lattice_shift, density=source.density))
+                    comp_coords.append(pool_coords[pi] + cartesian_shift)
                     next_frontier.append(len(comp_atoms) - 1)
                     if total_atoms + len(comp_atoms) >= max_atoms:
                         break
@@ -646,6 +652,9 @@ def build_complete_molecule_view(
         while completion_frontier:
             current_index = completion_frontier.pop(0)
             existing_atom, point = comp_atoms[current_index], comp_coords[current_index]
+            lattice_shift = np.floor(frac_of @ (point - vec)).astype(np.int64)
+            cartesian_shift = orth @ lattice_shift
+            point = point - cartesian_shift
             near = grid.candidates(point)
             if near.size == 0:
                 continue
@@ -661,14 +670,14 @@ def build_complete_molecule_view(
                     continue
                 options = [pi for pi in valid if pool_seed[pi] == seed_id]
                 pi = min(options, key=lambda item: float(np.linalg.norm(pool_coords[item] - point)))
-                key = key_of(pool_atoms[pi].element, pool_coords[pi])
+                key = key_of(pool_atoms[pi].element, pool_coords[pi] + cartesian_shift)
                 if key in accepted or total_atoms + len(comp_atoms) >= max_atoms:
                     continue
                 accepted.add(key)
                 symmetry_completed_seeds.add(seed_id)
                 source = pool_atoms[pi]
-                comp_atoms.append(AtomSite(label=source.label, element=source.element, frac=pool_frac_array[pi].copy(), density=source.density))
-                comp_coords.append(pool_coords[pi])
+                comp_atoms.append(AtomSite(label=source.label, element=source.element, frac=pool_frac_array[pi] + lattice_shift, density=source.density))
+                comp_coords.append(pool_coords[pi] + cartesian_shift)
                 completion_frontier.append(len(comp_atoms) - 1)
         covered[list(placed_seed)] = True
         components.append((comp_atoms, comp_coords))
@@ -1091,6 +1100,10 @@ class AutosolveWindow(QMainWindow):
             toggle_auto_rotate=lambda: self.auto_rotate_button.toggle(),
         )
         root.addWidget(self.structure_canvas, 14)
+        from .viewer_metadata import PanelMetadataLabel
+        self.comparison_status=PanelMetadataLabel()
+        self.comparison_status.setMaxLines(1)
+        self.comparison_status.setVisible(False);root.addWidget(self.comparison_status)
         self.search_placeholder = QLabel(
             "<b>Searching for a solution</b><br><br>"
             "Superflip and SharpED are searching the electron-density maps.<br>"
@@ -1359,8 +1372,11 @@ class AutosolveWindow(QMainWindow):
             return {}
         composition_label = "EDMA asymmetric-unit composition"
         composition = panel.edma_asu_composition
-        data = prepare_structure_presentation(
+        from .viewer_alignment import present_structure,comparison_policy,panel_summary
+        data = present_structure(
             Path(panel.current_cif), self.view_mode, composition, composition_label,
+            policy=comparison_policy(),reference_path=self._reference_path(),
+            metric_cell=self.structure_cell,
         )
         family = (
             "Charge-flipping solution" if self._ordinary_dual_workflow and role == guided.ROLE_OBSERVED else
@@ -1384,6 +1400,7 @@ class AutosolveWindow(QMainWindow):
             f" · {data.get('displayed', 0)} displayed · {'Full cell' if self.view_mode == 'cell' else 'Complete molecules'}"
         )
         from hashlib import sha256
+        if comparison_policy()!='independent':data['metadata']+='<br>'+html.escape(panel_summary(data))
         path = Path(panel.current_cif)
         cell, sg, hm = parse_cif_cell_and_sg(path)
         data["scientific_details"] = (
@@ -1407,8 +1424,19 @@ class AutosolveWindow(QMainWindow):
         return data
 
     def _refresh_viewer_palette(self):
+        from phase_studio.structure_camera import recolor_atoms
+        elements = recolor_atoms(self.structure_canvas, self._element_color,
+            self._structure_depth_artists + self._secondary_depth_artists,
+            self._update_structure_depth_artist)
+        self._set_displayed_elements(elements)
+
+    def _refresh_comparison_frame(self):
         self._render_signature=None
-        self._refresh_tick()
+        panels=getattr(self,'_last_panels',{})
+        self._render_structures(panels.get(guided.ROLE_OBSERVED),panels.get(guided.ROLE_PREDICTED))
+
+    def _comparison_provenance(self):
+        return {role:data.get('alignment',{}) for role,data in getattr(self,'_comparison_data',{}).items()}
 
     def _open_panel_fullscreen(self, role: str) -> None:
         panel = self._display_panel(role)
@@ -2300,12 +2328,13 @@ class AutosolveWindow(QMainWindow):
 
     def _camera_orientation_changed(self, elev: float, azim: float, _source_axis) -> None:
         if self._ordinary_dual_workflow:
-            _source_axis.view_init(elev=elev, azim=azim)
+            _source_axis.view_init(elev=elev, azim=azim, roll=_source_axis.roll)
             self._update_structure_depth_cue(elev, azim)
             return
         self.structure_elev, self.structure_azim = float(elev), float(azim)
+        self.structure_roll = float(_source_axis.roll)
         for axis in self._structure_interactive_axes:
-            axis.view_init(elev=elev, azim=azim)
+            axis.view_init(elev=elev, azim=azim, roll=self.structure_roll)
         self._update_structure_depth_cue(elev, azim)
 
     def _camera_interaction(self, kind: str) -> None:
@@ -2723,6 +2752,8 @@ class AutosolveWindow(QMainWindow):
                 view.secondary_coords[:, 0], view.secondary_coords[:, 1], view.secondary_coords[:, 2],
                 s=secondary_sizes, c=secondary_colors, alpha=1.0, linewidths=0.0, depthshade=False,
             )
+            secondary_scatter._phase_elements = tuple(a.element for a in view.secondary_atoms)
+            secondary_scatter._phase_white_blend = SECONDARY_PEAK_WHITE_BLEND
             secondary_artists = StructureDepthArtists(
                 scatter=secondary_scatter,
                 atom_coordinates=view.secondary_coords,
@@ -2741,6 +2772,7 @@ class AutosolveWindow(QMainWindow):
             coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=atom_base_colors,
             alpha=1.0, edgecolors="#ffffff", linewidths=0.3, depthshade=False,
         )
+        scatter._phase_elements = tuple(a.element for a in view.atoms)
         depth_artists = StructureDepthArtists(
             scatter=scatter,
             atom_coordinates=coords,
@@ -2837,6 +2869,12 @@ class AutosolveWindow(QMainWindow):
         shows exactly the structure its ReviewPanel names -- in Review the
         user-tuned threshold's structure, otherwise the best COMPLETED
         candidate's recorded structure."""
+        from .viewer_alignment import present_structure,comparison_policy,panel_summary
+        policy=comparison_policy()
+        self._comparison_data={}
+        if policy!='independent' and self._structure_interactive_axes:
+            self.structure_elev=self._structure_interactive_axes[0].elev
+            self.structure_azim=self._structure_interactive_axes[0].azim
         previous_cameras = {
             role: (axis.elev, axis.azim, self._structure_axis_limits(axis),
                    getattr(axis, "_phase_fit_zoom", None), axis.roll)
@@ -3024,8 +3062,16 @@ class AutosolveWindow(QMainWindow):
             self.structure_axes.append(axis)
             self._axis_roles[axis] = role
             role_axes.append((role, cycle, axis))
+            if policy!='independent' and self.view_mode=='cell' and path is not None:
+                self._comparison_data[role]=present_structure(path,'cell',policy=policy,reference_path=self._reference_path(),metric_cell=self.structure_cell)
             if self.view_mode == "molecule":
-                view = _complete_molecule_view_for_path(path)
+                if policy!='independent' and path is not None:
+                    data=present_structure(path,self.view_mode,policy=policy,reference_path=self._reference_path(),metric_cell=self.structure_cell)
+                    if not hasattr(self,'_comparison_data'):self._comparison_data={}
+                    self._comparison_data[role]=data
+                    center,radius=data['fit'] if data.get('fit') else (np.zeros(3),1.)
+                    view=CompleteMoleculeView(data['atoms'],data['coords'],data['bonds'],[],np.zeros((0,3)),center,radius)
+                else:view = _complete_molecule_view_for_path(path)
                 if view is not None:
                     if self._plot_molecule_panel(axis, view, empty_text):
                         displayed_elements += [clean_element_symbol(a.element) for a in view.atoms]
@@ -3047,6 +3093,15 @@ class AutosolveWindow(QMainWindow):
         # FIT_EXTENT_CHANGE_RATIO -- never merely because THIS render ran
         # (e.g. an ordinary +/- atoms nudge with a similar extent leaves
         # the user's current framing alone; see item 19-22).
+        if policy!='independent' and self._structure_depth_artists:
+            points=np.vstack([item.atom_coordinates for item in self._structure_depth_artists])
+            if self.view_mode=='cell':points=np.vstack([points,*[item.cell_corners for item in self._structure_depth_artists]])
+            center,radius=_bounding_sphere(points)
+            for axis in self._structure_interactive_axes:self._fit_axis(axis,center,radius,MOLECULE_VIEW_FILL)
+        if hasattr(self,'comparison_status'):
+            self.comparison_status.setVisible(policy!='independent')
+            self.comparison_status.setText(' | '.join(role+': '+panel_summary(data) for role,data in self._comparison_data.items()))
+            self.comparison_status.setToolTip(json.dumps(self._comparison_provenance(),indent=2))
         force_refit = False
         seen_roles = set()
         for role, cycle, axis in role_axes:

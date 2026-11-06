@@ -49,6 +49,9 @@ import traceback
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
+from phase_studio.feedback_diagnostics import record_feedback_observation
+from phase_studio.run_provenance import (RunProvenance,observe_pipeline,observe_reflection_read,
+    observe_native_command,active_provenance,provenance_scope,record as record_provenance,timestamp as provenance_timestamp)
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
@@ -78,6 +81,7 @@ try:
         profile_definition,
         recommend_best_result,
         scaled_amplitude_metrics,
+        amplitude_r_factor_at_scale,
         with_holdout_metrics,
         with_reference_metrics,
     )
@@ -94,6 +98,7 @@ except Exception:
         profile_definition,
         recommend_best_result,
         scaled_amplitude_metrics,
+        amplitude_r_factor_at_scale,
         with_holdout_metrics,
         with_reference_metrics,
     )
@@ -323,6 +328,8 @@ ATOMIC_NUMBER_HINTS = {
 
 @dataclass
 class Reflection:
+    # Legacy storage name: sigma holds the declared auxiliary column. In a
+    # FWHM mode this is an angular width, never a measurement uncertainty.
     h: int
     k: int
     l: int
@@ -577,17 +584,25 @@ class ExecutionLogRecord:
     subsystem: str = "Workflow"
     category: str = "USER_PROGRESS"
     timestamp: str = ""
+    cycle: Optional[int] = None
+    event_type: str = "log"
+    family: Optional[str] = None
 
 
 class RunDiagnosticLog:
     """Complete timestamped per-run forensic log, safe for worker threads."""
 
     def __init__(self, path: Path, cfg: "RunConfig") -> None:
+        from .error_reporting import register_private_value
+        from .run_provenance import safe as safe_provenance_value
+        register_private_value(getattr(cfg,'sharped_api_token',''))
+        self.provenance=None;self._diagnostic_stream=None
         self._lock = threading.Lock()
         jana_inflip = getattr(cfg, "jana_inflip", None)
         project = Path(jana_inflip).resolve().parent if jana_inflip else None
         requested_path = Path(path).expanduser().resolve()
         run_id = str(getattr(cfg, "run_id", "") or requested_path.parent.name)
+        self.run_id=run_id
         self.path = requested_path
         self.fallback_reason = ""
         self.persistent = True
@@ -622,7 +637,7 @@ class RunDiagnosticLog:
             if getattr(sys, "frozen", False) else "development source tree"
         )
         project_log = project / "log.txt" if project is not None else "standalone"
-        sharped_endpoint = str(getattr(cfg, "sharped_base_url", "") or "not configured")
+        sharped_endpoint = safe_provenance_value(str(getattr(cfg, "sharped_base_url", "") or "not configured"))
         self._stream.write("\n" + "=" * 72 + "\n")
         self._stream.write(f"Phase Studio version: {__version__}\n")
         self._stream.write(f"Started: {datetime.now().astimezone().isoformat(timespec='seconds')}\n")
@@ -665,13 +680,27 @@ class RunDiagnosticLog:
                 )
                 self._stream.flush()
 
+        self.diagnostic_path=self.path.with_name('diagnostic.log')
+        try:
+            self._diagnostic_stream=self.diagnostic_path.open('a',encoding='utf8')
+            self._diagnostic_stream.write(f'\nPhase Studio {__version__} · run {run_id} · {provenance_timestamp()}\n')
+            self.provenance=RunProvenance(self.path.parent,cfg) if self.persistent else None
+        except Exception as exc:
+            self._stream.write(f'WARNING: structured provenance unavailable: {redact_log_secrets(exc)}\n');self._stream.flush()
+
     def write(self, record: ExecutionLogRecord) -> None:
-        timestamp = record.timestamp or datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3]
-        line = f"{timestamp} [{record.category}][{record.subsystem}] {record.text}\n"
+        timestamp = record.timestamp if 'T' in record.timestamp and ('+' in record.timestamp or record.timestamp.endswith('Z')) else provenance_timestamp()
+        text=redact_log_secrets(record.text)
+        cycle=f' cycle {record.cycle}' if record.cycle is not None else ''
+        line = f"{timestamp} [{record.category}][{record.subsystem}]{cycle} {text}\n"
         with self._lock:
             try:
-                self._stream.write(line)
-                self._stream.flush()
+                if self._diagnostic_stream is not None:
+                    self._diagnostic_stream.write(line);self._diagnostic_stream.flush()
+                if record.category not in {'DIAGNOSTIC','TRACE'}:
+                    self._stream.write(line);self._stream.flush()
+                record_provenance(self.provenance,'event',record.event_type,record.subsystem,record.cycle,
+                                  dict(message=text,category=record.category,source_timestamp=timestamp,family=record.family),record.level)
             except OSError:
                 # Logging is ancillary; worker/UI progress must continue.
                 pass
@@ -680,8 +709,35 @@ class RunDiagnosticLog:
         with self._lock:
             try:
                 self._stream.close()
+                if self._diagnostic_stream is not None:self._diagnostic_stream.close()
+                record_provenance(self.provenance,'close')
             except Exception:
                 pass
+
+    def cycle_summary(self,cycle):
+        if self.provenance is None:return
+        record=self.provenance.manifest['cycles'].get(str(cycle))
+        if record is None:return
+        def show(value):return 'Unavailable' if value is None else str(value)
+        lines=['='*60,f'CYCLE {cycle} / {self.provenance.manifest.get("configured_cycles")}',
+            f'Input reflections: {show(record["reflection_input"].get("records"))} · {record["reflection_input"].get("path")}',
+            f'Initialization: {record["initialization_source"]}']
+        for source,key in [('Superflip','superflip_quality'),('SharpED','deblur_quality')]:
+            metric=record['result'].get(key) or {}
+            lines.append(f'{source}: F0.5={show(metric.get("reference_f05"))}; RMSD(A)={show(metric.get("reference_rmsd"))}; phase agreement={show(metric.get("reference_phase_agreement"))}')
+        for key in ('superflip_site_lineage','deblurred_site_lineage'):
+            counts=record.get(key) or {}
+            lines.append(f'EDMA {key.split("_")[0]}: raw={show(counts.get("raw_edma_sites"))}; CIF={show(counts.get("cif_sites"))}; Jana model={show(counts.get("jana_m40_sites"))}; threshold(sigma)={show(counts.get("threshold_sigma"))}')
+        feedback=record.get('map_feedback') or {}
+        from .run_review import disabled_feedback_summary
+        disabled=disabled_feedback_summary(self.provenance.manifest,record)
+        if disabled:lines.append(disabled)
+        for operation in (() if disabled else feedback.get('operations',[])):
+            lines.append(f'Map Feedback after {cycle} -> input {feedback.get("target_cycle")}: {operation["operation"]} · {operation["status"]} · modified={show(operation.get("modified_reflections"))}; group conservation={show(operation.get("conservation"))}')
+        lines+=['Cycle status: '+record['status'],'Detailed numeric changes: feedback_diagnostics/; full identities: run_manifest.json','='*60]
+        with self._lock:
+            try:self._stream.write('\n'.join(lines)+'\n');self._stream.flush()
+            except OSError:pass
 
 
 def redact_log_secrets(message: object) -> str:
@@ -781,7 +837,7 @@ def classify_log_record(
         category = "DIAGNOSTIC"
     return ExecutionLogRecord(
         text=text, level=resolved_level, subsystem=resolved_subsystem, category=category,
-        timestamp=datetime.now().astimezone().strftime("%H:%M:%S.%f")[:-3],
+        timestamp=provenance_timestamp(),
     )
 
 
@@ -983,6 +1039,8 @@ class RunConfig:
     # the established manual behavior.
     edma_threshold_mode: str = "manual"
     run_id: str = ""
+    setting_provenance: Optional[Dict[str, object]] = None
+    wavelength_source: str = "none"
 
 
 @dataclass
@@ -1160,6 +1218,8 @@ class HklAnalysis:
     source_note: str
     diagnostics: object = None
     format_verified: bool = True
+    d_full_100: Optional[float] = None
+
 
 @dataclass
 class HklAnalysisRequest:
@@ -1170,6 +1230,7 @@ class HklAnalysisRequest:
     work_text: str
     configured_mode: str
     metadata: Optional[CrystalMetadata] = None
+    powder_wavelength: float = 0.0
 
 @dataclass
 class HklLoadResult:
@@ -2498,7 +2559,8 @@ def parse_reflection_line(line: str, value_col: int, sigma_col: Optional[int]) -
         value = float(parts[value_col - 1])
         sigma = None
         if sigma_col is not None and sigma_col > 0 and len(parts) >= sigma_col:
-            sigma = float(parts[sigma_col - 1])
+            auxiliary=parts[sigma_col - 1]
+            sigma = None if auxiliary in {'?','.'} else float(auxiliary)
         phase = None
         if value_col == 4 and sigma_col == 6 and len(parts) >= 5:
             phase_token = parts[4].strip()
@@ -2509,10 +2571,15 @@ def parse_reflection_line(line: str, value_col: int, sigma_col: Optional[int]) -
         return None
 
 def read_hkl(hkl_path: Path, value_col: int = 4, sigma_col: Optional[int] = 5, include_000: bool = False) -> List[Reflection]:
+    observe_reflection_read('start',hkl_path)
     reflections: List[Reflection] = []
+    phase_in_turns=False
     with hkl_path.open("r", encoding="utf-8", errors="ignore") as f:
         for line in f:
+            if line.lstrip().startswith('#') and 'phase(turns)' in line:phase_in_turns=True
             r = parse_reflection_line(line, value_col=value_col, sigma_col=sigma_col)
+            if r is not None and phase_in_turns and r.phase is not None:r=replace(r,phase=r.phase*360.)
+            observe_reflection_read('line',hkl_path,line=line,reflection=r,include_000=include_000)
             if r is None:
                 continue
             if not include_000 and r.h == 0 and r.k == 0 and r.l == 0:
@@ -2520,6 +2587,7 @@ def read_hkl(hkl_path: Path, value_col: int = 4, sigma_col: Optional[int] = 5, i
             reflections.append(r)
     if not reflections:
         raise ValueError(f"No reflections parsed from HKL file: {hkl_path}")
+    observe_reflection_read('finish',hkl_path)
     return reflections
 
 def reflection_columns_for_mode(data_mode: str) -> Tuple[int, Optional[int], bool]:
@@ -2530,7 +2598,7 @@ def reflection_columns_for_mode(data_mode: str) -> Tuple[int, Optional[int], boo
         return 4, 5, False
     return 4, 5, False
 
-def merge_duplicate_reflections(reflections: Sequence[Reflection]) -> List[Reflection]:
+def merge_duplicate_reflections(reflections: Sequence[Reflection], data_mode: str = REFLECTION_DATA_MODE_INTENSITY) -> List[Reflection]:
     buckets: Dict[Tuple[int, int, int], List[Reflection]] = collections.defaultdict(list)
     order: List[Tuple[int, int, int]] = []
     for r in reflections:
@@ -2544,14 +2612,31 @@ def merge_duplicate_reflections(reflections: Sequence[Reflection]) -> List[Refle
         if len(items) == 1:
             merged.append(items[0])
             continue
+        finite_items=[x for x in items if math.isfinite(float(x.value))]
+        if not finite_items:
+            merged.append(items[0])
+            continue
+        items=finite_items
         vals = np.asarray([float(x.value) for x in items], dtype=np.float64)
+        if reflection_mode_has_fwhm(data_mode):
+            widths=[x.sigma for x in items]
+            if any(w is None or not math.isfinite(float(w)) or float(w)<=0 for w in widths):
+                raise ValueError(f'Cannot merge FWHM duplicates {(h,k,l)} with missing/invalid widths. Supply an authoritative unique peak list.')
+            if not np.allclose(widths,widths[0],rtol=1e-7,atol=1e-12):
+                raise ValueError(f'Conflicting FWHM widths for duplicate HKL {(h,k,l)}. Supply an authoritative merged peak list; widths are not inverse-variance weights.')
+            merged.append(Reflection(h,k,l,float(np.mean(vals)),float(widths[0]),items[0].phase))
+            continue
         sigs = np.asarray([float(x.sigma) if x.sigma is not None else np.nan for x in items], dtype=np.float64)
         valid = np.isfinite(sigs) & (sigs > 0)
         if np.any(valid):
             w = np.zeros_like(vals)
-            w[valid] = 1.0 / np.square(sigs[valid])
-            value = float(np.sum(w * vals) / np.sum(w))
-            sigma = float(math.sqrt(1.0 / np.sum(w)))
+            # Scale inverse-variance weights before squaring: finite sigma can
+            # otherwise overflow/underflow in sigma**2 and corrupt valid data.
+            sigma_scale = float(np.min(sigs[valid]))
+            w[valid] = np.square(sigma_scale / sigs[valid])
+            weight_sum = float(np.sum(w))
+            value = float(np.sum((w / weight_sum) * vals))
+            sigma = sigma_scale / math.sqrt(weight_sum)
         else:
             value = float(np.mean(vals))
             sigma = None
@@ -2842,6 +2927,8 @@ def canonical_hkl(hkl: Tuple[int, int, int], sg: Optional[gemmi.SpaceGroup] = No
     return min(equivalents)
 
 def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]:
+    if reflection_mode_has_fwhm(data_mode):
+        return None
     if r.sigma is None:
         return None
     sigma = float(r.sigma)
@@ -2852,15 +2939,12 @@ def reflection_signal_to_noise(r: Reflection, data_mode: str) -> Optional[float]
         amplitude = abs(value)
         if amplitude <= 0:
             return 0.0
-        if reflection_mode_has_fwhm(data_mode):
-            # The factor of 2 below propagates a genuine sigma(F) into an
-            # intensity-domain uncertainty (I=F^2 => dI=2F.dF); FWHM is not an
-            # uncertainty, so that propagation does not apply -- use F/FWHM directly.
-            return amplitude / sigma
         return amplitude / (2.0 * sigma)
     return value / sigma
 
-def reflection_amplitude_signal_to_noise(r: Reflection) -> Optional[float]:
+def reflection_amplitude_signal_to_noise(r: Reflection, data_mode: str = REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA) -> Optional[float]:
+    if reflection_mode_has_fwhm(data_mode):
+        return None
     if r.sigma is None:
         return None
     sigma = float(r.sigma)
@@ -2989,7 +3073,7 @@ def analyze_hkl_data(
     check_cancelled()
     validate_cell(cell)
     raw = _loaded.reflections if _loaded is not None else list(read_diagnostic_reflections(hkl_path, mode)[0])
-    unique = _loaded.unique_reflections if _loaded is not None else merge_duplicate_reflections(raw)
+    unique = _loaded.unique_reflections if _loaded is not None else merge_duplicate_reflections(raw, mode)
     gstar = reciprocal_metric_tensor(cell)
     unique_hkls = np.asarray([[int(r.h), int(r.k), int(r.l)] for r in unique], dtype=np.int32)
     unique_stls = hkl_stl_array_from_metric(gstar, unique_hkls)
@@ -3072,6 +3156,7 @@ def analyze_hkl_data(
         )
     theory_sorted = sorted((stl, key) for key, stl in theory_stl_by_key.items())
     d_full_98: Optional[float] = None
+    d_full_100: Optional[float] = None
     theory_idx = 0
     theory_cum_count = 0
     observed_cum_count = 0
@@ -3086,6 +3171,8 @@ def analyze_hkl_data(
             if observed_stl is not None and observed_stl <= edge + 1e-12:
                 observed_cum_count += 1
             theory_idx += 1
+        if theory_cum_count and observed_cum_count == theory_cum_count:
+            d_full_100 = 1.0 / (2.0 * edge) if edge > 0 else None
         if theory_cum_count and 100.0 * observed_cum_count / theory_cum_count >= 98.0:
             d_full_98 = 1.0 / (2.0 * edge) if edge > 0 else None
     analysis = HklAnalysis(
@@ -3098,6 +3185,7 @@ def analyze_hkl_data(
         reflections_unique=unique,
         d_min=d_min,
         d_full_98=d_full_98,
+        d_full_100=d_full_100,
         bins=bins,
         source_note=source_note,
         format_verified=_loaded.format_verified if _loaded is not None else format_verified,
@@ -3171,14 +3259,64 @@ def _passes_reflection_filters(
     i_over_sigma_min: float,
     cell: Optional[gemmi.UnitCell],
     resolution_d_min: float,
+    data_mode: str = REFLECTION_DATA_MODE_INTENSITY,
 ) -> bool:
-    if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
+    validate_reflection_filter_policy(data_mode,i_over_sigma_min)
+    if not math.isfinite(float(r.value)) or float(r.value)<0:
+        return False
+    if reflection_mode_has_fwhm(data_mode):
+        if r.sigma is None or not math.isfinite(float(r.sigma)) or r.sigma<=0:
+            return False
+    if i_over_sigma_min > 0:
+        if r.sigma is None or not math.isfinite(float(r.sigma)) or r.sigma<=0:
+            return False
         if float(r.value) / float(r.sigma) < i_over_sigma_min:
             return False
     d_min = max(0.0, float(resolution_d_min or 0.0))
     if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
         return False
     return True
+
+
+def validate_reflection_filter_policy(data_mode: str, threshold: float) -> None:
+    if normalize_reflection_data_mode(data_mode)==REFLECTION_DATA_MODE_AUTO:
+        raise ValueError('Resolve the exact reflection column layout before filtering or export. Select I/sigma(I), F/sigma(F), a phased layout, or FWHM explicitly; numerical values alone do not establish uncertainty semantics.')
+    if not math.isfinite(float(threshold)) or threshold<0:
+        raise ValueError('The observed value/uncertainty threshold must be finite and nonnegative.')
+    if reflection_mode_has_fwhm(data_mode) and threshold>0:
+        raise ValueError('FWHM is a peak width, not sigma(I) or sigma(F). Set Minimum observed value/σ to 0 to disable significance filtering for FWHM input. Genuine widths remain available for powder overlap and Superflip.')
+
+
+def powder_superflip_keywords(extra_keywords: str, wavelength: float = 0.0) -> str:
+    lines=clean_extra_superflip_keywords(extra_keywords)
+    declared=[line.split() for line in lines if inflip_first_token(line)=='lambda']
+    if declared:
+        if len(declared)!=1 or len(declared[0])!=2 or not math.isfinite(float(declared[0][1])) or float(declared[0][1])<=0:
+            raise ValueError('Superflip FWHM input requires one finite positive lambda wavelength keyword.')
+    if math.isfinite(float(wavelength)) and wavelength>0:
+        lines = [line for line in lines if inflip_first_token(line) != "lambda"]
+        lines.insert(0, f'lambda {wavelength:.12g}')
+    elif not declared:
+        raise ValueError('Superflip FWHM input requires a measured wavelength. Set Wavelength (Å) or supply a valid lambda keyword; peak widths are retained for native overlap grouping.')
+    return '\n'.join(lines)
+
+
+def filtered_reflections(reflections, data_mode, threshold, cell=None, resolution_d_min=0.0):
+    validate_reflection_filter_policy(data_mode,threshold)
+    if threshold>0 and reflections and not any(r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma>0 for r in reflections):
+        raise ValueError('Significance filtering requires genuine finite positive measurement uncertainties. Set Minimum observed value/σ to 0 for uncertainty-free input, or supply sigma(I)/sigma(F).')
+    return [r for r in reflections if _passes_reflection_filters(r,threshold,cell,resolution_d_min,data_mode)]
+
+
+def uncertainty_export_reflections(reflections,data_mode,threshold,cell,resolution_d_min):
+    if reflection_mode_has_fwhm(data_mode):
+        raise ValueError('Phased HKL/FCF export requires genuine sigma(I) or sigma(F); FWHM cannot supply it. Choose XPLOR, CCP4 or Jana map export, or provide a reflection list with measured uncertainties.')
+    rows=filtered_reflections(reflections,data_mode,threshold,cell,resolution_d_min)
+    if any(r.sigma is None or not math.isfinite(float(r.sigma)) or r.sigma<=0 for r in rows):
+        raise ValueError('Phased HKL/FCF export requires genuine positive finite measurement uncertainties for every exported record. Choose XPLOR, CCP4 or Jana map export, or supply the missing uncertainties.')
+    if reflection_mode_is_amplitude(data_mode) and any(r.value<=0 for r in rows):
+        raise ValueError('Cannot propagate sigma(F) to sigma(I) at F=0 using the first-order conversion. Choose a map export or supply measured intensity uncertainties.')
+    return rows
 
 
 def infer_dataitemwidths_from_hkl(hkl_path: Path, fallback: str = "4 14 14") -> str:
@@ -3220,28 +3358,28 @@ def infer_dataitemwidths_from_hkl(hkl_path: Path, fallback: str = "4 14 14") -> 
 
 
 def write_observed_reflections(out_hkl: Path, reflections: Sequence[Reflection], i_over_sigma_min: float = 0.0, data_mode: str = REFLECTION_DATA_MODE_INTENSITY, cell: Optional[gemmi.UnitCell] = None, resolution_d_min: float = 0.0) -> int:
-    out_hkl.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
-    filtered = [
-        r for r in reflections
-        if _passes_reflection_filters(r, i_over_sigma_min, cell, resolution_d_min)
-    ]
+    filtered = filtered_reflections(reflections,mode,i_over_sigma_min,cell,resolution_d_min)
+    out_hkl.parent.mkdir(parents=True, exist_ok=True)
     with out_hkl.open("w", encoding="utf-8") as f:
         quantity = "Fobs" if reflection_mode_is_amplitude(mode) else "Iobs"
         sigma_name = "sigma(Fobs)" if reflection_mode_is_amplitude(mode) else "sigma(Iobs)"
         if reflection_mode_has_phase(mode):
-            f.write(f"# h k l {quantity} phase(deg) {sigma_name}\n")
+            f.write(f"# h k l {quantity} phase(turns) {sigma_name}\n")
             f.write("# Phase is converted from degrees to turns for Superflip; sigma is ignored by Superflip.\n")
+        elif reflection_mode_has_fwhm(mode):
+            f.write(f"# h k l {quantity} FWHM(degrees_2theta)\n")
+            f.write("# FWHM is a peak width used by Superflip, never a measurement uncertainty.\n")
         else:
             f.write(f"# h k l {quantity} {sigma_name}\n")
-            f.write("# Sigma is retained by Phase Studio and ignored by Superflip.\n")
+            f.write("# Genuine sigma is retained when available; 0 denotes unavailable dummy data ignored by Superflip.\n")
         n = 0
         for r in filtered:
             value = max(0.0, float(r.value))
-            sigma = 0.0 if r.sigma is None else max(0.0, float(r.sigma))
+            sigma = float(r.sigma) if r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma>0 else 0.0
             if reflection_mode_has_phase(mode):
-                phase_turns = (0.0 if r.phase is None else float(r.phase)) / 360.0
-                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {phase_turns:14.9f} {sigma:14.7f}\n")
+                phase_text = f'{float(r.phase)/360.0:14.9f}' if r.phase is not None and math.isfinite(float(r.phase)) else '?'.rjust(14)
+                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {phase_text} {sigma:14.7f}\n")
             else:
                 f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {sigma:14.7f}\n")
             n += 1
@@ -3256,20 +3394,15 @@ def write_standardized_hkl_with_phase(
     FFT from a reconstructed XPLOR map (see xplor_fft_predictions); its phase is written
     instead of the reflection's own phase field, which is only ever the value supplied by
     the selected HKL mode (0.0 for most modes) and never reflects the reconstruction."""
-    out_hkl.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
-    d_min = max(0.0, float(resolution_d_min or 0.0))
+    filtered = uncertainty_export_reflections(reflections,mode,i_over_sigma_min,cell,resolution_d_min)
+    out_hkl.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with out_hkl.open("w", encoding="utf-8") as f:
         f.write("# h k l I sigma(I) phase(deg)\n")
         phase_note = "phase is calculated by FFT from the reconstructed map" if calc_by_hkl else "phase is 0.0 unless supplied by the selected HKL mode"
         f.write(f"# Phase Studio {__version__} standardized HKL export; {phase_note}.\n")
-        for r in reflections:
-            if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
-                if float(r.value) / float(r.sigma) < i_over_sigma_min:
-                    continue
-            if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
-                continue
+        for r in filtered:
             value = max(0.0, float(r.value))
             if not reflection_mode_is_amplitude(mode):
                 intensity = value
@@ -3294,9 +3427,9 @@ def write_shelx_fcf(
     (h, k, l) -> (F_squared_calc, phase_calc_deg) read by FFT from a reconstructed XPLOR
     map (see xplor_fft_predictions); without it, F_squared_calc is written equal to
     F_squared_meas and phase_calc to 0 as neutral placeholders (no reconstruction available)."""
-    out_fcf.parent.mkdir(parents=True, exist_ok=True)
     mode = normalize_reflection_data_mode(data_mode)
-    d_min = max(0.0, float(resolution_d_min or 0.0))
+    filtered = uncertainty_export_reflections(reflections,mode,i_over_sigma_min,cell,resolution_d_min)
+    out_fcf.parent.mkdir(parents=True, exist_ok=True)
     n = 0
     with out_fcf.open("w", encoding="utf-8") as f:
         f.write(f"# Phase Studio {__version__} ShelX-compatible FCF export (list format 4).\n")
@@ -3308,12 +3441,7 @@ def write_shelx_fcf(
         for tag in ("_refln_index_h", "_refln_index_k", "_refln_index_l", "_refln_F_squared_meas",
                     "_refln_F_squared_sigma", "_refln_F_squared_calc", "_refln_phase_calc"):
             f.write(f"{tag}\n")
-        for r in reflections:
-            if i_over_sigma_min > 0 and r.sigma is not None and r.sigma > 0:
-                if float(r.value) / float(r.sigma) < i_over_sigma_min:
-                    continue
-            if d_min > 0 and cell is not None and reflection_d_spacing(cell, int(r.h), int(r.k), int(r.l)) < d_min:
-                continue
+        for r in filtered:
             value = max(0.0, float(r.value))
             if not reflection_mode_is_amplitude(mode):
                 intensity = value
@@ -3341,6 +3469,7 @@ def export_phased_reflections_from_map(
     fmt = normalize_map_export_format(map_export_format)
     if fmt not in {"hkl_phases", "shelx_fcf"}:
         return None
+    uncertainty_export_reflections(reflections,data_mode,i_over_sigma_min,cell,resolution_d_min)
     calc_by_hkl = xplor_fft_predictions(xplor_map, [(int(r.h), int(r.k), int(r.l)) for r in reflections])
     if fmt == "hkl_phases":
         out_path = out_path_base.with_name(out_path_base.name + "_phased.hkl")
@@ -3365,22 +3494,17 @@ def value_from_intensity(intensity: float, data_mode: str) -> float:
     return intensity
 
 def estimate_sigma_for_reflection_value(reflections: Sequence[Reflection], value: float) -> Optional[float]:
-    ratios: List[float] = []
-    for r in reflections:
-        if r.sigma is None:
-            continue
-        if r.value > 0 and r.sigma > 0:
-            ratios.append(float(r.sigma) / float(r.value))
-    if not ratios:
-        return None
-    return max(0.0, float(value) * float(np.median(np.asarray(ratios, dtype=np.float64))))
+    """A map prediction has no measured uncertainty; never infer one from widths or ratios."""
+    return None
 
 def xplor_fft_intensity_phase(xplor_map: Path, hkl: Tuple[int, int, int]) -> Tuple[float, float]:
     xmap = read_xplor_map(xplor_map)
     grid = tuple(int(v) for v in xmap.grid)
     nx, ny, nz = grid[0], grid[3], grid[6]
     data = np.asarray(xmap.data, dtype=np.float64).reshape((nz, ny, nx))
-    coeffs = np.fft.fftn(data)
+    # Crystallographic F(h) uses exp(+2*pi*i*h.r), opposite to numpy.fftn.
+    # For a real density conjugation preserves magnitudes and corrects phases.
+    coeffs = np.fft.fftn(data).conjugate()
     h, k, l = hkl
     coeff = coeffs[int(l) % nz, int(k) % ny, int(h) % nx]
     intensity = float(abs(coeff) ** 2)
@@ -3400,7 +3524,8 @@ def xplor_fft_predictions_from_map(
     grid = tuple(int(v) for v in xmap.grid)
     nx, ny, nz = grid[0], grid[3], grid[6]
     data = np.asarray(xmap.data, dtype=np.float64).reshape((nz, ny, nx))
-    coeffs = np.fft.fftn(data)
+    # Match native Superflip/Gemmi phases, not NumPy's negative-exponent phase.
+    coeffs = np.fft.fftn(data).conjugate()
     predictions: Dict[Tuple[int, int, int], Tuple[float, float]] = {}
     for h, k, l in hkls:
         coeff = coeffs[int(l) % nz, int(k) % ny, int(h) % nx]
@@ -3453,7 +3578,9 @@ def synthesize_xplor_map_from_phases(
         mate = ((-lz) % nz, (-ky) % ny, (-hx) % nx)
         if mate not in direct:
             coeffs[mate] = np.conj(coeffs[lz, ky, hx])
-    data = np.fft.ifftn(coeffs).real
+    # rho(r) = sum_h F(h) exp(-2*pi*i*h.r) / N. Retain the existing
+    # discrete-map normalization while using the crystallographic phase sign.
+    data = np.fft.fftn(coeffs).real / coeffs.size
     return XplorMap(
         title=title,
         grid=tuple(int(v) for v in grid),
@@ -3545,23 +3672,25 @@ def select_omit_test_set(reflections: Sequence[Reflection], seed_text: str, frac
 
 def compute_rfree(reflections: Sequence[Reflection], test_hkls: FrozenSet[Tuple[int, int, int]], data_mode: str, predictions: Dict[Tuple[int, int, int], Tuple[float, float]]) -> Optional[float]:
     """Crystallographic R_free: sum(|Fobs - k*Fcalc|) / sum(|Fobs|) over only the
-    excluded test-set reflections, with k the least-squares scale factor between
-    them. Fcalc/phase_calc come from `predictions` (see xplor_fft_predictions),
+    excluded test-set reflections, with k fitted only to the working set.
+    Fcalc/phase_calc come from `predictions` (see xplor_fft_predictions),
     read from a map that never saw the test set during reconstruction."""
     fobs: List[float] = []
     fcalc: List[float] = []
+    work_fobs: List[float] = []
+    work_fcalc: List[float] = []
     for r in reflections:
         hkl = (int(r.h), int(r.k), int(r.l))
-        if hkl not in test_hkls:
-            continue
         prediction = predictions.get(hkl)
         if prediction is None:
             continue
-        fobs.append(math.sqrt(reflection_value_as_intensity(r, data_mode)))
-        fcalc.append(math.sqrt(max(0.0, prediction[0])))
+        target_observed,target_calculated=(fobs,fcalc) if hkl in test_hkls else (work_fobs,work_fcalc)
+        target_observed.append(math.sqrt(reflection_value_as_intensity(r, data_mode)))
+        target_calculated.append(math.sqrt(max(0.0, prediction[0])))
     if len(fobs) < 3:
         return None
-    return scaled_amplitude_metrics(fobs, fcalc).r_factor
+    scale=scaled_amplitude_metrics(work_fobs,work_fcalc).scale
+    return amplitude_r_factor_at_scale(fobs,fcalc,scale)
 
 
 def select_orbit_safe_holdout(
@@ -3754,6 +3883,7 @@ def apply_map_feedback_to_reflections(
     intensity_max_i_over_sigma: float,
     log: Callable[[str], None],
     excluded_hkls: FrozenSet[Tuple[int, int, int]] = frozenset(),
+    spacegroup: Optional[gemmi.SpaceGroup] = None,
 ) -> Tuple[List[Reflection], Optional[float]]:
     """Returns (updated_reflections, intensity_correction_avg_change_percent),
     the latter being the mean, across reflections actually corrected this
@@ -3762,6 +3892,8 @@ def apply_map_feedback_to_reflections(
     reflections are new, not changed, so they never contribute) -- or None
     when correct_intensities is off or nothing was corrected."""
     mode = normalize_reflection_data_mode(data_mode)
+    if reflection_mode_has_fwhm(mode) and add_missing:
+        raise ValueError('Missing-reflection completion cannot assign measured FWHM to new HKL. Disable completion for FWHM input; no widths or uncertainties are invented.')
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
     if not current:
         return current, None
@@ -3811,9 +3943,23 @@ def apply_map_feedback_to_reflections(
     if add_missing and missing_percent_limit > 0:
         max_add = int(math.floor(len(current) * max(0.0, float(missing_percent_limit)) / 100.0))
         if max_add > 0:
+            # A missing measurement is a missing symmetry/Friedel orbit, not
+            # merely an absent spelling of an HKL. In particular, never leak a
+            # held-out orbit back into the reconstruction through its mate.
+            sg = spacegroup if spacegroup is not None else gemmi.SpaceGroup('P 1')
+            operations = list(sg.operations())
+            def orbit_key(hkl):
+                equivalents = []
+                for operation in operations:
+                    mate = tuple(int(v) for v in operation.apply_to_hkl(hkl))
+                    equivalents.extend((mate, tuple(-v for v in mate)))
+                return min(equivalents)
+            unavailable_orbits = {orbit_key(key) for key in excluded_hkls}
+            unavailable_orbits.update(orbit_key((int(r.h), int(r.k), int(r.l))) for r in current)
             candidates = [
                 hkl for hkl in candidate_missing_hkls_from_bounds(current, cell, resolution_d_min)
-                if hkl not in excluded_hkls
+                if orbit_key(hkl) not in unavailable_orbits
+                and not sg.operations().is_systematically_absent(hkl)
             ]
             candidate_predictions = xplor_fft_predictions(feedback_map, candidates)
             ranked = sorted(candidate_predictions.items(), key=lambda item: item[1][0], reverse=True)
@@ -3822,13 +3968,14 @@ def apply_map_feedback_to_reflections(
             for key, (raw_i, phase) in ranked:
                 if added >= max_add:
                     break
-                if key in existing or raw_i <= 0:
+                if key in existing or orbit_key(key) in unavailable_orbits or not math.isfinite(raw_i) or raw_i <= 0:
                     continue
                 intensity = raw_i * scale
                 value = value_from_intensity(intensity, mode)
-                sigma = estimate_sigma_for_reflection_value(current, value)
+                sigma = None  # A map prediction has no measured uncertainty or peak width.
                 new_reflections.append(Reflection(key[0], key[1], key[2], value, sigma, phase if reflection_mode_has_phase(mode) else None))
                 existing.add(key)
+                unavailable_orbits.add(orbit_key(key))
                 added += 1
             current = new_reflections
     log(
@@ -3837,6 +3984,7 @@ def apply_map_feedback_to_reflections(
         f"intensity_max_i_over_sigma={max_i_over_sigma:g}, reflections={len(current)}, "
         f"avg_intensity_change={'n/a' if avg_change_percent is None else f'{avg_change_percent:.2f}%'}"
     )
+    record_feedback_observation('map', locals())
     return current, avg_change_percent
 
 def bragg_two_theta_deg(d_value: float, wavelength: float) -> Optional[float]:
@@ -3855,7 +4003,7 @@ def assign_powder_overlap_groups(
 ) -> Dict[Tuple[int, int, int], int]:
     """Group reflections whose Bragg peaks overlap in a powder pattern: sorted by
     2theta, neighbors are joined transitively into the same group while
-    delta(2theta) < separation_factor * (FWHM1 + FWHM2) / 2, matching Superflip's
+    delta(2theta) <= separation_factor * (FWHM1 + FWHM2) / 2, matching Superflip's
     own fwhmseparation convention. FWHM is read from each reflection's sigma
     field (that is where the 'hkl I/F fwhm' data modes store it). A reflection
     with no FWHM value or an inaccessible 2theta is left ungrouped (group 0).
@@ -3878,7 +4026,7 @@ def assign_powder_overlap_groups(
     for previous, current in zip(entries, entries[1:]):
         delta = current[1] - previous[1]
         threshold = separation_factor * (previous[2] + current[2]) / 2.0
-        if delta < threshold:
+        if delta <= threshold:
             current_component.append(current)
         else:
             if len(current_component) > 1:
@@ -3958,10 +4106,19 @@ def write_powder_repartitioning_log(
     except OSError:
         pass
 
+def validate_powder_reflections(reflections, data_mode):
+    if not reflection_mode_has_fwhm(data_mode):
+        raise ValueError('Powder overlap repartitioning requires declared FWHM data; measurement sigma cannot be used as a peak width.')
+    if any(not math.isfinite(float(r.value)) or r.value<0 or r.sigma is None or
+           not math.isfinite(float(r.sigma)) or r.sigma<=0 for r in reflections):
+        raise ValueError('Powder overlap repartitioning requires finite nonnegative values and finite positive measured FWHM for every record. Validate the peak list first.')
+
+
 def redistribute_overlap_reflections(
     reflections: Sequence[Reflection], data_mode: str, feedback_map: Path, cell: gemmi.UnitCell,
     wavelength: float, separation_factor: float, mix: float, log: Callable[[str], None],
     log_path: Optional[Path] = None,
+    native_grouping: object = None,
 ) -> Tuple[List[Reflection], Optional[float]]:
     """Powder overlap repartitioning: within each 2theta/FWHM overlap group (see
     assign_powder_overlap_groups), keep the observed group-total intensity fixed
@@ -3982,8 +4139,9 @@ def redistribute_overlap_reflections(
     percent change in intensity per overlap group -- or None if there were no
     overlap groups to redistribute."""
     mode = normalize_reflection_data_mode(data_mode)
+    validate_powder_reflections(reflections,mode)
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
-    groups = assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
+    groups = native_grouping.groups_for(current, cell, wavelength, separation_factor) if native_grouping is not None else assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
     if not groups:
         log("Overlap repartitioning: no overlap groups found (need at least two reflections with FWHM and accessible 2θ).")
         if log_path is not None:
@@ -3997,6 +4155,7 @@ def redistribute_overlap_reflections(
                 )
             except OSError:
                 pass
+        record_feedback_observation('powder', locals())
         return current, None
     by_group: Dict[int, List[Reflection]] = {}
     for r in current:
@@ -4052,6 +4211,7 @@ def redistribute_overlap_reflections(
             feedback_map, group_avg_change_percent, avg_change_percent,
         )
         log(f"Overlap repartitioning: detailed log written to {log_path}")
+    record_feedback_observation('powder', locals())
     return updated, avg_change_percent
 
 def wants_xplor_modelfile(value: str) -> bool:
@@ -4165,20 +4325,14 @@ def parse_atom_label_list(value: str) -> List[str]:
     return labels
 
 def normalize_xplor_for_strict_reader(xplor_map: Path, output_map: Path, log: Optional[Callable[[str], None]] = None) -> Path:
-    xmap = read_xplor_map(xplor_map)
-    write_xplor_map(output_map, xmap, title=xmap.title, values_per_line=1)
-    if log:
-        log(f"XPLOR map normalized for strict Superflip/EDMA reader: {output_map.name}")
-    return output_map
+    from .artifact_io import normalize_map_atomically
+    return normalize_map_atomically(xplor_map, output_map, read_xplor_map, write_xplor_map, log, 'Superflip/EDMA strict reader')
+
 
 def normalize_xplor_for_superflip_modelfile(xplor_map: Path, output_map: Path, log: Optional[Callable[[str], None]] = None) -> Path:
-    # Superflip's ReadXPlor chooses E-format only when the first data row
-    # contains an uppercase "E"; SharpED maps use lowercase "e".
-    xmap = read_xplor_map(xplor_map)
-    write_xplor_map(output_map, xmap, title=xmap.title, values_per_line=1)
-    if log:
-        log(f"XPLOR modelfile normalized for Superflip reader: {output_map.name}")
-    return output_map
+    from .artifact_io import normalize_map_atomically
+    return normalize_map_atomically(xplor_map, output_map, read_xplor_map, write_xplor_map, log, 'Superflip modelfile reader')
+
 
 def normalize_xplor_for_edma(xplor_map: Path, output_map: Path, log: Optional[Callable[[str], None]] = None) -> Path:
     return normalize_xplor_for_strict_reader(xplor_map, output_map, log)
@@ -4321,9 +4475,24 @@ def clean_extra_superflip_keywords(value: str, log: Optional[Callable[[str], Non
         safe.append(line)
     return safe
 
-def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Path:
+def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path, for_execution: bool = True) -> Path:
     lines = Path(inflip_path).read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     reflections: List[str] = []
+    declared_items = next((tuple(part.lower() for part in split_inflip_line(line)[1:])
+                           for line in lines if inflip_first_token(line) == 'dataformat'), ())
+    supported_items = {(quantity,) + suffix for quantity in ('intensity','amplitude')
+                       for suffix in ((),('dummy',),('phase',),('phase','dummy'),('fwhm',))}
+    if not for_execution:
+        supported_items.update({('intensity','group'),('amplitude','group')})
+    if declared_items and declared_items not in supported_items:
+        raise ValueError('Unsupported native reflection dataformat layout. Select intensity/amplitude with optional phase/dummy or measured FWHM in the supported order. Mixed uncertainty/width, explicit group and reordered columns require an authoritative conversion before import; no column meanings are inferred.')
+    dummy_columns = [3 + index for index, item in enumerate(declared_items) if item == 'dummy']
+    if declared_items and 'fwhm' not in declared_items:
+        # Superflip has no measured-sigma data item. Undeclared trailing numeric
+        # fields are no stronger evidence of sigma than an explicit dummy field.
+        auxiliary_column = 5 if 'phase' in declared_items else 4
+        if auxiliary_column not in dummy_columns:
+            dummy_columns.append(auxiliary_column)
     phase_is_superflip_turns = any(
         inflip_first_token(line) == "dataformat"
         and "phase" in {part.lower() for part in split_inflip_line(line)[1:]}
@@ -4341,12 +4510,22 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Pat
             record = line.rstrip()
             if phase_is_superflip_turns:
                 fields = record.split()
-                if len(fields) >= 6:
+                if len(fields) >= 5:
                     try:
                         fields[4] = f"{float(fields[4]) * 360.0:.9f}"
                         record = " ".join(fields)
                     except ValueError:
                         pass
+            # A native dummy column is ignored by Superflip and does not declare
+            # measured sigma. Preserve the original file, but mark its auxiliary
+            # unavailable in our extracted reflection representation. Explicit
+            # external I/sigma or F/sigma input retains genuine uncertainties.
+            if dummy_columns:
+                fields = record.split()
+                for column in dummy_columns:
+                    if column < len(fields):
+                        fields[column] = '?'
+                record = ' '.join(fields)
             reflections.append(record)
     if not reflections:
         raise ValueError(f"No fbegin/endf reflection block was found in Jana2020 .inflip: {inflip_path}")
@@ -4354,6 +4533,7 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path) -> Pat
     out = output_dir / f"{Path(inflip_path).stem}_embedded_reflections.hkl"
     out.write_text(
         "# Reflections exported from the Jana2020 .inflip fbegin/endf block.\n"
+        + ("# Native dummy columns are unavailable uncertainties (?); supply an explicit measured-sigma HKL file for significance filtering or sigma exports.\n" if dummy_columns else "")
         + ("# Input Superflip phase turns were converted to degrees by Phase Studio.\n" if phase_is_superflip_turns else "")
         + "\n".join(reflections)
         + "\n",
@@ -4654,7 +4834,11 @@ def resolve_hkl_analysis_inputs(request: HklAnalysisRequest) -> Tuple[Path, str,
     if use_inflip_hkl:
         if jana_path is None or not jana_path.is_file():
             raise FileNotFoundError("Jana2020 .inflip is required to test or analyze embedded HKL data.")
-        hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir)
+        from phase_studio.powder_diagnostics import standard_powder_context
+        diagnostic_context = standard_powder_context(jana_path)
+        if diagnostic_context.get('unsupported_layout'):
+            raise ValueError(diagnostic_context['error'])
+        hkl_path = extract_embedded_hkl_from_inflip(jana_path, work_dir, for_execution=False)
         source_note = f"HKL source: fbegin/endf block exported from {jana_path}"
     else:
         if not request.hkl_text:
@@ -4695,6 +4879,13 @@ def _build_uncached_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResul
         powder_context = standard_powder_context(Path(request.jana_text))
         if powder_context.get('unsupported_layout'):
             raise ValueError(powder_context['error'])
+        if powder_context and not powder_context.get('error'):
+            wavelength, source = resolve_powder_wavelength(
+                request.powder_wavelength, Path(request.jana_text),
+                Path(request.ref_text) if request.ref_text else None,
+                resolve_jana_m90_path(Path(request.jana_text)),
+            )
+            powder_context.update(wavelength=wavelength or None, wavelength_source=source)
     verified_mode = _verified_embedded_reflection_data_mode_from_inflip(Path(request.jana_text)) if embedded else None
     if embedded:
         source = Path(request.jana_text).read_text(encoding="utf-8", errors="replace").splitlines()
@@ -4705,7 +4896,7 @@ def _build_uncached_hkl_load_result(request: HklAnalysisRequest) -> HklLoadResul
             data_mode = verified_mode
     value_col, sigma_col, include_000 = reflection_columns_for_mode(data_mode)
     reflections = list(read_diagnostic_reflections(hkl_path, data_mode)[0])
-    unique = merge_duplicate_reflections(reflections)
+    unique = merge_duplicate_reflections(reflections, data_mode)
     result = HklLoadResult(
         hkl_path=hkl_path,
         data_mode=data_mode,
@@ -4946,7 +5137,7 @@ def _jana_original_m50(inflip_path: Path, output_m50: Path) -> Path:
     )
 
 
-def _publish_protocol_transaction(artifacts: Sequence[Tuple[Path, Path]]) -> None:
+def _publish_protocol_transaction(artifacts: Sequence[Tuple[Path, Path]], expected_hashes: Optional[Dict[Path, str]] = None) -> None:
     """Publish a validated protocol set and roll back if any replace fails."""
     prepared: List[Tuple[Path, Path]] = []
     backups: List[Tuple[Path, Optional[Path]]] = []
@@ -4957,10 +5148,10 @@ def _publish_protocol_transaction(artifacts: Sequence[Tuple[Path, Path]]) -> Non
             target = Path(target).resolve()
             _require_current_protocol_file(source, target.suffix or target.name)
             temporary = target.with_name(f".{target.name}.publish-{token}")
-            shutil.copyfile(source, temporary)
-            if file_sha256(temporary) != file_sha256(source):
-                raise RuntimeError(f"Jana2020 staged publication check failed: {target}")
             prepared.append((temporary, target))
+            shutil.copyfile(source, temporary)
+            if file_sha256(temporary) != file_sha256(source) or (expected_hashes is not None and file_sha256(temporary) != expected_hashes.get(target)):
+                raise RuntimeError(f"Jana2020 staged publication check failed: {target}")
         for temporary, target in prepared:
             backup: Optional[Path] = None
             if target.exists():
@@ -5256,7 +5447,9 @@ def return_phase_studio_result_to_jana(
     conversion_started = time.perf_counter()
     try:
         run_command(
-            [str(original), str(calc_map_inflip)],
+            # Legacy Fortran argv decoding can lose Unicode parent folders.
+            # The unchanged ASCII input is already in this exact working dir.
+            [str(original), calc_map_inflip.name],
             cwd=calc_dir,
             log_path=Path(cfg.work_dir) / "jana2020_return_map.log",
             log=log,
@@ -5591,29 +5784,43 @@ def resolve_powder_wavelength(
     file's _diffrn_radiation_wavelength CIF tag. Returns (value,
     source_description).
     """
-    if manual_value > 0:
-        return manual_value, "manual entry"
-    if jana_m90_path is not None and Path(jana_m90_path).is_file():
-        value = parse_m90_wavelength(Path(jana_m90_path))
-        if value > 0:
-            return value, f"Jana2020 .m90 file ({Path(jana_m90_path).name})"
-    if inflip_path is not None and inflip_path.is_file():
-        try:
-            settings = parse_inflip_settings(inflip_path)
-        except Exception:
-            settings = {}
-        value = parse_cif_number(settings.get("powder_wavelength", ""), 0.0)
-        if value > 0:
-            return value, f".inflip file ({inflip_path.name})"
-    if reference_cif_path is not None and reference_cif_path.is_file():
-        try:
-            raw = raw_cif_value(reference_cif_path, ["_diffrn_radiation_wavelength", "_diffrn_radiation.wavelength"])
-        except Exception:
-            raw = ""
-        value = parse_cif_number(raw, 0.0)
-        if value > 0:
-            return value, f"reference file ({reference_cif_path.name})"
-    return 0.0, "none"
+    candidates = []
+    def add(value, source):
+        if math.isfinite(value) and value > 0:
+            candidates.append((float(value), source))
+    add(float(manual_value), "manual entry")
+    companion = resolve_jana_m90_path(inflip_path)
+    # An explicitly supplied file must still belong to this exact input stem.
+    if companion is not None and (jana_m90_path is None or Path(jana_m90_path).resolve() == companion.resolve()):
+        add(parse_m90_wavelength(companion), f"Jana2020 .m90 file ({companion.name})")
+    if inflip_path is not None and Path(inflip_path).is_file():
+        settings = parse_inflip_settings(Path(inflip_path))
+        add(parse_cif_number(settings.get("powder_wavelength", ""), 0.0), f".inflip file ({Path(inflip_path).name})")
+    if reference_cif_path is not None and Path(reference_cif_path).is_file():
+        raw = raw_cif_value(Path(reference_cif_path), ["_diffrn_radiation_wavelength", "_diffrn_radiation.wavelength"])
+        add(parse_cif_number(raw, 0.0), f"reference file ({Path(reference_cif_path).name})")
+    if not candidates:
+        return 0.0, "none"
+    value, source = candidates[0]
+    conflicts = [f"{other_source}={other:.12g} A" for other, other_source in candidates[1:] if not math.isclose(value, other, rel_tol=1e-8, abs_tol=1e-10)]
+    if conflicts:
+        source += "; overridden conflicting wavelength: " + "; ".join(conflicts)
+    return value, source
+
+
+def configured_powder_wavelength(cfg) -> Tuple[float, str]:
+    """Reuse the run's already resolved measurement, including manual overrides."""
+    value = float(getattr(cfg, 'powder_wavelength', 0.0))
+    if math.isfinite(value) and value > 0:
+        source = getattr(cfg, 'wavelength_source', 'none')
+        return value, source if source and source != 'none' else 'configured effective wavelength'
+    return resolve_powder_wavelength(0.0, cfg.jana_inflip, cfg.reference_cif)
+
+
+def confirm_candidate_transfer(parent,rows) -> bool:
+    from .result_selection import show_candidate_details
+    return show_candidate_details(parent,'Confirm selected result export',rows,confirm=True)
+
 
 def normalize_output_format(value: str) -> str:
     fmt = str(value or "xplor").strip().lower()
@@ -5912,6 +6119,8 @@ def write_superflip_input(
     extra_superflip_keywords: str,
     log: Optional[Callable[[str], None]] = None,
 ) -> None:
+    if reflection_mode_has_fwhm(reflection_data_mode):
+        extra_superflip_keywords=powder_superflip_keywords(extra_superflip_keywords)
     inp_path.parent.mkdir(parents=True, exist_ok=True)
     ops = ref_ctx.spacegroup.operations()
     perform = str(perform_algorithm or "CF").strip().upper()
@@ -5943,13 +6152,20 @@ def write_superflip_input(
     with inp_path.open("w", encoding="utf-8") as f:
         f.write(f"title {prefix}\nperform {perform}\n")
         output_files: List[str] = []
-        if write_auxiliary_outputs or export_superflip_jana:
+        if write_auxiliary_outputs or export_superflip_jana or fmt == 'jana':
             output_files.extend([f"{prefix}.m81", f"{prefix}.m80"])
-        if export_superflip_ccp4:
+        if export_superflip_ccp4 or fmt == 'ccp4':
             output_files.append(f"{prefix}.ccp4")
+        if fmt == 'm80' and f'{prefix}.m80' not in output_files:
+            output_files.append(f'{prefix}.m80')
         if export_superflip_xplor or output_xplor not in output_files:
             output_files.append(output_xplor)
-        f.write("outputfile " + " ".join(output_files) + f"\noutputformat {fmt}\n")
+        # Superflip consumes one positional format for each output filename;
+        # a single format applies only to the first file, not to every output.
+        output_formats = ['xplor' if name == output_xplor else
+                          {'.m81':'jana','.m80':'m80','.ccp4':'ccp4'}[Path(name).suffix.lower()]
+                          for name in output_files]
+        f.write("outputfile " + " ".join(output_files) + "\noutputformat " + " ".join(output_formats) + "\n")
         if reference_file is not None:
             f.write(f"referencefile {reference_file.name}\n")
         if model_file is not None:
@@ -6083,6 +6299,7 @@ def run_command(
     per call site rather than globally -- a console that IS part of the user
     interface must keep showing."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    observe_native_command(cmd,cwd,log_path)
     display_cmd = [Path(str(cmd[0])).name] if cmd else []
     for argument in cmd[1:]:
         text = str(argument)
@@ -7364,6 +7581,7 @@ def result_candidates_from_results(results: Sequence[CycleResult], *, include_un
                 map_path=str(map_path.resolve()), structure_path=str(structure_path.resolve()), metrics=quality,
                 usable_map=usable_map, usable_structure=usable_structure,
                 map_feedback_change_percent=result.intensity_correction_avg_change_percent,
+                powder_feedback_change_percent=result.powder_repartition_avg_change_percent,
                 superflip_initialization=initialization if source == "superflip" else "",
                 reflection_input_provenance=reflection_provenance,
                 edma_sigma=(
@@ -7441,10 +7659,10 @@ def write_map_quality_report(
     path: Path,
     results: Sequence[CycleResult],
     selected_candidate: Optional[ResultCandidate] = None,
-) -> None:
+) -> Dict[str, ResultRecommendation]:
     candidates = result_candidates_from_results(results)
     if not results:
-        return
+        return {}
     profile = ValidationProfile(results[0].validation_profile)
     definition = profile_definition(profile)
     # One recommendation PER SOURCE (Superflip and SharpED are never ranked
@@ -7517,7 +7735,13 @@ def write_map_quality_report(
             f"{recommended.label if recommended is not None else 'unavailable'})"
         )
     path.parent.mkdir(parents=True, exist_ok=True)
+    lines += ['', 'Scientific interpretation:',
+        'Amplitude R = sum(abs(Fobs - s*Fcalc))/sum(Fobs), with nonnegative least-squares scale s. Amplitude CC is Pearson correlation.',
+        'Superflip imposes measured amplitudes during charge flipping; near-perfect agreement is not independent phase validation or a refined structural R_work.',
+        'Legacy r_work/cc_work are work-subset amplitude diagnostics. Without holdout they use all measured reflections and can duplicate amplitude_rf/amplitude_cc.',
+        'Reference-backed metrics and recommendations depend on the supplied reference; they do not independently validate a crystal structure.']
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return per_source
 
 
 # -----------------------------------------------------------------------------
@@ -7755,7 +7979,7 @@ INPUT_TOOLTIPS = {
     "biso": "Overall isotropic B factor used to sharpen the map. Use 0.000 if no sharpening is wanted.",
     "reflection_data_mode": "Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so uncertainty-based significance is unavailable.",
     "first_cycle_like_attachment": "Legacy option removed from the UI. Use Basic -> Workflow -> Next-cycle model instead.",
-    "i_over_sigma_min": "Minimum value/sigma filter for observed reflections before writing the Superflip HKL block.",
+    "i_over_sigma_min": "Minimum I/sigma(I) for intensity input or F/sigma(F) for amplitude input. 0 disables the filter. FWHM is a peak width: FWHM input requires 0. Missing/invalid uncertainties cannot pass a positive threshold. Only finite nonnegative observed values are written; zero is retained when the filter is disabled.",
     "resolution_d_min": "Optional resolution cutoff in Angstrom. 0 keeps all reflections; 1.2 keeps only reflections with d >= 1.2 A.",
     "normalize": "Optional Superflip reflection normalization keyword. For this Windows executable, none is the safest default and local is omitted.",
     "nresshells": "Number of resolution shells used only when a supported Superflip normalization keyword is written.",
@@ -7775,7 +7999,7 @@ INPUT_TOOLTIPS = {
     "redistribute_overlaps": "Enables powder overlap repartitioning: each cycle, redistribute the combined observed intensity of overlapping-reflection groups (hkl I/F fwhm data only) between their members, using intensities calculated by FFT from that cycle's processed map. When off, the fields below are ignored.",
     "powder_redistribution_from_cycle": "First completed cycle whose map is used to redistribute overlapping powder reflections for the next cycle.",
     "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected from the Jana .m90 file, then the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
-    "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2θ-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
+    "powder_separation_factor": "Multiplier of the mean FWHM (in degrees 2θ) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) ≤ separation_factor * (FWHM1 + FWHM2) / 2. Executed powder feedback uses the actual Superflip overlap table; offline geometric diagnostics are double-precision estimates.",
     "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
     "sharped_base_url": "SharpED inference server base URL. The reference client uses https://sharped.fzu.cz/.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
@@ -8448,11 +8672,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.input_labels: Dict[str, QWidget] = {}
         self.settings = QSettings("PhaseStudio", "PhaseStudio")
         self._build_ui()
+        from phase_studio.setting_provenance import SettingOrigins
+        self._setting_origins=SettingOrigins(self)
         QTimer.singleShot(0, self._apply_adaptive_window_geometry)
         self.help_shortcut = QShortcut(QKeySequence(Qt.Key_F1), self)
         self.help_shortcut.setContext(Qt.WindowShortcut)
         self.help_shortcut.activated.connect(self._open_context_help)
         self.load_settings()
+        self._setting_origins.loaded(self.settings)
         QTimer.singleShot(250, self.refresh_sharped_models)
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._poll_queue)
@@ -8842,7 +9069,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>1. Select the input</h3>
             <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
             <p><b>Crystal metadata</b> independently selects the authoritative unit cell, space group and composition: Jana2020 .inflip, the selected reference structure, or validated manual input. External HKL data therefore do not require a CIF when complete manual metadata are supplied.</p>
-            <p>For external reflections, select the exact HKL column order first. Use <b>Validate HKL</b> to verify how columns were parsed and <b>Analyze completeness</b> to inspect completeness and data quality before reconstruction.</p>
+            <p>For external reflections, select the exact HKL column order first. Use <b>View data</b> to verify how columns were parsed and <b>Analyze data</b> to inspect completeness and data quality before reconstruction.</p>
             <h3>2. Choose a reconstruction preset</h3>
             <p><b>Workflow preset</b> (Basic &rarr; Workflow) applies a bundle of starting values in one step; every value stays individually editable afterward. Use it as a starting point, then adjust parameters only when necessary.</p>
             <ul><li><b>Recommended</b> (default): a general-purpose baseline that matches the built-in defaults.</li>
@@ -8870,7 +9097,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <p><b>Jana2020 .inflip file</b> is the Superflip input file used by the two Jana input modes.</p>
             <p><b>External HKL file</b> replaces only the fbegin/endf block in override mode, or is the required reflection source in external mode.</p>
             <p><b>HKL format</b> is the exact displayed column order. <b>Set from .inflip</b> imports Jana's dataformat. For example, <b>h k l · F · phase · σ(F)</b> means Miller indices, amplitude, phase in degrees, and amplitude uncertainty. FWHM formats contain peak width rather than measurement uncertainty, so validation and completeness show intensity and peak width separately; no uncertainty-based significance is inferred.</p>
-            <p><b>Validate HKL</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze completeness</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
+            <p><b>View data</b> parses the selected HKL or .inflip reflection block and shows which h, k, l, value, sigma and phase fields were read. <b>Analyze data</b> opens completeness and data-statistics plots (d<sub>min</sub>, resolution-dependent completeness, mean I/&sigma;(I)) for the selected data.</p>
             <h3>Crystal metadata</h3>
             <p><b>Metadata source</b> is the authoritative source for unit cell, space group and composition: <b>Jana2020 .inflip</b>, the selected <b>Reference file</b>, or <b>Manual</b> entry. Phase Studio does not silently combine metadata from more than one source.</p>
             <p>When <b>Manual</b> is selected: <b>a, b, c</b> (&Aring;) and <b>alpha, beta, gamma</b> (&deg;) are the unit-cell parameters; <b>Number</b> (1-230) or <b>Symbol</b> identifies the space group; <b>Composition</b> uses Superflip syntax, for example <code>Ag196 S108 O40 B1000</code>.</p>
@@ -8923,7 +9150,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Intensity correction</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>I/&sigma;(I) limit</b> selects positive observations strictly below the intensity-significance threshold; amplitudes use the first-order approximation F/[2&sigma;(F)], not recovered experimental intensity significance. Zero bypasses significance filtering for all map-supported reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
             <h3>Powder overlap repartitioning</h3>
-            <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
+            <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- use the actual executed Superflip overlap table and have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the matching Jana <code>.m90</code> header, then from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
         self._add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.", kind="warning")
         self._add_back_to_contents(map_feedback_layout)
@@ -8935,23 +9162,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             developer ONEDIR package containing Phase_studio.exe and its complete _internal runtime. Do not replace the scientific Superflip executable.</p>
         """)
         self._add_back_to_contents(jana_integration_layout)
-        about_layout = self._add_help_section(basic_help_tab, "about", "About Phase Studio", f"""
-            <h2>Phase Studio</h2>
-            <p>Phase Studio is a crystallographic reconstruction workflow integrating Superflip, SharpED and EDMA with Jana2020-oriented workflows.</p>
-            <h3>Developed at</h3>
-            <p>Department of Structure Analysis<br>Institute of Physics of the Czech Academy of Sciences</p>
-            <h3>Phase Studio author and lead developer</h3>
-            <p><b>Jiří Zelenka</b><br><a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>
-            <p>Fyzikální ústav AV ČR, v. v. i. (Institute of Physics of the Czech Academy of Sciences).</p>
-            <p>Phase Studio is free open-source software under the MIT license. Scientific publications reporting work performed with Phase Studio should cite Jiří Zelenka, Phase Studio, version {__version__}, <a href="https://github.com/ji-ze/Phase-Studio">the software repository</a>. Citation is the project's scientific-attribution policy, separate from the MIT license.</p>
-            <h3>SharpED developers — separate hosted service</h3>
-            <p><b>Jiří Zelenka</b></p>
-            <p><b>Jan Rohlíček</b><br><a href="mailto:rohlicek@fzu.cz">rohlicek@fzu.cz</a></p>
-            <p><b>Monika Kučeráková</b></p><p><b>Zdeněk Buk</b></p>
-            <p>SharpED account, personal API token and the applicable access entitlement/service terms are required for inference. A free Phase Studio license does not include a SharpED subscription or free inference entitlement.</p>
-            <p><b>General contact</b><br><a href="mailto:sharped@fzu.cz">sharped@fzu.cz</a></p>
-            <h3>Project resources</h3>
-        """)
+        from phase_studio.legal_content import overview_html
+        about_layout = self._add_help_section(basic_help_tab, "about", "About Phase Studio", overview_html(__version__))
         for resource_name, resource_url, resource_tip in (
             ("Department of Structure Analysis", "https://www.fzu.cz/en/research/divisions-and-departments/division-3/department-19", "Open the department website"),
             ("SharpED project and API token", "https://sharped.fzu.cz/", "Open the SharpED project and API-token page"),
@@ -9397,11 +9609,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # off. It is diagnostic only: never a ranking/recommendation input.
         tab_specs.append((
             "map_feedback_change", "Map Feedback change (%)",
-            "Average intensity change caused by that cycle's map-based intensity correction, "
-            "relative to the observed reflection intensities before correction. Lower is better; "
-            "it should shrink toward 0% as the map increasingly agrees with the observed data. "
-            "Each cycle's point reflects the correction that fed its input, so it lags one cycle "
-            "behind the correction run itself.",
+            "Separate legacy engine means for intensity correction and powder groups. "
+            "Points are labelled by the target input cycle; detailed diagnostics label source N to input N+1. "
+            "Magnitude is diagnostic only, not a quality score or ranking criterion.",
         ))
         for key, title, tooltip in tab_specs:
             # Each page is now JUST the canvas -- the interaction controls
@@ -9484,9 +9694,71 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         metrics_toolbar_layout.addWidget(self.metrics_reset_btn)
         metrics_layout.addWidget(metrics_toolbar)
         metrics_layout.addWidget(self.metrics_tabs, 1)
+        feedback_row = QHBoxLayout()
+        self.feedback_reports = {}
+        self.feedback_summary = QLabel('Map Feedback: no completed steps')
+        self.feedback_summary.setWordWrap(True)
+        self.feedback_summary.setFixedHeight(2*self.feedback_summary.fontMetrics().lineSpacing())
+        feedback_row.addWidget(self.feedback_summary, 1)
+        feedback_details = QPushButton('Map Feedback diagnostics…')
+        feedback_details.clicked.connect(self._open_feedback_diagnostics)
+        feedback_row.addWidget(feedback_details)
+        metrics_layout.addLayout(feedback_row)
         self.metrics_tabs.currentChanged.connect(self._on_metrics_tab_changed)
         self._on_metrics_tab_changed(self.metrics_tabs.currentIndex())
         self.result_splitter.addWidget(metrics_section)
+
+    def _publish_feedback_diagnostics(self, capture, directory):
+        try:
+            from phase_studio.feedback_diagnostics import save_report, input_comparison, written_input_difference
+            detail = capture.report()
+            if capture.input_file is not None:
+                detail['cycle_input'] = input_comparison(directory, capture.input_file, capture.mode)
+                if detail['target_cycle'] is not None:
+                    detail['target_input'] = input_comparison(directory, capture.output_file or capture.input_file, capture.mode)
+                    detail['written_input_difference'] = written_input_difference(
+                        capture.input_file,capture.output_file or capture.input_file,capture.mode)
+            report = save_report(directory, detail)
+            record_provenance(active_provenance(),'feedback',report)
+            if any(op['status']=='Scientific error' for op in report['operations']):
+                self.log(f'Scientific diagnostic error after cycle {report["source_cycle"]}: group-wise intensity conservation failed. Diagnostics did not change any values.', level='ERROR')
+            self._queue_run_event('feedback_diagnostics',report,getattr(capture.cfg,'run_id',None))
+        except Exception as exc:
+            self.log(f'Map Feedback diagnostics unavailable: {exc}', level='WARNING')
+
+    def _receive_feedback_diagnostics(self, report):
+        self.feedback_reports[report['source_cycle']] = report
+        target = report['target_cycle']
+        prefix = f'After cycle {report["source_cycle"]} → ' + (f'input {target}' if target else 'no next input')
+        active = [op for op in report['operations'] if op['status'] != 'Disabled']
+        parts=[]
+        for op in active:
+            text=f'{op["operation"]}: {op["status"]}'
+            if 'modified_reflections' in op:text+=f' · {op["modified_reflections"]} changed'
+            if op.get('mean_absolute_delta') is not None:text+=f' · mean |ΔI| {op["mean_absolute_delta"]:.4g}'
+            if op.get('mean_absolute_relative_percent') is not None:text+=f' · mean relative {op["mean_absolute_relative_percent"]:.4g}%'
+            parts.append(text)
+        summary=prefix+': '+('; '.join(parts) if parts else 'Disabled')
+        self.feedback_summary.setText(summary)
+        self.feedback_summary.setAccessibleName(summary)
+        self.feedback_summary.setToolTip(summary+'\n'+report['definitions'])
+        dialog = getattr(self, '_feedback_diagnostics_dialog', None)
+        if dialog is not None and dialog.isVisible() and Path(dialog.directory).resolve()==Path(report['detail_path']).parent.parent.resolve():
+            dialog.refresh(list(self.feedback_reports.values()))
+
+    def _open_feedback_diagnostics(self):
+        from phase_studio.feedback_diagnostics import load_summaries
+        from phase_studio.feedback_diagnostics_ui import FeedbackDiagnosticsDialog
+        directory = self.last_run_config.work_dir if self.last_run_config is not None else Path(self._path_value('work_dir') or '.')
+        try:
+            recorded = {r['source_cycle']:r for r in load_summaries(directory)}
+            recorded.update(self.feedback_reports)
+            self.feedback_reports = recorded
+        except (OSError,ValueError) as exc:
+            self._append_execution_log(f'Diagnostics unavailable: {exc}',level='WARNING')
+        reports = list(self.feedback_reports.values())
+        self._feedback_diagnostics_dialog = FeedbackDiagnosticsDialog(self,reports,directory)
+        self._feedback_diagnostics_dialog.show()
 
     def _build_structure_comparison_section(self) -> None:
         structure_section, structure_layout = self._make_result_section("STRUCTURE COMPARISON")
@@ -9499,6 +9771,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         controls.addWidget(self.structure_element_legend, 1)
         controls.addWidget(QLabel("View:"))
         self.structure_molecule_view_button = QPushButton("Complete molecules")
+        self.structure_molecule_view_button.setToolTip(
+            "Complete the independent molecular components of the asymmetric unit across periodic cell boundaries. "
+            "More than one independent molecule can be shown. "
+            "Small disconnected fragments may be omitted; Full cell shows all sites. "
+            "Atom counts describe the displayed non-H/He atoms."
+        )
         self.structure_full_cell_view_button = QPushButton("Full cell")
         for button in (self.structure_molecule_view_button, self.structure_full_cell_view_button):
             button.setObjectName("metricsViewToggle")
@@ -9561,8 +9839,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 nav.addWidget(previous); nav.addWidget(combo, 1); nav.addWidget(next_button); nav.addWidget(latest)
                 navigation.setVisible(False)
                 column_layout.addWidget(navigation)
-                metadata = QLabel("")
-                metadata.setWordWrap(True)
+                from phase_studio.viewer_metadata import PanelMetadataLabel
+                metadata = PanelMetadataLabel()
                 metadata.setAlignment(Qt.AlignCenter)
                 metadata.setVisible(False)
                 column_layout.addWidget(metadata)
@@ -9614,6 +9892,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             orientation_changed=self._classic_camera_orientation_changed,
         )
         structure_layout.addWidget(self.structure_canvas, 1)
+        from phase_studio.viewer_metadata import PanelMetadataLabel
+        self.structure_metadata_band = QWidget()
+        metadata_row = QHBoxLayout(self.structure_metadata_band)
+        metadata_row.setContentsMargins(0,0,0,0)
+        self.structure_metadata_labels = [PanelMetadataLabel() for _ in range(3)]
+        for label in self.structure_metadata_labels:
+            metadata_row.addWidget(label, 1)
+        structure_layout.addWidget(self.structure_metadata_band)
         self.result_splitter.addWidget(structure_section)
 
     @staticmethod
@@ -9759,13 +10045,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
 
     def _classic_fullscreen_presentation(self, panel: str) -> dict:
-        from phase_studio.autosolve_window import prepare_structure_presentation
+        from phase_studio.viewer_alignment import present_structure,comparison_policy,panel_summary
 
         candidate = self._classic_selected_candidate(panel)
         path = self._structure_source_paths.get(panel)
         composition_label, composition = self._classic_structure_composition(panel)
-        data = prepare_structure_presentation(
+        data = present_structure(
             path, self.structure_view_mode, composition, composition_label,
+            policy=comparison_policy(),reference_path=self._structure_source_paths.get('reference'),
+            metric_cell=self.structure_cell,
         )
         title = {"reference": "Reference", "superflip": "Charge-flipping solution", "deblur": "Structure prediction"}[panel]
         source = {"reference": "Reference", "superflip": "Superflip", "deblur": "SharpED"}[panel]
@@ -9781,6 +10069,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"{int(data.get('detected', 0)):,} EDMA sites"
             )
         data["metadata"] = metadata
+        if comparison_policy()!='independent':data['metadata']+='<br>'+html.escape(panel_summary(data))
         data["title"] = f"Phase Studio — {title}{cycle}"
         return data
 
@@ -9836,10 +10125,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.execution_log_open_button = QToolButton()
         self.execution_log_open_button.setObjectName("diagnosticTextAction")
         self.execution_log_open_button.setText("Open log")
-        self.execution_log_open_button.setToolTip("Open the complete timestamped run diagnostic log.")
+        self.execution_log_open_button.setToolTip("Review the current or a saved run execution log, including after application restart.")
         self.execution_log_open_button.clicked.connect(self._open_run_diagnostic_log)
-        self.execution_log_open_button.setEnabled(False)
+        self.execution_log_open_button.setEnabled(True)
         log_actions.addWidget(self.execution_log_open_button)
+        self.execution_log_export_button=QToolButton()
+        self.execution_log_export_button.setObjectName('diagnosticTextAction')
+        self.execution_log_export_button.setText('Export sanitized diagnostics')
+        self.execution_log_export_button.clicked.connect(self._export_sanitized_run_diagnostics)
+        log_actions.addWidget(self.execution_log_export_button)
         log_layout.addLayout(log_actions)
         self.log_text = QTextEdit()
         self.log_text.setObjectName("executionLog")
@@ -9873,9 +10167,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._set_execution_log_expanded(not self.execution_log_expanded)
 
     def _open_run_diagnostic_log(self) -> None:
-        diagnostic = getattr(self, "_run_diagnostic_log", None)
-        if diagnostic is not None and diagnostic.path.is_file():
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(diagnostic.path)))
+        from .run_log_viewer import RunLogViewer
+        diagnostic=getattr(self,'_run_diagnostic_log',None)
+        path=getattr(diagnostic,'path',None)
+        directory=Path(path).parent if path and Path(path).is_file() else None
+        if directory is None:
+            name=QFileDialog.getExistingDirectory(self,'Open saved run execution log',str(Path.home()))
+            if not name:return
+            directory=Path(name)
+        viewer=RunLogViewer(self,directory)
+        self._execution_log_viewers=getattr(self,'_execution_log_viewers',[])
+        self._execution_log_viewers.append(viewer)
+        viewer.show();viewer.raise_()
+
+    def _export_sanitized_run_diagnostics(self):
+        provenance=getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None)
+        if provenance is None:
+            QMessageBox.information(self,'Diagnostics unavailable','No structured run provenance is available for this session.');return
+        name,_=QFileDialog.getSaveFileName(self,'Export sanitized diagnostic metadata','','ZIP (*.zip)')
+        if name:
+            try:provenance.export_sanitized(name)
+            except (OSError,ValueError) as exc:QMessageBox.warning(self,'Export unavailable',redact_log_secrets(exc))
 
     # ----- Basic-tab builders, one per tab, called in order from _build_ui.
     # Each assigns the same self.* attributes, connects the same signals, and
@@ -9933,8 +10245,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if hasattr(hkl_row, "on_change"):
             hkl_row.on_change = self._hkl_path_changed
         hkl_button_row = QHBoxLayout()
-        self.test_hkl_btn = QPushButton("Validate HKL")
-        self.analyze_hkl_btn = QPushButton("Analyze completeness")
+        self.test_hkl_btn = QPushButton("View data")
+        self.analyze_hkl_btn = QPushButton("Analyze data")
         self.test_hkl_btn.setToolTip("Parse the selected HKL or Jana2020 .inflip reflection block and show which h, k, l, value, sigma and phase fields were read.")
         self.analyze_hkl_btn.setToolTip("Open completeness and data-statistics plots for the selected HKL data.")
         self.test_hkl_btn.clicked.connect(self.test_hkl_load_dialog)
@@ -10244,14 +10556,26 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_damping", "Correction damping", 0.0, 0.0, 1.0, 0.05, 3)
         self._add_dspin(intensity_feedback_form, "map_feedback_intensity_max_i_over_sigma", "I/σ(I) limit", 0.0, 0.0, 1000.0, 0.5, 3)
         significance_control = self.inputs["map_feedback_intensity_max_i_over_sigma"]
+        self._intensity_feedback_form = intensity_feedback_form
         significance_control.setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
         intensity_feedback_form.labelForField(significance_control).setToolTip(MAP_FEEDBACK_SIGNIFICANCE_HELP)
         intensity_feedback_form.addRow("", self._settings_callout("Note", "At 0, correction applies to all map-supported reflections."))
+        self.feedback_uncertainty_note = QLabel(
+            "FWHM is a peak width, not a measurement uncertainty. "
+            "Positive I/σ(I) filtering is unavailable; threshold 0 retains map-supported correction."
+        )
+        self.feedback_uncertainty_note.setWordWrap(True)
+        intensity_feedback_form.addRow(self.feedback_uncertainty_note)
+        self.feedback_reset_significance = QPushButton("Set inapplicable limit to 0")
+        self.feedback_reset_significance.clicked.connect(lambda: significance_control.setValue(0))
+        self.feedback_reset_significance.clicked.connect(self._sync_map_feedback_widgets)
+        intensity_feedback_form.addRow(self.feedback_reset_significance)
 
         powder_feedback_form = self._add_form_group(feedback_tab, "Powder overlap repartitioning")
         self._add_checkbox(powder_feedback_form, "redistribute_overlaps", "Enable powder overlap repartitioning (FWHM data)", False, align_with_fields=True)
         self._add_spin(powder_feedback_form, "powder_redistribution_from_cycle", "Start after cycle", 1, 1, 999, 1)
         self._add_dspin(powder_feedback_form, "powder_wavelength", "Wavelength (Å)", 0.0, 0.0, 10.0, 0.01, 5)
+        self.inputs["powder_wavelength"].setSpecialValueText("Automatic")
         self._add_dspin(powder_feedback_form, "powder_separation_factor", "Separation factor", 0.2, 0.001, 100.0, 0.05, 3)
         self._add_dspin(powder_feedback_form, "powder_redistribution_mix", "Map ratio mix", 1.0, 0.0, 1.0, 0.05, 3)
         powder_feedback_form.addRow("", self._settings_callout(
@@ -10961,23 +11285,44 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             reachable = cycles_value >= from_cycle_value
             fields_active = checkbox_enabled and reachable
             for field_key in other_field_keys:
+                field_active = has_fwhm_data if field_key == "powder_wavelength" else fields_active
                 widget = self.inputs.get(field_key)
                 if hasattr(widget, "setEnabled"):
-                    widget.setEnabled(fields_active)  # type: ignore[attr-defined]
+                    widget.setEnabled(field_active)  # type: ignore[attr-defined]
                 label = self.input_labels.get(field_key)
                 if label is not None:
-                    label.setEnabled(fields_active)
+                    label.setEnabled(field_active)
                 if hasattr(widget, "setToolTip"):
-                    if not checkbox_enabled:
+                    if field_key == "powder_wavelength":
+                        tooltip = "Measured radiation wavelength in \u00c5. Zero resolves matching .m90, then .inflip, then reference CIF. Required by native Superflip FWHM input even with Map Feedback off."
+                    elif not checkbox_enabled:
                         tooltip = f"Ignored: requires '{checkbox_label}' to be enabled."
                     elif not reachable:
                         tooltip = "Requires a subsequent reconstruction cycle."
                     else:
                         tooltip = INPUT_TOOLTIPS.get(field_key, "")
                     widget.setToolTip(tooltip)  # type: ignore[attr-defined]
+        # Hide the inapplicable gate without changing a saved numerical limit.
+        # The existing execution validation still rejects a stale positive gate.
+        fwhm = reflection_mode_has_fwhm(self._resolve_configured_data_mode_for_ui())
+        significance = self.inputs.get("map_feedback_intensity_max_i_over_sigma")
+        if significance is not None and hasattr(self, "_intensity_feedback_form"):
+            self._intensity_feedback_form.setRowVisible(significance, not fwhm)
+            if fwhm:
+                significance.setEnabled(False)
+                self.input_labels["map_feedback_intensity_max_i_over_sigma"].setEnabled(False)
+            self._intensity_feedback_form.setRowVisible(self.feedback_uncertainty_note, fwhm)
+            self._intensity_feedback_form.setRowVisible(self.feedback_reset_significance, fwhm and significance.value() > 0)
+            self.feedback_uncertainty_note.setText(
+                "FWHM is a peak width, not a measurement uncertainty. "
+                + ("The saved positive I/σ(I) limit is inapplicable. Set it to 0 below to use "
+                   "map-supported correction with FWHM data."
+                   if significance.value() > 0 else
+                   "Positive I/σ(I) filtering is unavailable; threshold 0 retains map-supported correction.")
+            )
         if hasattr(self, "metrics_tabs") and "map_feedback_change" in self._metrics_tab_keys:
             feedback_index = self._metrics_tab_keys.index("map_feedback_change")
-            self.metrics_tabs.setTabVisible(feedback_index, self._check_value("map_feedback_intensity_enabled"))
+            self.metrics_tabs.setTabVisible(feedback_index, self._check_value("map_feedback_intensity_enabled") or self._check_value("redistribute_overlaps") or any(r.powder_repartition_avg_change_percent is not None or r.intensity_correction_avg_change_percent is not None for r in self.results))
 
     def _sync_input_source_mode_widgets(self) -> None:
         if self._configuration_locked:
@@ -11260,7 +11605,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         work_text = self._path_value("work_dir").strip() if "work_dir" in self.inputs else ""
         configured_mode = self._combo_value("reflection_data_mode") if "reflection_data_mode" in self.inputs else REFLECTION_DATA_MODE_AUTO
         metadata = self._resolve_crystal_metadata_from_inputs()
-        return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode, metadata)
+        return HklAnalysisRequest(mode, hkl_text, jana_text, ref_text, work_text, configured_mode, metadata,
+                                  self._dspin_value("powder_wavelength"))
 
     def _set_hkl_task_running(self, running: bool) -> None:
         if not running:
@@ -11564,7 +11910,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         return completeness_dialog(self, analysis)
 
     def _show_hkl_completeness_dialog(self, analysis: HklAnalysis) -> None:
-        dialog = self._build_hkl_completeness_dialog(analysis)
+        from phase_studio.input_analysis_ui import analyze_data_dialog
+        dialog = analyze_data_dialog(self, analysis)
         # The builder fits the work area, then restores and clamps the
         # user's saved geometry. A deferred second fit would overwrite it.
         dialog.exec()
@@ -11688,6 +12035,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.log_text.horizontalScrollBar().setValue(0)
         self._last_log_record = None
         self.results.clear()
+        self.feedback_reports.clear()
+        self.feedback_summary.setText("Map Feedback: no completed steps")
         self._structure_jobs.clear()
         self._operation_states.clear()
         self._live_structures.clear()
@@ -11745,7 +12094,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._run_diagnostic_log.close()
         self._run_diagnostic_log = RunDiagnosticLog(run_dir / "log.txt", cfg)
         if hasattr(self, "execution_log_open_button"):
-            self.execution_log_open_button.setEnabled(self._run_diagnostic_log.path.is_file())
+            self.execution_log_open_button.setEnabled(True)
         if self._run_diagnostic_log.fallback_reason:
             self._append_execution_log(
                 (
@@ -11788,6 +12137,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
         self._active_run_id = run_id
         self.results.clear()
+        self.feedback_reports.clear()
+        self.feedback_summary.setText("Map Feedback: no completed steps")
         self._structure_jobs.clear()
         self._operation_states.clear()
         self._live_structures.clear()
@@ -11825,6 +12176,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         *,
         level: str = "",
         subsystem: str = "",
+        event_type: str = "",
+        cycle: Optional[int] = None,
     ) -> bool:
         work_dir = self.last_run_config.work_dir if self.last_run_config is not None else None
         record = payload if isinstance(payload, ExecutionLogRecord) else classify_log_record(
@@ -11833,6 +12186,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             subsystem=subsystem,
             work_dir=work_dir,
         )
+        if event_type:
+            record = replace(record, event_type=event_type, cycle=cycle)
         diagnostic_log = getattr(self, "_run_diagnostic_log", None)
         if diagnostic_log is not None:
             diagnostic_log.write(record)
@@ -11937,7 +12292,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         "  Ignored duplicate/managed Superflip keyword",
     )
 
-    def log(self, message: str, *, level: str = "", subsystem: str = "") -> None:
+    def log(self, message: str, *, level: str = "", subsystem: str = "", event_type: str = "log", cycle: Optional[int] = None, family: Optional[str] = None) -> None:
         text = str(message)
         if text.startswith(self.LOG_ONCE_PER_WORKFLOW_PREFIXES):
             seen = getattr(self, "_workflow_log_once", None)
@@ -11948,12 +12303,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 return
             seen.add(text)
         work_dir = self.last_run_config.work_dir if self.last_run_config is not None else None
-        self._queue_run_event("log", classify_log_record(
+        record=classify_log_record(
             message,
             level=level,
             subsystem=subsystem,
             work_dir=work_dir,
-        ))
+        )
+        self._queue_run_event('log',replace(record,cycle=cycle if cycle is not None else getattr(self._run_event_context,'cycle',None),event_type=event_type,family=family))
 
     def _queue_run_event(
         self, kind: str, payload: object, run_id: Optional[str] = None,
@@ -11974,9 +12330,17 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._structure_job_generation += 1
             job_id = f"operation:{self._structure_job_generation}"
         self._queue_run_event("operation_state", (job_id, name, cycle, "running"), state.run_id)
+        self._run_event_context.cycle=cycle
+        provenance=getattr(state,'provenance',None)
+        operation_started=time.perf_counter();operation_status='completed'
+        record_provenance(provenance,'operation','started',name,cycle)
         try:
-            return call()
+            with provenance_scope(provenance,cycle):return call()
+        except BaseException:
+            operation_status='cancelled' if self.stop_now.is_set() else 'failed'
+            raise
         finally:
+            record_provenance(provenance,'operation','finished',name,cycle,status=operation_status,seconds=time.perf_counter()-operation_started)
             self._queue_run_event("operation_state", (job_id, name, cycle, "finished"), state.run_id)
 
     def active_workflow_operations(self) -> List[str]:
@@ -12044,6 +12408,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         busy: bool = False,
         complete: bool = False,
     ) -> None:
+        self._run_event_context.cycle=cycle_index
         try:
             stage_index = list(stages).index(stage_name) + 1
         except ValueError:
@@ -12153,7 +12518,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.run_btn.setText("Run phasing")
         self._update_action_states()
         self._append_execution_log(
-            "Workflow cancelled by the user.", level="WARNING", subsystem="Workflow"
+            f"Workflow cancelled immediately by the user after {completed_cycles} of {total_cycles} cycles. " + ("Completed results remain available." if completed_cycles else "No completed cycle results are available."), level="WARNING", subsystem="Workflow", event_type="CANCELLED_BY_USER"
         )
 
     def _finish_cancelled_run_for_request(self) -> None:
@@ -12245,13 +12610,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.run_btn.setEnabled(True)
         self._update_action_states()
         self._append_execution_log(
-            f"Workflow stopped after cycle {completed} as requested.",
+            f"Stopped by user after cycle {completed} of {total_cycles}.",
             level="WARNING",
-            subsystem="Workflow",
+            subsystem="Workflow", event_type="STOPPED_BY_USER", cycle=completed,
         )
         self._append_execution_log(
-            "Completed results are available.",
-            subsystem="Workflow",
+            ("Completed results are available." if completed else "No completed cycle results are available."),
+            subsystem="Workflow", event_type="RESULTS_AVAILABLE" if completed else "NO_RESULTS_AVAILABLE", cycle=completed,
         )
         # A partially completed workflow is still a usable result set: the
         # Jana2020 hand-off stays available for whatever finished.
@@ -12405,7 +12770,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._annotate_cycle_progress("Stopping after current cycle…")
         self._update_action_states()
         self._show_stopping_badge()
-        self.log("Stop after current cycle requested.", level="DETAIL")
+        cycle = getattr(self._cycle_progress_state, 'cycle_index', None)
+        self._append_execution_log("Stop after current cycle requested.", level="STEP", event_type="STOP_REQUESTED", cycle=cycle)
+        self._append_execution_log("Finishing the current cycle before stopping; completed results will be retained.", level="STEP", event_type="FINISHING_CURRENT_CYCLE", cycle=cycle)
 
     def request_autosolve_pass_now(self) -> None:
         """AutosolveWindow's "Pass to Jana2020": stop the active work
@@ -12466,10 +12833,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         self._update_action_states()
         self._show_stopping_badge()
-        self.log(
+        self._append_execution_log(
             "Stopping unfinished calculation for Jana2020 handoff."
             if self._handoff_pending else "Immediate stop requested.",
-            level="DETAIL",
+            level="STEP", event_type="CANCEL_REQUESTED", cycle=getattr(self._cycle_progress_state,"cycle_index",None),
         )
 
     def _requested_workflow_stop_kind(self) -> str:
@@ -12515,6 +12882,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             widget = self.inputs.get(key)
             if widget is not None:
                 self._set_widget_value_from_string(widget, value)
+                if getattr(self,'_setting_origins',None) is not None:self._setting_origins.mark(key,'Selected preset',str(preset))
 
         if "recommended" in name:
             set_value("cycles", "5")
@@ -12636,6 +13004,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return []
         if category == "input_validation":
             summary = report.summary.casefold()
+            if "wavelength" in summary:
+                def show_wavelength():
+                    self._open_configuration_page("Map feedback")
+                    self.inputs["powder_wavelength"].setFocus()
+                return [ErrorAction("Set measured wavelength", show_wavelength, True)]
             actions: List[ErrorAction] = []
             for token, key, label in (
                 (".inflip", "jana_inflip", "Select .inflip…"),
@@ -12845,6 +13218,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                         widget.setCurrentText(displayed)
                         widget.blockSignals(False)
                     self._append_execution_log("[SharpED] Models refreshed.", level="SUCCESS", subsystem="SharpED")
+                elif kind == "feedback_diagnostics":
+                    self._receive_feedback_diagnostics(payload)
                 elif kind == "hkl_load_result":
                     parsed_count = len(payload.reflections) if isinstance(payload, HklLoadResult) else 0
                     unique_count = len(payload.unique_reflections) if isinstance(payload, HklLoadResult) else 0
@@ -13894,10 +14269,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         cfg = state.cfg
         data_mode = self._resolve_configured_data_mode(cfg)
         if reflection_mode_has_fwhm(data_mode):
-            m90_path = resolve_jana_m90_path(cfg.jana_inflip)
-            wavelength, wavelength_source = resolve_powder_wavelength(
-                0.0, cfg.jana_inflip, cfg.reference_cif, jana_m90_path=m90_path,
-            )
+            wavelength, wavelength_source = configured_powder_wavelength(cfg)
             if wavelength <= 0:
                 return None, (
                     "The reflection data carries FWHM values (powder data), but no radiation "
@@ -13911,13 +14283,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """The established Autosolve Map Feedback configuration, unchanged."""
         cfg = self._resume_state.cfg
         if kind == guided.CORRECTION_POWDER:
-            m90_path = resolve_jana_m90_path(cfg.jana_inflip)
-            wavelength, _source = resolve_powder_wavelength(
-                0.0, cfg.jana_inflip, cfg.reference_cif, jana_m90_path=m90_path,
-            )
+            wavelength, wavelength_source = configured_powder_wavelength(cfg)
             cfg.redistribute_overlaps = True
             cfg.powder_redistribution_from_cycle = start_cycle
             cfg.powder_wavelength = wavelength
+            cfg.wavelength_source = wavelength_source
             cfg.powder_separation_factor = 0.200
             cfg.powder_redistribution_mix = 0.3
         else:
@@ -14331,9 +14701,31 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             if answer != QMessageBox.Yes:
                 return False
+        from .run_review import candidate_transfer_rows
+        from .result_selection import candidate_selection
+        rows=candidate_transfer_rows(candidate,self.last_run_config,destination)
+        if not confirm_candidate_transfer(self,rows):
+            return False
+        snapshot=candidate_selection(candidate,jana=False)
+        if not snapshot.ready:
+            self._append_execution_log('Export refused: '+snapshot.reason,level='ERROR',subsystem='Results')
+            return False
+        expected={target.resolve(): digest for target,digest in zip(targets,[candidate.map_sha256,*([candidate.structure_sha256] if candidate.usable_structure else [])])}
+        if not all(expected.values()):
+            self._append_execution_log('Export requires sealed map/model identities. Reopen the completed candidate before saving.',level='ERROR',subsystem='Results')
+            return False
+        provenance=getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None)
+        record_provenance(provenance,'selection',candidate,'confirmed standalone export')
+        if self.last_run_config is not None:
+            try:write_map_quality_report(self.last_run_config.work_dir/'map_quality_assessment.txt',self.results,candidate)
+            except OSError as exc:self._append_execution_log('Selection report update failed: '+str(exc),level='WARNING',subsystem='Results')
         destination.mkdir(parents=True, exist_ok=True)
-        for source, target in zip(sources, targets):
-            shutil.copy2(source, target)
+        try:
+            _publish_protocol_transaction([(source,target) for source,target in zip(sources,targets) if source.resolve()!=target.resolve()],expected_hashes=expected)
+        except Exception as exc:
+            record_provenance(provenance,'export','failed',candidate,destination,targets,reason=str(exc))
+            raise
+        record_provenance(provenance,'export','completed',candidate,destination,targets)
         self._append_execution_log(
             f"[Results] Saved {candidate.label} · {len(targets)} file(s) · {destination}",
             level="SUCCESS",
@@ -14427,6 +14819,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         preview_host = create_result_preview_host(
             self, self.structure_cell, self.structure_elev, self.structure_azim,
         )
+        from .run_review import candidate_transfer_rows
         dialog = ResultSelectionDialog(
             dialog_parent if dialog_parent is not None else self,
             superflip_candidates,
@@ -14451,6 +14844,12 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 cfg.crystal_metadata if cfg is not None else None
             ),
             adjust_threshold_async=self.request_result_candidate_retune,
+            map_feedback_powder_enabled=bool(cfg.redistribute_overlaps) if cfg is not None else False,
+            map_feedback_missing_enabled=bool(cfg.map_feedback_missing_enabled) if cfg is not None else False,
+            feedback_directory=cfg.work_dir if cfg is not None else None,
+            feedback_reports_provider=lambda: list(self.feedback_reports.values()),
+            comparison_reference=cfg.reference_cif if cfg is not None else self._structure_source_paths.get('reference'),
+            transfer_details_provider=lambda candidate: candidate_transfer_rows(candidate,cfg,jana=is_jana),
         )
         # A run owns its explicit selection; QSettings and a previous run do not.
         session_key = (str(getattr(cfg, "run_id", "")),
@@ -14496,11 +14895,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         active_recommendation = dialog.active_recommendation
         if active_recommendation is not None:
             self.result_recommendation = active_recommendation.with_selected(chosen)
+        if not is_jana:
+            return self._export_selected_candidate(chosen)
         if cfg is not None:
             write_map_quality_report(cfg.work_dir / "map_quality_assessment.txt", self.results, chosen)
-        if not is_jana:
-            self._export_selected_candidate(chosen)
-            return True
 
         result = self._cycle_result_for_candidate(chosen)
         if result is None:
@@ -14521,13 +14919,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         """The one Jana2020 handoff authority (perform_jana_handoff in a
         worker thread), shared by Result Selection and guided Autosolve."""
         self.handoff_btn.setEnabled(False)
+        provenance=getattr(getattr(self,'_run_diagnostic_log',None),'provenance',None)
+        record_provenance(provenance,'handoff','requested',candidate)
 
         def handoff_worker() -> None:
             self._run_event_context.run_id = str(candidate.run_id or cfg.run_id)
+            self._run_event_context.cycle=candidate.cycle
             try:
                 perform_jana_handoff(cfg, result, candidate, log=self.log)
+                record_provenance(provenance,'handoff','completed',candidate)
                 self._queue_run_event("handoff_done", None, candidate.run_id or cfg.run_id)
             except Exception as exc:
+                record_provenance(provenance,'handoff','failed',candidate,reason=redact_log_secrets(exc))
                 self._queue_run_event("handoff_error", build_error_report(
                     exc,
                     subsystem="Jana2020",
@@ -14752,6 +15155,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             coords[:, 0], coords[:, 1], coords[:, 2], s=sizes, c=atom_base_colors,
             alpha=1.0, edgecolors="#ffffff", linewidths=0.18, depthshade=False,
         )
+        scatter._phase_elements = tuple(a.element for a in plot_atoms)
         depth_artists = StructureDepthArtists(
             scatter=scatter,
             atom_coordinates=coords,
@@ -14775,6 +15179,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         # drawn, say so explicitly instead, rather than call the full count
         # "shown".
         return f"{shown:,} atoms shown"
+
+    def _refresh_viewer_palette(self):
+        from phase_studio.structure_camera import recolor_atoms
+        elements = recolor_atoms(self.structure_canvas, self._element_color,
+            self._structure_depth_artists, self._update_structure_depth_artist)
+        entries = "&nbsp;&nbsp;&nbsp; ".join(
+            f'<span style="color:{self._element_color(e)}; font-size:12pt;">&#9679;</span>&nbsp;{html.escape(e)}'
+            for e in sorted(set(elements), key=lambda e: -element_atomic_number(e)))
+        self.structure_element_legend.setText('<span style="color:#52658b;">Elements:</span>&nbsp;&nbsp; '+entries if entries else '')
 
     def _update_structure_depth_artist(self, artists: StructureDepthArtists, elev: float, azim: float) -> None:
         atom_fade = structure_depth_fade(
@@ -14846,6 +15259,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return []
         try:
             resolved = Path(path)
+            from phase_studio.viewer_alignment import comparison_policy,present_structure
+            if comparison_policy()!='independent':
+                data=present_structure(resolved,getattr(self,'structure_view_mode','molecule'),
+                    policy=comparison_policy(),reference_path=self._structure_source_paths.get('reference'),metric_cell=self.structure_cell)
+                if not hasattr(self,'_comparison_data'):self._comparison_data={}
+                self._comparison_data[str(resolved.resolve())]=data
+                return data['atoms']
             raw_atoms = parse_cif_atoms(resolved)
             _cell, sg, _hm = parse_cif_cell_and_sg(resolved)
             if getattr(self, "structure_view_mode", "molecule") == "cell":
@@ -14914,8 +15334,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _classic_camera_orientation_changed(self, elev: float, azim: float, _source_axis) -> None:
         self.structure_elev, self.structure_azim = float(elev), float(azim)
-        _source_axis.view_init(elev=elev, azim=azim, roll=_source_axis.roll)
-        self._update_structure_depth_cue(elev, azim)
+        self._apply_structure_view(_source_axis, redraw=False)
 
     def _fit_classic_structure_view(self) -> None:
         for axis in self._structure_interactive_axes:
@@ -14924,21 +15343,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_canvas.draw_idle()
 
     def _reset_classic_structure_view(self) -> None:
-        self.structure_elev, self.structure_azim = 20.0, 35.0
+        self.structure_elev, self.structure_azim, self.structure_roll = 20.0, 35.0, 0.0
         for axis in self._structure_interactive_axes:
             axis.view_init(elev=self.structure_elev, azim=self.structure_azim)
         self._fit_classic_structure_view()
 
     def _apply_structure_view(self, source_ax, *, redraw: bool = True) -> None:
-        """Mirror one panel's camera and zoom/pan onto every other panel."""
+        """Mirror orientation while preserving panel-local zoom and pan."""
         if source_ax is None or source_ax not in self._structure_interactive_axes:
             return
         elev = float(getattr(source_ax, "elev", self.structure_elev))
         azim = float(getattr(source_ax, "azim", self.structure_azim))
         self.structure_elev = elev
         self.structure_azim = azim
-        for axis in self.structure_axes:
-            axis.view_init(elev=elev, azim=azim)
+        self.structure_roll = float(source_ax.roll)
+        for axis in self._structure_interactive_axes:
+            axis.view_init(elev=elev, azim=azim, roll=self.structure_roll)
         self._update_structure_depth_cue(elev, azim)
         if redraw:
             self.structure_canvas.draw_idle()
@@ -14970,12 +15390,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         title_y = axes_top + title_band * 0.52
         for title_text in getattr(self, "structure_title_texts", []):
             title_text.set_y(title_y)
-        for metadata_text in getattr(self, "structure_metadata_texts", []):
-            metadata_text.set_y(metadata_band * 0.44)
+        # Panel metadata live in bounded Qt labels beneath the canvas.
         for separator in getattr(self, "structure_separators", []):
             separator.set_ydata([max(0.08, metadata_band + 0.01), axes_top - 0.01])
 
     def _update_structure_views(self) -> None:
+        from phase_studio.viewer_alignment import comparison_policy,panel_summary
+        previous=next(iter(getattr(self,'_structure_interactive_axes',[])),None)
+        orientation=(previous.elev,previous.azim,previous.roll) if previous is not None else (self.structure_elev,self.structure_azim,getattr(self,"structure_roll",0.0))
+        if orientation:self.structure_elev,self.structure_azim=orientation[:2]
         self.structure_figure.clear()
         self.structure_figure.patch.set_facecolor("#ffffff")
         self.structure_axes = []
@@ -15034,6 +15457,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"{composition_text} · {atom_metadata}"
                 if composition_text and atom_metadata else (composition_text or atom_metadata)
             )
+            path=self._structure_source_paths.get(panel)
+            data=getattr(self,'_comparison_data',{}).get(str(Path(path).resolve())) if path else None
+            if comparison_policy()!='independent' and data:panel_metadata[-1]+=' · '+panel_summary(data)
         self.structure_title_texts = [
             self.structure_figure.text(
                 x_position,
@@ -15047,18 +15473,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
             for x_position, (_panel, title, _atoms, _empty_text) in zip((1.0 / 6.0, 0.5, 5.0 / 6.0), panels)
         ]
-        self.structure_metadata_texts = [
-            self.structure_figure.text(
-                x_position,
-                0.03,
-                metadata,
-                ha="center",
-                va="center",
-                fontsize=7.5,
-                color="#52658b",
-            )
-            for x_position, metadata in zip((1.0 / 6.0, 0.5, 5.0 / 6.0), panel_metadata)
-        ]
+        self.structure_metadata_texts = []
+        for label, metadata in zip(self.structure_metadata_labels, panel_metadata):
+            label.setText(metadata)
+        self.structure_metadata_band.setVisible(any(panel_metadata))
         self.structure_separators = []
         for x_position in (1.0 / 3.0, 2.0 / 3.0):
             separator = Line2D(
@@ -15069,8 +15487,33 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self.structure_figure.add_artist(separator)
             self.structure_separators.append(separator)
         self._layout_structure_figure()
+        if comparison_policy()!='independent' and self._structure_depth_artists:
+            from phase_studio.autosolve_window import _bounding_sphere
+            points=np.vstack([item.atom_coordinates for item in self._structure_depth_artists])
+            if self.structure_view_mode=='cell':points=np.vstack([points,*[item.cell_corners for item in self._structure_depth_artists]])
+            lower=np.min(points,axis=0);upper=np.max(points,axis=0);spans=np.maximum(upper-lower,1.)
+            limits=tuple((float(lo-.04*span),float(hi+.04*span)) for lo,hi,span in zip(lower,upper,spans))
+            for axis in self._structure_interactive_axes:
+                axis.set_box_aspect(spans/max(spans),zoom=1.1);self._apply_structure_axis_limits(axis,limits)
+                self._classic_fit_limits[axis]=limits
+                if orientation:axis.view_init(*orientation[:2],roll=orientation[2])
+            if orientation:self._update_structure_depth_cue(orientation[0],orientation[1])
+        if orientation:
+            for axis in self._structure_interactive_axes:
+                axis.view_init(*orientation[:2], roll=orientation[2])
+            self.structure_roll = orientation[2]
+            self._update_structure_depth_cue(*orientation[:2])
         self._classic_camera.refresh_axes()
         self.structure_canvas.draw_idle()
+
+    def _refresh_comparison_frame(self):
+        self._comparison_data={}
+        for role,attribute in [('reference','reference_atoms_for_plot'),('superflip','superflip_atoms_for_plot'),('deblur','deblur_atoms_for_plot')]:
+            setattr(self,attribute,self._classic_structure_atoms(self._structure_source_paths.get(role)))
+        self._update_structure_views()
+
+    def _comparison_provenance(self):
+        return {path:data.get('alignment',{}) for path,data in getattr(self,'_comparison_data',{}).items()}
 
     def get_config(self) -> RunConfig:
         resolved_inputs = resolve_run_inputs(
@@ -15092,9 +15535,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         resolved_wavelength, wavelength_source = resolve_powder_wavelength(
             self._dspin_value("powder_wavelength"), resolved_inputs.jana_inflip,
             resolved_inputs.external_reference_file,
+            resolve_jana_m90_path(resolved_inputs.jana_inflip),
         )
-        if self._check_value("redistribute_overlaps") and resolved_wavelength > 0 and wavelength_source != "manual entry":
-            self.log(f"Powder overlap repartitioning: wavelength {resolved_wavelength:g} A auto-detected from {wavelength_source}.", level="DETAIL")
+        if resolved_wavelength > 0:
+            self.log(f"Effective radiation wavelength {resolved_wavelength:g} A from {wavelength_source}.", level="WARNING" if "conflicting wavelength" in wavelength_source else "INFO")
         return RunConfig(
             hkl=resolved_inputs.hkl,
             reference_cif=resolved_inputs.reference_cif,
@@ -15162,6 +15606,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             redistribute_overlaps=self._check_value("redistribute_overlaps"),
             powder_redistribution_from_cycle=self._spin_value("powder_redistribution_from_cycle"),
             powder_wavelength=resolved_wavelength,
+            wavelength_source=wavelength_source,
             powder_separation_factor=self._dspin_value("powder_separation_factor"),
             powder_redistribution_mix=self._dspin_value("powder_redistribution_mix"),
             run_sharped=self._check_value("run_sharped") and modelfile_source_value != "superflip_xplor",
@@ -15181,6 +15626,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sharped_poll_seconds=self._spin_value("sharped_poll_seconds"),
             sharped_max_polls=self._spin_value("sharped_max_polls"),
             edma_threshold_mode=str(getattr(self, "edma_threshold_mode", "manual") or "manual"),
+            setting_provenance=self._setting_origins.snapshot() if getattr(self,'_setting_origins',None) is not None else None,
         )
 
     def _resolve_configured_data_mode(self, cfg: RunConfig) -> str:
@@ -15240,6 +15686,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def _validate_run_config(self, cfg: RunConfig) -> Tuple[List[str], str]:
         issues: List[str] = []
         details: List[str] = []
+        try:
+            reflection_mode=self._resolve_configured_data_mode(cfg)
+            validate_reflection_filter_policy(reflection_mode,cfg.i_over_sigma_min)
+            if reflection_mode_has_fwhm(reflection_mode):
+                from phase_studio.native_overlap import native_powder_keywords
+                native_powder_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength,cfg.powder_separation_factor)
+                if cfg.map_feedback_missing_enabled:
+                    issues.append('Disable missing-reflection completion for FWHM input: new HKL have no measured peak widths. Intensity correction and powder overlap remain supported.')
+                if normalize_map_export_format(cfg.map_export_format) in {'hkl_phases','shelx_fcf'}:
+                    issues.append('FWHM cannot be exported as measurement uncertainty. Choose XPLOR, CCP4 or Jana map export instead of phased HKL/FCF.')
+        except ValueError as exc:
+            issues.append(str(exc))
         mode = normalize_input_source_mode(cfg.input_source_mode)
         ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
         if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
@@ -15266,6 +15724,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif ref_suffix not in REFERENCE_FILE_SUFFIXES:
                 issues.append("The external reference format is not supported.")
                 details.append(f"Reference suffix: {ref_suffix or '(none)'}")
+        if cfg.redistribute_overlaps and cfg.cycles>cfg.powder_redistribution_from_cycle and not cfg.run_superflip:
+            issues.append('Native powder repartitioning requires Superflip to run before feedback. Enable Superflip; diagnostic estimates are not used as native group membership.')
         if cfg.redistribute_overlaps and cfg.powder_wavelength <= 0:
             issues.append(
                 "Powder overlap repartitioning is enabled, but no Wavelength (Å) could be resolved from a manual "
@@ -15538,6 +15998,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
         self.worker.start()
 
+    @observe_pipeline
     def pipeline_worker(self, cfg: Optional[RunConfig], resume_state: Optional[PipelineState] = None) -> None:
         worker_run_id = (
             resume_state.run_id if resume_state is not None
@@ -15613,8 +16074,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             configured_data_mode = self._resolve_configured_data_mode(cfg)
             value_col, sigma_col, include_000 = reflection_columns_for_mode(configured_data_mode)
             refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
-            refl = merge_duplicate_reflections(refl_raw)
-            current_reflections = list(refl)
+            validate_reflection_filter_policy(configured_data_mode,cfg.i_over_sigma_min)
+            if reflection_mode_has_fwhm(configured_data_mode):
+                from phase_studio.native_overlap import native_powder_keywords
+                native_powder_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength,cfg.powder_separation_factor)
+                if cfg.redistribute_overlaps and cfg.cycles>cfg.powder_redistribution_from_cycle and not cfg.run_superflip:
+                    raise ValueError('Enable Superflip before native powder repartitioning; diagnostic estimates cannot authorize execution.')
+            refl = merge_duplicate_reflections(refl_raw, configured_data_mode)
+            filtered_reflections(refl,configured_data_mode,cfg.i_over_sigma_min)
+            if normalize_map_export_format(cfg.map_export_format) in {'hkl_phases','shelx_fcf'}:
+                uncertainty_export_reflections(refl,configured_data_mode,cfg.i_over_sigma_min,None,0)
+            if reflection_mode_has_fwhm(configured_data_mode) and cfg.map_feedback_missing_enabled:
+                raise ValueError('Missing-reflection completion cannot assign measured FWHM to new HKL. Disable missing-reflection completion for FWHM input; intensity correction and overlap repartitioning remain available.')
+            current_reflections = filtered_reflections(refl,configured_data_mode,0)
+            self.log(f'Input data policy: {len(current_reflections)} valid nonnegative records; {len(refl)-len(current_reflections)} invalid value/width records excluded from execution and feedback.')
+            if reflection_mode_has_fwhm(configured_data_mode):
+                self.log('FWHM input: observed significance filtering disabled (threshold 0); measured peak widths preserved.')
             self.log(f"  Reflections: {len(refl_raw)} parsed / {len(refl)} unique", level="DETAIL")
             if str(cfg.referencefile_mode).strip().lower() in {"reference_xplor", "reference_density"} and cfg.superflip_reference_xplor is None and cfg.superflip_referencefile is None:
                 cfg.referencefile_mode = "omit"
@@ -15811,14 +16286,14 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             self._queue_run_event("progress_setup", cfg.cycles)
             omit_test_hkls: FrozenSet[Tuple[int, int, int]] = frozenset()
             if cfg.compute_omit_maps:
-                omit_test_hkls = select_orbit_safe_holdout(refl, ref_ctx.spacegroup, cfg.randomseed)
+                omit_test_hkls = select_orbit_safe_holdout(current_reflections, ref_ctx.spacegroup, cfg.randomseed)
             validation_context = build_validation_context(
-                refl, configured_data_mode, ref_ctx, omit_test_hkls,
+                current_reflections, configured_data_mode, ref_ctx, omit_test_hkls,
             )
             self._queue_run_event("validation_profile", validation_context.profile.value)
             if omit_test_hkls:
                 current_reflections = [
-                    reflection for reflection in refl
+                    reflection for reflection in current_reflections
                     if (int(reflection.h), int(reflection.k), int(reflection.l)) not in omit_test_hkls
                 ]
             definition = profile_definition(validation_context.profile)
@@ -15834,6 +16309,11 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 subsystem="Validation",
             )
             data_modes_needed = {configured_data_mode}
+            try:
+                from phase_studio.feedback_diagnostics import save_original_reflections
+                save_original_reflections(cfg.work_dir, refl, configured_data_mode, getattr(cfg,'run_id',None))
+            except Exception as exc:
+                self.log(f'Original-reflection diagnostic snapshot unavailable: {exc}',level='WARNING')
             observed_hkls: Dict[str, Path] = {}
             for data_mode in sorted(data_modes_needed):
                 observed_hkl = cfg.work_dir / observed_hkl_name_for_mode(data_mode)
@@ -15871,6 +16351,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 performance_root=performance_root,
                 run_id=cfg.run_id,
             )
+            state.provenance=active_provenance()
+            diagnostic=getattr(self,'_run_diagnostic_log',None)
+            state.diagnostic_log=diagnostic if diagnostic is not None and diagnostic.run_id==state.run_id else None
+            record_provenance(state.provenance,'prepared',cfg,state,refl,original_count=len(refl_raw))
             self._resume_state = state
             if preparation_timing is not None:
                 preparation_timing.stop()
@@ -15893,6 +16377,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     performance_root.stop()
                 if cfg is not None:
                     profiler.write_report(cfg.work_dir / "workflow_performance.txt", "failed")
+            record_provenance(active_provenance(),'finish','failed')
             self._queue_run_event(
                 "error_report",
                 build_error_report(
@@ -15904,6 +16389,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     @staticmethod
     def _finish_performance_profile(state: PipelineState, outcome: str) -> None:
+        record_provenance(getattr(state,'provenance',None),'finish',outcome)
         profiler = state.performance_profiler
         if profiler is None or not profiler.enabled:
             return
@@ -15936,17 +16422,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         pending_results.sort(key=lambda item: item.cycle)
         with profile_stage(state.performance_profiler, "Reports and CSV"):
             write_metrics_csv(state.cfg.work_dir / "metrics.csv", pending_results)
-            write_map_quality_report(
+            recommendations = write_map_quality_report(
                 state.cfg.work_dir / "map_quality_assessment.txt", pending_results
             )
         state.all_results[:] = pending_results
+        record_provenance(getattr(state,'provenance',None),'completed_cycle',state,result)
+        record_provenance(getattr(state,'provenance',None),'recommendations',recommendations)
         for source, quality in (
             ("superflip", result.superflip_quality), ("deblurred", result.deblur_quality),
         ):
             if quality is not None:
                 self.log(
                     format_validation_log_line(result.cycle, source, result.validation_profile, quality),
-                    subsystem="Validation",
+                    subsystem="Validation", family=source,
                 )
         self._queue_run_event("result", result, state.run_id)
 
@@ -15962,12 +16450,15 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     ) -> bool:
         """Checkpoint one valid cycle and apply terminal-intent precedence."""
         state.completed_cycles = cycle
+        record_provenance(getattr(state,'provenance',None),'cycle_finished',cycle)
+        diagnostic=getattr(state,'diagnostic_log',None)
+        if diagnostic is not None:diagnostic.cycle_summary(cycle)
         self._queue_run_event("progress", state.completed_cycles, state.run_id)
         self._emit_cycle_progress(
             cycle, state.cfg.cycles, progress_stages, "Finalizing cycle",
             detail="completed", complete=True,
         )
-        self.log(f"Cycle {cycle} complete.", level="SUCCESS")
+        self.log(f"Cycle {cycle} complete.", level="SUCCESS", event_type="CURRENT_CYCLE_COMPLETED", cycle=cycle)
         return self._emit_requested_workflow_stop(state.completed_cycles)
 
     def _run_configured_sharped_stage(
@@ -16371,6 +16862,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             # inside run_sharped_deblur, on the map SharpED actually receives.
             sf_voxel = cfg.voxel
             sf_extra_superflip_keywords = cfg.extra_superflip_keywords
+            if reflection_mode_has_fwhm(configured_data_mode):
+                from phase_studio.native_overlap import native_powder_keywords
+                sf_extra_superflip_keywords=native_powder_keywords(sf_extra_superflip_keywords,cfg.powder_wavelength,cfg.powder_separation_factor)
             effective_repeat = 1 if model_for_sf is not None else max(1, int(cfg.repeatmode))
 
             def make_superflip_progress_relay(detail: str) -> Optional[Callable[[str], None]]:
@@ -16867,57 +17361,73 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 checkpoint.result_recorded = True
             state.pending_powder_repartition_change_percent = None
             state.pending_intensity_correction_change_percent = None
-            if cyc < cfg.cycles and not checkpoint.feedback_completed:
-                add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
-                correct_intensities = cfg.map_feedback_intensity_enabled and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
-                redistribute = cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength > 0
-                if cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength <= 0:
-                    self.log("Overlap repartitioning enabled but Wavelength is 0; skipping for this cycle.", level="WARNING")
-                if add_missing or correct_intensities or redistribute:
-                    feedback_reflections = state.current_reflections
-                    intensity_change = None
-                    powder_change = None
-                    if add_missing or correct_intensities:
-                        feedback_reflections, intensity_change = apply_map_feedback_to_reflections(
+            from phase_studio.feedback_diagnostics import FeedbackCapture
+            with FeedbackCapture(cyc, configured_data_mode, state.current_reflections, cfg) as feedback_capture:
+                feedback_capture.input_file = observed_hkl_for_cycle
+                if cyc < cfg.cycles and not checkpoint.feedback_completed:
+                    add_missing = cfg.map_feedback_missing_enabled and cyc >= cfg.map_feedback_missing_from_cycle and cfg.map_feedback_missing_percent_limit > 0
+                    correct_intensities = cfg.map_feedback_intensity_enabled and cyc >= cfg.map_feedback_intensity_from_cycle and cfg.map_feedback_intensity_damping > 0
+                    redistribute = cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength > 0
+                    if cfg.redistribute_overlaps and cyc >= cfg.powder_redistribution_from_cycle and cfg.powder_wavelength <= 0:
+                        self.log("Overlap repartitioning enabled but Wavelength is 0; skipping for this cycle.", level="WARNING")
+                    if add_missing or correct_intensities or redistribute:
+                        feedback_reflections = state.current_reflections
+                        intensity_change = None
+                        powder_change = None
+                        if add_missing or correct_intensities:
+                            feedback_reflections, intensity_change = apply_map_feedback_to_reflections(
+                                feedback_reflections,
+                                configured_data_mode,
+                                deblur_map,
+                                ref_ctx.cell,
+                                cfg.resolution_d_min,
+                                add_missing,
+                                cfg.map_feedback_missing_percent_limit,
+                                correct_intensities,
+                                cfg.map_feedback_intensity_damping,
+                                cfg.map_feedback_intensity_max_i_over_sigma,
+                                self.log,
+                                excluded_hkls=state.omit_test_hkls,
+                                spacegroup=ref_ctx.spacegroup,
+                            )
+                        if redistribute:
+                            from phase_studio.native_overlap import capture_native_overlap
+                            if not cfg.run_superflip:
+                                raise ValueError('Native powder repartitioning requires a completed Superflip cycle with expandedlog yes. Enable Superflip; approximate diagnostic groups are not used for execution.')
+                            native_grouping = capture_native_overlap(
+                                cycle_dir / f"{sf_prefix}.inflip", cycle_dir / f"{sf_prefix}.sflog",
+                                observed_hkl_for_cycle, cfg.superflip_exe,
+                            )
+                            feedback_reflections, powder_change = redistribute_overlap_reflections(
+                                feedback_reflections,
+                                configured_data_mode,
+                                deblur_map,
+                                ref_ctx.cell,
+                                cfg.powder_wavelength,
+                                cfg.powder_separation_factor,
+                                cfg.powder_redistribution_mix,
+                                self.log,
+                                log_path=cycle_dir / f"cycle_{cyc:03d}_powder_repartitioning.log",
+                                native_grouping=native_grouping,
+                            )
+                        feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
+                        n_feedback = write_observed_reflections(
+                            feedback_hkl,
                             feedback_reflections,
-                            configured_data_mode,
-                            deblur_map,
-                            ref_ctx.cell,
-                            cfg.resolution_d_min,
-                            add_missing,
-                            cfg.map_feedback_missing_percent_limit,
-                            correct_intensities,
-                            cfg.map_feedback_intensity_damping,
-                            cfg.map_feedback_intensity_max_i_over_sigma,
-                            self.log,
-                            excluded_hkls=state.omit_test_hkls,
+                            cfg.i_over_sigma_min,
+                            data_mode=configured_data_mode,
+                            cell=ref_ctx.cell,
+                            resolution_d_min=cfg.resolution_d_min,
                         )
-                    if redistribute:
-                        feedback_reflections, powder_change = redistribute_overlap_reflections(
-                            feedback_reflections,
-                            configured_data_mode,
-                            deblur_map,
-                            ref_ctx.cell,
-                            cfg.powder_wavelength,
-                            cfg.powder_separation_factor,
-                            cfg.powder_redistribution_mix,
-                            self.log,
-                            log_path=cycle_dir / f"cycle_{cyc:03d}_powder_repartitioning.log",
-                        )
-                    feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
-                    n_feedback = write_observed_reflections(
-                        feedback_hkl,
-                        feedback_reflections,
-                        cfg.i_over_sigma_min,
-                        data_mode=configured_data_mode,
-                        cell=ref_ctx.cell,
-                        resolution_d_min=cfg.resolution_d_min,
-                    )
-                    observed_hkls[configured_data_mode] = feedback_hkl
-                    state.current_reflections = feedback_reflections
-                    state.pending_intensity_correction_change_percent = intensity_change
-                    state.pending_powder_repartition_change_percent = powder_change
-                    self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
+                        observed_hkls[configured_data_mode] = feedback_hkl
+                        state.current_reflections = feedback_reflections
+                        state.pending_intensity_correction_change_percent = intensity_change
+                        state.pending_powder_repartition_change_percent = powder_change
+                        feedback_capture.output_file = str(feedback_hkl)
+                        feedback_capture.written_reflections = n_feedback
+                        self.log(f"Prepared map-feedback HKL for cycle {cyc + 1}: {feedback_hkl} ({n_feedback} reflections)")
+            if not checkpoint.feedback_completed:
+                self._publish_feedback_diagnostics(feedback_capture, cfg.work_dir)
             checkpoint.feedback_completed = True
             if not checkpoint.continuation_completed and use_xplor_modelfile:
                 next_xplor_model = sf_map if use_superflip_xplor_modelfile else deblur_map
@@ -17122,11 +17632,14 @@ class PhaseStudioSplash(QSplashScreen):
         title_stack.setSpacing(2)
         title = QLabel("PHASE STUDIO")
         title.setObjectName("splashTitle")
+        title.ensurePolished()
         title.setFont(phase_studio_brand_font(title.font()))
+        title.setStyleSheet('font-family: "Science Gothic"; font-weight:400; letter-spacing:0px;')
         title.setProperty("resolvedBrandFontFamily", QFontInfo(title.font()).family())
         subtitle = QLabel(
             '<span style="color:#52658b;">by </span>'
-            '<span style="color:#2264b8; font-weight:600;">SharpED</span>'
+            '<span style="color:#001170; font-family:Science Gothic; font-weight:400;">Sharp</span>'
+            '<span style="color:#1fa5ff; font-family:Science Gothic; font-weight:400;">ED</span>'
         )
         subtitle.setObjectName("splashSubtitle")
         subtitle.setTextFormat(Qt.RichText)

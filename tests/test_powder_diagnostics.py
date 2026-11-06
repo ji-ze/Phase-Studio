@@ -34,12 +34,13 @@ class PowderDiagnosticsTests(unittest.TestCase):
         self.assertIn('Wavelength missing',dict(report.overlap)['reason'])
         self.assertFalse(report.available('significance'))
 
-    def test_inflip_precedes_m90_and_metadata_cache_invalidation(self):
+    def test_matching_m90_precedes_inflip_and_metadata_cache_invalidation(self):
         self.source('lambda 1.2\nfwhmseparation .5')
         with patch.object(a,'parse_m90_wavelength',return_value=1.54):
             self.path.with_suffix('.m90').write_text('first')
             first=self.load()
-            self.assertEqual(dict(first.diagnostics.overlap)['wavelength'],1.2)
+            self.assertEqual(dict(first.diagnostics.overlap)['wavelength'],1.54)
+            self.assertIn('conflicting wavelength',standard_powder_context(self.path)['wavelength_source'])
             self.source()
             second=self.load()
             self.assertEqual(dict(second.diagnostics.overlap)['wavelength'],1.54)
