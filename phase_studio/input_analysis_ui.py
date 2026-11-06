@@ -31,7 +31,7 @@ def analyze_data_dialog(win, analysis):
     dialog.setWindowTitle('Analyze data')
     dialog.setWindowFlag(Qt.WindowMaximizeButtonHint,True)
     root = QVBoxLayout(dialog)
-    integrity = 'Warnings' if report.warnings else 'Parsed'
+    integrity = 'Warnings' if any(severity=='WARNING' for severity,_ in report.warnings) else 'Parsed'
     root.addWidget(win._diagnostic_header('ANALYZE DATA',
         f'{Path(analysis.hkl_path).name} · {report.data_type} · {analysis.spacegroup_hm}', integrity, compact=True))
     overlap = dict(report.overlap)

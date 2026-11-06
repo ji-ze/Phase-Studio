@@ -98,7 +98,7 @@ or validated manual metadata. Structure views/exports use CIF/PDB; density
 workflows use XPLOR maps. The [technical user guide](docs/USER_GUIDE.md) preserves
 the detailed format and workflow documentation.
 
-Validate HKL interpretation and completeness before phasing. FWHM is peak
+Use **View data** and **Analyze data** to inspect HKL interpretation and coverage before phasing. FWHM is peak
 width, not intensity uncertainty. Powder overlap repartitioning requires a
 positive wavelength; zero requests automatic detection.
 

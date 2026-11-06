@@ -214,9 +214,9 @@ Use a dedicated directory for each reconstruction run when reproducibility is im
 
 ## 5. Reflection-data diagnostics
 
-### 5.1 Validate HKL
+### 5.1 View data
 
-Use **Validate HKL** before starting a reconstruction, especially for external data.
+Use **View data** before starting a reconstruction, especially for external data.
 
 The dialog reports:
 
@@ -224,15 +224,15 @@ The dialog reports:
 - unit cell and space group,
 - parsed reflection count,
 - unique reflection count,
-- σ(Fobs) availability,
+- actual auxiliary-column semantics (measured uncertainty, FWHM, dummy sigma or absent),
 - phase-value coverage,
-- a sample of parsed reflections.
+- all parsed original reflections through incremental HKL search and filtering.
 
 The reflection table may include:
 
 - `h`, `k`, `l`,
 - observed value,
-- uncertainty,
+- the actual auxiliary column, clearly separated from measured uncertainty,
 - phase,
 - `I/σ(I)`,
 - `d`,
@@ -240,40 +240,43 @@ The reflection table may include:
 
 The purpose of this dialog is to validate parsing and input interpretation. It is not a substitute for crystallographic refinement or a complete data-quality assessment.
 
-### 5.2 Analyze completeness
+### 5.2 Analyze data
 
-**Analyze completeness** opens the HKL Completeness dialog.
+**Analyze data** opens the unified read-only analysis window with Overview,
+Resolution, Intensity & Amplitude, Signal & Uncertainty, Symmetry & Coverage,
+Powder & Peak Overlap and Advanced Diagnostics.
 
-The current layout separates three scientific views:
+The Resolution tab initially shows **Reflection frequency vs d** and
+**Indexed/symmetry-allowed HKL coverage vs d** side by side. Additional plot pairs
+provide cumulative counts and genuine-uncertainty significance. The separate
+Iobs/Fobs distribution histogram remains in Intensity & Amplitude. Frequency
+explicitly selects input records, literal unique HKL, allowed indexed orbits or
+record density per unit sinθ/λ; these counts are not independent powder peaks.
 
-1. **Completeness (%) vs. `sinθ/λ`**
-2. **Mean `I/σ(I)` vs. `sinθ/λ`**
-3. **Reflection distribution vs. `I/σ(I)`**
+`d_min` and cumulative indexed coverage `d98` retain their existing definitions.
+Strict `d_full` is a separate 100% allowed-orbit coverage boundary, not a renamed
+d98. Significance cutoffs at mean I/σ(I)=2 and 3 require at least 20 usable records
+per shell and a sustained crossing supported by two outer shells, without sparse
+tails or later recovery. Values derived from F+σ(F) are explicitly approximations.
+CC1/2 remains unavailable for merged text input; external shell statistics require
+recorded source, method and independence evidence, whose truth is not certified
+by the importer. No diagnostic cutoff changes reconstruction input.
 
-The first two share a common resolution axis.
-
-The summary reports values such as:
-
-- unique reflections,
-- `d_min`,
-- the resolution at 98% cumulative completeness,
-- median `I/σ(I)`,
-- the resolution where mean `I/σ(I)` falls below 3, when available,
-- phase-value coverage,
-- σ(Fobs) coverage.
-
-The **Resolution Bins** table provides shell-wise statistics.
-
-The dialog can also provide copy/export actions when available in the current build.
+The navigation toolbar provides zoom, pan and reset. Controls select d or
+sinθ/λ, count scale and full/detail histogram range. Advanced Diagnostics retains
+technical definitions and the full-precision shell table. Export diagnostics as
+JSON, displayed graph data as CSV and figures as PNG/SVG. See
+[exact definitions and limitations](docs/ABOUT_DATA_ANALYSIS_2_0_7.md).
 
 ### 5.3 FWHM-format data
 
-**HKL format** (Basic → Input) includes two additional modes, `hkl I fwhm` and `hkl F fwhm`, for reflection data whose second column is a peak-shape full width at half maximum — for example intensities extracted from a Le Bail powder-pattern fit — rather than a genuine measurement uncertainty. Selecting `set from inflip` also recognizes a Jana `.inflip` `dataformat ... fwhm` line automatically.
+**HKL format** (Basic → Input) includes `hkl I fwhm` and `hkl F fwhm`, whose auxiliary column after the h, k, l and observed-value fields is peak full width at half maximum rather than measurement uncertainty. Selecting `set from inflip` also recognizes a Jana `.inflip` `dataformat ... fwhm` line automatically.
 
 Because FWHM is not comparable in scale or meaning to σ, an `I/FWHM` ratio is not a signal-to-noise ratio. When FWHM data is detected:
 
-- Validate HKL and Analyze completeness relabel every σ-based column and statistic (`sigma(Iobs)`/`sigma(Fobs)` becomes `FWHM(Iobs)`/`FWHM(Fobs)`, `I/σ(I)` becomes `I/FWHM`), and the "Derived I/σ" conversion column (which applies an F→I error-propagation factor that assumes a genuine σ) is left blank.
-- The `I/σ(I) = 3` significance threshold and the resolution where mean `I/σ(I)` falls below it are not computed or shown, since that convention does not apply to FWHM data; the completeness dialog displays an explanatory note instead.
+- Widths are preserved for valid native Superflip and powder-overlap processing. Neither filtering nor diagnostic significance divides I or F by FWHM. Dummy sigma is likewise excluded from measured-uncertainty statistics.
+- A positive configured significance threshold is rejected explicitly for FWHM input. A zero threshold does not require preserving invalid/nonfinite observations: the documented finite, nonnegative observation policy and valid-width requirements still apply. Genuine I/σ(I) and direct F/σ(F) filtering retain their established observed-value conventions; the first-order F/(2σ(F)) approximation is a separately labelled diagnostic intensity significance.
+- Significance graphs and resolution cutoffs are unavailable with an explanation. Width-versus-resolution, intensity distributions and indexed coverage remain meaningful alternatives; powder indexed coverage does not establish independently resolved experimental completeness.
 - The Superflip input still receives the correct `dataformat ... fwhm` keyword (not `dummy` or a plain `sigma` assumption), so Superflip itself is told the true nature of the column.
 
 ---
@@ -846,7 +849,7 @@ Check:
 - whether values are intensities or amplitudes,
 - sigma/phase column mapping.
 
-Use **Validate HKL** before starting the workflow.
+Use **View data** before starting the workflow.
 
 ### 14.2 Completeness appears unexpectedly low
 
@@ -858,7 +861,7 @@ Check:
 - resolution coverage,
 - whether the selected metadata source belongs to the HKL dataset.
 
-Then inspect **Analyze completeness**.
+Then inspect **Analyze data**.
 
 ### 14.3 Crystal metadata are unavailable
 

@@ -316,7 +316,7 @@ Changes input interpretation/metadata or the first seed; affects scientific comp
 
 **Allowed:** Set from .inflip; h k l · I · σ(I); h k l · F · σ(F); h k l · I · phase · σ(I); h k l · F · phase · σ(F); h k l · I · FWHM; h k l · F · FWHM. **Fresh full-configuration default:** h k l · I · σ(I).
 
-Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so sigma-based statistics are hidden or relabeled I/FWHM.
+Exact HKL column order. 'Set from .inflip' imports Jana's dataformat. The other choices use the displayed h k l · value · optional phase · uncertainty layout. Phase is in degrees; Phase Studio converts it to Superflip turns. FWHM choices describe peak width, not measurement uncertainty, so uncertainty-based significance is unavailable.
 
 Changes input interpretation/metadata or the first seed; affects scientific computation. Disabled context fields are ignored. Change only to match the actual experiment/model, not to improve the displayed score.
 
