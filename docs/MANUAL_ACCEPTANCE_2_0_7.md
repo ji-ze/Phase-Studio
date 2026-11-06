@@ -17,6 +17,10 @@ Offscreen acceptance and controlled protocol fixtures do not close these gates.
   verify credential persistence after application restart without exporting tokens.
 - [ ] Verify both packages on a clean supported Windows VM with no development
   dependencies, as a standard user, including native scientific-program paths.
+- [ ] Verify ordinary unprefixed paths over 260 characters on a host configured
+  to support them. The current host disables LongPathsEnabled; reading font
+  files through explicit Windows extended-length paths has separate acceptance,
+  which does not prove launching the complete application from a long path.
 - [ ] Complete terminology/editorial owner review using current status rather
   than treating archived historical findings as blanket current approval.
 - [ ] Obtain independent scientific review of native-authority provenance,

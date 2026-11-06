@@ -111,6 +111,21 @@ Native Windows Credential Manager is checked using a unique disposable fixture
 target with cross-process persistence and cleanup. Unicode/long-path and
 nonadministrator execution have their own actual-binary acceptance driver.
 
+That driver discovered a real ONEDIR Unicode-path defect after the first full
+900/4/37 campaign: Qt's filename-based font registration returned no families
+and silently selected Agency FB even though the bundled font existed. Loading
+the unchanged original font bytes through Qt's data API corrects this boundary;
+regression tests explicitly load the actual face from Czech/Chinese and
+extended-length font paths. The failed campaign is preserved, and a new
+exact-commit full campaign is required after the fix. The host's
+`LongPathsEnabled` policy is disabled. Explicit extended-length (`\\?\`) font
+file access is tested without changing that system policy; this does not prove
+whole-application long-path launch. Native CreateProcess probes failed with
+WinError 206/267, and an explicit-application probe timed out. Whole-application
+paths over 260 characters remain UNVERIFIED. The environment driver reports
+this missing prerequisite separately; its `passed` field describes available
+checks, while `complete_path_acceptance` remains false on this host.
+
 `SIGNPATH_2_0_7.md` records the helper-before-embedding architecture, narrow nested
 artifact configurations, final Authenticode/Ed25519 checks and exact missing
 owner configuration. Production signing remains **UNVERIFIED**; local packages

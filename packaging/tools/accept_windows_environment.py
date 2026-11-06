@@ -1,4 +1,4 @@
-"""Opt-in real Windows path/WinCred checks in fresh, isolated build directories."""
+"""Real Windows checks. 'passed' covers available checks; inspect completeness."""
 import argparse
 import ctypes
 import hashlib
@@ -47,34 +47,57 @@ def main():
     from phase_studio.version import VERSION
     report=dict(passed=False,is_administrator=bool(ctypes.windll.shell32.IsUserAnAdmin()),
                 physical_monitor_acceptance=False,clean_vm_acceptance=False,cases=[])
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,r'SYSTEM\CurrentControlSet\Control\FileSystem') as key:
+        report['windows_long_paths_enabled']=bool(winreg.QueryValueEx(key,'LongPathsEnabled')[0])
+    report['unprefixed_over_260_acceptance']=False
+    def save():
+        (output/'environment-acceptance.json').write_text(json.dumps(report,indent=2),encoding='utf8')
     if args.credentials:report['credentials']=credential_check()
+    save()
     standalone=args.standalone.resolve();archive=args.jana_zip.resolve()
     expected_standalone=hashlib.sha256(standalone.read_bytes()).hexdigest()
     expected_zip=hashlib.sha256(archive.read_bytes()).hexdigest()
     asset=UpdateAsset('jana2020-onedir',archive.name,archive.stat().st_size,expected_zip)
     for name in ('unicode','long-unicode'):
+        if name=='long-unicode' and not report['windows_long_paths_enabled']:
+            report['cases'].append(dict(case=name,verdict='UNVERIFIED',passed=None,
+                reason='Host LongPathsEnabled is disabled. Normal >260-character executable paths cannot be accepted on this host.'))
+            save()
+            continue
         base=output/(name+' žluťoučký 密度')
         if name=='long-unicode':
             while len(str(base/'Phase_studio.exe'))<=310:base=base/('segment '+('x'*45))
+            # Test the explicit Windows extended-length representation without
+            # changing the host's system-wide LongPathsEnabled policy.
+            base=Path('\\\\?\\'+str(base))
         base.mkdir(parents=True)
         standalone_copy=base/standalone.name;shutil.copy2(standalone,standalone_copy)
         jana=extract_jana_package(archive,base/'jana',asset,VERSION)
         for profile,exe in (('standalone',standalone_copy),('jana',jana/'Phase_studio.exe')):
             destination=base/(profile+'-output')
             env=dict(os.environ,QT_QPA_PLATFORM='offscreen',PHASE_STUDIO_STARTUP_PROBE='1',PHASE_STUDIO_INPUT_UI_ACCEPTANCE='1',QT_SCALE_FACTOR='1')
-            process=subprocess.run([str(exe),'--packaging-acceptance',str(destination)],cwd=base,
-                capture_output=True,text=True,timeout=180,env=env,creationflags=subprocess.CREATE_NO_WINDOW)
+            try:
+                process=subprocess.run([str(exe),'--packaging-acceptance',str(destination)],executable=str(exe),cwd=output if name=='long-unicode' else base,
+                    capture_output=True,text=True,timeout=180,env=env,creationflags=subprocess.CREATE_NO_WINDOW)
+            except (OSError,subprocess.TimeoutExpired) as error:
+                report['failure']=dict(case=name,profile=profile,error_type=type(error).__name__,error=str(error));save()
+                raise
             (base/(profile+'-process.txt')).write_text(process.stdout+'\n'+process.stderr,encoding='utf8')
             data=json.loads((destination/'report.json').read_text(encoding='utf8'))
-            if process.returncode or not data.get('passed') or not data.get('frozen'):raise ValueError('Frozen path acceptance failed: '+name+'/'+profile)
+            if process.returncode or not data.get('passed') or not data.get('frozen'):
+                report['failure']=dict(case=name,profile=profile,exit_code=process.returncode,report=data);save()
+                raise ValueError('Frozen path acceptance failed: '+name+'/'+profile)
             length=len(str(exe))
             if name=='long-unicode' and length<=260:raise ValueError('Long-path fixture did not exceed MAX_PATH.')
             report['cases'].append(dict(case=name,profile=profile,exe_path_characters=length,
-                unicode=True,over_260=length>260,passed=True,report=str(destination/'report.json')))
+                unicode=True,over_260=length>260,extended_length_prefix=name=='long-unicode',passed=True,verdict='PASS',report=str(destination/'report.json')))
+            save()
     if hashlib.sha256(standalone.read_bytes()).hexdigest()!=expected_standalone or hashlib.sha256(archive.read_bytes()).hexdigest()!=expected_zip:
         raise ValueError('Original distribution changed during path acceptance.')
     report['original_packages_unchanged']=True;report['passed']=True
-    (output/'environment-acceptance.json').write_text(json.dumps(report,indent=2),encoding='utf8')
+    report['complete_path_acceptance']=all(case['verdict']=='PASS' for case in report['cases'])
+    save()
     print(json.dumps(report,ensure_ascii=True))
 
 
