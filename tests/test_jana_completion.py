@@ -889,6 +889,8 @@ def main():
               and appmod.read_xplor_map(wrapper_dir / "wrapper-job-deb.xplor").title == "scientific sharped map")
         check("Superflip + SharpED: final Jana command uses calc_m80 in the original context",
               wrapper_calls[1] == ((str(wrapper_exe), str(calc_m80)), wrapper_dir))
+        check("Superflip + SharpED: native input uses an ASCII relative filename",
+              not calc_m80.is_absolute() and str(calc_m80).isascii())
         check("Superflip + SharpED: generated handoff input is project-local and cleaned",
               calc_m80.parent.resolve() == wrapper_dir.resolve() and not calc_m80.exists()
               and not any((wrapper_bin / "deblurrer").iterdir()))
@@ -912,8 +914,9 @@ def main():
     gui_handoff_calls = []
 
     def fake_run_command(cmd, cwd, **kwargs):
+        assert not Path(cmd[1]).is_absolute(), 'Native input must be addressed from its working directory.'
         gui_handoff_calls.append((tuple(map(str, cmd)), Path(cwd), kwargs))
-        calc_lines = Path(cmd[1]).read_text(encoding="utf-8").splitlines()
+        calc_lines = (Path(cwd) / cmd[1]).read_text(encoding="utf-8").splitlines()
         selected_bytes = b""
         for line in calc_lines:
             parts = appmod.split_inflip_line(line)
@@ -999,7 +1002,7 @@ def main():
         check("phase recycling: matching SharpED CIF remains attached to the selected result",
               Path(recycling_choice.structure_path) == Path(recycling_results[2].deblur_edma_cif))
         recycling_model = recycling_inflip.parent / "job-phase-studio-model-prediction-cycle_003-0p50sigma.cif"
-        recycling_map_calc = Path(gui_handoff_calls[-1][0][1])
+        recycling_map_calc = gui_handoff_calls[-1][1] / gui_handoff_calls[-1][0][1]
         check("phase recycling: exact selected structure bytes are copied for Jana",
               recycling_model.read_bytes() == Path(recycling_choice.structure_path).read_bytes()
               and appmod.file_sha256(recycling_model) == recycling_choice.structure_sha256)
@@ -1012,7 +1015,7 @@ def main():
               == Path(recycling_choice.structure_path).with_suffix(".m40").read_bytes())
         check("phase recycling: handoff invokes one conversion in its candidate-scoped directory",
               len(gui_handoff_calls) == 1
-              and gui_handoff_calls[0][0] == (str(recycling_exe), str(recycling_map_calc))
+              and gui_handoff_calls[0][0] == (str(recycling_exe), recycling_map_calc.name)
               and all(call[1] == recycling_map_calc.parent for call in gui_handoff_calls))
 
         # Full configuration starts idle. A manually completed run auto-opens
@@ -1170,7 +1173,7 @@ def main():
               candidate_030.structure_sha256 != candidate_050.structure_sha256)
         check("custom threshold: handed-off structure hash equals the preview candidate hash",
               appmod.file_sha256(threshold_model) == candidate_030.structure_sha256)
-        map_calc_path = Path(gui_handoff_calls[-1][0][1])
+        map_calc_path = gui_handoff_calls[-1][1] / gui_handoff_calls[-1][0][1]
         map_calc_text = map_calc_path.read_text(encoding="utf-8")
         check("custom threshold: map and 0.30 m40 feed their respective protocol sides",
               'modelfile "selected_map.xplor"' in map_calc_text
@@ -1292,7 +1295,7 @@ def main():
               b"run2" in run2_m81 and b"run2" in run2_m80
               and len(gui_handoff_calls) == 1)
         check("second run: map conversion and m40 consume only Run-2 artifacts",
-              'modelfile "selected_map.xplor"' in Path(gui_handoff_calls[-1][0][1]).read_text(encoding="utf-8")
+              'modelfile "selected_map.xplor"' in (gui_handoff_calls[-1][1] / gui_handoff_calls[-1][0][1]).read_text(encoding="utf-8")
               and (threshold_inflip.parent / "job_tmp.m40").read_bytes()
               == run2_model.with_suffix(".m40").read_bytes())
         check("second run: model and protocol context are replaced coherently",
@@ -1324,7 +1327,7 @@ def main():
             fake_run_command(cmd, cwd, **kwargs)
             import numpy as np
             from phase_studio.xplor_io import read_xplor_map, write_xplor_map
-            for line in Path(cmd[1]).read_text().splitlines():
+            for line in (Path(cwd) / cmd[1]).read_text().splitlines():
                 tokens = appmod.split_inflip_line(line)
                 if tokens and tokens[0] == 'outputfile':
                     path = next(Path(cwd) / name for name in tokens[1:] if name.endswith('.xplor'))

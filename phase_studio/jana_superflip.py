@@ -745,7 +745,7 @@ def run_final_jana_handoff(
     log(f"Final Jana inflip: {calc_m80}")
     log(f"Final Jana handoff model: {selected_map}")
     try:
-        return run_process([str(original), str(calc_m80)], cwd=cwd, log=log)
+        return run_process([str(original), calc_m80.name], cwd=cwd, log=log)
     finally:
         try:
             calc_m80.unlink()
@@ -759,7 +759,8 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
     Both workflows call the active Jana scientific Superflip with Jana2020's own .inflip essentially
     unmodified (only reference/model overrides and, for the SharpED workflow, the
     XPLOR output keyword are injected in place, under the exact same file name Jana
-    supplied) so Superflip's own output-file naming is never disturbed. Phase
+    supplied, addressed relative to the existing project CWD when local) so
+    Superflip's own output-file naming is never disturbed. Phase
     recycling (multiple cycles) is handled separately by the full Phase Studio
     pipeline; this function always performs exactly one Superflip call.
     """
@@ -780,6 +781,11 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
     if not inflip_path.is_file():
         raise FileNotFoundError(f"Jana2020 .inflip file not found: {inflip_path}")
     base_name = inflip_path.stem
+    # The legacy Fortran argv decoder can lose Unicode directory characters.
+    # Keep the exact original file, addressed relative to its existing CWD.
+    args=list(args)
+    if inflip_path.parent.resolve()==cwd.resolve():
+        args[inflip_arg[0]]=inflip_path.name
     original_lines = read_text_lines(inflip_path)
     original_bytes = inflip_path.read_bytes()
 
@@ -829,8 +835,7 @@ def run_jana_superflip(args: Sequence[str], options: JanaRunOptions, log: Callab
 
     try:
         if modified:
-            # Write back to the exact same file name Jana2020 supplied (args is
-            # passed through unchanged below) so Superflip's own implicit
+            # Write back to the exact same file name Jana2020 supplied so its implicit
             # output-file naming, which some builds derive from the input file
             # name, is not disturbed.
             write_text_lines(inflip_path, modified_lines)

@@ -5447,7 +5447,9 @@ def return_phase_studio_result_to_jana(
     conversion_started = time.perf_counter()
     try:
         run_command(
-            [str(original), str(calc_map_inflip)],
+            # Legacy Fortran argv decoding can lose Unicode parent folders.
+            # The unchanged ASCII input is already in this exact working dir.
+            [str(original), calc_map_inflip.name],
             cwd=calc_dir,
             log_path=Path(cfg.work_dir) / "jana2020_return_map.log",
             log=log,

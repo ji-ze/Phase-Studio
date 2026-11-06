@@ -136,6 +136,19 @@ The earlier stall is preserved as a native test-producer limitation, not claimed
 fixed inside the vendor executable. Final acceptance requires another complete
 suite and all authorities on the final source, without retrying failed tests.
 
+A further actual native handoff in a Czech/Chinese directory exposed loss of
+Unicode characters in Superflip's absolute input argument (native exit 2).
+EDMA in that same directory had succeeded. The `d4b2f69` campaign was stopped
+and preserved rather than counted as final acceptance. GUI and wrapper map
+conversions now pass their existing ASCII input filename relative to the exact
+working directory; local incoming wrapper inputs likewise address the original
+file relatively. No project, dataset or original input is renamed. Native
+regressions cover real EDMA/model transfer, m80/m81 density parity, legacy
+conversion and preservation of the original input. All 196 existing Jana
+authority checks remain intact. This establishes Unicode-directory support for
+the tested ASCII basenames; arbitrary non-ASCII native input/output basenames
+remain unverified.
+
 `SIGNPATH_2_0_7.md` records the helper-before-embedding architecture, narrow nested
 artifact configurations, final Authenticode/Ed25519 checks and exact missing
 owner configuration. Production signing remains **UNVERIFIED**; local packages
