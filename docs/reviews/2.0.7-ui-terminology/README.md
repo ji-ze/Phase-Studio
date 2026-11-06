@@ -1,5 +1,10 @@
 # UI terminology owner review, 2.0.7
 
+The large generated inventories are preserved as a byte-exact archive, not
+maintained source. See [archive provenance and regeneration](ARCHIVE.md) and
+[current resolution status](CURRENT_STATUS.md). Historical proposal decisions
+below are not a statement that the corrected FWHM defect remains open.
+
 **Snapshot note:** this inventory predates the focused
 [FWHM scientific correction](../../FWHM_SCIENTIFIC_CORRECTION_2_0_7.md).
 That correction updates the actual data flow and directly related scientific
@@ -34,8 +39,8 @@ Read in this order:
 
 1. [Scientific findings and coverage limits](TERMINOLOGY_REVIEW.md).
 2. [Owner decision checklist](PROPOSED_TEXT_CHANGES.md).
-3. [Exact text inventory](UI_TEXT_INVENTORY.md).
-4. [Settings inventory](SETTINGS_INVENTORY.md).
+3. Exact text inventory, restored by the archive command in ARCHIVE.md.
+4. Settings inventory, restored by the same command.
 
 Machine-readable files retain exact source paths, line numbers, symbols,
 dynamic source templates, observed controls and numerical properties:

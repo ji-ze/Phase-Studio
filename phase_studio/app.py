@@ -4118,6 +4118,7 @@ def redistribute_overlap_reflections(
     reflections: Sequence[Reflection], data_mode: str, feedback_map: Path, cell: gemmi.UnitCell,
     wavelength: float, separation_factor: float, mix: float, log: Callable[[str], None],
     log_path: Optional[Path] = None,
+    native_grouping: object = None,
 ) -> Tuple[List[Reflection], Optional[float]]:
     """Powder overlap repartitioning: within each 2theta/FWHM overlap group (see
     assign_powder_overlap_groups), keep the observed group-total intensity fixed
@@ -4140,7 +4141,7 @@ def redistribute_overlap_reflections(
     mode = normalize_reflection_data_mode(data_mode)
     validate_powder_reflections(reflections,mode)
     current = [Reflection(int(r.h), int(r.k), int(r.l), float(r.value), r.sigma, r.phase) for r in reflections]
-    groups = assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
+    groups = native_grouping.groups_for(current, cell, wavelength, separation_factor) if native_grouping is not None else assign_powder_overlap_groups(current, cell, wavelength, separation_factor)
     if not groups:
         log("Overlap repartitioning: no overlap groups found (need at least two reflections with FWHM and accessible 2θ).")
         if log_path is not None:
@@ -7996,7 +7997,7 @@ INPUT_TOOLTIPS = {
     "redistribute_overlaps": "Enables powder overlap repartitioning: each cycle, redistribute the combined observed intensity of overlapping-reflection groups (hkl I/F fwhm data only) between their members, using intensities calculated by FFT from that cycle's processed map. When off, the fields below are ignored.",
     "powder_redistribution_from_cycle": "First completed cycle whose map is used to redistribute overlapping powder reflections for the next cycle.",
     "powder_wavelength": "Radiation wavelength in Å, required to compute 2θ for powder overlap repartitioning. If left at 0, it is auto-detected from the Jana .m90 file, then the .inflip file's lambda/wavelength line, then from the reference file's _diffrn_radiation_wavelength tag; enter it manually if neither source has it.",
-    "powder_separation_factor": "Multiplier of the mean FWHM (in the same 2θ-like units as the data) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) < separation_factor * (FWHM1 + FWHM2) / 2. Matches Superflip's own fwhmseparation keyword.",
+    "powder_separation_factor": "Multiplier of the mean FWHM (in degrees 2θ) used to decide whether two reflections' Bragg peaks overlap: delta(2θ) ≤ separation_factor * (FWHM1 + FWHM2) / 2. Executed powder feedback uses the actual Superflip overlap table; offline geometric diagnostics are double-precision estimates.",
     "powder_redistribution_mix": "Blend factor for powder overlap repartitioning: 0 keeps each reflection's observed share of its group's total intensity; 1 replaces it entirely with the share implied by intensities calculated from the processed map. The group total is always conserved regardless of this value.",
     "sharped_base_url": "SharpED inference server base URL. The reference client uses https://sharped.fzu.cz/.",
     "sharped_api_token": "User API token sent as Authorization: Bearer during upload/status/download.",
@@ -9147,7 +9148,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             <h3>Intensity correction</h3>
             <p><b>Start after cycle</b> is the first completed cycle whose map is used to damp observed intensities for the next cycle. <b>Correction damping</b> ranges from 0 (keeps observed values) to 1 (replaces them with scaled map-derived values). <b>I/&sigma;(I) limit</b> selects positive observations strictly below the intensity-significance threshold; amplitudes use the first-order approximation F/[2&sigma;(F)], not recovered experimental intensity significance. Zero bypasses significance filtering for all map-supported reflections. The average intensity change across corrected reflections is plotted on the <b>Intensity correction</b> convergence tab (lower is better).</p>
             <h3>Powder overlap repartitioning</h3>
-            <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the matching Jana <code>.m90</code> header, then from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
+            <p>Only applies to reflections carrying an FWHM value ({html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM))} or {html.escape(format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_FWHM))}). <b>Start after cycle</b> is the first completed cycle whose map is used to redistribute overlapping reflections for the next cycle. Reflections whose Bragg peaks overlap in a powder pattern -- delta(2θ) below <b>Separation factor</b> times the mean of their FWHM, Superflip's own <code>fwhmseparation</code> convention -- use the actual executed Superflip overlap table and have their combined observed intensity redistributed between them using intensities calculated by FFT from that cycle's map (the SharpED map when SharpED deblurring is enabled, otherwise a copy of the Superflip map), blended by <b>Map ratio mix</b> (0 keeps the observed split, 1 uses the map split fully; default 1). The group total is always conserved. <b>Wavelength</b> is required to compute 2θ; if left at 0 it is auto-detected first from the matching Jana <code>.m90</code> header, then from the loaded <code>.inflip</code> file's <code>lambda</code>/<code>wavelength</code> line, then from the reference file's <code>_diffrn_radiation_wavelength</code> tag -- enter it manually if neither source has it. Each time it runs, a <code>cycle_NNN_powder_repartitioning.log</code> file is written with the number of overlap groups considered, their average size, their average intensity change, and the before/after intensities for every reflection in the 3 groups with the largest d-spacing. The average intensity change per group is also plotted on the <b>Powder repartitioning</b> convergence tab (lower is better).</p>
         """)
         self._add_help_callout(map_feedback_layout, "Warning", "Missing-reflection completion and intensity correction rewrite the observed HKL data fed into later cycles, not just the model. Review the reconstruction carefully before trusting downstream cycles.", kind="warning")
         self._add_back_to_contents(map_feedback_layout)
@@ -15687,7 +15688,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             reflection_mode=self._resolve_configured_data_mode(cfg)
             validate_reflection_filter_policy(reflection_mode,cfg.i_over_sigma_min)
             if reflection_mode_has_fwhm(reflection_mode):
-                powder_superflip_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength)
+                from phase_studio.native_overlap import native_powder_keywords
+                native_powder_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength,cfg.powder_separation_factor)
                 if cfg.map_feedback_missing_enabled:
                     issues.append('Disable missing-reflection completion for FWHM input: new HKL have no measured peak widths. Intensity correction and powder overlap remain supported.')
                 if normalize_map_export_format(cfg.map_export_format) in {'hkl_phases','shelx_fcf'}:
@@ -15720,6 +15722,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             elif ref_suffix not in REFERENCE_FILE_SUFFIXES:
                 issues.append("The external reference format is not supported.")
                 details.append(f"Reference suffix: {ref_suffix or '(none)'}")
+        if cfg.redistribute_overlaps and cfg.cycles>cfg.powder_redistribution_from_cycle and not cfg.run_superflip:
+            issues.append('Native powder repartitioning requires Superflip to run before feedback. Enable Superflip; diagnostic estimates are not used as native group membership.')
         if cfg.redistribute_overlaps and cfg.powder_wavelength <= 0:
             issues.append(
                 "Powder overlap repartitioning is enabled, but no Wavelength (Å) could be resolved from a manual "
@@ -16070,7 +16074,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
             validate_reflection_filter_policy(configured_data_mode,cfg.i_over_sigma_min)
             if reflection_mode_has_fwhm(configured_data_mode):
-                powder_superflip_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength)
+                from phase_studio.native_overlap import native_powder_keywords
+                native_powder_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength,cfg.powder_separation_factor)
+                if cfg.redistribute_overlaps and cfg.cycles>cfg.powder_redistribution_from_cycle and not cfg.run_superflip:
+                    raise ValueError('Enable Superflip before native powder repartitioning; diagnostic estimates cannot authorize execution.')
             refl = merge_duplicate_reflections(refl_raw, configured_data_mode)
             filtered_reflections(refl,configured_data_mode,cfg.i_over_sigma_min)
             if normalize_map_export_format(cfg.map_export_format) in {'hkl_phases','shelx_fcf'}:
@@ -16854,7 +16861,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             sf_voxel = cfg.voxel
             sf_extra_superflip_keywords = cfg.extra_superflip_keywords
             if reflection_mode_has_fwhm(configured_data_mode):
-                sf_extra_superflip_keywords=powder_superflip_keywords(sf_extra_superflip_keywords,cfg.powder_wavelength)
+                from phase_studio.native_overlap import native_powder_keywords
+                sf_extra_superflip_keywords=native_powder_keywords(sf_extra_superflip_keywords,cfg.powder_wavelength,cfg.powder_separation_factor)
             effective_repeat = 1 if model_for_sf is not None else max(1, int(cfg.repeatmode))
 
             def make_superflip_progress_relay(detail: str) -> Optional[Callable[[str], None]]:
@@ -17381,6 +17389,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                                 spacegroup=ref_ctx.spacegroup,
                             )
                         if redistribute:
+                            from phase_studio.native_overlap import capture_native_overlap
+                            if not cfg.run_superflip:
+                                raise ValueError('Native powder repartitioning requires a completed Superflip cycle with expandedlog yes. Enable Superflip; approximate diagnostic groups are not used for execution.')
+                            native_grouping = capture_native_overlap(
+                                cycle_dir / f"{sf_prefix}.inflip", cycle_dir / f"{sf_prefix}.sflog",
+                                observed_hkl_for_cycle, cfg.superflip_exe,
+                            )
                             feedback_reflections, powder_change = redistribute_overlap_reflections(
                                 feedback_reflections,
                                 configured_data_mode,
@@ -17391,6 +17406,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                                 cfg.powder_redistribution_mix,
                                 self.log,
                                 log_path=cycle_dir / f"cycle_{cyc:03d}_powder_repartitioning.log",
+                                native_grouping=native_grouping,
                             )
                         feedback_hkl = cfg.work_dir / f"cycle_{cyc + 1:03d}_map_feedback_for_superflip.hkl"
                         n_feedback = write_observed_reflections(

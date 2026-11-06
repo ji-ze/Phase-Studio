@@ -72,6 +72,7 @@ class FeedbackTests(unittest.TestCase):
         cfg.hkl=source;cfg.reference_cif=reference;cfg.input_source_mode=a.INPUT_MODE_EXTERNAL
         cfg.reflection_data_mode=a.REFLECTION_DATA_MODE_INTENSITY_FWHM
         cfg.i_over_sigma_min=0;cfg.resolution_d_min=0;cfg.powder_wavelength=1
+        cfg.powder_separation_factor=.2
         cfg.compute_omit_maps=True;cfg.reconstruction_mode='superflip';cfg.modelfile_source='none'
         cfg.referencefile_mode='omit';cfg.map_export_format='xplor';cfg.randomseed='12345'
         cfg.cycles=1;cfg.sharped_map_value_exponent=1
@@ -573,6 +574,9 @@ class FeedbackTests(unittest.TestCase):
                 cfg.modelfile_source='none';cfg.map_export_format='xplor';cfg.structure_export_format='cif'
                 cfg.reflection_data_mode=a.REFLECTION_DATA_MODE_INTENSITY_FWHM
                 cfg.run_sharped=False;cfg.run_edma_superflip=False;cfg.run_edma_deblurred=False
+                cfg.run_superflip=True
+                cfg.superflip_exe=work/'controlled-native-executable.fixture'
+                cfg.superflip_exe.write_text('Unit-test stub only; no native execution claimed.')
                 cfg.map_feedback_intensity_enabled=intensity;cfg.map_feedback_intensity_from_cycle=start
                 cfg.map_feedback_intensity_damping=.5;cfg.map_feedback_intensity_max_i_over_sigma=0
                 cfg.redistribute_overlaps=powder;cfg.powder_redistribution_from_cycle=start
@@ -597,11 +601,19 @@ class FeedbackTests(unittest.TestCase):
                 real_intensity=a.apply_map_feedback_to_reflections;real_powder=a.redistribute_overlap_reflections
                 def flip(directory,prefix,_context,input_hkl,*args,**kwargs):
                     inputs.append((prefix,Path(input_hkl)))
-                    path=Path(directory)/(prefix+'.xplor');a.write_xplor_map(path,xmap);return path
+                    directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+                    # The mocked native producer must supply the same strict
+                    # input/log protocol as production; do not bypass capture.
+                    from phase_studio.native_overlap import native_powder_keywords
+                    header='cell 10 10 10 90 90 90\nspacegroup P 1\ncomposition C1\n'
+                    (directory/(prefix+'.inflip')).write_text(header+native_powder_keywords('',1,.2)+'\ndataformat intensity fwhm\nfbegin\n'+Path(input_hkl).read_text()+'\nendf\n')
+                    (directory/(prefix+'.sflog')).write_text('Number of reflections in the input file: 2\nNumber of overlapping reflections: 2\nNumber of overlap groups: 1\nReflections read from the input file and averaged:\nN H K L F ArrayLocation Group\n1: 1 0 0 1 1 1\n2: 0 1 0 1 2 1\nMaximum indices in expanded reflection set:\n')
+                    path=directory/(prefix+'.xplor');a.write_xplor_map(path,xmap);return path
                 def correct(*args,**kwargs):
                     calls.append('intensity');return real_intensity(*args,**kwargs)
                 def repartition(*args,**kwargs):
                     calls.append('powder');powder_calls[0]+=1
+                    self.assertFalse(kwargs['native_grouping'].provenance()['estimate_used'])
                     if fail_powder and powder_calls[0]==1: raise RuntimeError('controlled powder failure')
                     return real_powder(*args,**kwargs)
                 def structure(path,*args,**kwargs):

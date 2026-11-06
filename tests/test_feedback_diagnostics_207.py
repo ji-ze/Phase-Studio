@@ -94,6 +94,8 @@ def test_numerical_implementations_remain_identical_to_starting_source():
             assert ast.dump(get(reviewed))==ast.dump(new)
             continue
         if kind=='powder':
+            from native_overlap_guard_207 import restore_estimated_dispatch
+            restore_estimated_dispatch(new)
             expected=ast.parse('validate_powder_reflections(reflections,mode)').body[0]
             guards=[node for node in new.body if ast.dump(node)==ast.dump(expected)]
             assert len(guards)==1

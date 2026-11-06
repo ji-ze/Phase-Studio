@@ -159,6 +159,8 @@ class FeedbackCapture:
             groups=s['groups']
             if not groups:
                 self.operations['powder'].update(reason='No valid FWHM overlap groups detected',overlap_groups=0,eligible_groups=0)
+                native=s.get('native_grouping')
+                self.operations['powder']['grouping_provenance']=native.provenance() if native is not None else dict(authority='Double-precision geometric estimate',estimate_used=True)
                 return
             eligible=set()
             for members in s['by_group'].values():
@@ -169,6 +171,8 @@ class FeedbackCapture:
             data['legacy_mean_percent']=s['avg_change_percent']
             data['map_path']=str(s['feedback_map'])
             data['parameters']=dict(wavelength=s['wavelength'],separation_factor=s['separation_factor'],mix=s['mix'])
+            native=s.get('native_grouping')
+            data['grouping_provenance']=native.provenance() if native is not None else dict(authority='Double-precision geometric estimate',estimate_used=True)
             self._store('powder',data,'Mix is zero.' if s['mix']==0 else 'Eligible groups have usable map signal. Statistics describe actual changed finite records; relative denominators require I before > 1e-12.')
 
     def report(self):

@@ -15,7 +15,8 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[3]
 sys.path[:0]=[str(ROOT),str(ROOT/'tests')]
 os.environ.setdefault('QT_QPA_PLATFORM','offscreen')
-OUT=Path(__file__).parent
+OUT=Path(os.environ.get('PHASE_STUDIO_TERMINOLOGY_OUTPUT',str(ROOT/'build/ui-terminology-current')))
+OUT.mkdir(parents=True,exist_ok=True)
 
 def write(name,value):
     (OUT/name).write_text(value,encoding='utf8')

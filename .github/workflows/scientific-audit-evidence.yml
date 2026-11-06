@@ -1,0 +1,23 @@
+name: Restore immutable scientific audit evidence
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  archive:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python packaging/tools/archive_terminology_evidence.py --output evidence/terminology-evidence-9458722.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: terminology-evidence-9458722
+          path: evidence/terminology-evidence-9458722.zip
+          if-no-files-found: error
+          retention-days: 90

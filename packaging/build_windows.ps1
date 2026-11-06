@@ -7,6 +7,10 @@ param(
     [ValidateSet("All", "Standalone", "JanaDeveloper", "JanaWrapper")]
     [string]$Target = "All",
     [string]$DistRoot = "",
+    [string]$SignedUpdaterPath = "",
+    [string]$SignedUpdaterSha256 = "",
+    [string]$CertificateSubject = "",
+    [string]$CertificateThumbprints = "",
     [switch]$Clean = $true
 )
 $ErrorActionPreference = "Stop"
@@ -75,8 +79,21 @@ try {
     if ($Target -eq "All" -and $Clean) { Remove-SafePath $releaseDir }
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
     if ($buildStandalone -or $buildDeveloper) {
-        Write-Step "Building independent Windows updater (ONEFILE)"
-        Invoke-PyInstaller "packaging\pyinstaller\PhaseStudioUpdater.spec" "PhaseStudioUpdater" (Join-Path $buildDir "updater")
+        if ($SignedUpdaterPath) {
+            if ($SignedUpdaterSha256 -notmatch '^[0-9a-f]{64}$' -or -not $CertificateSubject -or -not $CertificateThumbprints) {
+                throw 'Approved signed updater hash and certificate policy are required.'
+            }
+            $helperSource = (Resolve-Path -LiteralPath $SignedUpdaterPath).Path
+            if ((Get-FileHash -LiteralPath $helperSource -Algorithm SHA256).Hash.ToLowerInvariant() -ne $SignedUpdaterSha256) { throw 'Signed updater hash differs.' }
+            & $PythonExe (Join-Path $PSScriptRoot 'tools/verify_authenticode.py') --file $helperSource --version $Version --subject $CertificateSubject --thumbprints $CertificateThumbprints --report (Join-Path $buildDir 'signed-updater-verification.json')
+            if ($LASTEXITCODE) { throw 'Signed updater Authenticode verification failed.' }
+            New-Item -ItemType Directory -Force -Path (Join-Path $buildDir 'updater') | Out-Null
+            Copy-Item -LiteralPath $helperSource -Destination (Join-Path $buildDir 'updater/PhaseStudioUpdater.exe') -Force
+        } else {
+            if ($SignedUpdaterSha256 -or $CertificateSubject -or $CertificateThumbprints) { throw 'Incomplete signed updater build configuration.' }
+            Write-Step "Building independent Windows updater (ONEFILE)"
+            Invoke-PyInstaller "packaging\pyinstaller\PhaseStudioUpdater.spec" "PhaseStudioUpdater" (Join-Path $buildDir "updater")
+        }
         Assert-PathExists (Join-Path $buildDir "updater\PhaseStudioUpdater.exe") "Independent updater"
     }
 

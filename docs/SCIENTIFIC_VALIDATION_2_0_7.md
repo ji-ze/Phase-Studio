@@ -1,5 +1,10 @@
 # Scientific validation of 2.0.7 — investigation in progress
 
+Current release-readiness correction: see [exact native powder membership and
+remaining acceptance gates](RELEASE_READINESS_2_0_7.md). Earlier counts below are
+historical evidence. Executed powder feedback now uses the verified native
+table; the 3,795-member geometric estimate remains explicitly visible.
+
 Release verdict: **NO-GO** pending remaining scientific workflow and interactive
 acceptance gaps. The immutable scientific snapshot `2eae1ec` completed 834 tests
 (4 skipped, 37 successful subtests), nine independent authorities, native-format

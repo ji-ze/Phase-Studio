@@ -325,6 +325,8 @@ class SplitDistributionTests(unittest.TestCase):
                             for _field,value in ast.iter_fields(parent):
                                 if isinstance(value,list):value[:]=[child for child in value if child not in hooks]
                     if filename == 'app.py' and text == current and node.name == 'redistribute_overlap_reflections':
+                        from native_overlap_guard_207 import restore_estimated_dispatch
+                        restore_estimated_dispatch(node)
                         validation=ast.parse('validate_powder_reflections(reflections,mode)').body[0]
                         validations=[n for n in node.body if ast.dump(n)==ast.dump(validation)]
                         self.assertEqual(len(validations),1)

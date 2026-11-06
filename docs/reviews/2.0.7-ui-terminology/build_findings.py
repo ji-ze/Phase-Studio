@@ -1,8 +1,11 @@
 """Maintain owner-review proposals separately from application wording."""
 import json
+import os
 from pathlib import Path
 
-OUT=Path(__file__).parent
+ROOT=Path(__file__).resolve().parents[3]
+OUT=Path(os.environ.get('PHASE_STUDIO_TERMINOLOGY_OUTPUT',str(ROOT/'build/ui-terminology-current')))
+OUT.mkdir(parents=True,exist_ok=True)
 settings={r['key']:r for r in json.loads((OUT/'settings.json').read_text(encoding='utf8'))}
 rows=[
 ('i_over_sigma_min','Critical scientific correction','Minimum intensity significance I/σ(I) [only when uncertainties are available]',
