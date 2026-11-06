@@ -18,9 +18,10 @@ def native_case(executable,out,mode,uncertainty_free=False,export_ccp4=False,exp
     cell=gemmi.UnitCell(10,11,12,90,90,90)
     context=a.ReferenceContext(folder/'ref.cif',folder/'work.cif',cell,gemmi.SpaceGroup('P 1'),'P 1','C2 O1',[])
     inp=folder/'check.inflip'
+    algorithm='fourier' if a.reflection_mode_has_phase(mode) else 'CF'
     a.write_superflip_input(inp_path=inp,prefix='check',ref_ctx=context,observed_hkl=observed,
         model_file=None,output_xplor='check.xplor',reference_file=None,reference_format='cif',
-        perform_algorithm='fourier',output_format=output_format,write_auxiliary_outputs=False,
+        perform_algorithm=algorithm,output_format=output_format,write_auxiliary_outputs=False,
         export_superflip_xplor=True,export_superflip_ccp4=export_ccp4,export_superflip_jana=export_jana,
         voxel='0.5',bestdensities_count=1,bestdensities_metric='symmetry',bestdensities_symmetry=True,
         polish=False,maxcycles=1,repeatmode=1,randomseed='12345',delta='AUTO',weakratio='0',biso='0',
@@ -36,7 +37,7 @@ def native_case(executable,out,mode,uncertainty_free=False,export_ccp4=False,exp
     assert np.isfinite(parsed.data).all(),mode
     return dict(mode=mode,uncertainty_free=uncertainty_free,exit_code=completed.returncode,
         executable_sha256=digest(executable),input_sha256=digest(inp),map_sha256=digest(folder/'check.xplor'),
-        note='Controlled Fourier compatibility check only; not a rerun of the recorded reconstruction.')
+        algorithm=algorithm,note='Controlled phase-aware native compatibility check only; not a rerun of the recorded reconstruction.')
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)

@@ -126,6 +126,16 @@ paths over 260 characters remain UNVERIFIED. The environment driver reports
 this missing prerequisite separately; its `passed` field describes available
 checks, while `complete_path_acceptance` remains false on this host.
 
+The subsequent `cfe1d92` full campaign recorded 902 passed, three skipped and
+one native-fixture setup timeout; it is not accepted as a passing campaign.
+The handwritten unphased Fourier fixture was replaced by the production input
+writer's explicitly seeded CF calculation, keeping the original timeout and all
+exact membership/conservation assertions. Reflection-format probes likewise use
+CF for unphased input and Fourier only when explicit phases are supplied.
+The earlier stall is preserved as a native test-producer limitation, not claimed
+fixed inside the vendor executable. Final acceptance requires another complete
+suite and all authorities on the final source, without retrying failed tests.
+
 `SIGNPATH_2_0_7.md` records the helper-before-embedding architecture, narrow nested
 artifact configurations, final Authenticode/Ed25519 checks and exact missing
 owner configuration. Production signing remains **UNVERIFIED**; local packages

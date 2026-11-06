@@ -15,6 +15,21 @@ from phase_studio.native_overlap import (native_powder_keywords,parse_native_mem
 EXE=Path('C:/Jana2020/SUPERFLIP/superflip.exe')
 
 
+def write_native_fixture(inp,observed,cell,factor):
+    context=a.ReferenceContext(inp,inp,cell,a.gemmi.SpaceGroup('P 1'),'P 1','C1',[])
+    # Use a supported, seeded phase-retrieval calculation, not a handwritten
+    # unphased Fourier input. All membership/conservation assertions stay exact.
+    a.write_superflip_input(inp_path=inp,prefix='native',ref_ctx=context,observed_hkl=observed,
+        model_file=None,output_xplor='native.xplor',reference_file=None,reference_format='cif',
+        perform_algorithm='CF',output_format='xplor',write_auxiliary_outputs=False,
+        export_superflip_xplor=True,export_superflip_ccp4=False,export_superflip_jana=False,
+        voxel='0.5',bestdensities_count=1,bestdensities_metric='symmetry',bestdensities_symmetry=True,
+        polish=False,maxcycles=20,repeatmode=1,randomseed='12345',delta='AUTO',weakratio='0',biso='0',
+        reflection_data_mode=a.REFLECTION_DATA_MODE_INTENSITY_FWHM,normalize='none',nresshells=1,
+        missing='zero',searchsymmetry='no',derivesymmetry='no',electrons='',dataitemwidths='auto',
+        extra_superflip_keywords=native_powder_keywords('',1,factor),log=None)
+
+
 @pytest.fixture
 def native(tmp_path):
     if not EXE.is_file():pytest.skip('Installed native Superflip required for independent executable acceptance.')
@@ -22,8 +37,7 @@ def native(tmp_path):
     observed=tmp_path/'observed.hkl'
     a.write_observed_reflections(observed,rows,0,a.REFLECTION_DATA_MODE_INTENSITY_FWHM)
     inp=tmp_path/'native.inflip'
-    inp.write_text('title controlled native overlap\nperform fourier\ndimension 3\nvoxel 16 16 16\ncell 10 10 10 90 90 90\nspacegroup P 1\ncomposition C1\nsymmetry\nx1 x2 x3\nendsymmetry\nreflectionlist unique\noutputformat xplor\noutputfile native.xplor\n'+native_powder_keywords('',1,.2)+'\ndataformat intensity fwhm\nfbegin\n'+
-        '\n'.join(line for line in observed.read_text().splitlines() if not line.startswith('#'))+'\nendf\n')
+    write_native_fixture(inp,observed,a.gemmi.UnitCell(10,10,10,90,90,90),.2)
     result=subprocess.run([str(EXE),inp.name],cwd=tmp_path,capture_output=True,timeout=30)
     assert result.returncode==0 and (tmp_path/'native.xplor').is_file(),result.stdout
     authority=capture_native_overlap(inp,tmp_path/'native.sflog',observed,EXE)
@@ -55,7 +69,7 @@ def test_native_groups_conserve_serialized_I_or_squared_F(native,mode,mix):
     authority,rows,folder,cell=native
     if mode==a.REFLECTION_DATA_MODE_AMPLITUDE_FWHM:
         rows=[replace(r,value=math.sqrt(r.value)) for r in rows]
-    # This actual native Fourier map supplies nonconstant real predictions.
+    # This actual seeded native CF map supplies real predictions.
     output,_=a.redistribute_overlap_reflections(rows,mode,folder/'native.xplor',cell,1,.2,mix,lambda _:None,native_grouping=authority)
     observed=folder/'corrected.hkl'
     assert a.write_observed_reflections(observed,output,0,mode)==3
@@ -97,8 +111,7 @@ def test_actual_native_nondefault_factor_changes_membership(tmp_path,factor,expe
     observed=tmp_path/'observed.hkl'
     a.write_observed_reflections(observed,rows,0,a.REFLECTION_DATA_MODE_INTENSITY_FWHM)
     inp=tmp_path/'native.inflip'
-    records='\n'.join(line for line in observed.read_text().splitlines() if line.strip() and not line.startswith('#'))
-    inp.write_text('title factor acceptance\nperform fourier\ndimension 3\nvoxel 16 16 16\ncell 10 10.1 11 90 90 90\nspacegroup P 1\ncomposition C1\nsymmetry\nx1 x2 x3\nendsymmetry\nreflectionlist unique\noutputformat xplor\noutputfile native.xplor\n'+native_powder_keywords('',1,factor)+'\ndataformat intensity fwhm\nfbegin\n'+records+'\nendf\n')
+    write_native_fixture(inp,observed,a.gemmi.UnitCell(10,10.1,11,90,90,90),factor)
     result=subprocess.run([str(EXE),inp.name],cwd=tmp_path,capture_output=True,timeout=30)
     assert result.returncode==0 and (tmp_path/'native.xplor').is_file()
     authority=capture_native_overlap(inp,tmp_path/'native.sflog',observed,EXE)
