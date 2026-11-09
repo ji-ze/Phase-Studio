@@ -82,7 +82,8 @@ def probe(scale):
                 assert box(w.processing_heading).top()>box(w.inflip_info).bottom()
                 assert box(w.cycles).top() - box(w.processing_heading).bottom() <= 12
                 gap = box(w.inflip_info).top() - box(w.context_banner).bottom()
-                assert 12 <= gap <= 24, (gap, height, expanded)
+                from phase_studio.ui_style import PHASE_STUDIO_SPACING
+                assert PHASE_STUDIO_SPACING['heading_gap'] <= gap <= 24, (gap, height, expanded)
                 assert box(w.validation_group).bottom() < 650, "extra height must stay below the compact form"
                 assert w.primary_button.isVisible() and w.back_button.isVisible()
                 assert w.warning_text.height() >= w.warning_text.heightForWidth(w.warning_text.width())

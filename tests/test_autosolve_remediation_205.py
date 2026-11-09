@@ -114,7 +114,9 @@ def test_settings_recovery_opens_hidden_destination(app, monkeypatch):
     backend = IterativeSuperflipPipelineQtGUI()
     try:
         original = backend.inputs["cycles"].value()
-        report = ErrorReport("input_validation", "Input", "Configure SharpED", "SharpED model", "Open settings", "fixture")
+        from phase_studio.validation_issues import ValidationIssue
+        report = ErrorReport("input_validation", "Input", "Configure SharpED", "SharpED model", "Open settings", "fixture",
+            issues=(ValidationIssue('SharpED model', 'sharped_configuration', 'sharped_api_token', 'Setup', True),))
         actions = backend._error_actions(report)
         QTimer.singleShot(20, lambda: app.activeModalWidget().findChild(QPushButton, "errorPrimaryAction").click())
         show_phase_studio_error(None, report, actions)
