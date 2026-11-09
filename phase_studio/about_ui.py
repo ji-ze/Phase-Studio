@@ -1,4 +1,4 @@
-﻿"""Compact owned About dialog and safe bundled-document viewer."""
+"""Compact owned About dialog and safe bundled-document viewer."""
 from html import escape
 from pathlib import Path
 import re

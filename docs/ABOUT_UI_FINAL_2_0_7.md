@@ -22,7 +22,7 @@ Each scale report captures both runtime profiles, all four sections, independent
 
 Eleven original legal authorities remain byte-identical to the preserved baseline. Source and frozen evidence additionally verifies complete packaged notices, legal fonts, source modules and Unicode extraction paths. No license, citation or authorship resource was rewritten.
 
-The narrowly related Help change removes the redundant About contents link while preserving original help sections. The existing prepared update-dialog fix describes an installed development version ahead of published stable truthfully; version comparison, trust and update security are unchanged. Unrelated Run Overview/workshop work remains preserved outside this change.
+The narrowly related Help change removes the redundant About contents link while preserving original help sections. The existing prepared update-dialog fix describes an installed development version ahead of published stable truthfully; version comparison, trust and update security are unchanged. Unrelated Run Overview/workshop work remains preserved outside this change. Additional Help/update captures are retained in the local evidence directory. The AST-based asset scan also checks ordinary UTF-8 source decoding; the final About module uses UTF-8 without a BOM.
 
 Exact source commit, final focused/full regression counts, nine scientific authority results, both unsigned Windows artifact hashes and frozen screenshot verification are recorded in the latest validation section of [draft PR #21](https://github.com/ji-ze/Phase-Studio/pull/21), with full logs in `build/about207-final-cards/`. Earlier reports remain historical evidence.
 
