@@ -4,7 +4,7 @@ os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 import pytest
 from PySide6.QtWidgets import QApplication, QTabWidget, QWidget
 from phase_studio.about_ui import AboutDialog, DocumentDialog
-from phase_studio.legal_content import source_text
+from phase_studio.legal_content import legal_directory, source_text
 
 
 def test_four_cards_viewers_and_stable_geometry():
@@ -23,7 +23,7 @@ def test_four_cards_viewers_and_stable_geometry():
         assert sum(c.isChecked() for c in dialog.cards) == 1
         assert dialog.geometry() == geometry
     viewer = DocumentDialog(dialog, 'LICENSE')
-    assert viewer.raw_text == source_text('LICENSE')
+    assert viewer.raw_bytes == (legal_directory() / 'LICENSE').read_bytes()
     viewer = DocumentDialog(dialog, 'THIRD_PARTY_NOTICES.md', third_party=True)
     assert viewer.raw_text.replace('\r\n', '\n') == source_text('THIRD_PARTY_NOTICES.md')
     if viewer.selector.count() > 1:

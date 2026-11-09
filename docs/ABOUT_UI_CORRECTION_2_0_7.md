@@ -20,6 +20,8 @@ Shown and polished widgets resolve to **Segoe UI** for ordinary UI text and **Se
 
 Both profiles have the same four cards and stable outer geometry. Search, copy, opening originals, Escape, one modal per owner and safe explicit HTTPS/mailto links remain available. Reflow changes display whitespace only; complete original bytes remain intact and are available through Copy original, Open original and Original layout.
 
+Isolated build inputs preserve the original legal baseline bytes explicitly; a fresh Windows checkout's automatic CRLF conversion must not silently change the packaged resource hashes. Raw-copy regressions compare original bytes directly rather than assuming a particular checkout newline convention.
+
 Focused verification: **23 passed**. This includes all four Qt scale factors (1, 1.25, 1.5, 2), source access and Unicode/extended paths, existing branding path tests, application-menu/About ownership checks and update UI regressions. Eleven legal authority hashes match the preserved local baseline, including LICENSE, AUTHORS.md, CITATION.cff, THIRD_PARTY_NOTICES.md, bundled upstream texts and the Science Gothic OFL. Complete exact-source regression and frozen artifact evidence are recorded in draft [PR #21](https://github.com/ji-ze/Phase-Studio/pull/21) and the local `build/about207-correction/` evidence directory; focused results are not a substitute for those gates.
 
 The screenshots below are **actual Qt widgets** with public About/legal content. Offscreen images use controlled screen geometry; the native Windows image is also a controlled fixture. Neither establishes human physical/mixed-DPI acceptance. No scientific inference was run.

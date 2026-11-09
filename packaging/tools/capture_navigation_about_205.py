@@ -190,7 +190,7 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
         geometry = about.geometry()
         about.cards[1].click();settle()
         viewer = about.open_document('LICENSE');settle()
-        assert (ROOT/'LICENSE').read_text(encoding='utf8') == viewer.raw_text
+        assert (ROOT/'LICENSE').read_bytes() == viewer.raw_bytes
         viewer.close();settle()
         assert about.geometry() == geometry and area.contains(about.frameGeometry())
         about.cards[0].click();QTest.keyClick(about, Qt.Key_Escape);settle()
