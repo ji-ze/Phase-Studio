@@ -61,17 +61,17 @@ def run(directory):
             name='jana' if jana else 'standalone'
             about=AboutDialog(win,jana=jana)
             about.show();settle()
-            first=about.documents[0].toPlainText()
-            assert 'Jiří Zelenka' in first and 'kucerakova@fzu.cz' in first
-            assert '**' not in first and '# Authors' not in first
-            assert about.credits.toPlainText()==source_text('LICENSE')
-            assert 'mailto:zelenka@fzu.cz' in about.documents[0].toHtml()
-            third=about.documents[3].toHtml()
-            assert '<table' in third
+            labels = [label.text() for label in about.findChildren(QLabel)]
+            assert any('Ji\u0159\u00ed Zelenka' in text and 'zelenka@fzu.cz' in text for text in labels)
+            assert len(about.cards) == 4 and about.cards[0].isChecked()
             snap(name+'-about',about)
-            about.tabs.setCurrentIndex(2);about.search.setText('permission');about.find_next()
-            assert 'permission' in about.credits.textCursor().selectedText().lower()
+            about.cards[1].click();settle()
+            viewer=about.open_document('LICENSE');settle()
+            assert viewer.raw_text.replace('\r\n', '\n') == source_text('LICENSE')
+            viewer.search.setText('permission');viewer.find_next()
+            assert 'permission' in viewer.browser.textCursor().selectedText().lower()
             snap(name+'-license',about)
+            viewer.close()
             about.close()
             profile=dict(profile=name,legal_exact=True,tabs=[])
             for powder in (False,True):

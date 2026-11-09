@@ -11,6 +11,9 @@ from unittest.mock import patch
 
 
 def run(directory):
+    if os.environ.get('PHASE_STUDIO_ABOUT_UI_ACCEPTANCE') == '1':
+        from .about_ui_acceptance import run as run_about_ui
+        return run_about_ui(directory)
     if os.environ.get('PHASE_STUDIO_INPUT_UI_ACCEPTANCE')=='1':
         from .input_ui_acceptance import run as run_input_ui
         try:

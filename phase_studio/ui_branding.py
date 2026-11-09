@@ -18,6 +18,34 @@ _science_gothic_font_id: Optional[int] = None
 _science_gothic_families: tuple[str, ...] = ()
 
 
+def standard_ui_font(point_size: float = 10) -> QFont:
+    """Resolve a readable UI face even in Qt's fontless Windows offscreen backend.
+
+    Native Windows normally provides Segoe UI. Offscreen can enumerate no OS
+    fonts; after loading the wordmark, every missing family then falls back to
+    Science Gothic. Register installed UI font bytes in that case, including
+    when branding was initialized first. No system font is bundled or copied.
+    """
+    import os
+    families = set(QFontDatabase.families())
+    if os.name == "nt" and "Segoe UI" not in families:
+        fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+        for filename in ("segoeui.ttf", "segoeuib.ttf", "seguisb.ttf", "segoeuii.ttf"):
+            try:
+                data = (fonts / filename).read_bytes()
+            except OSError:
+                continue
+            QFontDatabase.addApplicationFontFromData(data)
+        families = set(QFontDatabase.families())
+    candidates = ("Segoe UI", "Arial", "Noto Sans", "DejaVu Sans", "Liberation Sans")
+    family = next((name for name in candidates if name in families),
+                  QFontDatabase.systemFont(QFontDatabase.GeneralFont).family())
+    font = QFont(family)
+    font.setPointSizeF(point_size)
+    font.setWeight(QFont.Normal)
+    return font
+
+
 def register_science_gothic_font() -> tuple[str, ...]:
     """Register the bundled OFL face once and return Qt's actual families."""
     global _science_gothic_font_id, _science_gothic_families

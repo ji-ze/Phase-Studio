@@ -177,29 +177,34 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
         p.dialog.close()
         w.update_menu.menu().actions()[-1].trigger();settle()
         about = w.dialog._phase_studio_about
-        assert isinstance(about, AboutDialog) and 'Jana2020' in about.mode_label.text()
-        assert VERSION in about.version_label.text() and area.contains(about.frameGeometry())
+        from PySide6.QtWidgets import QLabel
+        assert isinstance(about, AboutDialog)
+        assert any('Jana2020 integration' in label.text() for label in about.findChildren(QLabel))
+        assert area.contains(about.frameGeometry())
         assert show_about_dialog(w.dialog, jana=True) is about
         capture('10-about-jana', about)
         with patch.object(QDesktopServices, 'openUrl', return_value=True) as open_url:
             from PySide6.QtWidgets import QPushButton
-            next(b for b in about.findChildren(QPushButton) if b.text() == 'Official GitHub Releases').click()
+            next(b for b in about.findChildren(QPushButton) if b.text() == 'Official releases').click()
             open_url.assert_called_once_with(QUrl(RELEASES_URL))
-        about.tabs.setCurrentIndex(2);settle()
-        assert (ROOT/'LICENSE').read_text(encoding='utf8') in about.credits.toPlainText()
-        assert area.contains(about.frameGeometry())
-        about.tabs.setCurrentIndex(0);QTest.keyClick(about, Qt.Key_Escape);settle()
+        geometry = about.geometry()
+        about.cards[1].click();settle()
+        viewer = about.open_document('LICENSE');settle()
+        assert (ROOT/'LICENSE').read_text(encoding='utf8') == viewer.raw_text
+        viewer.close();settle()
+        assert about.geometry() == geometry and area.contains(about.frameGeometry())
+        about.cards[0].click();QTest.keyClick(about, Qt.Key_Escape);settle()
         assert not about.isVisible()
         about = show_about_dialog(w.dialog, jana=False);settle()
-        assert about.mode_label.text() == 'Standalone application'
+        assert any('Standalone application' in label.text() for label in about.findChildren(QLabel))
         capture('11-about-standalone', about)
-        about.findChild(QDialogButtonBox).button(QDialogButtonBox.Close).click();settle()
+        next(b for b in about.findChildren(QPushButton) if b.text() == 'Close').click();settle()
         assert not about.isVisible()
         about = show_about_dialog(w.dialog, jana=True);settle();about.close();settle()
         assert not about.isVisible()
         with patch('phase_studio.about_ui.version.VERSION', '9.8.7'):
             dynamic = AboutDialog(w.dialog, jana=False)
-            assert dynamic.version_label.text() == 'Version 9.8.7'
+            assert '9.8.7' in dynamic.citation
             dynamic.deleteLater()
         menu = w.update_menu.menu();menu.popup(w.update_menu.mapToGlobal(w.update_menu.rect().bottomLeft()))
         capture('12-ellipsis-menu', menu);menu.close()

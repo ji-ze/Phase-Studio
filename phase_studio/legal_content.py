@@ -28,7 +28,35 @@ def citation_fields():
 
 def citation_text(runtime_version):
     fields = citation_fields()
-    return f'Jiří Zelenka, {fields.get("title", "Phase Studio")}, version {runtime_version}, {fields.get("repository-code", "")}'
+    # Read the supported CFF person/name scalars rather than duplicating an
+    # author in the UI. Keep the runtime version supplied by the caller.
+    authors = []
+    person = {}
+    in_authors = False
+    for line in source_text('CITATION.cff').splitlines():
+        if line == 'authors:':
+            in_authors = True
+            continue
+        if not in_authors:
+            continue
+        if line and not line[0].isspace():
+            break
+        scalar = line.strip()
+        if scalar.startswith('- '):
+            if person:
+                authors.append(person)
+            person = {}
+            scalar = scalar[2:]
+        if ':' in scalar:
+            key, value = scalar.split(':', 1)
+            person[key] = value.strip().strip('\"\'')
+    if person:
+        authors.append(person)
+    names = [' '.join(filter(None, (person.get('given-names'), person.get('family-names'))))
+             or person.get('name', '') for person in authors]
+    credit = '; '.join(filter(None, names))
+    return ', '.join(filter(None, (credit, fields.get('title', 'Phase Studio'),
+                                  f'version {runtime_version}', fields.get('repository-code', ''))))
 
 
 def overview_html(runtime_version):
