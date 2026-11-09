@@ -13,6 +13,23 @@ from phase_studio.validation_issues import ValidationIssue
 _application = None
 
 
+def test_opt_in_visual_fixture_parses_input_and_isolates_settings(tmp_path):
+    import subprocess
+    import sys
+    import json
+    root = Path(__file__).resolve().parents[1]
+    env = {key:value for key,value in os.environ.items() if not key.startswith(('QT_', 'PHASE_STUDIO_'))}
+    result = subprocess.run([sys.executable, '-m', 'phase_studio', '--packaging-acceptance', str(tmp_path)],
+        cwd=root, env=env | {'QT_QPA_PLATFORM':'offscreen', 'QT_SCALE_FACTOR':'1',
+            'PHASE_STUDIO_GUI_POLISH_ACCEPTANCE':'1', 'PHASE_STUDIO_GUI_PROFILE':'jana'},
+        capture_output=True, text=True, timeout=90)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads((tmp_path/'report.json').read_text(encoding='utf8'))
+    assert report['passed'] and report['metadata']['settings_isolated']
+    assert report['scientific']['records'] == 35
+    assert not report['metadata']['scientific_workflow']
+
+
 @pytest.fixture
 def window(tmp_path, monkeypatch):
     global _application

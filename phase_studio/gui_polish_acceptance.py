@@ -32,7 +32,11 @@ def run(directory):
     def snap(name,widget):
         settle();assert widget.grab().save(str(out/(name+'.png')))
         rows[name]=dict(geometry=widget.geometry().getRect(),dpr=widget.devicePixelRatioF())
-    with tempfile.TemporaryDirectory() as temporary,patch.object(QScreen,'availableGeometry',return_value=QRect(0,0,int(1920/float(scale)),int(1040/float(scale)))):
+    qt_imports = js._qt_imports
+    def isolated_settings(*parts):
+        name = hashlib.sha256(repr(parts).encode('utf8')).hexdigest() + '.ini'
+        return QSettings(str(Path(temporary)/name), QSettings.IniFormat)
+    with tempfile.TemporaryDirectory() as temporary,patch.object(QScreen,'availableGeometry',return_value=QRect(0,0,int(1920/float(scale)),int(1040/float(scale)))),patch.object(a,'QSettings',isolated_settings),patch.object(js,'_qt_imports',lambda:qt_imports()|{'QSettings':isolated_settings}):
         QSettings.setDefaultFormat(QSettings.IniFormat);QSettings.setPath(QSettings.IniFormat,QSettings.UserScope,temporary)
         state=update_ui.UpdateState(QSettings(str(Path(temporary)/'updates.ini'),QSettings.IniFormat),Path(temporary)/'updates.lock');state.set_enabled(False)
         app._phase_studio_updates=update_ui.UpdateService(app,state=state,automatic_allowed=False)
@@ -98,8 +102,9 @@ def run(directory):
             def delete(self, origin): self.values.pop(origin, None)
         store=CredentialStore(backend=MemoryCredentials())
         store.set('controlled-offline-capture-key', remember=True)
-        with patch.object(js,'application_dir',lambda:Path('C:/Jana2020/SharpED')),patch.object(js,'credential_store',store),patch.object(QDialog,'exec',lambda self:QDialog.Rejected),patch.object(js.SharpEDServerClient,'get_models',lambda self:SimpleNamespace(models=[js.SHARPED_ONE_CYCLE_MODEL,js.SHARPED_ITERATIVE_MODEL,'controlled-model-3','controlled-model-4'],default_model=js.SHARPED_ONE_CYCLE_MODEL,provenance='offline')):
+        with patch.object(js,'application_dir',lambda:Path(temporary)/'Jana2020/SharpED'),patch.object(js,'resolve_active_jana_superflip',lambda _directory:Path(temporary)/'mock-tools/superflip.exe'),patch.object(js,'credential_store',store),patch.object(QDialog,'exec',lambda self:QDialog.Rejected),patch.object(js.SharpEDServerClient,'get_models',lambda self:SimpleNamespace(models=[js.SHARPED_ONE_CYCLE_MODEL,js.SHARPED_ITERATIVE_MODEL,'controlled-model-3','controlled-model-4'],default_model=js.SHARPED_ONE_CYCLE_MODEL,provenance='offline')):
             wizard=js._JanaWorkflowWizard([],local);wizard.run();wizard.dialog.show();settle();snap('wizard-workflow',wizard.dialog)
+            assert hasattr(wizard, 'hkl_load_result'), 'Wizard must display parsed input, not an unavailable fixture'
             wizard.superflip_sharped_tile._trigger();settle()
             for _ in range(80):
                 if not wizard.model_cache['inflight']:break
@@ -114,7 +119,7 @@ def run(directory):
             wizard.scroll_area.verticalScrollBar().setValue(wizard.scroll_area.verticalScrollBar().maximum());snap('feedback-zero-damping-controls',wizard.dialog)
             wizard.intensity_damping_spin.setValue(.25);snap('feedback-positive-damping',wizard.dialog)
             wizard.dialog.close()
-    rows['metadata']=dict(phase=phase,scale=scale,physical_display=False,real_saved_input=bool(provided),profile=profile,scientific_workflow=False,remote_models='controlled offline catalogue')
+    rows['metadata']=dict(phase=phase,scale=scale,physical_display=False,real_saved_input=bool(provided),profile=profile,scientific_workflow=False,settings_isolated=True,executable_resolution='mock path; not executed',remote_models='controlled offline catalogue')
     assert source.read_bytes()==original
     rows['passed']=True
     (out/'report.json').write_text(json.dumps(rows,indent=2,default=str),encoding='utf8')
