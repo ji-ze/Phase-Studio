@@ -5,7 +5,7 @@ import re
 import sys
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument
+from PySide6.QtGui import QDesktopServices, QFontInfo, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog,
     QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
     QSizePolicy, QStackedWidget, QStyle, QTextBrowser, QVBoxLayout, QWidget)
@@ -17,6 +17,26 @@ from phase_studio.ui_branding import (activate_owned_dialog, create_phase_studio
 
 RELEASES_URL = 'https://github.com/ji-ze/Phase-Studio/releases'
 REPOSITORY_URL = 'https://github.com/ji-ze/Phase-Studio'
+
+CONTACTS_HTML = '''<h2>Phase Studio</h2>
+<p><a href="mailto:zelenka@fzu.cz">Jiří Zelenka</a> — author and lead developer.</p>
+<p><a href="https://github.com/ji-ze/Phase-Studio">GitHub repository</a> ·
+<a href="https://sharped.fzu.cz/">SharpED website</a> ·
+<a href="mailto:sharped@fzu.cz">sharped@fzu.cz</a></p>
+<h3>SharpED development team</h3>
+<p><a href="mailto:rohlicek@fzu.cz">Jan Rohlíček</a><br>
+<a href="mailto:zelenka@fzu.cz">Jiří Zelenka</a><br>
+<a href="mailto:kucerakova@fzu.cz">Monika Kučeráková</a><br>
+<a href="mailto:buk@fzu.cz">Zdeněk Buk</a></p>
+<h3>Scientific collaboration</h3>
+<p>We welcome questions about the SharpED method, possible applications to
+crystallographic data and opportunities for scientific collaboration.</p>
+<p><a href="mailto:sharped@fzu.cz?subject=SharpED%20scientific%20collaboration">Contact us about a collaboration</a></p>
+<h3>Institution</h3><p>Institute of Physics of the Czech Academy of Sciences<br>
+Fyzikální ústav AV ČR, v. v. i.<br>Na Slovance 1999/2<br>
+182 00 Prague 8<br>Czech Republic<br><a href="https://www.fzu.cz/en">www.fzu.cz/en</a></p>
+<p>Use Original AUTHORS.md to read the complete original credits.
+Copy original and Open original always use that unchanged source document.</p>'''
 
 # Scoped to the two About surfaces. The wordmark is the only plain-text
 # widget that requests the branding face; the SharpED subtitle retains its
@@ -111,11 +131,12 @@ def _document_title(path):
 
 class DocumentDialog(QDialog):
     """Display only enumerated bundled authorities; copy exact decoded source."""
-    def __init__(self, parent, name, *, third_party=False):
+    def __init__(self, parent, name, *, third_party=False, contacts=False):
         super().__init__(parent)
         if name not in {'AUTHORS.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CITATION.cff'}:
             raise ValueError('Unknown bundled document')
         self.setObjectName('phaseStudioDocument')
+        self.contacts = contacts and name == 'AUTHORS.md'
         _style(self)
         self.setWindowTitle('Third-party licenses' if third_party else _document_title(Path(name)))
         self.setWindowModality(Qt.WindowModal)
@@ -132,6 +153,11 @@ class DocumentDialog(QDialog):
         self.original_layout.setCheckable(True)
         self.original_layout.setToolTip('Show original line breaks. Copy original always copies the complete original source.')
         title_row.addWidget(self.original_layout)
+        self.original_authors = QPushButton('Original AUTHORS.md')
+        self.original_authors.setCheckable(True)
+        self.original_authors.setVisible(self.contacts)
+        self.original_authors.toggled.connect(self.render_document)
+        title_row.addWidget(self.original_authors)
         layout.addLayout(title_row)
         self.paths = [legal_directory() / name]
         self.allowed_paths = [self.paths[0].resolve()]
@@ -139,6 +165,10 @@ class DocumentDialog(QDialog):
         self.selector.setAccessibleName('Choose dependency license')
         self.selector.addItem(_document_title(self.paths[0]))
         if third_party:
+            self.selector.setEditable(True)
+            self.selector.setInsertPolicy(QComboBox.NoInsert)
+            self.selector.completer().setCaseSensitivity(Qt.CaseInsensitive)
+            self.selector.completer().setFilterMode(Qt.MatchContains)
             roots = ([legal_directory() / 'dependencies', legal_directory() / 'upstream']
                      if getattr(sys, 'frozen', False) else [legal_directory() / 'third_party_licenses'])
             for root in roots:
@@ -218,8 +248,10 @@ class DocumentDialog(QDialog):
         self.render_document()
 
     def _update_source_label(self):
+        prefix = ('Contact summary · Original source: ' if self.contacts and
+                  not self.original_authors.isChecked() else 'Original source: ')
         self.source_label.setText(self.source_label.fontMetrics().elidedText(
-            'Original source: ' + self.source, Qt.ElideMiddle, max(80, self.source_label.width())))
+            prefix + self.source, Qt.ElideMiddle, max(80, self.source_label.width())))
 
     def render_document(self):
         original = self.original_layout.isChecked()
@@ -228,7 +260,13 @@ class DocumentDialog(QDialog):
         self.browser.setCurrentCharFormat(QTextCharFormat())
         self.browser.document().setDefaultFont(standard_ui_font(10.5))
         self.original_layout.setEnabled(not (self.path and self.path.suffix.lower() == '.cff'))
-        if self.path and self.path.suffix.lower() == '.md' and not original:
+        summary = self.contacts and not self.original_authors.isChecked()
+        if summary:
+            self.title_label.setText('Contacts and collaboration')
+            self.original_layout.setEnabled(False)
+            self.browser.setHtml(CONTACTS_HTML)
+        elif self.path and self.path.suffix.lower() == '.md' and not original:
+            self.title_label.setText(_document_title(self.path))
             self.browser.document().setMarkdown(self.raw_text,
                 QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
         else:
@@ -245,12 +283,34 @@ class DocumentDialog(QDialog):
             body_format = QTextCharFormat()
             body_format.setFont(standard_ui_font(10.5))
             cursor.setCharFormat(body_format)
+        # Markdown headings and code spans must not inherit the branding font
+        # when the offscreen font database starts with only Science Gothic.
+        block = self.browser.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    correction = QTextCharFormat(fragment.charFormat())
+                    if QFontInfo(correction.font()).family() in ('', 'Science Gothic'):
+                        correction.setFontFamilies([standard_ui_font().family()])
+                    heading = block.blockFormat().headingLevel()
+                    if heading:
+                        correction.clearProperty(QTextFormat.FontSizeAdjustment)
+                        correction.setFontPointSize(12 if heading == 1 else 11)
+                    cursor = QTextCursor(self.browser.document())
+                    cursor.setPosition(fragment.position())
+                    cursor.setPosition(fragment.position() + fragment.length(), QTextCursor.KeepAnchor)
+                    cursor.setCharFormat(correction)
+                iterator += 1
+            block = block.next()
         cursor = QTextCursor(self.browser.document())
         cursor.select(QTextCursor.Document)
         spacing = QTextBlockFormat()
         spacing.setLineHeight(120, QTextBlockFormat.ProportionalHeight.value)
         cursor.mergeBlockFormat(spacing)
         self.browser.moveCursor(QTextCursor.Start)
+        self._update_source_label()
 
     def find_next(self):
         if not self.browser.find(self.search.text()):
@@ -367,7 +427,7 @@ class AboutDialog(QDialog):
                    '<a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>'
                    '<p><b>SharpED development team</b><br>'
                    'Jiří Zelenka, Jan Rohlíček, Monika Kučeráková and Zdeněk Buk.</p>',
-                   [('View original authors', lambda: self.open_document('AUTHORS.md'))])
+                   [('Contacts and credits', lambda: self.open_document('AUTHORS.md', contacts=True))])
         copyright_line = next((line for line in source_text('LICENSE').splitlines() if line.startswith('Copyright')), '').replace('(c)', '©')
         self._page('<p><b>MIT License</b></p><p>' + escape(copyright_line) + '</p>'
                    '<p>Permits use, modification and distribution under the terms of the license.</p>',
@@ -427,14 +487,14 @@ class AboutDialog(QDialog):
         scroll.setWidget(body)
         self.stack.addWidget(scroll)
 
-    def open_document(self, name, *, third_party=False):
+    def open_document(self, name, *, third_party=False, contacts=False):
         if self.viewer is not None and self.viewer.isVisible():
             activate_owned_dialog(self.viewer)
             return self.viewer
         if self.viewer is not None:
             self.viewer.deleteLater()
         previous = QApplication.focusWidget()
-        self.viewer = DocumentDialog(self, name, third_party=third_party)
+        self.viewer = DocumentDialog(self, name, third_party=third_party, contacts=contacts)
         self.viewer.finished.connect(lambda _result: _restore_focus(previous))
         self.viewer.open()
         return self.viewer

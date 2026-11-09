@@ -25,7 +25,7 @@ def test_about_font_and_reader_matrix(scale, tmp_path):
         assert profile['geometry'][2:] == [720, 420]
         assert profile['reader_font']['point_size'] >= 10
     assert report['narrow']['geometry'][2] <= 480
-    assert len(report['screenshots']) == 17
+    assert len(report['screenshots']) == 26
 
 
 def test_about_resolves_ui_font_without_application_styles(tmp_path):

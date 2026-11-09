@@ -9055,7 +9055,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         basic_contents_row.addWidget(basic_contents_label)
         for link_text, anchor in (
             ("Setup", "setup"), ("Input", "input"), ("Workflow", "workflow"),
-            ("Output", "output"), ("Map feedback", "map_feedback"), ("Jana2020", "jana_integration"), ("About", "about"),
+            ("Output", "output"), ("Map feedback", "map_feedback"), ("Jana2020", "jana_integration"),
         ):
             link = QToolButton()
             link.setObjectName("helpNavLink")

@@ -91,14 +91,25 @@ def run(directory):
             next(b for b in dialog.stack.currentWidget().findChildren(QPushButton)
                  if b.text() == 'Copy citation').click()
             assert QApplication.clipboard().text() == dialog.citation
-            for name, third in (('LICENSE', False), ('THIRD_PARTY_NOTICES.md', True)):
-                viewer = dialog.open_document(name, third_party=third)
+            for name, third in (('LICENSE', False), ('THIRD_PARTY_NOTICES.md', True),
+                                ('AUTHORS.md', False), ('CITATION.cff', False)):
+                viewer = dialog.open_document(name, third_party=third, contacts=name == 'AUTHORS.md')
                 settle()
                 assert viewer.parentWidget() is dialog and viewer.isModal()
                 assert viewer.raw_bytes == (legal_directory() / name).read_bytes()
                 assert viewer.raw_text.replace('\r\n', '\n') == source_text(name)
                 check_fonts(viewer)
-                if not third:
+                if name == 'AUTHORS.md':
+                    snap(prefix + '-contacts-viewer', viewer)
+                    viewer.browser.verticalScrollBar().setValue(viewer.browser.verticalScrollBar().maximum())
+                    snap(prefix + '-collaboration-viewer', viewer)
+                    viewer.original_authors.click()
+                    assert 'SharpED' in viewer.browser.toPlainText()
+                    snap(prefix + '-original-credits', viewer)
+                elif name == 'CITATION.cff':
+                    assert viewer.browser.toPlainText() == viewer.raw_text.replace('\r\n', '\n')
+                    snap(prefix + '-citation-metadata', viewer)
+                elif not third:
                     viewer.search.setText('permission')
                     viewer.find_next()
                     assert 'permission' in viewer.browser.textCursor().selectedText().lower()
@@ -151,9 +162,13 @@ def run(directory):
             report['narrow'] = profile
             from PySide6.QtWidgets import QPushButton
             action = next(b for b in narrow.stack.currentWidget().findChildren(QPushButton)
-                          if b.text() == 'View original authors')
+                          if b.text() == 'Contacts and credits')
             action.setFocus(Qt.TabFocusReason)
             narrow.stack.currentWidget().ensureWidgetVisible(action)
+            settle()
+            from PySide6.QtCore import QPoint
+            panel = narrow.stack.currentWidget()
+            assert panel.viewport().rect().contains(QRect(action.mapTo(panel.viewport(), QPoint()), action.size()))
             snap('narrow-authors-action', narrow)
             narrow.close()
         with patch.object(QScreen, 'availableGeometry', return_value=QRect(0, 0, 640, 360)):
@@ -164,6 +179,13 @@ def run(directory):
             assert short.rect().contains(short.close_button.geometry())
             report['short'] = dict(geometry=short.geometry().getRect(), content_height=short.stack.height())
             snap('short-screen-authors', short)
+            panel = short.stack.currentWidget()
+            action = next(b for b in panel.findChildren(QPushButton) if b.text() == 'Contacts and credits')
+            action.setFocus(Qt.TabFocusReason)
+            panel.ensureWidgetVisible(action)
+            settle()
+            assert panel.viewport().rect().contains(QRect(action.mapTo(panel.viewport(), QPoint()), action.size()))
+            snap('short-screen-authors-action', short)
             short.close()
         owner.close()
     first_header.deleteLater()
