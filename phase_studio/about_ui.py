@@ -302,6 +302,7 @@ class AboutDialog(QDialog):
         badge = header.findChild(QLabel, 'versionBadge')
         badge.setText('v' + version.VERSION + '\nDevelopment')
         badge.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.version_label = badge
         layout.addWidget(header)
         profile = 'Jana2020 integration' if jana else 'Standalone application'
         description = QLabel('Crystallographic structure solution and electron-density processing. · ' + profile)
@@ -310,6 +311,7 @@ class AboutDialog(QDialog):
         description.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         description.setToolTip(profile)
         description.setAccessibleDescription(description.toolTip())
+        self.mode_label = description
         layout.addWidget(description)
         navigation = QWidget()
         navigation.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)

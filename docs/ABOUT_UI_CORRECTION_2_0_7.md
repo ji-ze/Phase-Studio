@@ -1,4 +1,4 @@
-﻿# About UI correction for Phase Studio 2.0.7
+# About UI correction for Phase Studio 2.0.7
 
 The four-card About dialog now uses a readable standard UI face, a compact 720 × 420 logical-pixel layout, and a reusable document reader. The scientific dashboard, update security, legal resource bytes, version and branding font loader are unchanged by this correction.
 
@@ -22,7 +22,7 @@ Both profiles have the same four cards and stable outer geometry. Search, copy, 
 
 Isolated build inputs preserve the original legal baseline bytes explicitly; a fresh Windows checkout's automatic CRLF conversion must not silently change the packaged resource hashes. Raw-copy regressions compare original bytes directly rather than assuming a particular checkout newline convention.
 
-Focused verification: **23 passed**. This includes all four Qt scale factors (1, 1.25, 1.5, 2), source access and Unicode/extended paths, existing branding path tests, application-menu/About ownership checks and update UI regressions. Eleven legal authority hashes match the preserved local baseline, including LICENSE, AUTHORS.md, CITATION.cff, THIRD_PARTY_NOTICES.md, bundled upstream texts and the Science Gothic OFL. Complete exact-source regression and frozen artifact evidence are recorded in draft [PR #21](https://github.com/ji-ze/Phase-Studio/pull/21) and the local `build/about207-correction/` evidence directory; focused results are not a substitute for those gates.
+Focused verification: **25 passed**. This includes all four Qt scale factors (1, 1.25, 1.5, 2), source access and Unicode/extended paths, existing branding path tests, application-menu/About ownership checks, legacy release diagnostic compatibility and update UI regressions. Eleven legal authority hashes match the preserved local baseline, including LICENSE, AUTHORS.md, CITATION.cff, THIRD_PARTY_NOTICES.md, bundled upstream texts and the Science Gothic OFL. Complete exact-source regression and frozen artifact evidence are recorded in draft [PR #21](https://github.com/ji-ze/Phase-Studio/pull/21) and the local `build/about207-correction/` evidence directory; focused results are not a substitute for those gates.
 
 The screenshots below are **actual Qt widgets** with public About/legal content. Offscreen images use controlled screen geometry; the native Windows image is also a controlled fixture. Neither establishes human physical/mixed-DPI acceptance. No scientific inference was run.
 
