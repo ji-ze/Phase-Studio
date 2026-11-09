@@ -495,7 +495,11 @@ class AboutDialog(QDialog):
             self.viewer.deleteLater()
         previous = QApplication.focusWidget()
         self.viewer = DocumentDialog(self, name, third_party=third_party, contacts=contacts)
-        self.viewer.finished.connect(lambda _result: _restore_focus(previous))
+        def finished(_result):
+            if self.isVisible():
+                activate_owned_dialog(self)
+                _restore_focus(previous)
+        self.viewer.finished.connect(finished)
         self.viewer.open()
         return self.viewer
 
