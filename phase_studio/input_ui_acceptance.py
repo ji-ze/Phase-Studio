@@ -88,7 +88,7 @@ def run(directory):
                 analysis=a.analyze_hkl_data(source,mode,cell,sg,sg.xhm(),load.source_note,_loaded=load)
                 dialog=analyze_data_dialog(win,analysis)
                 dialog.show();settle()
-                assert tuple(dialog.analysis_tabs.tabText(i) for i in range(7))==TABS
+                assert tuple(dialog.analysis_tabs.tabText(i).replace('&&', '&') for i in range(7))==TABS
                 for i,tab in enumerate(TABS):
                     dialog.analysis_tabs.setCurrentIndex(i);settle()
                     snap(name+('-powder-' if powder else '-single-')+str(i+1),dialog)

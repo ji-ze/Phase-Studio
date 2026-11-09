@@ -35,7 +35,9 @@ with patch.object(window,'_path_value',side_effect=lambda key: str(source) if ke
     assert 'ochlor.m90' in cfg.wavelength_source
     assert a.powder_superflip_keywords('',cfg.powder_wavelength)=='lambda 1.541866'
 # Missing wavelength opens the editable setting, not an executable picker.
-report=a.ErrorReport('input_validation','input','Wavelength missing','Superflip FWHM requires wavelength','','')
+from phase_studio.validation_issues import ValidationIssue
+report=a.ErrorReport('input_validation','input','Wavelength missing','Superflip FWHM requires wavelength','','',
+    issues=(ValidationIssue('Measured wavelength missing', 'powder_wavelength', 'powder_wavelength', 'Map feedback'),))
 actions=window._error_actions(report)
 assert [action.label for action in actions]==['Set measured wavelength']
 actions[0].callback()

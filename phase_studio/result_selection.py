@@ -708,15 +708,17 @@ class ResultSelectionDialog(QDialog):
             )
 
         self._preview_figure = Figure(figsize=(6.0, 3.4), dpi=100)
-        preview_canvas = FigureCanvas(self._preview_figure)
+        class PreviewCanvas(FigureCanvas):
+            def sizeHint(self):
+                hint = super().sizeHint()
+                hint.setHeight(130)
+                return hint
+        preview_canvas = PreviewCanvas(self._preview_figure)
         preview_canvas.setObjectName("resultPreviewCanvas")
         preview_canvas.setFocusPolicy(Qt.StrongFocus)
-        # This is the flexible region.  A large canvas minimum used to force
-        # the native dialog taller after its pre-layout screen clamp, placing
-        # the handoff actions below the Windows work area on short monitors.
-        # The actual viewport must shrink with a short screen. A taller canvas
-        # minimum paints a correctly fitted model outside the clipped panel.
-        preview_canvas.setMinimumHeight(40)
+        # The independent body scrolls on short screens while retaining a useful
+        # preview. Its preferred height must not inherit the figure's pixel size.
+        preview_canvas.setMinimumHeight(130)
         preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_host.structure_canvas = preview_canvas
         self._preview_canvas = preview_canvas
@@ -906,7 +908,9 @@ class ResultSelectionDialog(QDialog):
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
         splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        splitter.setMinimumHeight(150)
+        # Let the preview controls and useful canvas determine the body minimum.
+        # An explicit 150px floor suppresses QSplitter's child minimum hint and
+        # leaves content outside the scrollable area's reported extent.
         content_layout.addWidget(splitter, 1)
         self._splitter = splitter
         self._splitter_user_resized = False
@@ -1069,6 +1073,8 @@ class ResultSelectionDialog(QDialog):
             self._reason_label.setVisible(False)
         if hasattr(self, "_splitter") and not getattr(self, "_splitter_user_resized", False):
             QTimer.singleShot(0, self._set_initial_splitter_sizes)
+        if hasattr(self, '_preview_section'):
+            QTimer.singleShot(0, self._sync_preview_extent)
         if hasattr(self, "_preview_fit_timer") and not self._preview_user_interacted:
             self._preview_fit_timer.start()
 
@@ -1520,7 +1526,16 @@ class ResultSelectionDialog(QDialog):
 
     def _schedule_preview_fit(self) -> None:
         """Fit after Qt resolves the canvas, coalescing resize bursts."""
+        self._sync_preview_extent()
         self._preview_fit_timer.start()
+
+    def _sync_preview_extent(self) -> None:
+        # QSplitter does not propagate wrapped child layouts' height-for-width
+        # into a QScrollArea. Keep the complete preview in its scroll extent.
+        layout = self._preview_section.layout()
+        required = max(layout.minimumSize().height(), layout.heightForWidth(self._preview_section.width()))
+        if self._preview_section.minimumHeight() != required:
+            self._preview_section.setMinimumHeight(required)
 
     def _on_preview_resize(self, _event) -> None:
         if not self._closed and not self._preview_user_interacted:

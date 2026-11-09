@@ -830,6 +830,13 @@ def bounded_tooltip(text, width=64):
     """Wrap presentation only; exact source strings stay in copy/details APIs."""
     from html import escape
     import textwrap
+    from .ui_style import _TOOLTIP_WRAP_PREFIX
+    if str(text).startswith(_TOOLTIP_WRAP_PREFIX):
+        from PySide6.QtGui import QTextDocument
+        document = QTextDocument()
+        document.setHtml(str(text))
+        text = document.toPlainText()
     lines = [textwrap.fill(line, width=width, break_long_words=True,
                           break_on_hyphens=False) for line in str(text).splitlines()]
-    return '<qt>' + escape('\n'.join(lines)).replace('\n', '<br>') + '</qt>'
+    body = escape('\n'.join(lines)).replace('\n', '<br>')
+    return f'{_TOOLTIP_WRAP_PREFIX}380px;">{body}</div>'

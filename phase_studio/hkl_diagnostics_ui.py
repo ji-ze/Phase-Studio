@@ -922,6 +922,8 @@ def validation_dialog(win, result):
         f'\nInvalid values: {report.count("invalid_values")} · Rejected records: {report.count("rejected_records")}')
     summary.setToolTip('Original overlapping findings: ' + integrity_text +
         '. Category totals are not counts of invalid records. These checks do not establish experimental validity.')
+    if not complete:
+        summary.setText(summary.text() + ' · Some checks unavailable')
     dialog.hkl_integrity_status = summary
     summary.setWordWrap(True)
     layout.addWidget(summary)

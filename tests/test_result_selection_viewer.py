@@ -210,6 +210,10 @@ def main():
     check("manual vertical shrink preserves both footer actions",
           available.contains(action_rect) and available.contains(close_rect)
           and dialog._footer.isVisible())
+    # Short windows retain a useful canvas in the independently scrollable
+    # body; the footer remains fixed instead of forcing a 720px minimum.
+    dialog._content_scroll.ensureWidgetVisible(dialog._preview_canvas, 0, 0)
+    app.processEvents()
     canvas_rect = QRect(dialog._preview_canvas.mapToGlobal(QPoint(0, 0)), dialog._preview_canvas.size())
     footer_top = dialog._footer.mapToGlobal(QPoint(0, 0)).y()
     check("reduced-height preview keeps a meaningful canvas above the fixed footer",
