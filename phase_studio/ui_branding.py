@@ -798,3 +798,38 @@ def guard_numeric_wheel(editor):
     guard = _IntentionalWheel(editor)
     editor.installEventFilter(guard)
     editor._intentional_wheel_guard = guard
+
+
+def create_help_topic_navigation(entries, callback):
+    """One accessible standard selector; topic links never wrap into orphan rows."""
+    from PySide6.QtWidgets import QComboBox
+    widget = QWidget()
+    widget.setObjectName('helpTopicNavigation')
+    row = QHBoxLayout(widget)
+    row.setContentsMargins(0, 0, 0, 0)
+    label = QLabel('CONTENTS')
+    label.setObjectName('helpContentsLabel')
+    row.addWidget(label)
+    selector = QComboBox()
+    selector.setAccessibleName('Help topic')
+    selector.addItem('Choose a topic…', None)
+    for title, anchor in entries:
+        selector.addItem(title, anchor)
+    selector.setMaximumWidth(260)
+    selector.setMinimumContentsLength(15)
+    selector.activated.connect(lambda index: callback(selector.itemData(index))
+                               if selector.itemData(index) is not None else None)
+    label.setBuddy(selector)
+    row.addWidget(selector, 1)
+    row.addStretch()
+    widget.selector = selector
+    return widget
+
+
+def bounded_tooltip(text, width=64):
+    """Wrap presentation only; exact source strings stay in copy/details APIs."""
+    from html import escape
+    import textwrap
+    lines = [textwrap.fill(line, width=width, break_long_words=True,
+                          break_on_hyphens=False) for line in str(text).splitlines()]
+    return '<qt>' + escape('\n'.join(lines)).replace('\n', '<br>') + '</qt>'

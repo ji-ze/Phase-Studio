@@ -191,7 +191,7 @@ class UpdateNotice(QDialog):
         layout.invalidate()
         layout.activate()
         from .ui_branding import apply_safe_dialog_geometry
-        apply_safe_dialog_geometry(self, 500, max(180, layout.sizeHint().height(), layout.totalHeightForWidth(500)))
+        apply_safe_dialog_geometry(self, 500, max(140, layout.sizeHint().height(), layout.totalHeightForWidth(500)))
 
     def _open_release(self):
         self.browser(QUrl(validated_release_url(self.release.url,version=self.release.version)))

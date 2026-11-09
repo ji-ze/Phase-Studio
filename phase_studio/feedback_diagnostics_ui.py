@@ -33,12 +33,13 @@ class ReflectionChanges(QAbstractTableModel):
 
 
 class FeedbackDiagnosticsDialog(QDialog):
-    def __init__(self,parent,reports,directory):
+    def __init__(self,parent,reports,directory,*,historical=False):
         super().__init__(parent)
         self.setWindowFlag(Qt.WindowMaximizeButtonHint,True)
         self.setWindowTitle('Map Feedback diagnostics');self.resize(1120,780)
-        self.directory=directory;self.reports=reports;self.report=None
+        self.directory=directory;self.reports=reports;self.report=None;self.historical=historical
         layout=QVBoxLayout(self);top=QHBoxLayout()
+        self.provenance=QLabel();self.provenance.setWordWrap(True);layout.addWidget(self.provenance)
         self.cycle=QComboBox();self.operation=QComboBox()
         self.operation.addItem('All operations',None)
         for name in OPERATIONS:self.operation.addItem(TITLES[name],name)
@@ -46,7 +47,7 @@ class FeedbackDiagnosticsDialog(QDialog):
         reopen=QPushButton('Open recorded run…');reopen.clicked.connect(self.open_run);top.addWidget(reopen)
         layout.addLayout(top)
         self.notes=QPlainTextEdit();self.notes.setReadOnly(True);self.notes.setMaximumHeight(110);layout.addWidget(self.notes)
-        tabs=QTabWidget();layout.addWidget(tabs,1)
+        tabs=QTabWidget();self.tabs=tabs;layout.addWidget(tabs,1)
         self.summary=QTableWidget();tabs.addTab(self.summary,'Operation summaries')
         self.figure=Figure(figsize=(9,4));self.canvas=FigureCanvasQTAgg(self.figure);tabs.addTab(self.canvas,'Change by source cycle')
         self.table=QTableView();self.table.setAlternatingRowColors(True);self.table.setSortingEnabled(True)
@@ -65,18 +66,28 @@ class FeedbackDiagnosticsDialog(QDialog):
         written_layout.addWidget(self.written_label);written_layout.addWidget(self.written_export)
         written_layout.addWidget(self.written_table,1);tabs.addTab(written_page,'Actual written inputs')
         buttons=QHBoxLayout()
+        self.cycle_exports=[]
         for text,slot in [('Export cycle JSON',self.export_json),('Export cycle CSV',self.export_cycle_csv)]:
-            button=QPushButton(text);button.clicked.connect(slot);buttons.addWidget(button)
+            button=QPushButton(text);button.clicked.connect(slot);buttons.addWidget(button);self.cycle_exports.append(button)
         self.cumulative_export=QPushButton('Export cumulative CSV')
         self.cumulative_export.clicked.connect(self.export_cumulative_csv);buttons.addWidget(self.cumulative_export)
         buttons.addStretch();close=QPushButton('Close');close.clicked.connect(self.close);buttons.addWidget(close);layout.addLayout(buttons)
         self.cycle.currentIndexChanged.connect(self.select_cycle);self.operation.currentIndexChanged.connect(self.select_cycle)
         self.refresh(reports)
         from .ui_branding import fit_dialog_to_available_screen
-        fit_dialog_to_available_screen(self,QSize(1120,780))
+        fit_dialog_to_available_screen(self,QSize(1000,660) if reports else QSize(620,240))
+        self.setMinimumSize(min(420,self.width()),min(240,self.height()))
 
     def refresh(self,reports):
         selected=self.cycle.currentData();self.reports=reports
+        available=bool(reports)
+        self.tabs.setVisible(available)
+        self.cycle.setVisible(available);self.operation.setVisible(available)
+        for button in self.cycle_exports+[self.cumulative_export]:button.setVisible(available)
+        runs=sorted({str(report.get('run_id') or 'unavailable') for report in reports})
+        self.provenance.setText(('Recorded run' if self.historical else 'Current run') + ': ' +
+            (', '.join(runs) if runs else 'No observations available') + ' · Source: ' + Path(self.directory).name)
+        self.provenance.setToolTip(str(Path(self.directory).resolve()))
         self.cycle.blockSignals(True);self.cycle.clear()
         if any(r.get('source_cycle')==1 and r.get('cycle_input') for r in reports):
             self.cycle.addItem('Original input for cycle 1 · no preceding Map Feedback',0)
@@ -98,6 +109,7 @@ class FeedbackDiagnosticsDialog(QDialog):
         self.figure.tight_layout();self.canvas.draw_idle()
 
     def select_cycle(self,*_):
+        for button in self.cycle_exports:button.setEnabled(False)
         self.summary.setRowCount(0);self.table.setModel(None);self.cumulative_table.setModel(None)
         self.cumulative_label.setText('Cumulative comparison unavailable: original or actual input observations were not recorded.')
         self.cumulative_export.setEnabled(False);self._cumulative_report=None
@@ -117,6 +129,8 @@ class FeedbackDiagnosticsDialog(QDialog):
         try:self.report=load_report(summary)
         except (OSError,ValueError) as exc:
             self.notes.setPlainText('Recorded diagnostics unavailable: '+str(exc));self.report=None;return
+        self.cycle_exports[0].setEnabled(True)
+        self.cycle_exports[1].setEnabled(any(operation.get('rows') for operation in self.report.get('operations',[])))
         if initial:
             self.report=self.report|dict(source_cycle=0,target_cycle=1,operations=[],
                 target_input=self.report['cycle_input'],written_reflections=None,next_cycle_reflection_file=None,

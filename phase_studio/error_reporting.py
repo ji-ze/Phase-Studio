@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
+from phase_studio.validation_issues import ValidationIssue
 
 try:
     from phase_studio.version import VERSION as __version__
@@ -57,6 +58,7 @@ class ErrorReport:
     technical_details: str
     operation: str = ""
     severity: str = "error"
+    issues: tuple[ValidationIssue, ...] = ()
 
     def diagnostic_block(self) -> str:
         lines = [
@@ -66,6 +68,8 @@ class ErrorReport:
         ]
         if self.operation:
             lines.append(f"Operation: {self.operation}")
+        for issue in self.issues:
+            lines.append(f'Validation: {issue.code} · {issue.page} · {issue.setting}')
         lines.extend((f"Summary: {self.summary}", "", self.technical_details.strip()))
         return sanitize_error_details("\n".join(lines).strip())
 
@@ -336,6 +340,21 @@ def build_error_report(
 
 
 def build_validation_report(issues: Sequence[str], *, technical_details: str = "") -> ErrorReport:
+    structured = tuple(dict.fromkeys(issue for issue in issues if isinstance(issue, ValidationIssue)))
+    if structured:
+        bullets = '\n'.join('• ' + sanitize_error_details(issue) for issue in dict.fromkeys(issues))
+        significance = len(issues) == 1 and structured[0].code == 'significance_fwhm'
+        return ErrorReport(
+            category='input_validation', subsystem='Input',
+            title='Invalid reflection significance threshold' if significance else 'Cannot start workflow',
+            summary=('FWHM is a peak-width measurement, not an intensity or amplitude uncertainty. '
+                     'A positive significance threshold cannot be applied to this input format.'
+                     if significance else 'Please review the following settings:\n' + bullets),
+            guidance=('Set the significance threshold to zero to disable significance filtering. '
+                      'Your parameters have not been changed.' if significance else
+                      'Use the issue-specific actions to review the affected settings.\n' + bullets),
+            technical_details=sanitize_error_details(technical_details or bullets),
+            operation='Pre-run validation', issues=structured)
     unique = list(dict.fromkeys(str(issue).strip() for issue in issues if str(issue).strip()))
     bullets = "\n".join(f"• {issue}" for issue in unique)
     wavelength_issue = next((issue for issue in unique if "wavelength" in issue.casefold()
@@ -349,6 +368,7 @@ def build_validation_report(issues: Sequence[str], *, technical_details: str = "
                      "Zero requests automatic detection; no wavelength was found.\n" + bullets,
             technical_details=sanitize_error_details(technical_details or bullets),
             operation="Pre-run validation", severity="error",
+            issues=(ValidationIssue(wavelength_issue, 'powder_wavelength', 'powder_wavelength', 'Map feedback'),),
         )
     if len(unique) == 1:
         issue = unique[0]
@@ -395,7 +415,7 @@ def show_phase_studio_error(
     actions: Sequence[ErrorAction] = (),
 ) -> str:
     """Show one compact, expandable, cross-platform Phase Studio error dialog."""
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QSize
     from PySide6.QtGui import QFont
     from PySide6.QtWidgets import (
         QApplication,
@@ -404,6 +424,7 @@ def show_phase_studio_error(
         QLabel,
         QPlainTextEdit,
         QPushButton,
+        QMenu,
         QVBoxLayout,
         QWidget,
     )
@@ -486,22 +507,32 @@ def show_phase_studio_error(
         details_button.setText("Hide details" if expanded else "Show details")
         dialog.adjustSize()
         target_height = min(610, dialog.sizeHint().height()) if expanded else max(250, dialog.minimumSizeHint().height())
-        dialog.resize(max(520, min(700, dialog.width())), target_height)
+        from .ui_branding import fit_dialog_to_available_screen
+        fit_dialog_to_available_screen(dialog, QSize(max(420, min(700, dialog.width())), target_height))
 
     details_button.clicked.connect(toggle_details)
     copy_button.clicked.connect(lambda: QApplication.clipboard().setText(report.diagnostic_block()))
 
-    for action in actions:
-        button = QPushButton(action.label)
-        button.setObjectName("errorPrimaryAction" if action.primary else "errorAction")
-        button.setMinimumHeight(30)
+    def choose_action(action):
+        selected['label'] = action.label
+        dialog.accept()
 
-        def choose(_checked: bool = False, selected_action: ErrorAction = action) -> None:
-            selected["label"] = selected_action.label
-            dialog.accept()
-
-        button.clicked.connect(choose)
+    if len(actions) > 1:
+        button = QPushButton('Review affected settings…')
+        button.setObjectName('errorPrimaryAction')
+        menu = QMenu(button)
+        for action in actions:
+            item = menu.addAction(action.label)
+            item.triggered.connect(lambda _checked=False, action=action: choose_action(action))
+        button.setMenu(menu)
         button_row.addWidget(button)
+    else:
+        for action in actions:
+            button = QPushButton(action.label)
+            button.setObjectName('errorPrimaryAction' if action.primary else 'errorAction')
+            button.setMinimumHeight(30)
+            button.clicked.connect(lambda _checked=False, action=action: choose_action(action))
+            button_row.addWidget(button)
 
     close_button = QPushButton("Close")
     close_button.setObjectName("errorCloseButton")
@@ -514,6 +545,10 @@ def show_phase_studio_error(
     body_layout.addLayout(button_row)
     root.addWidget(body)
 
+    from .ui_branding import fit_dialog_to_available_screen
+    dialog.setMinimumWidth(0)
+    fit_dialog_to_available_screen(dialog, QSize(620, max(280, dialog.minimumSizeHint().height())))
+    dialog.setMinimumWidth(min(420, dialog.width()))
     dialog.exec()
     chosen = selected["label"]
     if chosen:

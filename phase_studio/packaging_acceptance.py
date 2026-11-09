@@ -11,6 +11,9 @@ from unittest.mock import patch
 
 
 def run(directory):
+    if os.environ.get('PHASE_STUDIO_GUI_POLISH_ACCEPTANCE') == '1':
+        from .gui_polish_acceptance import run as run_gui_polish
+        return run_gui_polish(directory)
     if os.environ.get('PHASE_STUDIO_ABOUT_UI_ACCEPTANCE') == '1':
         from .about_ui_acceptance import run as run_about_ui
         return run_about_ui(directory)

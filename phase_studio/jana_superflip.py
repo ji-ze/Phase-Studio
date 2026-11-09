@@ -1140,7 +1140,7 @@ class _JanaWorkflowWizard:
     WIZARD_MIN_WIDTH = 720
     WIZARD_PREFERRED_WIDTH = 1000
     WIZARD_MAX_WIDTH = 1040
-    WIZARD_PREFERRED_HEIGHT = 760
+    WIZARD_PREFERRED_HEIGHT = 720
     WIZARD_MAX_SCREEN_FRACTION = 0.92
 
     def _available_screen_width(self) -> int:
@@ -1182,12 +1182,15 @@ class _JanaWorkflowWizard:
 
     def _preferred_dialog_height(self) -> int:
         """Measure the initial page once; later navigation preserves user geometry."""
+        from phase_studio.ui_style import PHASE_STUDIO_SPACING as spacing
         target = self.WIZARD_PREFERRED_HEIGHT
         if getattr(self, 'chrome_holder', {}).get('footer') is not None:
             width = self._preferred_dialog_width()
             chrome = sum(widget.sizeHint().height() for widget in
                          (self.brand_header, self.context_banner, self.footer))
-            target = max(target, self._content_height_for_width(width) + chrome + 16)
+            # Leave one normal inline gap for deferred font/metadata layout;
+            # otherwise Qt can create a scrollbar for just two padding pixels.
+            target = min(target, max(520, self._content_height_for_width(width) + chrome + 16 + spacing['inline_gap']))
         available = self._available_screen_height()
         if available > 0:
             target = min(target, max(1, int(available * self.WIZARD_MAX_SCREEN_FRACTION)))
@@ -1199,6 +1202,10 @@ class _JanaWorkflowWizard:
     # editor width, with the spare width becoming flexible space so the labels
     # stay aligned. Still well within the usable area at 1366x768.
     MAP_FEEDBACK_EDITOR_WIDTH = 180
+
+    def _set_compact_body_margins(self):
+        from phase_studio.ui_style import PHASE_STUDIO_SPACING as spacing
+        self.content_layout.setContentsMargins(spacing['page_margin'], spacing['heading_gap'], spacing['page_margin'], 0)
 
     def _constrain_numeric_editors(self, *editors) -> None:
         """Give short numeric editors a sensible preferred width."""
@@ -1238,7 +1245,7 @@ class _JanaWorkflowWizard:
         try:
             self.content_layout.setSpacing(max(0,spacing["section_gap"]-2))
             margin = spacing["page_margin"]
-            self.content_layout.setContentsMargins(margin, 10, margin, 10)
+            self.content_layout.setContentsMargins(margin, spacing['heading_gap'], margin, 0)
         except Exception:
             pass
 
@@ -1788,7 +1795,7 @@ class _JanaWorkflowWizard:
         self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.content = QWidget()
         self.content_layout = QVBoxLayout(self.content)
-        self.content_layout.setContentsMargins(14, 10, 14, 10)
+        self._set_compact_body_margins()
         self.content_layout.setSpacing(10)
         self.scroll_area.setWidget(self.content)
         self.outer_root.addWidget(self.scroll_area, 1)
@@ -2066,11 +2073,7 @@ class _JanaWorkflowWizard:
         for button in (self.validate_hkl_button, self.analyze_completeness_button):
             button.setMinimumWidth(diagnostic_width)
         self.input_summary_body.addLayout(self.hkl_buttons_column)
-        composition_row = QHBoxLayout()
-        composition_row.setSpacing(10)
-        composition_row.addWidget(QLabel("Superflip input composition"))
-        composition_row.addWidget(self.composition_value, 1)
-        self.input_summary_body.addLayout(composition_row)
+        self.input_summary_right_layout.addRow("Composition", self.composition_value)
         self.page1_layout.addWidget(self.input_summary_section)
 
         def refresh_input_summary() -> None:
@@ -2483,7 +2486,7 @@ class _JanaWorkflowWizard:
                 self.setProperty("workflowTier", tier)
                 self.setProperty("recommended", secondary == "Recommended")
                 if icon_source.startswith("workflow_"):
-                    self.setMinimumHeight(76 if tier == "primary" else 94)
+                    self.setMinimumHeight(64 if tier == "primary" else 78)
                     # Recommendation is a label, not a permanent selection.
                     self.setStyleSheet(
                         'QFrame#actionTile[recommended="true"] { background:#f3f8ff; border-color:#8fa9cc; }'
@@ -2935,7 +2938,7 @@ class _JanaWorkflowWizard:
         self.model_row_layout.addStretch(1)
         self.refresh_layout.addWidget(self.model_status, 1, Qt.AlignVCenter)
         self.model_state_row = QWidget()
-        self.model_state_row.setMaximumWidth(560)
+        self.model_state_row.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         state_layout = QHBoxLayout(self.model_state_row)
         state_layout.setContentsMargins(0,0,0,0)
         state_layout.setSpacing(8)
@@ -3593,13 +3596,23 @@ class _JanaWorkflowWizard:
             self.intensity_sigma_spin.setEnabled(enabled and has_sigma)
             self.intensity_sigma_spin.setVisible(has_sigma)
             self.intensity_form.labelForField(self.intensity_sigma_spin).setVisible(has_sigma)
-            inactive = enabled and self.intensity_damping_spin.value() == 0
-            self.intensity_effective_note.setText("No intensity correction: damping is 0; observed values are retained." if inactive else
-                "Intensity correction will use the configured positive damping." if enabled else "")
+            from phase_studio.feedback_presentation import effective_operation
+            state = effective_operation(enabled, self.intensity_start_cycle_spin.value(), self.cycles.value(),
+                self.intensity_damping_spin.value(), available=has_sigma or self.intensity_sigma_spin.value() == 0)
+            if enabled and state.status == 'Configured but inactive':
+                text = f"Intensity correction configured but inactive\nCorrection damping is {self.intensity_damping_spin.value():.3f}, so observed intensities are retained unchanged."
+            elif enabled and state.active:
+                text = 'Intensity correction awaits an eligible completed cycle; positive damping is configured.\n' + state.reason
+            else:
+                text = 'Intensity correction: ' + state.status + '\n' + state.reason if enabled else ''
+            self.intensity_effective_note.setText(text)
             self.intensity_effective_note.setVisible(enabled)
 
         self.intensity_enabled_checkbox.toggled.connect(sync_intensity_dependency)
         self.intensity_damping_spin.valueChanged.connect(sync_intensity_dependency)
+        self.intensity_start_cycle_spin.valueChanged.connect(sync_intensity_dependency)
+        self.intensity_sigma_spin.valueChanged.connect(sync_intensity_dependency)
+        self.cycles.valueChanged.connect(sync_intensity_dependency)
         sync_intensity_dependency()
 
         def sync_powder_dependency(_checked: bool = False) -> None:
@@ -3617,6 +3630,7 @@ class _JanaWorkflowWizard:
                     f"Automatic wavelength: {wavelength:.10g} Å · {source}"
                     if wavelength > 0 else "No automatic wavelength was found. Enter a positive measured wavelength."
                 )
+                self.powder_wavelength_status.setToolTip(source if wavelength > 0 else 'No wavelength source verified')
                 self.powder_wavelength_status.setVisible(True)
             else:
                 self.powder_wavelength_status.setVisible(False)
@@ -3642,9 +3656,16 @@ class _JanaWorkflowWizard:
                 if not compatible or not checkbox.isChecked():
                     continue
                 selected.append(title)
-                if total > 1 and start.value() < total and magnitude > 0:
-                    if title != 'Powder repartitioning' or self._map_feedback_wavelength()[0] > 0:
-                        active.append((title, start.value() + 1))
+                from phase_studio.feedback_presentation import effective_operation
+                available = True
+                if title == 'Powder repartitioning':
+                    available = self._map_feedback_wavelength()[0] > 0
+                elif title == 'Intensity correction':
+                    available = getattr(self, 'feedback_has_uncertainty', False) or self.intensity_sigma_spin.value() == 0
+                state = effective_operation(True, start.value(), total, magnitude, compatible=compatible,
+                    available=available)
+                if state.active:
+                    active.append((title, state.target_cycle))
             if active:
                 text = ('<b>Map Feedback enabled</b> · '+ ' → '.join(name for name, _ in active)+
                         '<br>Scientific warning: Map Feedback uses derived reflection data for subsequent cycles. '
@@ -3660,7 +3681,7 @@ class _JanaWorkflowWizard:
             text += '<br>Original experimental input files are never modified.'
             noops = [name for name in selected if name not in {name for name, _ in active}]
             if active and noops:
-                text += '<br>This setting currently has no effect: ' + ', '.join(noops) + '.'
+                text += '<br>Configured but inactive: ' + ', '.join(noops) + '. See the reason beside its controls.'
             self.map_feedback_warning_text.setText(text)
             self.map_feedback_warning_icon.setPixmap(self.dialog.style().standardIcon(icon).pixmap(20, 20))
             cycle_text = cycle_count_text(total) + ' configured'
@@ -3855,7 +3876,7 @@ class _JanaWorkflowWizard:
             self.scroll_area.verticalScrollBar().setValue(0)
 
         def go_to_page1() -> None:
-            self.content_layout.setContentsMargins(14, 10, 14, 14)
+            self._set_compact_body_margins()
             if self._current_workflow() not in (
                 WORKFLOW_SUPERFLIP_ONLY, WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_AUTOSOLVE,
             ):
@@ -3886,7 +3907,7 @@ class _JanaWorkflowWizard:
         self.cycles.valueChanged.connect(sync_processing_navigation)
 
         def go_to_page2() -> None:
-            self.content_layout.setContentsMargins(14, 16, 14, 10)
+            self._set_compact_body_margins()
             self.stack.setCurrentWidget(self.page2)
             self.back_button.setVisible(True)
             self.primary_button.setVisible(True)
@@ -3910,7 +3931,7 @@ class _JanaWorkflowWizard:
             # unknown state fail-closed until its existing worker completes.
             if getattr(self, "hkl_load_result", None) is None:
                 self._refresh_input_summary_and_refit()
-            self.content_layout.setContentsMargins(14, 10, 14, 10)
+            self._set_compact_body_margins()
             self._sync_page3_for_data_type()
             self._refresh_page3_validation_message()
             self.stack.setCurrentWidget(self.page3)

@@ -8952,7 +8952,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         main_layout.setContentsMargins(8, 8, 8, 8)
         self.main_splitter = QSplitter(Qt.Horizontal)
         self.main_splitter.setObjectName("mainSplitter")
-        self.main_splitter.setHandleWidth(1)
+        self.main_splitter.setHandleWidth(4)
         main_layout.addWidget(self.main_splitter)
 
         left = QWidget()
@@ -8989,13 +8989,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(8, 4, 6, 4)
         right_layout.setSpacing(6)
-        self.main_splitter.addWidget(right)
+        # Keep dashboard controls reachable on high-DPI desktops narrower
+        # than the combined panel minima. The viewport scrolls only when the
+        # dashboard cannot fit; the existing splitter remains user-adjustable.
+        self.dashboard_scroll = QScrollArea()
+        self.dashboard_scroll.setObjectName("dashboardScroll")
+        self.dashboard_scroll.setWidgetResizable(True)
+        self.dashboard_scroll.setFrameShape(QFrame.NoFrame)
+        self.dashboard_scroll.setMinimumWidth(300)
+        self.dashboard_scroll.setWidget(right)
+        self.main_splitter.addWidget(self.dashboard_scroll)
         left.setMinimumWidth(400)
         right.setMinimumWidth(600)
         self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.setStretchFactor(0, 4)
         self.main_splitter.setStretchFactor(1, 7)
-        self.main_splitter.setSizes([520, 900])
+        self.main_splitter.setSizes([570, 850])
 
         self.status_badge = QLabel("READY")
         self.status_badge.setObjectName("statusBadge")
@@ -9049,22 +9058,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_basic_help_tab(self) -> None:
         basic_help_tab = self._add_settings_tab("Help")
-        basic_contents_row = FlowLayout(spacing=4)
-        basic_contents_label = QLabel("CONTENTS")
-        basic_contents_label.setObjectName("helpContentsLabel")
-        basic_contents_row.addWidget(basic_contents_label)
-        for link_text, anchor in (
-            ("Setup", "setup"), ("Input", "input"), ("Workflow", "workflow"),
-            ("Output", "output"), ("Map feedback", "map_feedback"), ("Jana2020", "jana_integration"),
-        ):
-            link = QToolButton()
-            link.setObjectName("helpNavLink")
-            link.setText(link_text)
-            link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-            link.setCursor(Qt.PointingHandCursor)
-            link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
-            basic_contents_row.addWidget(link)
-        basic_help_tab.addLayout(basic_contents_row)
+        from phase_studio.ui_branding import create_help_topic_navigation
+        basic_help_tab.addWidget(create_help_topic_navigation(
+            [('Setup', 'setup'), ('Input', 'input'), ('Workflow', 'workflow'), ('Output', 'output'), ('Map feedback', 'map_feedback'), ('Jana2020', 'jana_integration')],
+            lambda anchor: self._open_help_section(anchor)))
         setup_help_layout = self._add_help_section(basic_help_tab, "setup", "Phase Studio guide", """
             <h3>1. Select the input</h3>
             <p>Phase Studio can use a Jana2020 <b>.inflip</b> file, a Jana2020 .inflip file with selected external overrides, or an external HKL file.</p>
@@ -9329,22 +9326,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def _build_advanced_help_tab(self) -> None:
         advanced_help_tab = self._add_settings_tab("Help", advanced=True)
-        advanced_contents_row = FlowLayout(spacing=4)
-        advanced_contents_label = QLabel("CONTENTS")
-        advanced_contents_label.setObjectName("helpContentsLabel")
-        advanced_contents_row.addWidget(advanced_contents_label)
-        for link_text, anchor in (
-            ("Setup", "adv_setup"), ("Superflip", "superflip"), ("EDMA", "edma"),
-            ("SharpED", "sharped"), ("Keywords", "keyword_reference"),
-        ):
-            link = QToolButton()
-            link.setObjectName("helpNavLink")
-            link.setText(link_text)
-            link.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
-            link.setCursor(Qt.PointingHandCursor)
-            link.clicked.connect(lambda _checked=False, target=anchor: self._open_help_section(target))
-            advanced_contents_row.addWidget(link)
-        advanced_help_tab.addLayout(advanced_contents_row)
+        from phase_studio.ui_branding import create_help_topic_navigation
+        advanced_help_tab.addWidget(create_help_topic_navigation(
+            [('Setup', 'adv_setup'), ('Superflip', 'superflip'), ('EDMA', 'edma'), ('SharpED', 'sharped'), ('Keywords', 'keyword_reference')],
+            lambda anchor: self._open_help_section(anchor)))
         adv_setup_help_layout = self._add_help_section(advanced_help_tab, "adv_setup", "Setup reference", """
             <h3>External programs</h3>
             <p><b>Superflip executable</b> is the absolute path to the scientific executable under the active Jana2020 root (normally <code>SUPERFLIP\\superflip.exe</code>).</p>
@@ -9441,7 +9426,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         secondary_buttons.setSpacing(8)
         self.run_btn = QPushButton("Run phasing")
         self.continue_btn = QPushButton("Continue run")
-        self.stop_btn = QPushButton("Stop after current cycle")
+        self.stop_btn = QPushButton("Stop after cycle")
         self.stop_now_btn = QPushButton("Stop immediately")
         self.clear_btn = QPushButton("Clear results")
         # Result handoff is visible only in a Jana Wizard session.
@@ -9626,7 +9611,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             figure = Figure(figsize=(7.5, 3.5), dpi=100)
             canvas = FigureCanvas(figure)
             canvas.setObjectName("metricsCanvas")
-            canvas.setMinimumHeight(140)
+            canvas.setMinimumHeight(190)
             canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
             canvas.mpl_connect("resize_event", lambda _event, k=key: self._layout_metrics_figure(k))
             canvas.setToolTip("")
@@ -9702,8 +9687,18 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         feedback_row.addWidget(self.feedback_summary, 1)
         feedback_details = QPushButton('Map Feedback diagnostics…')
         feedback_details.clicked.connect(self._open_feedback_diagnostics)
+        self.feedback_details = feedback_details
+        feedback_details.setEnabled(False)
+        feedback_details.setToolTip('No current-run feedback observations are available.')
         feedback_row.addWidget(feedback_details)
+        recorded = QPushButton('Open recorded run…')
+        recorded.clicked.connect(self._open_recorded_feedback_diagnostics)
+        feedback_row.addWidget(recorded)
         metrics_layout.addLayout(feedback_row)
+        for key in ('map_feedback_intensity_damping', 'map_feedback_missing_percent_limit', 'powder_map_ratio_mix', 'powder_wavelength'):
+            widget = self.inputs.get(key)
+            if widget is not None:
+                widget.valueChanged.connect(self._update_feedback_availability)
         self.metrics_tabs.currentChanged.connect(self._on_metrics_tab_changed)
         self._on_metrics_tab_changed(self.metrics_tabs.currentIndex())
         self.result_splitter.addWidget(metrics_section)
@@ -9742,23 +9737,72 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.feedback_summary.setText(summary)
         self.feedback_summary.setAccessibleName(summary)
         self.feedback_summary.setToolTip(summary+'\n'+report['definitions'])
+        self._update_feedback_availability()
         dialog = getattr(self, '_feedback_diagnostics_dialog', None)
         if dialog is not None and dialog.isVisible() and Path(dialog.directory).resolve()==Path(report['detail_path']).parent.parent.resolve():
             dialog.refresh(list(self.feedback_reports.values()))
 
+    def _current_feedback_reports(self):
+        cfg = getattr(self, 'last_run_config', None)
+        run_id = getattr(cfg, 'run_id', None)
+        if not run_id:
+            return []
+        return [report for report in self.feedback_reports.values() if report.get('run_id') == run_id]
+
+    def _update_feedback_availability(self, *_args):
+        if not hasattr(self, 'feedback_details'):
+            return
+        from phase_studio.feedback_presentation import effective_operation, recorded_feedback_state
+        reports = self._current_feedback_reports()
+        state, recorded = recorded_feedback_state(reports)
+        if not reports:
+            value = lambda key, default=0: self.inputs[key].value() if key in self.inputs else default
+            checked = lambda key: self.inputs[key].isChecked() if key in self.inputs else False
+            total = value('cycles', 1)
+            powder = reflection_mode_has_fwhm(self._resolve_configured_data_mode_for_ui())
+            wavelength = value('powder_wavelength')
+            if checked('redistribute_overlaps') and not wavelength:
+                wavelength, _source = resolve_powder_wavelength(0, self._path_value('jana_inflip') or None, self._path_value('reference_cif') or None)
+            states = [effective_operation(checked(enabled), value(start, 1), total, value(magnitude), compatible=compatible, available=available)
+                for enabled, start, magnitude, compatible, available in (
+                    ('map_feedback_missing_enabled', 'map_feedback_missing_from_cycle', 'map_feedback_missing_percent_limit', not powder, True),
+                    ('map_feedback_intensity_enabled', 'map_feedback_intensity_from_cycle', 'map_feedback_intensity_damping', True,
+                     not powder or value('map_feedback_intensity_max_i_over_sigma') == 0),
+                    ('redistribute_overlaps', 'powder_redistribution_from_cycle', 'powder_map_ratio_mix', powder, wavelength > 0))]
+            state = 'Waiting for eligible cycle results' if any(item.active for item in states) else 'Disabled'
+            self.feedback_summary.setText('Map Feedback: ' + state)
+            self.feedback_summary.setToolTip('\n'.join(item.reason for item in states if item.selected) or 'All feedback operations are disabled.')
+        elif recorded:
+            self.feedback_summary.setText('Map Feedback: ' + state)
+        else:
+            self.feedback_summary.setText('Map Feedback: Disabled')
+        self.feedback_details.setEnabled(recorded)
+        self.feedback_details.setToolTip('Read-only observations for the current run only.' if recorded else
+                                        'No current-run feedback observations are available. Use Open recorded run for historical records.')
+
     def _open_feedback_diagnostics(self):
+        from phase_studio.feedback_diagnostics_ui import FeedbackDiagnosticsDialog
+        reports = self._current_feedback_reports()
+        from phase_studio.feedback_presentation import recorded_feedback_state
+        if not recorded_feedback_state(reports)[1]:
+            return
+        directory = self.last_run_config.work_dir
+        self._feedback_diagnostics_dialog = FeedbackDiagnosticsDialog(self, reports, directory)
+        self._feedback_diagnostics_dialog.show()
+
+    def _open_recorded_feedback_diagnostics(self):
         from phase_studio.feedback_diagnostics import load_summaries
         from phase_studio.feedback_diagnostics_ui import FeedbackDiagnosticsDialog
-        directory = self.last_run_config.work_dir if self.last_run_config is not None else Path(self._path_value('work_dir') or '.')
+        directory = QFileDialog.getExistingDirectory(self, 'Open recorded run', self._path_value('work_dir') or '')
+        if not directory:
+            return
         try:
-            recorded = {r['source_cycle']:r for r in load_summaries(directory)}
-            recorded.update(self.feedback_reports)
-            self.feedback_reports = recorded
-        except (OSError,ValueError) as exc:
-            self._append_execution_log(f'Diagnostics unavailable: {exc}',level='WARNING')
-        reports = list(self.feedback_reports.values())
-        self._feedback_diagnostics_dialog = FeedbackDiagnosticsDialog(self,reports,directory)
-        self._feedback_diagnostics_dialog.show()
+            reports = load_summaries(directory)
+        except (OSError, ValueError) as error:
+            self._show_error_report(build_error_report(error, subsystem='Map Feedback', operation='Open recorded run'))
+            return
+        self._recorded_feedback_dialog = FeedbackDiagnosticsDialog(self, reports, directory, historical=True)
+        self._recorded_feedback_dialog.show()
 
     def _build_structure_comparison_section(self) -> None:
         structure_section, structure_layout = self._make_result_section("STRUCTURE COMPARISON")
@@ -9880,7 +9924,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.structure_figure = Figure(figsize=(7.5, 3.0), dpi=100)
         self.structure_canvas = FigureCanvas(self.structure_figure)
         self.structure_canvas.setObjectName("structureCanvas")
-        self.structure_canvas.setMinimumHeight(260)
+        self.structure_canvas.setMinimumHeight(200)
         self.structure_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.structure_canvas.setToolTip("")
         self.structure_canvas.mpl_connect("resize_event", lambda _event: self._layout_structure_figure())
@@ -10138,11 +10182,19 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.log_text = QTextEdit()
         self.log_text.setObjectName("executionLog")
         self.log_text.setReadOnly(True)
+        self.log_text.setPlaceholderText("Execution events and diagnostic messages will appear here.")
         self.log_text.setLineWrapMode(QTextEdit.NoWrap)
         self.log_text.setMinimumHeight(100)
         self.log_text.setToolTip("")
         log_layout.addWidget(self.log_text, 1)
         self.result_splitter.addWidget(log_section)
+        # A short viewport must scroll rather than squeeze child sections
+        # below the height needed by their plot and controls.
+        minimum = sum(max(self.result_splitter.widget(i).minimumHeight(),
+                          self.result_splitter.widget(i).minimumSizeHint().height())
+                      for i in range(self.result_splitter.count()))
+        minimum += self.result_splitter.handleWidth() * (self.result_splitter.count() - 1)
+        self.result_splitter.setMinimumHeight(minimum)
         self.result_splitter.setStretchFactor(0, 2)
         self.result_splitter.setStretchFactor(1, 6)
         self.result_splitter.setStretchFactor(2, 2)
@@ -10309,7 +10361,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             control.setRange(0.0, 10000.0 if "cell_" in key and not key.endswith(("alpha", "beta", "gamma")) else 179.99999)
             control.setDecimals(5)
             control.setSingleStep(0.1)
-            control.setSpecialValueText("Not set")
+            control.setSpecialValueText("Unset")
             control.setValue(0.0)
             manual_layout.addWidget(label, row, column)
             manual_layout.addWidget(control, row, column + 1)
@@ -11324,6 +11376,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             feedback_index = self._metrics_tab_keys.index("map_feedback_change")
             self.metrics_tabs.setTabVisible(feedback_index, self._check_value("map_feedback_intensity_enabled") or self._check_value("redistribute_overlaps") or any(r.powder_repartition_avg_change_percent is not None or r.intensity_correction_avg_change_percent is not None for r in self.results))
 
+        self._update_feedback_availability()
+
     def _sync_input_source_mode_widgets(self) -> None:
         if self._configuration_locked:
             return
@@ -12036,7 +12090,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._last_log_record = None
         self.results.clear()
         self.feedback_reports.clear()
-        self.feedback_summary.setText("Map Feedback: no completed steps")
+        self._update_feedback_availability()
         self._structure_jobs.clear()
         self._operation_states.clear()
         self._live_structures.clear()
@@ -12138,7 +12192,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._active_run_id = run_id
         self.results.clear()
         self.feedback_reports.clear()
-        self.feedback_summary.setText("Map Feedback: no completed steps")
+        self._update_feedback_availability()
         self._structure_jobs.clear()
         self._operation_states.clear()
         self._live_structures.clear()
@@ -12973,6 +13027,27 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         tabs.currentWidget().setFocus()
 
     def _error_actions(self, report: ErrorReport) -> List[ErrorAction]:
+        from phase_studio.validation_issues import RECOVERY_LABELS
+        if report.issues:
+            actions = []
+            targets = set()
+            for issue in report.issues:
+                target = (issue.code, issue.setting, issue.page, issue.advanced)
+                if target in targets:
+                    continue
+                targets.add(target)
+                def review(issue=issue):
+                    self._open_configuration_page(issue.page, advanced=issue.advanced)
+                    widget = self.inputs.get(issue.setting)
+                    if isinstance(widget, PathRow):
+                        widget.browse()
+                    elif widget is not None:
+                        widget.setFocus(Qt.OtherFocusReason)
+                        page = (self.advanced_tabs if issue.advanced else self.basic_tabs).currentWidget()
+                        if isinstance(page, QScrollArea):
+                            page.ensureWidgetVisible(widget)
+                actions.append(ErrorAction(RECOVERY_LABELS.get(issue.code, 'Review ' + issue.setting.replace('_', ' ')), review, not actions))
+            return actions
         category = report.category
         if category == "reference_missing":
             row = self.inputs.get("reference_cif")
@@ -13003,33 +13078,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if category.startswith("sharped_"):
             return []
         if category == "input_validation":
-            summary = report.summary.casefold()
-            if "wavelength" in summary:
-                def show_wavelength():
-                    self._open_configuration_page("Map feedback")
-                    self.inputs["powder_wavelength"].setFocus()
-                return [ErrorAction("Set measured wavelength", show_wavelength, True)]
-            actions: List[ErrorAction] = []
-            for token, key, label in (
-                (".inflip", "jana_inflip", "Select .inflip…"),
-                ("external hkl", "hkl", "Select HKL…"),
-                ("initial model", "first_cycle_modelfile", "Select model…"),
-                ("reference file", "reference_cif", "Select reference…"),
-                ("superflip", "superflip_exe", "Locate Superflip…"),
-                ("edma", "edma_exe", "Locate EDMA…"),
-            ):
-                row = self.inputs.get(key)
-                if token in summary and isinstance(row, PathRow):
-                    actions.append(ErrorAction(label, row.browse, not actions))
-            if "sharped api token" in summary or "sharped access key" in summary or "sharped model" in summary:
-                actions.append(ErrorAction(
-                    "Open SharpED settings",
-                    lambda: self._open_configuration_page("Setup", advanced=True),
-                    not actions,
-                ))
-            if not actions:
-                actions.append(ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True))
-            return actions
+            return [ErrorAction("Open Input", lambda: self._open_configuration_page("Input"), True)]
         if category in {"hkl_invalid", "metadata", "unit_cell", "space_group", "composition", "inflip"}:
             return [ErrorAction("Open Input settings", lambda: self._open_configuration_page("Input"), True)]
         return []
@@ -15460,19 +15509,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             path=self._structure_source_paths.get(panel)
             data=getattr(self,'_comparison_data',{}).get(str(Path(path).resolve())) if path else None
             if comparison_policy()!='independent' and data:panel_metadata[-1]+=' · '+panel_summary(data)
-        self.structure_title_texts = [
-            self.structure_figure.text(
-                x_position,
-                0.96,
-                title,
-                ha="center",
-                va="center",
-                fontsize=10,
-                fontweight="bold",
-                color="#001170",
-            )
-            for x_position, (_panel, title, _atoms, _empty_text) in zip((1.0 / 6.0, 0.5, 5.0 / 6.0), panels)
-        ]
+        # The Qt column headers above the canvas already name each viewer.
+        # A second title inside each plot duplicates navigation and consumes
+        # vertical space, especially on shorter displays.
+        self.structure_title_texts = []
         self.structure_metadata_texts = []
         for label, metadata in zip(self.structure_metadata_labels, panel_metadata):
             label.setText(metadata)
@@ -15684,6 +15724,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             return normalize_reflection_data_mode(configured)
 
     def _validate_run_config(self, cfg: RunConfig) -> Tuple[List[str], str]:
+        from phase_studio.validation_issues import ValidationIssue
         issues: List[str] = []
         details: List[str] = []
         try:
@@ -15697,29 +15738,35 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if normalize_map_export_format(cfg.map_export_format) in {'hkl_phases','shelx_fcf'}:
                     issues.append('FWHM cannot be exported as measurement uncertainty. Choose XPLOR, CCP4 or Jana map export instead of phased HKL/FCF.')
         except ValueError as exc:
-            issues.append(str(exc))
+            code = 'significance_fwhm' if 'reflection_mode' in locals() and reflection_mode_has_fwhm(reflection_mode) and cfg.i_over_sigma_min > 0 else 'reflection_policy'
+            if code == 'significance_fwhm':
+                issues.append(ValidationIssue(str(exc), code, 'i_over_sigma_min', 'Superflip', True))
+            elif 'reflection_mode' in locals() and reflection_mode_has_fwhm(reflection_mode) and cfg.powder_wavelength <= 0:
+                issues.append(ValidationIssue(str(exc), 'powder_wavelength', 'powder_wavelength', 'Map feedback'))
+            else:
+                issues.append(ValidationIssue(str(exc), code, 'reflection_data_mode', 'Input'))
         mode = normalize_input_source_mode(cfg.input_source_mode)
         ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
         if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
             if cfg.jana_inflip is None or not cfg.jana_inflip.is_file():
-                issues.append("The Jana2020 .inflip file does not exist or cannot be read.")
+                issues.append(ValidationIssue('The Jana2020 .inflip file does not exist or cannot be read.', 'inflip_missing', 'jana_inflip', 'Input', False))
                 details.append(f"Jana2020 .inflip: {cfg.jana_inflip or '(not selected)'}")
             if mode == INPUT_MODE_INFLIP_OVERRIDES:
                 if not uses_embedded_hkl(cfg.hkl) and not cfg.hkl.is_file():
-                    issues.append("The external HKL override does not exist.")
+                    issues.append(ValidationIssue('The external HKL override does not exist.', 'hkl_missing', 'hkl', 'Input', False))
                     details.append(f"HKL override: {cfg.hkl}")
                 if cfg.superflip_referencefile is not None and not cfg.superflip_referencefile.is_file():
-                    issues.append("The external reference file does not exist.")
+                    issues.append(ValidationIssue('The external reference file does not exist.', 'reference_missing', 'reference_cif', 'Input', False))
                     details.append(f"Reference: {cfg.superflip_referencefile}")
         elif not cfg.hkl.is_file():
-            issues.append("The external HKL file does not exist.")
+            issues.append(ValidationIssue('The external HKL file does not exist.', 'hkl_missing', 'hkl', 'Input', False))
             details.append(f"HKL: {cfg.hkl}")
         if cfg.first_cycle_modelfile is not None and not cfg.first_cycle_modelfile.is_file():
-            issues.append("The initial model file does not exist.")
+            issues.append(ValidationIssue('The initial model file does not exist.', 'model_missing', 'first_cycle_modelfile', 'Workflow', False))
             details.append(f"Initial model: {cfg.first_cycle_modelfile}")
         if cfg.superflip_referencefile is not None:
             if not cfg.superflip_referencefile.is_file():
-                issues.append("The external reference file does not exist.")
+                issues.append(ValidationIssue('The external reference file does not exist.', 'reference_missing', 'reference_cif', 'Input', False))
                 details.append(f"Reference: {cfg.superflip_referencefile}")
             elif ref_suffix not in REFERENCE_FILE_SUFFIXES:
                 issues.append("The external reference format is not supported.")
@@ -15727,10 +15774,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if cfg.redistribute_overlaps and cfg.cycles>cfg.powder_redistribution_from_cycle and not cfg.run_superflip:
             issues.append('Native powder repartitioning requires Superflip to run before feedback. Enable Superflip; diagnostic estimates are not used as native group membership.')
         if cfg.redistribute_overlaps and cfg.powder_wavelength <= 0:
-            issues.append(
+            issues.append(ValidationIssue(
                 "Powder overlap repartitioning is enabled, but no Wavelength (Å) could be resolved from a manual "
-                "entry, the Jana .m90 file, the .inflip file, or the reference file's _diffrn_radiation_wavelength tag."
-            )
+                "entry, the Jana .m90 file, the .inflip file, or the reference file's _diffrn_radiation_wavelength tag.",
+                'powder_wavelength', 'powder_wavelength', 'Map feedback'))
             details.append("Wavelength (Å): Basic → Map feedback → Powder overlap repartitioning")
         if cfg.redistribute_overlaps and not reflection_mode_has_fwhm(self._resolve_configured_data_mode(cfg)):
             issues.append(

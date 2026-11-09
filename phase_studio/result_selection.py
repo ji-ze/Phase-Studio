@@ -1037,14 +1037,14 @@ class ResultSelectionDialog(QDialog):
 
     def _apply_safe_initial_geometry(self) -> None:
         apply_safe_dialog_geometry(
-            self, 1180, 680, width_fraction=0.90, height_fraction=0.84,
+            self, 1120, 640, width_fraction=0.90, height_fraction=0.84,
         )
         # This is the measured practical minimum for the compact header,
         # toolbar, 150 px scientific canvas, and fixed handoff footer.  On a
         # shorter work area, retain the largest safe initial height instead.
         # Reserve the added diagnostic strip on normal monitors; short
         # work areas keep the footer fixed and scroll only the content.
-        self.setMinimumHeight(min(720,max(1,self.available_geometry_at_open.height()-48)))
+        self.setMinimumHeight(min(520,max(1,self.available_geometry_at_open.height()-48)))
 
     def _clamp_after_show(self) -> None:
         clamp_window_to_available_screen(
@@ -1535,6 +1535,9 @@ class ResultSelectionDialog(QDialog):
         coords = getattr(self, "_preview_fit_coords", None)
         if coords is None:
             return
+        # Fit against the actual rendered viewport rather than an earlier
+        # pre-layout canvas extent. Scientific coordinates are unchanged.
+        self._preview_canvas.draw()
         for axis in self._preview_host._structure_interactive_axes:
             fit_projected_structure(axis, coords)
         self._preview_canvas.draw_idle()

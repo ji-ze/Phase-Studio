@@ -24,6 +24,19 @@ PHASE_STUDIO_SPACING = {
     "numeric_editor_width": 230,
 }
 
+# Existing main-GUI roles, shared by compact document surfaces as well.
+PHASE_STUDIO_COLORS = dict(navy='#001170', accent='#2264b8', cyan='#44b7ff',
+                          text='#14204a', secondary='#52658b', border='#cbd7ea',
+                          surface='#f2f4f9', selected='#f3f8ff')
+
+
+def apply_standard_dialog_style(dialog, extra=''):
+    """Use the actual main-GUI rules locally, without changing scientific UI."""
+    from .ui_branding import standard_ui_font
+    font = standard_ui_font()
+    dialog.setFont(font)
+    dialog.setStyleSheet(_SHARPED_QSS.replace('"Segoe UI", "Arial"', '"' + font.family() + '"') + extra)
+
 _SHARPED_QSS = """
 QWidget {
     background-color: #ffffff;

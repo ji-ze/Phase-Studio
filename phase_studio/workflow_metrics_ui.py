@@ -83,7 +83,7 @@ def layout_metrics_figure(self, key: str) -> None:
     legend_gap_pixels = 8.0
     left_pixels = 86.0 if has_data else 70.0
     left = min(0.18, max(0.07, left_pixels / width))
-    bottom = min(0.22, max(0.12, 34.0 / height))
+    bottom = min(0.30, max(0.12, 50.0 / height))
     if has_data:
         top = 1.0 - min(0.08, max(0.035, 10.0 / height))
         if has_legend:
@@ -160,7 +160,7 @@ def render_metrics_tab(
         elif status in {"ERROR", "CANCELLED", "STOPPED"}:
             empty_message = "No workflow metrics available."
         else:
-            empty_message = "Run phasing to display workflow metrics."
+            empty_message = "Metrics will appear as phasing cycles complete."
         ax.set_axis_off()
         ax.text(
             0.5,

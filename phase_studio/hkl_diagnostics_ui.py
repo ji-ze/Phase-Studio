@@ -144,7 +144,11 @@ def _top(win, dialog, result, report, completeness=False):
     provenance = QLabel('Cell / symmetry source: ' + Path(metadata_source).name)
     provenance.setWordWrap(True)
     provenance.setTextInteractionFlags(Qt.TextSelectableByMouse)
-    provenance.setToolTip(result.source_note + '\nThis diagnostic snapshot does not replace current manual overrides. Re-run validation after changing inputs.')
+    from .ui_branding import bounded_tooltip
+    provenance.setToolTip(bounded_tooltip(result.source_note + '\nThis diagnostic snapshot does not replace current manual overrides. Re-run validation after changing inputs.'))
+    for child in summary.findChildren(QLabel):
+        if child.toolTip():
+            child.setToolTip(bounded_tooltip(child.toolTip()))
     if isinstance(summary.layout(), QGridLayout):
         grid = summary.layout()
         grid.addWidget(provenance, grid.rowCount(), 0, 1, grid.columnCount())
@@ -910,8 +914,14 @@ def validation_dialog(win, result):
                       f'{issues:,} category findings (categories may overlap)' if issues else 'Some checks unavailable')
     if issues and not complete:
         integrity_text += ' · Some checks unavailable'
-    summary = QLabel('Input integrity: ' + integrity_text)
-    summary.setToolTip('Input integrity checks parsing, reflection indices, auxiliary values and duplicate records. It does not establish experimental or scientific validity.')
+    from collections import Counter
+    severity_counts = Counter(severity for severity, _text in report.warnings)
+    summary = QLabel('Input diagnostics: ' + str(len(report.warnings)) + ' categories · ' +
+        ' · '.join(f'{severity_counts[severity]} {label}' for severity, label in
+                   [('ERROR','errors'),('WARNING','warnings'),('INFO','informational')]) +
+        f'\nInvalid values: {report.count("invalid_values")} · Rejected records: {report.count("rejected_records")}')
+    summary.setToolTip('Original overlapping findings: ' + integrity_text +
+        '. Category totals are not counts of invalid records. These checks do not establish experimental validity.')
     dialog.hkl_integrity_status = summary
     summary.setWordWrap(True)
     layout.addWidget(summary)

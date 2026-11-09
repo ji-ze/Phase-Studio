@@ -41,46 +41,44 @@ Copy original and Open original always use that unchanged source document.</p>''
 # Scoped to the two About surfaces. The wordmark is the only plain-text
 # widget that requests the branding face; the SharpED subtitle retains its
 # established, explicitly marked rich-text spans.
-_STYLE = '''
-QWidget { font-family:"@UI_FONT@"; font-size:10pt; color:#14204a; background:transparent; }
-QDialog { background:#ffffff; }
-QLabel#brandTitle { font-family:"Science Gothic"; font-size:18pt; font-weight:400; color:#001170; }
-QLabel#brandSubtitle { font-size:8.5pt; }
-QLabel#versionBadge { font-size:9pt; color:#60718b; font-weight:400; border:0; padding:0; }
-QLabel#aboutDescription { color:#52617b; font-size:9pt; }
-QPushButton { font-size:9pt; font-weight:400; background:#ffffff; color:#214b7e;
-    border:1px solid #bdcce0; border-radius:4px; padding:3px 10px; min-height:18px; }
-QPushButton:hover { background:#f0f6fc; border-color:#8baccd; }
-QPushButton:pressed { background:#e4eef8; }
-QPushButton:focus { border:1px dashed #596980; }
-QPushButton:disabled { color:#76859b; background:#f5f7fa; border-color:#d8e1ec; }
-QPushButton#documentLayoutButton { font-size:8.5pt; }
-QPushButton#documentLayoutButton:checked { background:#eef6fc; border-color:#5293c0; }
-QPushButton#aboutCard { background:#f8fafd; border:1px solid #d8e3ef; padding:0; border-radius:6px; min-height:44px; }
-QPushButton#aboutCard:hover { background:#f1f6fc; border-color:#a7bfd8; }
-QPushButton#aboutCard:checked { background:#eef6fc; border-color:#5293c0; }
-QPushButton#aboutCard:focus { border:1px dashed #596980; }
-QPushButton#aboutCard:pressed { background:#e5f0f9; }
-QLabel#aboutCardTitle { color:#142d57; font-size:9.5pt; font-weight:600; }
-QLabel#aboutCardSubtitle { color:#65748d; font-size:8.5pt; }
-QScrollArea#aboutContent { border:1px solid #dce5ef; border-radius:6px; background:#f8fafd; }
-QWidget#aboutPage { background:#f8fafd; }
-QPushButton#aboutLink { color:#2c66a7; background:transparent; border:0; padding:2px 0; }
-QPushButton#aboutLink:hover { text-decoration:underline; }
-QPushButton#aboutLink:focus { border:1px dashed #596980; }
-QLabel#documentTitle { font-size:12pt; font-weight:600; color:#142d57; }
-QLabel#documentSource { font-size:8.5pt; color:#6b7890; }
-QComboBox, QLineEdit { font-size:9.5pt; background:#ffffff; border:1px solid #cbd8e7;
-    border-radius:3px; padding:4px 6px; min-height:18px; }
-QTextBrowser { font-size:10.5pt; background:#ffffff; border:1px solid #dce5ef; padding:8px; }
-QCheckBox { font-size:9pt; color:#5b6b82; }
-'''
-
-
 def _style(dialog):
-    font = standard_ui_font()
-    dialog.setFont(font)
-    dialog.setStyleSheet(_STYLE.replace('@UI_FONT@', font.family()))
+    from .ui_style import apply_standard_dialog_style, PHASE_STUDIO_COLORS as colors
+    # Buttons, inputs, scrollbars and brand typography come from the main GUI.
+    # Only the compact navigation layout requires local semantic selectors.
+    extra = """
+    QWidget#phaseStudioAbout, QWidget#phaseStudioDocument { background:#ffffff; }
+    QLabel#aboutDescription, QLabel#documentSource { color:@secondary@; font-size:9pt; }
+    QLabel#versionBadge { background:transparent; color:@secondary@; font-weight:400; padding:0; }
+    QPushButton#aboutCard { border:1px solid @border@; border-radius:4px; background:#ffffff; padding:0; min-height:44px; }
+    QPushButton#aboutCard:hover { background:#edf3fa; border-color:@accent@; }
+    QPushButton#aboutCard:checked { background:@selected@; border-color:@accent@; }
+    QPushButton#aboutCard[keyboardFocus="true"] { border:2px solid @navy@; }
+    QLabel#aboutCardTitle { color:@navy@; font-size:10pt; font-weight:600; background:transparent; }
+    QLabel#aboutCardSubtitle { color:@secondary@; font-size:9pt; background:transparent; }
+    QScrollArea#aboutContent { border:0; background:#ffffff; }
+    QWidget#aboutPage { background:#ffffff; }
+    QLabel#documentTitle { color:@navy@; font-size:12pt; font-weight:600; }
+    QPushButton#aboutLink { border:0; color:@accent@; padding:2px 0; font-weight:400; }
+    QPushButton:focus { border:2px solid @accent@; }
+    QTextBrowser { border:1px solid @border@; font-size:10.5pt; padding:8px; }
+    """
+    for role, value in colors.items():
+        extra = extra.replace('@' + role + '@', value)
+    apply_standard_dialog_style(dialog, extra)
+
+
+class _NavigationCard(QPushButton):
+    def focusInEvent(self, event):
+        self.setProperty('keyboardFocus', event.reason() in (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self.setProperty('keyboardFocus', False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        super().focusOutEvent(event)
 
 
 def _restore_focus(widget):
@@ -148,7 +146,7 @@ class DocumentDialog(QDialog):
         self.title_label.setObjectName('documentTitle')
         self.title_label.setWordWrap(True)
         title_row.addWidget(self.title_label, 1)
-        self.original_layout = QPushButton('Original layout')
+        self.original_layout = QPushButton('Source line breaks')
         self.original_layout.setObjectName('documentLayoutButton')
         self.original_layout.setCheckable(True)
         self.original_layout.setToolTip('Show original line breaks. Copy original always copies the complete original source.')
@@ -216,7 +214,7 @@ class DocumentDialog(QDialog):
         self.selector.currentIndexChanged.connect(self.load_document)
         self.original_layout.toggled.connect(self.render_document)
         self.load_document()
-        self.resize(760, 560)
+        self.resize(680, 560)
 
     def _trusted(self):
         return (self.path is not None and self.path.resolve() == self.allowed_path
@@ -328,7 +326,7 @@ class DocumentDialog(QDialog):
 
     def showEvent(self, event):
         super().showEvent(event)
-        fit_dialog_to_available_screen(self, QSize(760, 560))
+        fit_dialog_to_available_screen(self, QSize(680, 560))
         # The common helper's large-dialog minimum is inappropriate here.
         self.setMinimumSize(min(420, self.width()), min(300, self.height()))
         self._update_source_label()
@@ -352,7 +350,7 @@ class AboutDialog(QDialog):
         self.setWindowModality(Qt.WindowModal)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(14, 10, 14, 10)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
         header = create_phase_studio_brand_header()
         header.layout().setContentsMargins(0, 0, 0, 0)
         logo = header.findChild(QLabel, 'brandLogo')
@@ -384,11 +382,11 @@ class AboutDialog(QDialog):
         self.card_group = QButtonGroup(self)
         self.card_group.setExclusive(True)
         entries = [('Authors & contacts', 'Credits and contacts'), ('License', 'MIT and copyright'),
-                   ('Third-party licenses', 'Original notices'), ('Citation', 'Scientific citation')]
+                   ('Third-party licenses', 'Original notices'), ('How to cite', 'Software and methods')]
         icons = (QStyle.SP_FileDialogInfoView, QStyle.SP_FileDialogDetailedView,
                  QStyle.SP_FileDialogListView, QStyle.SP_FileIcon)
         for index, (title, subtitle) in enumerate(entries):
-            card = QPushButton()
+            card = _NavigationCard()
             card.setObjectName('aboutCard')
             card.setFocusPolicy(Qt.StrongFocus)
             card.setCheckable(True)
@@ -436,9 +434,9 @@ class AboutDialog(QDialog):
                    '<p>Bundled dependencies retain their own licenses. Complete original notices are available locally.</p>',
                    [('Browse licenses', lambda: self.open_document('THIRD_PARTY_NOTICES.md', third_party=True))])
         self.citation = citation_text(version.VERSION)
-        self._page('<p><b>Citation</b></p><p>' + escape(self.citation) + '</p>',
+        self._page('<p><b>How to cite</b></p><p>Cite the components actually used: Phase Studio, Superflip, EDMA or SharpED.</p>',
                    [('Copy citation', lambda: QApplication.clipboard().setText(self.citation)),
-                    ('View citation metadata', lambda: self.open_document('CITATION.cff'))])
+                    ('View citations', self.open_citations)])
         self.card_group.idClicked.connect(self.stack.setCurrentIndex)
         self.cards[0].setChecked(True)
         footer = QHBoxLayout()
@@ -458,6 +456,7 @@ class AboutDialog(QDialog):
         footer.addWidget(self.close_button)
         layout.addLayout(footer)
         self.viewer = None
+        self.citations_viewer = None
         self.resize(720, 420)
 
     def _page(self, text, actions):
@@ -502,6 +501,23 @@ class AboutDialog(QDialog):
         self.viewer.finished.connect(finished)
         self.viewer.open()
         return self.viewer
+
+    def open_citations(self):
+        from .citation_ui import CitationDialog
+        if self.citations_viewer is not None and self.citations_viewer.isVisible():
+            activate_owned_dialog(self.citations_viewer)
+            return self.citations_viewer
+        previous = QApplication.focusWidget()
+        if self.citations_viewer is not None:
+            self.citations_viewer.deleteLater()
+        self.citations_viewer = CitationDialog(self)
+        def finished(_result):
+            if self.isVisible():
+                activate_owned_dialog(self)
+                _restore_focus(previous)
+        self.citations_viewer.finished.connect(finished)
+        self.citations_viewer.open()
+        return self.citations_viewer
 
     def _fit(self):
         self.layout().activate()

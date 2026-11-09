@@ -4,9 +4,11 @@ import math
 import json
 import numpy as np
 from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTabWidget,
     QWidget, QPushButton, QComboBox, QScrollArea, QFileDialog, QTableWidget,
-    QTableWidgetItem, QHeaderView, QMessageBox, QDoubleSpinBox, QSizePolicy)
+    QTableWidgetItem, QHeaderView, QMessageBox, QDoubleSpinBox, QSizePolicy,
+    QGroupBox, QFormLayout, QGridLayout, QApplication, QPlainTextEdit, QMenu)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from .input_analysis import (analysis_rows, significance_cutoff, strict_full_resolution,
@@ -15,8 +17,31 @@ from .input_analysis import (analysis_rows, significance_cutoff, strict_full_res
 from .hkl_diagnostics_ui import (presentation_report, _detail_dialog, number, _overlap_metrics,
                                  overlap_group_dialog, _PlotHover, _BinPoint)
 
-TABS = ('Overview', 'Resolution', 'Intensity & Amplitude', 'Signal & Uncertainty',
-        'Symmetry & Coverage', 'Powder & Peak Overlap', 'Advanced Diagnostics')
+TABS = ('Overview', 'Resolution', 'Intensity & amplitude', 'Signal & uncertainty',
+        'Symmetry & coverage', 'Powder & peak overlap', 'Advanced diagnostics')
+
+
+class _OverviewPanel(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.groups = []
+        self.grid = QGridLayout(self)
+        self.grid.setContentsMargins(0, 0, 0, 0)
+        self._columns = 1
+
+    def add_group(self, widget):
+        self.groups.append(widget)
+        self.grid.addWidget(widget, len(self.groups) - 1, 0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        columns = 2 if self.width() >= 760 else 1
+        if columns != self._columns:
+            self._columns = columns
+            for index, group in enumerate(self.groups):
+                self.grid.addWidget(group, index // columns, index % columns)
+            self.grid.setColumnStretch(0, 1)
+            self.grid.setColumnStretch(1, int(columns == 2))
 
 
 def analyze_data_dialog(win, analysis):
@@ -35,19 +60,20 @@ def analyze_data_dialog(win, analysis):
     root.addWidget(win._diagnostic_header('ANALYZE DATA',
         f'{Path(analysis.hkl_path).name} · {report.data_type} · {analysis.spacegroup_hm}', integrity, compact=True))
     overlap = dict(report.overlap)
-    metadata = QLabel('Wavelength: ' + (f'{overlap["wavelength"]:.8g} Å · {overlap.get("wavelength_source", "input metadata")}'
+    metadata = QLabel('Wavelength: ' + (f'{overlap["wavelength"]:.8g} Å · {Path(overlap.get("wavelength_source", "input metadata")).name}'
                        if overlap.get('wavelength') else 'unavailable / not established in this diagnostic snapshot'))
     metadata.setWordWrap(True)
+    metadata.setToolTip(str(overlap.get('wavelength_source', 'Input metadata unavailable')))
     root.addWidget(metadata)
     cards = [(str(report.count('parsed_records')), 'Input records'),
              (str(sum(r['observed'] for r in rows)), 'Allowed indexed orbits'),
              (number(analysis.d_min)+' Å','d_min'),
              (number(analysis.d_full_98)+' Å' if analysis.d_full_98 else 'Not reached','d98 ≥98%'),
              (number(d_full)+' Å' if d_full else 'Not reached','d_full 100%')]
-    for threshold in (2,3):
+    for threshold in ((2,3) if report.available('significance') else ()):
         cards.append((number(limits[threshold]['d'])+' Å' if limits[threshold] else 'Unavailable',
                       f'd(mean I/σ(I)={threshold})' + (' · derived' if a.reflection_mode_is_amplitude(analysis.data_mode) else '')))
-    metrics = win._diagnostic_metric_grid(cards,compact=True,row_columns=(4,3))
+    metrics = win._diagnostic_metric_grid(cards,compact=True,row_columns=(len(cards),))
     metrics.setToolTip(CUTOFF_METHOD)
     root.addWidget(metrics)
     tabs = QTabWidget()
@@ -61,7 +87,7 @@ def analyze_data_dialog(win, analysis):
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         scroll.setWidget(page)
-        tabs.addTab(scroll,name)
+        tabs.addTab(scroll,name.replace('&','&&'))
         pages.append(layout)
     def note(index,text):
         label = QLabel(text)
@@ -69,19 +95,75 @@ def analyze_data_dialog(win, analysis):
         label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         pages[index].addWidget(label)
         return label
-    note(0,f'{report.data_type} · {report.data_mode}\nSource: {report.source}\n{report.source_note}')
-    note(0,'Unit cell: '+', '.join(number(v) for v in analysis.cell.parameters))
-    note(0,'Literal unique HKL: '+str(report.count('literal_unique')))
-    pages[0].addWidget(win._diagnostic_metric_grid([
-        (number(report.statistic('mean_value')),'Mean observed value'),
-        (number(report.statistic('median_value')),'Median observed value'),
-        (str(report.count('symmetry_orbits')),'Symmetry orbits (incl. forbidden indices)'),
-        (str(report.count('zero_values')),'Zero values'),
-        (str(report.count('negative_values')),'Negative values'),
-        (number(report.statistic('mean_significance')),'Mean I/σ(I)' + (' · derived' if a.reflection_mode_is_amplitude(analysis.data_mode) else '')),
-    ],compact=True,row_columns=(3,3)))
-    note(0,'\n'.join(f'{severity}: {text}' for severity,text in report.warnings))
-    note(0,'Diagnostics are read-only. Original records, reconstruction filters and RunConfig remain unchanged.')
+    overview = _OverviewPanel()
+    def group(title, fields, position):
+        box = QGroupBox(title)
+        form = QFormLayout(box)
+        form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+        for heading, value in fields:
+            label = QLabel(str(value))
+            label.setWordWrap(True)
+            label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            form.addRow(heading, label)
+        overview.add_group(box)
+        return box
+    group('Dataset', [('Input', Path(report.source).name),
+        ('Records / literal HKL', f"{report.count('parsed_records'):,} / {report.count('literal_unique'):,}"),
+        ('Data type', report.data_type), ('Format', report.data_mode),
+        ('Unit cell', ', '.join(f'{v:.6g}' for v in analysis.cell.parameters)),
+        ('Space group', analysis.spacegroup_hm)], 0)
+    group('Resolution', [('d_min', f'{analysis.d_min:.6g} Å'),
+        ('d98 · cumulative ≥98%', f'{analysis.d_full_98:.6g} Å' if analysis.d_full_98 else 'Not reached'),
+        ('d_full · cumulative 100%', f'{d_full:.6g} Å' if d_full else 'Not reached'),
+        ('Domain', 'Theoretical symmetry-allowed reciprocal sphere to input d_min; Friedel mates combined')], 1)
+    group('Quality and coverage', [
+        ('Measured uncertainty', 'Available' if report.available('significance') else 'Unavailable; FWHM and dummy fields are not measured σ'),
+        ('Experimental completeness', 'Not established by indexed-domain coverage'),
+        ('CC1/2', 'Unavailable without unmerged observations or supplied half-dataset statistics'),
+        ('Diagnostics', f'{len(report.warnings)} categories; not a count of invalid records')], 2)
+    if powder:
+        group('Powder information', [('FWHM', number(report.statistic('median_auxiliary')) + ' · ' + report.fwhm_units),
+            ('Wavelength', f"{overlap['wavelength']:.8g} Å" if overlap.get('wavelength') else 'Unavailable'),
+            ('Overlap estimate', f"{overlap.get('affected', 0):,} affected records in {overlap.get('group_count', 0):,} groups" if overlap.get('available') else overlap.get('reason', 'Unavailable')),
+            ('Interpretation', 'Geometric groups are not independently measured or experimentally resolved peaks')], 3)
+    pages[0].addWidget(overview)
+    source_tools = QHBoxLayout()
+    filename = QLabel('Source: ' + Path(report.source).name)
+    filename.setWordWrap(True)
+    source_tools.addWidget(filename, 1)
+    copy_path = QPushButton('Copy full path')
+    copy_path.clicked.connect(lambda: QApplication.clipboard().setText(str(analysis.hkl_path)))
+    source_tools.addWidget(copy_path)
+    provenance_button = QPushButton('Full provenance…')
+    def provenance():
+        import hashlib
+        details = QDialog(dialog)
+        details.setWindowTitle('Input provenance')
+        layout = QVBoxLayout(details)
+        text = QPlainTextEdit()
+        text.setReadOnly(True)
+        path = Path(analysis.hkl_path)
+        payload = dict(input_path=str(path), source=report.source, source_note=report.source_note,
+            current_file_sha256=hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else None,
+            definitions=report.methods, warnings=report.warnings)
+        text.setPlainText(json.dumps(payload, indent=2, ensure_ascii=False))
+        layout.addWidget(text)
+        close = QPushButton('Close')
+        close.clicked.connect(details.close)
+        layout.addWidget(close, 0, Qt.AlignRight)
+        dialog.provenance_dialog = details
+        fit_dialog_to_available_screen(details, QSize(680, 450))
+        details.show()
+    provenance_button.clicked.connect(provenance)
+    source_tools.addWidget(provenance_button)
+    pages[0].addLayout(source_tools)
+    warning_details = note(0, '\n'.join(f'{severity}: {text}' for severity, text in report.warnings))
+    warning_details.hide()
+    disclose = QPushButton('Show diagnostic categories')
+    disclose.setCheckable(True)
+    disclose.toggled.connect(warning_details.setVisible)
+    pages[0].addWidget(disclose, 0, Qt.AlignLeft)
+    note(0, 'Read-only analysis. Original observations, reconstruction filters and full-precision exports are unchanged.')
     method_note = note(1,CUTOFF_METHOD)
     coverage_note = note(1,'d_min is the observed accepted-domain boundary. d_full is the last exact theoretical reciprocal-radius boundary with 100% cumulative allowed-orbit coverage from infinite d. d98 retains its existing ≥98% definition. Friedel mates combined; 000 and systematic absences excluded; equal-radius boundaries grouped within 1e-12 sinθ/λ. Neither is an independent experimental quality cutoff.')
     method_note.hide();coverage_note.hide()
@@ -142,9 +224,12 @@ def analyze_data_dialog(win, analysis):
     pages[6].addWidget(details.hkl_details_tabs)
     details.hkl_details_tabs.setParent(pages[6].parentWidget())
     dialog.advanced_source = details
-    controls = QHBoxLayout()
+    controls_widget = QWidget()
+    controls = QGridLayout(controls_widget)
+    controls.setContentsMargins(0, 0, 0, 0)
     axis_mode = QComboBox()
-    axis_mode.addItems(['d (Å) · high resolution to the right','sin θ / λ (Å⁻¹)'])
+    axis_mode.addItems(['d (Å)','sin θ / λ (Å⁻¹)'])
+    axis_mode.setToolTip('Display axis only. The d axis places high resolution to the right; shell boundaries and data do not change.')
     frequency = QComboBox()
     frequency.addItems(['Input records','Literal unique HKL','Allowed indexed orbits','Records per unit sin θ / λ'])
     counts = QComboBox()
@@ -154,9 +239,13 @@ def analyze_data_dialog(win, analysis):
     histogram_range = QComboBox()
     histogram_range.addItems(['Full histogram range','Detail histogram: 1–99%'])
     histogram_range.setToolTip('Display-only range. Original values and reconstruction inputs are retained. The graph CSV describes the displayed histogram bins.')
-    for control in (axis_mode,frequency,counts,plot_pair): controls.addWidget(control)
-    controls.addWidget(histogram_range)
-    root.insertLayout(3,controls)
+    for i, control in enumerate((axis_mode,frequency,counts,plot_pair,histogram_range)):
+        control.setMinimumContentsLength(10)
+        control.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        controls.addWidget(control, i // 3, i % 3)
+        controls.setColumnStretch(i % 3, 1)
+    root.insertWidget(3,controls_widget)
+    controls_widget.hide()
     figures = {}
     canvases = {}
     toolbars = {}
@@ -179,6 +268,10 @@ def analyze_data_dialog(win, analysis):
             canvas.setMinimumSize(0,300)
             canvas.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Ignored)
             toolbar = NavigationToolbar2QT(canvas,dialog)
+            toolbar.setToolTip('Pan/zoom acts on the plot under the pointer. Home/back restore figure view history. Save exports the complete figure.')
+            toolbar_note = QLabel('Figure controls · pan/zoom the plot under the pointer; save the complete figure')
+            toolbar_note.setWordWrap(True)
+            pages[index].addWidget(toolbar_note)
             pages[index].addWidget(toolbar)
             pages[index].addWidget(canvas,1)
             figures[index],canvases[index],toolbars[index] = fig,canvas,toolbar
@@ -246,11 +339,20 @@ def analyze_data_dialog(win, analysis):
                 if axis_mode.currentIndex()==0: ax.invert_xaxis()
                 ax.set_ylabel(selected_key.replace('_',' '))
                 markers = [('d_min',analysis.d_min),('d98',analysis.d_full_98),('d_full',d_full)] + [(f'I/σ={n}',limits[n]['d'] if limits[n] else None) for n in (2,3)]
+                marker_labels = []
                 for label,d in grouped_resolution_markers(markers):
                     if d and math.isfinite(d):
                         position = d if axis_mode.currentIndex()==0 else 1/(2*d)
                         ax.axvline(position,linestyle=':',alpha=.4,label=label)
-                        ax.annotate(label,(position,1),xycoords=('data','axes fraction'),rotation=90,va='top',fontsize=6)
+                        marker_labels.append(f'{label}: {d:.6g} Å')
+                if marker_labels:
+                    ax.text(.02,.98, '\n'.join(marker_labels), transform=ax.transAxes,
+                        va='top', fontsize=7, bbox=dict(facecolor='white',edgecolor='none',alpha=.9))
+                if key in ('coverage','cumulative_coverage'):
+                    ax.set_ylim(0,100)
+                    ax.set_ylabel('Indexed / allowed orbits (%)')
+                if key == 'frequency':
+                    ax.set_ylabel('Input records per bin' if frequency.currentIndex()==0 else selected_key.replace('_',' '))
             if counts.currentIndex()==1 and key in ('hist','sigma','groups','frequency','cumulative_records','observed','missing'):
                 ax.set_yscale('log',nonpositive='mask')
             ax.grid(alpha=.15)
@@ -291,30 +393,48 @@ def analyze_data_dialog(win, analysis):
         for index in tuple(rendered): render(index,True)
     for control in (axis_mode,frequency,counts,plot_pair,histogram_range): control.currentIndexChanged.connect(refresh)
     buttons = QHBoxLayout()
-    json_button = QPushButton('Export diagnostics JSON')
+    json_button = QAction('Export diagnostics JSON', dialog)
     def save_diagnostics():
         filename,_ = QFileDialog.getSaveFileName(dialog,'Export diagnostics','','JSON (*.json)')
         if filename:
             Path(filename).write_text(json.dumps(analysis_payload(analysis,report,rows,limits,external_cc),indent=2,ensure_ascii=False,allow_nan=False),encoding='utf8')
-    json_button.clicked.connect(save_diagnostics)
-    buttons.addWidget(json_button)
-    csv_button = QPushButton('Export graph data CSV')
+    json_button.triggered.connect(save_diagnostics)
+    csv_button = QAction('Export graph data CSV', dialog)
     def save_csv():
         filename,_ = QFileDialog.getSaveFileName(dialog,'Export analysis data','','CSV (*.csv)')
         if filename:
             index = tabs.currentIndex()
             export_rows(filename,graph_data[index] if index in graph_data else rows)
-    csv_button.clicked.connect(save_csv)
-    buttons.addWidget(csv_button)
-    image_button = QPushButton('Export plot PNG/SVG')
+    csv_button.triggered.connect(save_csv)
+    image_button = QAction('Export plot PNG/SVG', dialog)
     def save_image():
         if tabs.currentIndex() not in figures: return
         filename,_ = QFileDialog.getSaveFileName(dialog,'Export plot','','PNG (*.png);;SVG (*.svg)')
         if filename: figures[tabs.currentIndex()].savefig(filename,dpi=180)
-    image_button.clicked.connect(save_image)
-    buttons.addWidget(image_button)
+    image_button.triggered.connect(save_image)
+    export_menu = QMenu(dialog)
+    export_menu.setToolTipsVisible(True)
+    export_menu.addActions([json_button, csv_button, image_button])
+    export_button = QPushButton('Export…')
+    export_button.setMenu(export_menu)
+    buttons.addWidget(export_button)
+    buttons.addStretch()
     close = QPushButton('Close'); close.clicked.connect(dialog.close); buttons.addWidget(close)
     root.addLayout(buttons)
+    def sync_exports(index):
+        controls_widget.setVisible(index not in (0,6))
+        available = index in figures and bool(graph_data.get(index))
+        image_button.setEnabled(available)
+        image_button.setToolTip('Export the displayed figure' if available else 'No compatible plotted data are available on this page.')
+        csv_button.setEnabled(bool(rows) if index in (0,6) else available)
+        csv_button.setText('Export analysis data CSV' if index in (0,6) else 'Export graph data CSV')
+        csv_button.setToolTip('Full-precision resolution-shell fields' if index in (0,6) else 'Full-precision data behind the displayed plots')
+    tabs.currentChanged.connect(sync_exports)
+    sync_exports(tabs.currentIndex())
+    dialog.analysis_image_button = image_button
+    dialog.analysis_csv_button = csv_button
+    dialog.analysis_json_action = json_button
+    dialog.analysis_export_button = export_button
     for index in (0,3,5): pages[index].addStretch()
     dialog.analysis_rows,dialog.analysis_limits = rows,limits
     dialog.analysis_tabs,dialog.analysis_figures = tabs,figures
@@ -324,5 +444,5 @@ def analyze_data_dialog(win, analysis):
     dialog.analysis_plot_pair = plot_pair
     dialog.analysis_histogram_range = histogram_range
     dialog.analysis_canvas = canvases
-    fit_dialog_to_available_screen(dialog,QSize(1400,980))
+    fit_dialog_to_available_screen(dialog,QSize(1120,740))
     return dialog

@@ -39,7 +39,7 @@ from test_jana_completion import build_window
 WIDTHS = [int(v) for v in sys.argv[2].split(",")]
 COUNTS = [int(v) for v in sys.argv[3].split(",")]
 ACTION_TEXTS = {"Run phasing", "Continue run", "Save map and model", "Pass to Jana2020", "Save available result",
-                "Stop after current cycle", "Stop immediately", "Clear results", "Return to Phase Studio"}
+                "Stop after current cycle", "Stop after cycle", "Stop immediately", "Clear results", "Return to Phase Studio"}
 
 def clipped(root):
     out = []
