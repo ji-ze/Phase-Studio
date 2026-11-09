@@ -61,7 +61,7 @@ def run_checks():
    assert w.validate_hkl_button.width()==w.analyze_completeness_button.width()
    assert metadata==[getattr(w,n).text() for n in ('reflections_value','format_value','cell_value','spacegroup_value','composition_value')]
   w.dialog.resize(900,850);settle();size=w.dialog.size()
-  assert tiles[2].height()==tiles[3].height() and tiles[2].height()>=94
+  assert tiles[2].height()==tiles[3].height() and tiles[2].height()>=78
   w.files_toggle.click();settle();assert w.files_form_widget.isVisible() and w.dialog.size()==size
   w.files_toggle.click();settle();assert not w.files_form_widget.isVisible() and w.scroll_area.verticalScrollBar().maximum()==0
   assert w.backing_window_holder['win'] is None

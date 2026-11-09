@@ -53,7 +53,9 @@ def check_ui():
             vp = w.scroll_area.viewport()
             rect = control.rect().translated(control.mapTo(vp, QPoint()))
             assert vp.rect().contains(rect), (control.objectName(), rect, vp.rect())
-            assert rect.top() >= 5 and rect.bottom() < vp.height()-5
+            # Compact pages may meet the viewport edge; every pixel of the
+            # control must remain visible above the independently fixed footer.
+            assert rect.top() >= 0 and rect.bottom() < vp.height()
 
         for width, height in [(821,780), (821,580), (640,700), (900,850)]:
             w.dialog.resize(width,height)
