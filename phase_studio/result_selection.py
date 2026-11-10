@@ -420,7 +420,7 @@ def _build_candidate_table(
     visible_rows = min(8, max(2, len(ordered)))
     table.setMaximumHeight(
         header.sizeHint().height()
-        + table.horizontalScrollBar().sizeHint().height()
+        + (table.horizontalScrollBar().sizeHint().height() if visible_rows < 8 else 0)
         + visible_rows * table.verticalHeader().defaultSectionSize()
         + 2 * table.frameWidth()
     )
