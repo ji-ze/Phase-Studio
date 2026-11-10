@@ -25,7 +25,7 @@ def test_about_font_and_reader_matrix(scale, tmp_path):
         assert profile['geometry'][2:] == [720, 420]
         assert profile['reader_font']['point_size'] >= 10
     assert report['narrow']['geometry'][2] <= 480
-    assert len(report['screenshots']) == 26
+    assert len(report['screenshots']) == 28
 
 
 def test_about_resolves_ui_font_without_application_styles(tmp_path):
@@ -55,6 +55,33 @@ def test_dependency_license_is_not_mislabeled_as_project_mit():
     from phase_studio.about_ui import _document_title
     path = Path('dependencies/example/example-1.2.dist-info/licenses/LICENSE')
     assert _document_title(path) == 'example-1.2 · License'
+
+
+def test_reader_renders_bundled_html_and_avoids_duplicate_mit_heading():
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    from PySide6.QtWidgets import QApplication
+    from phase_studio import about_ui
+    app = QApplication.instance() or QApplication([])
+    mit = about_ui.DocumentDialog(None, 'LICENSE')
+    mit.show(); app.processEvents()
+    assert not mit.title_label.isVisible()
+    assert mit.browser.toPlainText().startswith('MIT License')
+    mit.copy_button.click()
+    assert app.clipboard().text() == mit.raw_text
+    mit.close()
+    viewer = about_ui.DocumentDialog(None, 'THIRD_PARTY_NOTICES.md', third_party=True)
+    index = next(i for i, path in enumerate(viewer.paths) if path.name == 'Qt-third-party-notices.html')
+    viewer.selector.setCurrentIndex(index)
+    raw = viewer.path.read_bytes()
+    plain = viewer.browser.toPlainText()
+    assert 'Third-Party Code Used in Qt' in plain and '<html' not in plain.lower()
+    assert viewer.raw_bytes == raw
+    viewer.copy_button.click()
+    assert app.clipboard().text() == raw.decode('utf8')
+    viewer.original_layout.setChecked(True)
+    assert viewer.browser.toPlainText() == raw.decode('utf8').replace('\r\n', '\n')
+    assert viewer.path.read_bytes() == raw
+    viewer.close()
 
 
 def test_reader_unicode_extended_paths_raw_copy_and_markdown_safety(tmp_path, monkeypatch):

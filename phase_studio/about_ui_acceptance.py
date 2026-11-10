@@ -135,6 +135,14 @@ def run(directory):
                         assert ''.join(viewer.raw_text.split()) == ''.join(viewer.browser.toPlainText().split())
                     assert viewer.browser.geometry().top() - viewer.source_label.geometry().bottom() < 20
                     snap(prefix + '-third-party-viewer', viewer)
+                    html_notice = next(i for i, path in enumerate(viewer.paths)
+                                       if path.name == 'Qt-third-party-notices.html')
+                    viewer.selector.setCurrentIndex(html_notice)
+                    settle()
+                    assert '<html' not in viewer.browser.toPlainText().lower()
+                    assert 'Third-Party Code Used in Qt' in viewer.browser.toPlainText()
+                    assert viewer.raw_bytes == viewer.path.read_bytes()
+                    snap(prefix + '-qt-notices-rendered', viewer)
                     profile['selected_notice'] = viewer.source
                     profile['notice_count'] = len(viewer.paths)
                 QTest.keyClick(viewer, Qt.Key_Escape)

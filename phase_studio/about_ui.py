@@ -273,8 +273,16 @@ class DocumentDialog(QDialog):
                 self.title_label.setVisible(False)
             self.browser.document().setMarkdown(self.raw_text,
                 QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
+        elif self.path and self.path.suffix.lower() in ('.html', '.htm') and not original:
+            # LegalBrowser blocks embedded resource loading. Render the
+            # bundled document, keeping raw bytes available to Copy/Open.
+            self.browser.setHtml(self.raw_text)
+            self.title_label.setVisible(not bool(re.search(r'<h1\b', self.raw_text, re.I)))
         else:
             text = self.raw_text
+            first_line = next((line.strip() for line in text.splitlines() if line.strip()), '')
+            if first_line.casefold() == self.title_label.text().strip().casefold():
+                self.title_label.hide()
             if not original and self.path and self.path.suffix.lower() != '.cff':
                 # Reflow source-wrapped paragraphs for the reader. Every word
                 # and paragraph remains; raw copy/open and Original layout
