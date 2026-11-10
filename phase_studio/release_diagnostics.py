@@ -60,9 +60,17 @@ def run_release_ui_check(output_path):
                     assert time.monotonic() < deadline
                 wizard.cycles.setValue(1)
                 assert wizard.model.currentText() == models[0]
-                assert wizard.primary_button.text() == 'Run phasing'
+                # This native fixture has no measured uncertainties. Disabling
+                # significance is an explicit fixture choice, never a UI reset.
+                wizard.observed_threshold.setValue(0)
+                assert wizard.primary_button.text() == 'Next: Map feedback →'
                 wizard._ensure_workflow_requirements = lambda **kwargs: False
                 wizard.primary_button.click()
+                assert wizard.stack.currentWidget() is wizard.page3
+                assert wizard.primary_button.text() == 'Run phasing'
+                wizard.primary_button.click()
+                assert wizard.stack.currentWidget() is wizard.page3
+                wizard.back_button.click()
                 assert wizard.stack.currentWidget() is wizard.page2
                 wizard.cycles.setValue(3)
                 assert wizard.model.currentText() == models[1]
@@ -88,7 +96,8 @@ def run_release_ui_check(output_path):
                 assert not (programs / 'superflip_original.exe').exists()
                 assert source.read_bytes() == original
                 report.update(ok=True, parsed_records=2, navigation=True, model_policy=True,
-                    account_dialog=True, update_menu=True, about_dialog=True, one_cycle_skip=True,
+                    account_dialog=True, update_menu=True, about_dialog=True, one_cycle_skip=False,
+                    single_cycle_feedback=True, multi_cycle_feedback=True,
                     original_superflip_required=False,
                     context='Isolated synthetic project and executable-path fixtures; no native Jana acceptance')
                 wizard.dialog.close()

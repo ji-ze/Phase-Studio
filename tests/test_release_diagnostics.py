@@ -17,4 +17,6 @@ def test_release_ui_diagnostic(module, tmp_path):
     report = json.loads(output.read_text())
     assert report['ok'] and report['parsed_records'] == 2
     assert report['navigation'] and report['account_dialog'] and report['model_policy']
+    assert report['single_cycle_feedback'] and report['multi_cycle_feedback']
+    assert not report['one_cycle_skip']
     assert not report['inference_submitted'] and not report['original_superflip_required']
