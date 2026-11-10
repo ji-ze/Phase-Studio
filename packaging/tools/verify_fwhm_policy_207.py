@@ -67,6 +67,7 @@ def main():
         assert report['historical']['unchanged_original_files']
     if args.native:
         modes=[a.REFLECTION_DATA_MODE_INTENSITY,a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+            a.REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA,
             a.REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
             a.REFLECTION_DATA_MODE_INTENSITY_FWHM,a.REFLECTION_DATA_MODE_AMPLITUDE_FWHM]
         report['native']=[native_case(args.native,out/'native',mode) for mode in modes]

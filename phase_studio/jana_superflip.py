@@ -204,6 +204,15 @@ def _resolved_handoff_path(value: str, base_dir: Path) -> str:
     return str((path if path.is_absolute() else base_dir / path).resolve())
 
 
+def jana_work_directory(inflip_path: Path) -> Path:
+    source = Path(inflip_path).expanduser().resolve()
+    stem = source.stem
+    if len(stem) > 64:
+        import hashlib
+        stem = stem[:40] + '_' + hashlib.sha256(source.name.encode('utf8')).hexdigest()[:12]
+    return source.parent / f'phase_studio_full_run_{stem}'
+
+
 def build_jana_handoff_import(
     inflip_path: Path,
     options: JanaRunOptions,
@@ -258,7 +267,7 @@ def build_jana_handoff_import(
     handoff_values = {
         "input_source_mode": app_input_label,
         "jana_inflip": str(inflip_path),
-        "work_dir": str(base_dir / f"phase_studio_full_run_{inflip_path.stem}"),
+        "work_dir": str(jana_work_directory(inflip_path)),
         "superflip_exe": str(integration_superflip.resolve()),
         "edma_exe": str(integration_edma.resolve()),
         # Normal Jana workflows start from Phase Studio's own structure-
@@ -1446,13 +1455,11 @@ class _JanaWorkflowWizard:
 
     def _hkl_diagnostic_request(self):
         """Snapshot the Wizard inputs, independently of cached Advanced widgets."""
-        from phase_studio.app import build_hkl_analysis_request_from_inflip, parse_inflip_settings
+        from phase_studio.app import build_hkl_analysis_request_from_inflip
         if self.inflip_path is None:
             raise ValueError("No incoming Jana2020 .inflip was supplied.")
-        parsed = parse_inflip_settings(self.inflip_path)
-        imported = build_jana_handoff_import(self.inflip_path, JanaRunOptions(action="edit"), parsed)
         reference = self.reference_file.text().strip()
-        work_dir = imported.values.get("work_dir", "")
+        work_dir = jana_work_directory(self.inflip_path)
         request = build_hkl_analysis_request_from_inflip(
             self.inflip_path, Path(reference).expanduser() if reference else None,
             Path(work_dir) if work_dir else None,
@@ -1498,14 +1505,34 @@ class _JanaWorkflowWizard:
         return mode
 
     def _observed_filter_threshold(self) -> Optional[float]:
-        from phase_studio.app import reflection_mode_has_fwhm
-        return 0.0 if reflection_mode_has_fwhm(self._detect_reflection_data_mode()) else None
+        return self.observed_threshold.value() if hasattr(self, 'observed_threshold') else None
+
+    def _scientific_input_issue(self):
+        from .validation_issues import ValidationIssue
+        if self.inflip_path is None:
+            return None
+        state = getattr(self, 'input_readiness', 'Loading')
+        if state not in ('Validated', 'Warning'):
+            return ValidationIssue('Wait for input validation to finish before running.' if state in ('Loading', 'Parsed') else
+                'Input validation failed. Review View data and the input metadata before running.', 'input_readiness')
+        if self._current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
+            return None  # Native original-input launch does not apply the Phase Studio filter.
+        result = self.hkl_load_result
+        from .app import validate_reflection_filter_policy, REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
+        from .reflection_readiness import genuine_uncertainties, significance_issue
+        try:
+            validate_reflection_filter_policy(result.data_mode, self.observed_threshold.value())
+        except ValueError as error:
+            return ValidationIssue(str(error), 'significance_fwhm', 'i_over_sigma_min', 'Superflip', True)
+        return significance_issue(result.data_mode, self.observed_threshold.value(),
+            genuine_uncertainties(result.data_mode, result.reflections, verified=result.format_verified and result.data_mode != REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA))
 
     def _sync_page3_for_data_type(self) -> None:
         from phase_studio.app import (
             format_reflection_data_mode,
             reflection_mode_has_fwhm,
             reflection_mode_is_amplitude,
+            REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
         )
         import math
         mode = self._detect_reflection_data_mode()
@@ -1514,11 +1541,8 @@ class _JanaWorkflowWizard:
         self.feedback_is_powder = is_powder
         self.reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal" if verified else "Not verified")
         self.reflection_format_value.setText(format_reflection_data_mode(mode) if verified else "Not yet determined")
-        self.feedback_has_uncertainty = verified and not is_powder and any(
-            r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma > 0
-            and math.isfinite(float(r.value))
-            for r in getattr(self, "input_reflections", ())
-        )
+        from .reflection_readiness import genuine_uncertainties
+        self.feedback_has_uncertainty = genuine_uncertainties(mode, getattr(self, 'input_reflections', ()), verified=verified and mode != REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA)
         self.page3_description.setText(
             "FWHM: peak width in degrees 2θ · σ(I) unavailable. FWHM is not measurement uncertainty."
             if is_powder else
@@ -1559,6 +1583,9 @@ class _JanaWorkflowWizard:
         )
 
     def _check_page3_validity(self) -> Optional[str]:
+        issue = self._scientific_input_issue()
+        if issue:
+            return str(issue)
         if getattr(self, "model_policy_error", ""):
             return str(self.model_policy_error)
         if (
@@ -2076,84 +2103,119 @@ class _JanaWorkflowWizard:
         self.input_summary_right_layout.addRow("Composition", self.composition_value)
         self.page1_layout.addWidget(self.input_summary_section)
 
-        def refresh_input_summary() -> None:
-            no_inflip_tip = "No incoming Jana2020 .inflip was supplied."
-            if self.inflip_path is None:
-                self.validate_hkl_button.setEnabled(False)
-                self.analyze_completeness_button.setEnabled(False)
-                self.validate_hkl_button.setToolTip(no_inflip_tip)
-                self.analyze_completeness_button.setToolTip(no_inflip_tip)
-                return
+        self.input_readiness = 'Unavailable'
+        self.input_readiness_label = QLabel('Input readiness: not checked')
+        self.input_readiness_label.setWordWrap(True)
+        self.input_summary_body.addWidget(self.input_readiness_label)
+
+        def set_readiness(state, detail):
+            self.input_readiness = state
+            self.input_readiness_label.setText(state + ' · ' + detail)
+            self.input_readiness_label.setToolTip('Parsing, metadata verification and workflow readiness are distinct. Scientific settings are checked before Run.')
+
+        def apply_crystal_summary(metadata):
+            if isinstance(metadata, tuple):
+                metadata, defaults = metadata
+                for name, value in defaults.items():
+                    edit = getattr(self, name)
+                    if not edit.isModified() and not edit.text():
+                        was_blocked = edit.blockSignals(True)
+                        edit.setText(value)
+                        edit.blockSignals(was_blocked)
+                self._deferred_input_defaults = False
+            from phase_studio.scientific_typography import scientific_text
+            from phase_studio.hkl_diagnostics_ui import _spacegroup_display
+            rcell = metadata.cell
+            self.cell_value.setText('<table cellspacing="0" cellpadding="0"><tr>'+''.join(
+                ('</tr><tr>' if index==3 else '')+'<td style="padding-right:10px">'+
+                scientific_text(text).replace(' ','&nbsp;')+'</td>' for index,text in enumerate((
+                f'a = {rcell.a:.5g} Å', f'b = {rcell.b:.5g} Å', f'c = {rcell.c:.5g} Å',
+                f'alpha = {rcell.alpha:.4g}°', f'beta = {rcell.beta:.4g}°', f'gamma = {rcell.gamma:.4g}°')))+ '</tr></table>')
+            symbol, setting = _spacegroup_display(metadata.spacegroup.xhm())
+            self.spacegroup_value.setText(symbol);self.spacegroup_value.setToolTip(setting)
+            self.composition_value.setText((metadata.composition or '—').translate(str.maketrans('0123456789','₀₁₂₃₄₅₆₇₈₉')))
+
+        from phase_studio.input_readiness import InputReadinessLoader
+        self.input_loader = InputReadinessLoader(self.dialog)
+        self.dialog.finished.connect(lambda _result:self.input_loader.cancel())
+        def input_is_current():
+            from .hkl_diagnostics import source_identity
             try:
-                from phase_studio.app import (
-                    build_hkl_analysis_request_from_inflip,
-                    build_hkl_load_result,
-                    format_reflection_data_mode,
-                    parse_inflip_settings,
-                )
-                # Computed directly from this Wizard's own state (no hidden
-                # backing IterativeSuperflipPipelineQtGUI needed for this --
-                # unlike validate_hkl_clicked()/analyze_completeness_clicked()
-                # below, this only needs the shared HKL-analysis computation,
-                # not the main GUI's dialog presentation). work_dir is
-                # resolved via the same build_jana_handoff_import() call the
-                # backing window itself would apply to its own widgets, so
-                # the embedded-HKL cache file lands in the same place a real
-                # run would put it.
+                return self.inflip_path is not None and self.input_loader.key[0] == source_identity(self.inflip_path)
+            except (OSError, TypeError):
+                return False
+        def metadata_ready(metadata):
+            if not input_is_current():
+                refresh_input_summary_and_refit()
+                return
+            apply_crystal_summary(metadata)
+            set_readiness('Parsed', 'Crystal metadata verified; loading reflection diagnostics…')
+        def load_failed(error):
+            if self.input_loader.key is not None and not input_is_current():
+                return
+            from phase_studio.error_reporting import sanitize_error_details
+            self._input_validation_error = error
+            set_readiness('Invalid', sanitize_error_details(error))
+            self.reflections_value.setText('Input validation failed')
+        def load_completed(payload):
+            key, request, result = payload
+            if not input_is_current():
+                refresh_input_summary_and_refit()
+                return
+            self._hkl_summary_state = dict(key=key, request=request, result=result)
+            refresh_input_summary_and_refit()
+        self.input_loader.metadata.connect(metadata_ready)
+        self.input_loader.completed.connect(load_completed)
+        self.input_loader.failed.connect(load_failed)
+
+        def refresh_input_summary() -> None:
+            if self.inflip_path is None:
+                self.validate_hkl_button.setEnabled(False);self.analyze_completeness_button.setEnabled(False)
+                set_readiness('Unavailable', 'No incoming Jana2020 input selected')
+                return
+            from phase_studio.app import build_hkl_analysis_request_from_inflip, build_hkl_load_result, format_reflection_data_mode, parse_inflip_settings
+            from phase_studio.hkl_diagnostics import source_identity
+            try:
                 ref_text = self.reference_file.text().strip()
                 reference_file = Path(ref_text).expanduser() if ref_text else None
-                parsed = parse_inflip_settings(self.inflip_path)
-                handoff_import = build_jana_handoff_import(self.inflip_path, JanaRunOptions(action="edit"), parsed)
-                work_dir_text = handoff_import.values.get("work_dir", "")
-                work_dir = Path(work_dir_text) if work_dir_text else None
-                request = build_hkl_analysis_request_from_inflip(
-                    self.inflip_path, reference_file=reference_file, work_dir=work_dir
-                )
-                # Large input summaries use the same cached diagnostic worker
-                # as the dialogs, without doing a long parse on the Qt thread.
-                # Small inputs retain their immediate summary presentation.
-                state = getattr(self, "_hkl_summary_state", None)
-                if self.inflip_path.stat().st_size > 1_000_000 and state is None:
-                    import threading
-                    from phase_studio.hkl_diagnostics import diagnostic_cancellation
-                    from shiboken6 import isValid
-                    state = self._hkl_summary_state = {"done": False}
-                    cancelled = threading.Event()
-                    self.dialog.finished.connect(lambda _result: cancelled.set())
-
-                    def load_summary() -> None:
-                        try:
-                            with diagnostic_cancellation(cancelled):
-                                state["result"] = build_hkl_load_result(request)
-                        except Exception:
-                            state["error"] = True
-                        finally:
-                            state["done"] = True
-
-                    def poll_summary() -> None:
-                        if not isValid(self.dialog) or cancelled.is_set():
-                            return
-                        if not state["done"]:
-                            QTimer.singleShot(25, poll_summary)
-                        else:
-                            refresh_input_summary_and_refit()
-
-                    threading.Thread(target=load_summary, daemon=True).start()
-                    self.reflections_value.setText("Loading HKL diagnostics…")
-                    QTimer.singleShot(25, poll_summary)
-                    return
-                if state is not None:
-                    if not state["done"] or state.get("error"):
-                        return
-                    result = state["result"]
+                key = (source_identity(self.inflip_path), source_identity(reference_file) if reference_file and reference_file.is_file() else ref_text,
+                       self.powder_wavelength_spin.value() if hasattr(self, 'powder_wavelength_spin') else 0)
+                state = getattr(self, '_hkl_summary_state', None)
+                if state is not None and state['key'] == key:
+                    request, result = state['request'], state['result']
                 else:
-                    result = build_hkl_load_result(request)
-            except Exception:
-                # Per spec: never show a raw exception in this summary. The
-                # existing structured error dialog still covers View data /
-                # Analyze data themselves if the reflection block truly
-                # cannot be analyzed.
+                    self.hkl_load_result = None;self.input_reflections = ()
+                    if getattr(self.input_loader, 'key', None) != key:
+                        self._input_validation_error = None
+                        for label in (self.cell_value,self.spacegroup_value,self.composition_value,self.format_value):label.setText('Not yet verified')
+                    def load(metadata):
+                        source = Path(key[0][0])
+                        defaults = {}
+                        if getattr(self, '_deferred_input_defaults', False):
+                            for name, keyword in (('reference_file', 'referencefile'), ('model_file', 'modelfile')):
+                                found = inflip_keyword_path(source, keyword)
+                                defaults[name] = str(found) if found else ''
+                        request = build_hkl_analysis_request_from_inflip(source,reference_file=reference_file,work_dir=jana_work_directory(source))
+                        request.powder_wavelength = key[2]
+                        metadata((request.metadata, defaults))
+                        result = build_hkl_load_result(request)
+                        if source_identity(Path(key[0][0])) != key[0]:
+                            raise ValueError('Input changed during validation. Reload the input before running.')
+                        return key, request, result
+                    if self.inflip_path.stat().st_size > 1_000_000:
+                        if self.input_loader.start(key,load):
+                            set_readiness('Loading', 'Reading and validating reflection input…')
+                            self.reflections_value.setText('Loading HKL diagnostics…')
+                        return
+                    key, request, result = load(lambda metadata:apply_crystal_summary(metadata))
+                    self._hkl_summary_state = dict(key=key, request=request, result=result)
+            except Exception as error:
+                load_failed(error)
                 return
+            errors = any(severity=='ERROR' for severity,_text in result.diagnostics.warnings)
+            warnings = any(severity=='WARNING' for severity,_text in result.diagnostics.warnings)
+            set_readiness('Warning' if errors or warnings else 'Validated',
+                          'Input diagnostics complete; workflow settings checked before Run')
             self.reflections_value.setText(f"{len(result.reflections):,} HKL records · {len(result.unique_reflections):,} unique indices")
             self.reflections_value.setToolTip(
                 "Unique indices count distinct literal (h, k, l) tuples, not symmetry-independent orbits. "
@@ -2168,30 +2230,14 @@ class _JanaWorkflowWizard:
                     self._refresh_page3_validation_message()
             from phase_studio.app import reflection_mode_has_fwhm
             self.format_value.setText(format_reflection_data_mode(result.data_mode)+
-                (' · filter off (0)' if reflection_mode_has_fwhm(result.data_mode) else ''))
+                (' · σ unavailable' if reflection_mode_has_fwhm(result.data_mode) else ''))
             # Use the diagnostic authority's verified column semantics, never
             # a filename or AUTO fallback, to classify the measurement input.
             report = result.diagnostics
             verified = report is not None and report.available('column_semantics')
             self.data_type_value.setText(('Powder / polycrystalline' if report.data_type.startswith('Powder') else 'Single crystal') if verified else 'Not available / unverified')
             self.format_value.setToolTip('FWHM is a peak width in degrees 2θ, not a measurement uncertainty.' if verified and report.data_type.startswith('Powder') and report.fwhm_units=='degrees_2theta' else 'Declared reflection-column layout; data type is shown only when verified.')
-            rcell = result.cell
-            from phase_studio.scientific_typography import scientific_text
-            self.cell_value.setText(
-                '<table cellspacing="0" cellpadding="0"><tr>'+''.join(
-                    ('</tr><tr>' if index==3 else '')+'<td style="padding-right:10px">'+
-                    scientific_text(text).replace(' ','&nbsp;')+'</td>' for index,text in enumerate((
-                    f'a = {rcell.a:.5g} Å', f'b = {rcell.b:.5g} Å', f'c = {rcell.c:.5g} Å',
-                    f'alpha = {rcell.alpha:.4g}°', f'beta = {rcell.beta:.4g}°', f'gamma = {rcell.gamma:.4g}°')))+
-                '</tr></table>'
-            )
-            from phase_studio.hkl_diagnostics_ui import _spacegroup_display
-            symbol, setting = _spacegroup_display(result.spacegroup.xhm())
-            self.spacegroup_value.setText(symbol)
-            self.spacegroup_value.setToolTip(setting)
-            metadata = request.metadata
-            composition = metadata.composition if metadata is not None and metadata.composition else "—"
-            self.composition_value.setText(composition.translate(str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")))
+            apply_crystal_summary(request.metadata)
             self.validate_hkl_button.setEnabled(True)
             self.analyze_completeness_button.setEnabled(True)
             # These short hints need no application-wide rich-text wrapping.
@@ -2338,6 +2384,9 @@ class _JanaWorkflowWizard:
             if self.inflip_path is None:
                 return ""
             try:
+                if self.inflip_path.stat().st_size > 1_000_000:
+                    self._deferred_input_defaults = True
+                    return ""
                 found = inflip_keyword_path(self.inflip_path, keyword)
             except Exception:
                 return ""
@@ -2367,6 +2416,7 @@ class _JanaWorkflowWizard:
             "No first-cycle model",
             _inflip_keyword_default("modelfile"),
         )
+        self.reference_file.textChanged.connect(lambda _text:refresh_input_summary_and_refit())
         # These overrides are useful but optional for nearly every Jana run.
         # Keep their availability obvious while leaving enough vertical room
         # for all four workflows on the opening page at Full HD / 125%.
@@ -2856,6 +2906,16 @@ class _JanaWorkflowWizard:
         cycles_layout.addWidget(self.cycles_recommendation, 1)
         self.processing_form.addRow("Number of cycles", self.cycles_row)
         self.cycles_label = self.processing_form.labelForField(self.cycles_row)
+        self.observed_threshold = qt['QDoubleSpinBox']()
+        self.observed_threshold.setRange(0, 100)
+        self.observed_threshold.setDecimals(3)
+        self.observed_threshold.setSingleStep(.5)
+        self.observed_threshold.setMaximumWidth(120)
+        self.observed_threshold.setValue(float(self.settings.value('observed_filter_threshold',
+            self.shared_settings.value('inputs/i_over_sigma_min', 2.0))))
+        self.observed_threshold.setAccessibleName('Reflection significance threshold')
+        self.observed_threshold.setToolTip('Direct I/σ(I) for intensity or F/σ(F) for amplitude input. 0 bypasses significance filtering. FWHM and dummy fields are not measured uncertainties. This value is never reset automatically.')
+        self.processing_form.addRow('Minimum observed value/σ', self.observed_threshold)
 
         def update_cycle_guidance(value: int) -> None:
             self.cycles_recommendation.setText(
@@ -3330,7 +3390,7 @@ class _JanaWorkflowWizard:
         self.page3_description.setStyleSheet("color: #52658b;")
         self.page3_layout.addWidget(self.page3_description)
         self.feedback_applicability_note = QLabel(
-            "Map Feedback requires at least 2 cycles."
+            "Map Feedback has no effect in a single-cycle workflow because there is no subsequent cycle to receive updated reflection data."
         )
         self.feedback_applicability_note.setObjectName("recommendationReason")
         self.feedback_applicability_note.setWordWrap(True)
@@ -3892,17 +3952,11 @@ class _JanaWorkflowWizard:
             scroll_to_page_top()
             self._adjust_dialog_size()
 
-        def skip_map_feedback() -> bool:
-            return self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED and self.cycles.value() == 1
-
         def sync_processing_navigation(_value=None) -> None:
-            skip = skip_map_feedback()
-            self.processing_progress.setText('Choose workflow → <b>Configure processing</b>' +
-                ('' if skip else ' → Map feedback'))
+            self.processing_progress.setText('Choose workflow → <b>Configure processing</b> → Map feedback')
             if self.stack.currentWidget() is self.page2:
-                self.primary_button.setText('Run phasing' if skip else
-                    ('Next: Map feedback →' if self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED else 'Next ›'))
-                self.primary_button.setToolTip('Start the configured phasing workflow.' if skip else 'Continue to Map Feedback.')
+                self.primary_button.setText('Next: Map feedback →' if self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED else 'Next ›')
+                self.primary_button.setToolTip('Continue to Map Feedback.')
 
         self.cycles.valueChanged.connect(sync_processing_navigation)
 
@@ -3999,6 +4053,7 @@ class _JanaWorkflowWizard:
             return effective_cycles() > 1 and self._current_workflow() in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
 
         def save_values() -> None:
+            self.settings.setValue('observed_filter_threshold', self.observed_threshold.value())
             next_cycle_mode = effective_next_cycle_mode()
             self.settings.setValue("workflow", self._current_workflow())
             self.settings.setValue("cycles", effective_cycles())
@@ -4076,6 +4131,18 @@ class _JanaWorkflowWizard:
 
         def attempt_run() -> None:
             self._preflight_sharped_default_model = ""
+            navigating = self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED and self.stack.currentWidget() in (self.page1, self.page2)
+            if not navigating:
+                issue = self._scientific_input_issue()
+                if issue:
+                    from .error_reporting import build_validation_report, ErrorAction
+                    def review_reflections():
+                        go_to_page2()
+                        self.observed_threshold.setFocus()
+                        self.scroll_area.ensureWidgetVisible(self.observed_threshold)
+                    show_phase_studio_error(self.dialog, build_validation_report([issue]),
+                        [ErrorAction('Review reflection settings', review_reflections, True)])
+                    return
             if self.stack.currentWidget() is self.page1 and self._current_workflow() == WORKFLOW_SUPERFLIP_SHARPED:
                 go_to_page2()
                 return
@@ -4086,9 +4153,7 @@ class _JanaWorkflowWizard:
                 self.result["action"] = "autosolve"
                 self.dialog.accept()
                 return
-            if self.stack.currentWidget() is self.page3 or (
-                self.stack.currentWidget() is self.page2 and skip_map_feedback()
-            ):
+            if self.stack.currentWidget() is self.page3:
                 validation_message = self._check_page3_validity()
                 if validation_message:
                     self._refresh_page3_validation_message()

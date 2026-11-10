@@ -72,6 +72,8 @@ class PersistedRunReview:
                 continue
             payload = event.get('payload') or {}
             category = payload.get('category', '')
+            if kind == 'important' and event.get('severity') not in ('STEP','SUCCESS','WARNING','ERROR','CRITICAL') and category != 'SCIENTIFIC_RESULT':
+                continue
             if kind == 'warnings' and event.get('severity') not in ('WARNING', 'ERROR', 'CRITICAL'):
                 continue
             if kind == 'scientific' and category != 'SCIENTIFIC_RESULT' and event.get('component') not in ('Validation', 'Map Feedback', 'Results', 'EDMA'):
@@ -113,6 +115,8 @@ def uncertainty_description(mode):
         return 'FWHM is measured peak width, not sigma(I) or sigma(F).'
     if mode == a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
         return 'Amplitude with auxiliary/dummy column. Genuine experimental sigma(F) provenance is unavailable; a populated fifth column is not proof of measured uncertainty.'
+    if mode == a.REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA:
+        return 'Explicitly declared measured σ(F). Direct F/σ(F) and the documented first-order derived intensity significance are distinct.'
     if mode in (a.REFLECTION_DATA_MODE_INTENSITY, a.REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA):
         return 'Declared sigma(I) input. Experimental origin must be established from the input provenance, not from the presence of a numeric column.'
     if mode == a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA:

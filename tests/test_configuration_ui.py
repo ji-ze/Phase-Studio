@@ -37,6 +37,10 @@ def probe(scale):
                           "dataformat intensity\nfbegin\n1 0 0 10 2\nendf\n", encoding="utf8")
         w = js._JanaWorkflowWizard([], source)
         w.run()
+        # Native intensity's trailing dummy is not measured sigma. The user
+        # must explicitly choose the bypass before the Run dependency check.
+        assert w.observed_threshold.value() == 2
+        w.observed_threshold.setValue(0)
         w.dialog.show()
         for _ in range(20):
             app.processEvents()
@@ -120,8 +124,14 @@ def probe(scale):
         preflight = []
         w._ensure_workflow_requirements = lambda **kw: preflight.append(kw) or False
         w.primary_button.click()
+        assert w.stack.currentWidget() is w.page3
+        assert preflight == []
+        assert w._check_page3_validity() is None, w._check_page3_validity()
+        w.primary_button.click()
+        assert w.stack.currentWidget() is w.page3
+        assert preflight == [{'needs_sharped': True}], repr(preflight)
+        w.back_button.click()
         assert w.stack.currentWidget() is w.page2
-        assert preflight == [{'needs_sharped': True}]
         w.cycles.setValue(3)
         w.primary_button.click()
         assert w.stack.currentWidget() is w.page3

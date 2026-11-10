@@ -107,6 +107,13 @@ def build_error_report(
 ) -> ErrorReport:
     """Map an existing exception/message to a concise user-facing category."""
     message = sanitize_error_details(error).strip() or "The operation failed without an error message."
+    from .reflection_readiness import ReflectionReadinessError
+    if isinstance(error, ReflectionReadinessError) or 'significance filtering requires genuine finite positive measurement uncertainties' in message.casefold():
+        issue = error.issue if isinstance(error, ReflectionReadinessError) else ValidationIssue(
+            message, 'significance_unavailable', 'i_over_sigma_min', 'Superflip', True)
+        report = build_validation_report([issue], technical_details=extra_details or message)
+        from dataclasses import replace
+        return replace(report, operation=operation or 'Reflection validation')
     lower = message.lower()
     resolved_subsystem = "EDMA" if subsystem == "EDMA" else _subsystem_from_message(message, subsystem)
     category = "internal"
@@ -343,6 +350,11 @@ def build_validation_report(issues: Sequence[str], *, technical_details: str = "
     structured = tuple(dict.fromkeys(issue for issue in issues if isinstance(issue, ValidationIssue)))
     if structured:
         bullets = '\n'.join('• ' + sanitize_error_details(issue) for issue in dict.fromkeys(issues))
+        if len(issues) == 1 and structured[0].code == 'significance_unavailable':
+            return ErrorReport('input_validation', 'Input', 'Reflection significance filter unavailable',
+                str(structured[0]), 'Review the reflection filtering threshold or select input containing genuine measured uncertainties. '
+                'A zero threshold bypasses significance filtering. Your configuration has not been changed.',
+                sanitize_error_details(technical_details or bullets), 'Pre-run validation', issues=structured)
         significance = len(issues) == 1 and structured[0].code == 'significance_fwhm'
         return ErrorReport(
             category='input_validation', subsystem='Input',

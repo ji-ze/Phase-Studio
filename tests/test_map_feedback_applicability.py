@@ -235,6 +235,10 @@ class FeedbackTests(unittest.TestCase):
         from PySide6.QtWidgets import QDialog
         w = self.j._JanaWorkflowWizard([],self.input_file(powder))
         with patch.object(QDialog,'exec',return_value=QDialog.Rejected): w.run()
+        # Feedback tests explicitly bypass observed significance; FWHM and
+        # auxiliary fields must never silently reset a user's threshold.
+        self.assertEqual(w.observed_threshold.value(), 2.0)
+        w.observed_threshold.setValue(0)
         w.dialog.show()
         for _ in range(20): self.qtapp.processEvents()
         w.cycles.setValue(3)
@@ -294,7 +298,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn('subsequent cycle', w._check_page3_validity())
         w.cycles.setValue(1)
         self.assertIn('Map Feedback disabled', w.map_feedback_warning_text.text())
-        self.assertIn('at least 2 cycles', w.feedback_applicability_note.text())
+        self.assertIn('no subsequent cycle', w.feedback_applicability_note.text())
         w.cycles.setValue(3)
         self.assertEqual(w.powder_start_cycle_spin.value(), 2)
         self.assertEqual(w.intensity_damping_spin.value(), .4)
@@ -329,6 +333,7 @@ class FeedbackTests(unittest.TestCase):
         external=self.root/'explicit-measured-F-sigma.hkl'
         external.write_text('# h k l F sigma(F)\n1 0 0 12 .1\n',encoding='utf8')
         w.input_reflections=self.a.read_hkl(external,4,5)
+        w._detect_reflection_data_mode = lambda: self.a.REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA
         w._sync_page3_for_data_type()
         self.assertTrue(w.feedback_has_uncertainty)
         w.intensity_enabled_checkbox.setChecked(True)
@@ -383,6 +388,10 @@ class FeedbackTests(unittest.TestCase):
         w.powder_enabled_checkbox.setChecked(True)
         options = w._build_options('recycle')
         self.assertEqual(options.intensity_sigma_threshold, 0.0)
+        self.assertEqual(options.observed_filter_threshold, 2.0)
+        self.assertIn('FWHM', w._check_page3_validity())
+        w.observed_threshold.setValue(0)
+        options = w._build_options('recycle')
         self.assertEqual(options.observed_filter_threshold,0.0)
         handoff=self.j.build_jana_handoff_import(path,options,self.a.parse_inflip_settings(path))
         self.assertEqual(handoff.values['i_over_sigma_min'],'0.0')

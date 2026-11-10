@@ -222,7 +222,7 @@ def main():
           dialog._preview_canvas.toolTip() == ""
           and any(
               child.objectName() == "structureInteractionHint"
-              for child in dialog.findChildren(type(dialog._metadata_label))
+              for child in dialog.findChildren(appmod.QLabel)
           ))
     check("Result Selection uses a large full-width two-segment output selector",
           dialog._superflip_btn.minimumHeight() >= 30

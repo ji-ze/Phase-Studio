@@ -257,7 +257,8 @@ def build_diagnostics(result, *, observation_kind='unknown', friedel_policy='mer
         orbits = len({key for key,nz in zip(canonical,nonzero) if nz})
     finite = np.isfinite(values)
     good_aux = np.isfinite(auxiliary) & (auxiliary > 0)
-    uncertainty = verified and not powder and not dummy and bool(np.any(good_aux & finite & nonzero))
+    from .reflection_readiness import genuine_uncertainties
+    uncertainty = genuine_uncertainties(mode, raw, verified=verified and not dummy) and not powder
     significance = np.full(len(raw),np.nan)
     if uncertainty:
         ok = good_aux & finite & nonzero

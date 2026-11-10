@@ -43,12 +43,15 @@ def account_state(store, base_url=DEFAULT_SERVER_URL, *, entered_token=None):
     connection = {
         'Not connected': 'Not checked',
         'Connected': 'Connected · Authorization verified',
-        'Authentication expired': 'Authentication rejected or expired',
+        'Authentication expired': 'Expired; sign in again',
+        'Authentication rejected': 'Explicitly rejected',
         'Connection unavailable': 'Unavailable',
         'Checking': 'Checking',
     }.get(status, 'Not checked')
     if status == 'Authentication expired':
-        credentials = 'Invalid or rejected'
+        credentials = 'Expired'
+    elif status == 'Authentication rejected':
+        credentials = 'Rejected'
     return credentials, connection, status
 from phase_studio.ui_branding import (
     activate_owned_dialog, apply_safe_dialog_geometry, create_phase_studio_brand_header,
@@ -92,6 +95,8 @@ class SharpEDAccessDialog(QDialog):
     def __init__(self, parent=None, status=None, configured_value="", *,
                  base_url=DEFAULT_SERVER_URL, verify=None, store=None) -> None:
         super().__init__(parent)
+        from .ui_style import apply_standard_dialog_style
+        apply_standard_dialog_style(self)
         self.store = store if store is not None else credential_store
         self.base_url = base_url
         self.verify = verify or (lambda token: reqs.check_sharped_api(base_url, token))
@@ -130,7 +135,7 @@ class SharpEDAccessDialog(QDialog):
         title_row.addWidget(icon, 0, Qt.AlignVCenter)
         self.heading = QLabel("Connect to SharpED")
         self.heading.setWordWrap(True)
-        self.heading.setStyleSheet('font-family:"Segoe UI"; font-size:17pt; font-weight:600; color:#001170;')
+        self.heading.setObjectName('sectionLabel')
         title_row.addWidget(self.heading, 1)
         layout.addLayout(title_row)
 
@@ -654,7 +659,7 @@ class SharpEDAccessDialog(QDialog):
         verification = getattr(self.store, '_access_verification', {})
         # The legacy manual-key preflight checks the PUBLIC catalogue, not
         # token validity. Never turn that response into verified authentication.
-        state = ('Credentials available — not yet verified' if status.ok else 'Authentication expired'
+        state = ('Credentials available — not yet verified' if status.ok else 'Authentication rejected'
                  if status.state == reqs.RequirementState.TOKEN_REJECTED else 'Connection unavailable')
         verification[self.base_url] = (hashlib.sha256(self._pending_key.encode('utf8')).hexdigest(),state)
         self.store._access_verification = verification
@@ -704,7 +709,12 @@ def show_sharped_access_dialog(parent, status, configured_value="", **kwargs) ->
         active.raise_()
         active.activateWindow()
         return None  # The owning request resumes when its single dialog completes.
-    dialog = SharpEDAccessDialog(parent, status, configured_value, **kwargs)
+    from PySide6.QtWidgets import QApplication
+    from shiboken6 import isValid
+    modal = QApplication.activeModalWidget()
+    owner = modal if modal is not None and (parent is None or parent is modal or parent.isAncestorOf(modal)) else parent or QApplication.activeWindow()
+    origin = QApplication.focusWidget()
+    dialog = SharpEDAccessDialog(owner, status, configured_value, **kwargs)
     store._active_access_dialog = dialog
     try:
         dialog.exec()
@@ -712,3 +722,5 @@ def show_sharped_access_dialog(parent, status, configured_value="", **kwargs) ->
     finally:
         store._active_access_dialog = None
         dialog.deleteLater()
+        if origin is not None and isValid(origin):
+            QTimer.singleShot(0, lambda: isValid(origin) and origin.setFocus(Qt.OtherFocusReason))

@@ -10,7 +10,7 @@ def run(directory):
     from PySide6.QtCore import QSettings,QRect,Qt
     from PySide6.QtGui import QScreen,QFontInfo
     from PySide6.QtWidgets import QApplication,QDialog,QLabel
-    from phase_studio import app as a,jana_superflip as js,update_ui,hkl_diagnostics as d,hkl_diagnostics_ui as hu
+    from phase_studio import app as a,jana_superflip as js,update_ui,hkl_diagnostics as d,hkl_diagnostics_ui as hu,result_selection as selection,structure_camera as camera
     from phase_studio.about_ui import AboutDialog
     from phase_studio.credentials import CredentialStore
     phase='acceptance';scale=os.environ.get('QT_SCALE_FACTOR','1');out=Path(directory).absolute();out.mkdir(parents=True,exist_ok=True)
@@ -36,7 +36,7 @@ def run(directory):
     def isolated_settings(*parts):
         name = hashlib.sha256(repr(parts).encode('utf8')).hexdigest() + '.ini'
         return QSettings(str(Path(temporary)/name), QSettings.IniFormat)
-    with tempfile.TemporaryDirectory() as temporary,patch.object(QScreen,'availableGeometry',return_value=QRect(0,0,int(1920/float(scale)),int(1040/float(scale)))),patch.object(a,'QSettings',isolated_settings),patch.object(js,'_qt_imports',lambda:qt_imports()|{'QSettings':isolated_settings}):
+    with tempfile.TemporaryDirectory() as temporary,patch.object(QScreen,'availableGeometry',return_value=QRect(0,0,int(1920/float(scale)),int(1040/float(scale)))),patch.object(a,'QSettings',isolated_settings),patch.object(selection,'QSettings',isolated_settings),patch.object(camera,'QSettings',isolated_settings),patch.object(js,'_qt_imports',lambda:qt_imports()|{'QSettings':isolated_settings}):
         QSettings.setDefaultFormat(QSettings.IniFormat);QSettings.setPath(QSettings.IniFormat,QSettings.UserScope,temporary)
         state=update_ui.UpdateState(QSettings(str(Path(temporary)/'updates.ini'),QSettings.IniFormat),Path(temporary)/'updates.lock');state.set_enabled(False)
         app._phase_studio_updates=update_ui.UpdateService(app,state=state,automatic_allowed=False)
@@ -94,16 +94,34 @@ def run(directory):
             feedback=FeedbackDiagnosticsDialog(main,load_summaries(directory),directory,historical=True);feedback.show();snap('recorded-feedback',feedback);feedback.close()
             empty=FeedbackDiagnosticsDialog(main,[],directory,historical=True);empty.show();snap('empty-feedback',empty)
             assert not empty.tabs.isVisible() and all(not button.isEnabled() for button in empty.cycle_exports)
-            empty.close();main.close()
+            empty.close()
+            from .functional_ui_acceptance import capture
+            capture(main,out,snap,rows,jana=profile=='jana')
+            main.close()
         class MemoryCredentials:
             def __init__(self): self.values={}
             def read(self, origin): return self.values.get(origin, '')
             def write(self, origin, value): self.values[origin]=value
             def delete(self, origin): self.values.pop(origin, None)
         store=CredentialStore(backend=MemoryCredentials())
+        from .sharped_access import SharpEDAccessDialog
+        access=SharpEDAccessDialog(store=store);access.show();snap('account-not-configured',access);access.close()
         store.set('controlled-offline-capture-key', remember=True)
+        access=SharpEDAccessDialog(store=store);access.show();snap('account-stored-unverified',access)
+        access._present('api_network');snap('account-network-unavailable',access)
+        access._present('expired');snap('account-expired',access);access.close()
         with patch.object(js,'application_dir',lambda:Path(temporary)/'Jana2020/SharpED'),patch.object(js,'resolve_active_jana_superflip',lambda _directory:Path(temporary)/'mock-tools/superflip.exe'),patch.object(js,'credential_store',store),patch.object(QDialog,'exec',lambda self:QDialog.Rejected),patch.object(js.SharpEDServerClient,'get_models',lambda self:SimpleNamespace(models=[js.SHARPED_ONE_CYCLE_MODEL,js.SHARPED_ITERATIVE_MODEL,'controlled-model-3','controlled-model-4'],default_model=js.SHARPED_ONE_CYCLE_MODEL,provenance='offline')):
             wizard=js._JanaWorkflowWizard([],local);wizard.run();wizard.dialog.show();settle();snap('wizard-workflow',wizard.dialog)
+            def responsive_wizard(page):
+                size=wizard.dialog.size();position=wizard.scroll_area.verticalScrollBar().value()
+                for width,height in ((680,500),(800,400)):
+                    wizard.dialog.resize(width,height);settle()
+                    wizard.scroll_area.verticalScrollBar().setValue(0)
+                    snap(f'{page}-{width}x{height}',wizard.dialog)
+                    wizard.scroll_area.verticalScrollBar().setValue(wizard.scroll_area.verticalScrollBar().maximum())
+                    snap(f'{page}-{width}x{height}-scrolled',wizard.dialog)
+                wizard.dialog.resize(size);wizard.scroll_area.verticalScrollBar().setValue(position);settle()
+            responsive_wizard('wizard-workflow')
             assert hasattr(wizard, 'hkl_load_result'), 'Wizard must display parsed input, not an unavailable fixture'
             wizard.superflip_sharped_tile._trigger();settle()
             for _ in range(80):
@@ -113,7 +131,12 @@ def run(directory):
             selected=wizard.model.findText(js.SHARPED_ITERATIVE_MODEL)
             wizard.model.setCurrentIndex(selected);wizard.model.activated.emit(selected)
             snap('wizard-processing',wizard.dialog)
+            responsive_wizard('wizard-processing')
             wizard._go_to_map_feedback();settle();snap('feedback-disabled',wizard.dialog)
+            responsive_wizard('wizard-feedback')
+            wizard.cycles.setValue(1);snap('feedback-single-cycle',wizard.dialog)
+            assert not wizard.powder_enabled_checkbox.isEnabled()
+            wizard.cycles.setValue(3)
             wizard.powder_enabled_checkbox.setChecked(True);snap('feedback-powder',wizard.dialog)
             wizard.intensity_enabled_checkbox.setChecked(True);wizard.intensity_damping_spin.setValue(0);snap('feedback-zero-damping',wizard.dialog)
             wizard.scroll_area.verticalScrollBar().setValue(wizard.scroll_area.verticalScrollBar().maximum());snap('feedback-zero-damping-controls',wizard.dialog)

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QTabWi
     QGroupBox, QFormLayout, QGridLayout, QApplication, QPlainTextEdit, QMenu)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from .scientific_typography import scientific_text
 from .input_analysis import (analysis_rows, significance_cutoff, strict_full_resolution,
                              export_rows, CUTOFF_METHOD, CC_UNAVAILABLE, import_half_dataset_statistics,
                              analysis_payload, grouped_resolution_markers)
@@ -189,12 +190,29 @@ def analyze_data_dialog(win, analysis):
     cc_threshold.setToolTip('User-selected criterion, not a universal crystallographic threshold. Sustained crossing uses at least 20 paired orbits per shell; a bracket is not a confidence interval.')
     pages[6].addWidget(cc_threshold)
     cc_limit = note(6,'CC1/2 cutoff unavailable until external statistics are imported.')
-    note(3,('Derived I/σ(I) ≈ |F|/(2σ(F)), unreliable near zero amplitudes. Direct F/σ(F) is signed.'
+    if report.available('significance'):
+        note(3,('Derived I/σ(I) ≈ |F|/(2σ(F)), unreliable near zero amplitudes. Direct F/σ(F) is signed.'
             if a.reflection_mode_is_amplitude(analysis.data_mode) and report.available('significance') else
             'Genuine measured σ(I) is used.' if report.available('significance') else
             'Significance unavailable: genuine measured uncertainties are absent or column semantics are unverified. FWHM and dummy sigma are excluded.'))
+    else:
+        from .ui_states import UnavailableState
+        from .run_review import uncertainty_description
+        pages[3].addWidget(UnavailableState('Measured uncertainty analysis unavailable',
+            uncertainty_description(analysis.data_mode),
+            'HKL indices, observed values, resolution, symmetry and compatible descriptive statistics.',
+            'Verified finite positive measured σ(I) or σ(F); FWHM and dummy fields cannot supply it.',
+            action=('View input provenance', provenance)))
     note(4,'Indexed HKL coverage is not independent experimental completeness for powder data. '+report.methods[0])
-    note(5,'Geometry-based overlap is an estimate, not proof of measured peak separation. '+overlap.get('reason',''))
+    if powder:
+        note(5,'Geometry-based overlap is an estimate, not proof of measured peak separation. '+overlap.get('reason',''))
+    else:
+        from .ui_states import UnavailableState
+        pages[5].addWidget(UnavailableState('Peak overlap analysis unavailable',
+            'Compatible peak widths and the required geometric metadata are unavailable for this input.',
+            'Observed values, HKL indices, resolution and symmetry statistics.',
+            'Measured FWHM with declared units, a valid cell and verified radiation wavelength.',
+            action=('View input provenance', provenance)))
     if powder:
         note(5,('Constant' if report.statistic('constant_fwhm') else 'Variable or incomplete')+' FWHM · units: '+report.fwhm_units+' · finite positive widths: '+str(report.count('valid_widths_or_sigmas')))
     if powder and overlap.get('available'):
@@ -207,22 +225,53 @@ def analyze_data_dialog(win, analysis):
             child.show()
         inspect.clicked.connect(inspect_groups)
         pages[5].addWidget(inspect)
-    note(6,'\n'.join(report.methods))
+    methodology = note(6,'\n'.join(report.methods))
+    methodology.hide();external_status.hide();cc_threshold.hide()
+    technical = QPushButton('Definitions, provenance and external statistics')
+    technical.setCheckable(True)
+    for widget in (methodology,external_status,cc_threshold):technical.toggled.connect(widget.setVisible)
+    pages[6].insertWidget(0,technical)
     table = QTableWidget(len(rows),len(rows[0]) if rows else 0)
     if rows:
-        table.setHorizontalHeaderLabels(list(rows[0]))
+        keys = list(rows[0])
+        labels = {'lo':'s lower (Å⁻¹)','hi':'s upper (Å⁻¹)','center':'s center (Å⁻¹)',
+                  'records':'Input records','literal_unique':'Literal HKL','theory':'Allowed orbits',
+                  'observed':'Indexed orbits','coverage':'Shell coverage (%)','cumulative_coverage':'Cumulative coverage (%)','d':'d (Å)'}
+        table.setHorizontalHeaderLabels([labels.get(key,key.replace('_',' ')) for key in keys])
+        for column,key in enumerate(keys):
+            table.horizontalHeaderItem(column).setToolTip('Original export field: '+key+
+                (' · s = sin θ / λ = 1/(2d); reciprocal-space shell coordinate.' if key in ('lo','hi','center') else ''))
         for i,row in enumerate(rows):
             for j,value in enumerate(row.values()):
-                item = QTableWidgetItem('Unavailable' if value is None else repr(value))
+                item = QTableWidgetItem('Unavailable' if value is None else f'{value:.6g}' if isinstance(value,float) else str(value))
+                item.setData(Qt.UserRole,value)
+                item.setToolTip('Original full precision: '+repr(value))
                 item.setFlags(item.flags() & ~Qt.ItemIsEditable)
                 table.setItem(i,j,item)
     table.setMinimumHeight(170)
+    table.setAlternatingRowColors(True)
+    table.setSelectionBehavior(QTableWidget.SelectRows)
+    table.setWordWrap(False)
+    table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+    table.resizeColumnsToContents()
+    for column in range(table.columnCount()):table.setColumnWidth(column,min(160,max(90,table.columnWidth(column))))
     pages[6].addWidget(table)
+    copy_shells = QPushButton('Copy full-precision shell rows')
+    def copy_shell_rows():
+        selected = sorted({index.row() for index in table.selectedIndexes()}) or list(range(len(rows)))
+        QApplication.clipboard().setText(json.dumps([rows[index] for index in selected],indent=2,allow_nan=False))
+    copy_shells.clicked.connect(copy_shell_rows)
+    pages[6].addWidget(copy_shells,alignment=Qt.AlignLeft)
     # Preserve all existing technical fields, samples, assumptions and exports.
     details = _detail_dialog(dialog,report)
     details.layout().removeWidget(details.hkl_details_tabs)
+    categories = QPushButton('Technical diagnostic categories')
+    categories.setCheckable(True)
+    categories.toggled.connect(details.hkl_details_tabs.setVisible)
+    pages[6].addWidget(categories)
     pages[6].addWidget(details.hkl_details_tabs)
     details.hkl_details_tabs.setParent(pages[6].parentWidget())
+    details.hkl_details_tabs.hide()
     dialog.advanced_source = details
     controls_widget = QWidget()
     controls = QGridLayout(controls_widget)
@@ -265,7 +314,10 @@ def analyze_data_dialog(win, analysis):
         if index not in figures:
             fig = Figure(figsize=(10,6),layout='constrained')
             canvas = FigureCanvasQTAgg(fig)
-            canvas.setMinimumSize(0,300)
+            # Four panels need room for scientific titles, axis units and
+            # tick labels at high DPI. The containing page scrolls on short
+            # screens, while exports retain the complete figure.
+            canvas.setMinimumSize(0,360)
             canvas.setSizePolicy(QSizePolicy.Expanding,QSizePolicy.Ignored)
             toolbar = NavigationToolbar2QT(canvas,dialog)
             toolbar.setToolTip('Pan/zoom acts on the plot under the pointer. Home/back restore figure view history. Save exports the complete figure.')
@@ -297,7 +349,7 @@ def analyze_data_dialog(win, analysis):
         graph_data[index] = []
         for j,(key,title) in enumerate(specs):
             ax = fig.add_subplot(plot_rows,2,j+1)
-            ax.set_title(title,fontsize=9)
+            ax.set_title(scientific_text(title,'plot'),fontsize=9)
             unavailable = ((index==3 or key=='mean_significance') and not report.available('significance')) or (index==5 and not powder) or (key in ('overlap_fraction','groups') and not overlap.get('available'))
             if unavailable:
                 ax.text(.5,.5,'Unavailable\n'+('Genuine measured uncertainties required' if index==3 or key=='mean_significance' else 'Applicable powder metadata required'),ha='center',va='center',wrap=True,transform=ax.transAxes,fontsize=8)
@@ -308,11 +360,11 @@ def analyze_data_dialog(win, analysis):
                 if histogram_range.currentIndex()==1 and len(sample):
                     low,high = np.percentile(sample,[1,99])
                     sample = sample[(sample>=low)&(sample<=high)]
-                    ax.set_title(title+' · detail 1–99%',fontsize=9)
+                    ax.set_title(scientific_text(title,'plot')+' · detail 1–99%',fontsize=9)
                 heights,edges,_ = ax.hist(sample,bins=min(100,max(1,int(np.sqrt(len(values))))))
                 for left,right,height in zip(edges[:-1],edges[1:],heights):
                     graph_data[index].append(dict(series=key,x=float(left),x_end=float(right),y=float(height)))
-                ax.set_xlabel(value_label if key=='hist' else a.reflection_sigma_label(analysis.data_mode))
+                ax.set_xlabel(scientific_text(value_label if key=='hist' else a.reflection_sigma_label(analysis.data_mode),'plot'))
                 ax.set_ylabel('Original input records')
             elif key=='groups':
                 size_frequency = dict(overlap.get('size_distribution',()))
@@ -350,9 +402,9 @@ def analyze_data_dialog(win, analysis):
                         va='top', fontsize=7, bbox=dict(facecolor='white',edgecolor='none',alpha=.9))
                 if key in ('coverage','cumulative_coverage'):
                     ax.set_ylim(0,100)
-                    ax.set_ylabel('Indexed / allowed orbits (%)')
+                    ax.set_ylabel(('Cumulative' if key=='cumulative_coverage' else 'Shell')+' indexed / allowed orbits (%)')
                 if key == 'frequency':
-                    ax.set_ylabel('Input records per bin' if frequency.currentIndex()==0 else selected_key.replace('_',' '))
+                    ax.set_ylabel(('Input records per bin','Literal unique HKL per bin','Indexed allowed orbits per bin','Records per unit sin θ / λ')[frequency.currentIndex()])
             if counts.currentIndex()==1 and key in ('hist','sigma','groups','frequency','cumulative_records','observed','missing'):
                 ax.set_yscale('log',nonpositive='mask')
             ax.grid(alpha=.15)

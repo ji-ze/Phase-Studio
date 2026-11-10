@@ -22,9 +22,10 @@ def run(directory):
         try:
             return run_input_ui(directory)
         except Exception as error:
+            import traceback
             output=Path(directory)
             output.mkdir(parents=True,exist_ok=True)
-            (output/'report.json').write_text(json.dumps(dict(passed=False,error=str(error),error_type=type(error).__name__)),encoding='utf8')
+            (output/'report.json').write_text(json.dumps(dict(passed=False,error=str(error),error_type=type(error).__name__,technical_details=traceback.format_exc())),encoding='utf8')
             raise SystemExit(1)
     if os.environ.get('PHASE_STUDIO_MAP_LOADING_ACCEPTANCE_INPUT'):
         from .map_loading_acceptance import run as run_map_loading
@@ -282,7 +283,7 @@ def _check_feedback_significance(a, backend, wizard, report, directory, snap):
     predictions = {(1,0,0):(1.,0.), (2,0,0):(9.,0.), (3,0,0):(16.,0.)}
     results = []
     for mode in (a.REFLECTION_DATA_MODE_INTENSITY, a.REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
-                 a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA):
+                 a.REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA, a.REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA):
         amplitude = a.reflection_mode_is_amplitude(mode)
         backend._set_widget_value_from_string(backend.inputs['reflection_data_mode'],a.format_reflection_data_mode(mode))
         rows = [a.Reflection(i,0,0,f if amplitude else f*f,s if amplitude else 2*f*s,37.)
@@ -316,6 +317,11 @@ def _check_feedback_significance(a, backend, wizard, report, directory, snap):
                 snap('12-map-significance-wizard-'+suffix,wizard.dialog)
                 snap('12-map-significance-configuration-'+suffix,backend)
     # Sentinel bypass and width-only rejection use the same frozen authority.
+    with patch.object(wizard,'_detect_reflection_data_mode',return_value=a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA), \
+            patch.object(wizard,'input_reflections',[a.Reflection(1,0,0,12,.1)],create=True):
+        wizard._sync_page3_for_data_type()
+        assert not wizard.feedback_has_uncertainty
+        assert not wizard.intensity_sigma_spin.isEnabled()
     zeros = [a.Reflection(1,0,0,0.,None),a.Reflection(2,0,0,4.,None)]
     with patch.object(a,'xplor_fft_predictions',return_value=predictions):
         updated,_ = a.apply_map_feedback_to_reflections(zeros,a.REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,

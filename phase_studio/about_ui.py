@@ -146,7 +146,7 @@ class DocumentDialog(QDialog):
         self.title_label.setObjectName('documentTitle')
         self.title_label.setWordWrap(True)
         title_row.addWidget(self.title_label, 1)
-        self.original_layout = QPushButton('Source line breaks')
+        self.original_layout = QPushButton('Original formatting')
         self.original_layout.setObjectName('documentLayoutButton')
         self.original_layout.setCheckable(True)
         self.original_layout.setToolTip('Show original line breaks. Copy original always copies the complete original source.')
@@ -253,6 +253,7 @@ class DocumentDialog(QDialog):
 
     def render_document(self):
         original = self.original_layout.isChecked()
+        self.title_label.setVisible(True)
         # QTextEdit.setPlainText retains currentCharFormat. Clear a previous
         # Markdown heading before switching to a plain-text notice.
         self.browser.setCurrentCharFormat(QTextCharFormat())
@@ -265,6 +266,11 @@ class DocumentDialog(QDialog):
             self.browser.setHtml(CONTACTS_HTML)
         elif self.path and self.path.suffix.lower() == '.md' and not original:
             self.title_label.setText(_document_title(self.path))
+            first_line = self.raw_text.lstrip().splitlines()[0] if self.raw_text.strip() else ''
+            if first_line.startswith('#'):
+                # Keep the original heading in the document; avoid a second
+                # competing title above it. Copy/Open always retain the source.
+                self.title_label.setVisible(False)
             self.browser.document().setMarkdown(self.raw_text,
                 QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
         else:
@@ -330,12 +336,23 @@ class DocumentDialog(QDialog):
         # The common helper's large-dialog minimum is inappropriate here.
         self.setMinimumSize(min(420, self.width()), min(300, self.height()))
         self._update_source_label()
+        if not getattr(self, '_document_fit_initialized', False):
+            self._document_fit_initialized = True
+            QTimer.singleShot(0, self._fit_document_content)
+
+    def _fit_document_content(self):
+        if not self.isVisible():
+            return
+        chrome = self.height() - self.browser.height()
+        height = int(self.browser.document().size().height()) + chrome + 24
+        fit_dialog_to_available_screen(self, QSize(680, min(560, max(340, height))))
+        self.setMinimumSize(min(420, self.width()), min(280, self.height()))
 
 
 class _ContentPanel(QScrollArea):
     def sizeHint(self):
         height = self.widget().sizeHint().height() + 2 if self.widget() else 130
-        return QSize(640, min(140, max(108, height)))
+        return QSize(640, min(180, max(108, height)))
 
     def minimumSizeHint(self):
         return QSize(0, 76)
@@ -416,10 +433,9 @@ class AboutDialog(QDialog):
             self.cards.append(card)
         layout.addWidget(navigation)
         self.stack = QStackedWidget()
-        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.stack.setMinimumHeight(76)
-        self.stack.setMaximumHeight(140)
-        layout.addWidget(self.stack)
+        layout.addWidget(self.stack, 1)
         self._page('<p><b>Phase Studio</b><br>Jiří Zelenka — author and lead developer.<br>'
                    'Institute of Physics of the Czech Academy of Sciences · '
                    '<a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>'
@@ -466,7 +482,7 @@ class AboutDialog(QDialog):
         body = QWidget()
         body.setObjectName('aboutPage')
         page_layout = QVBoxLayout(body)
-        page_layout.setContentsMargins(12, 6, 12, 6)
+        page_layout.setContentsMargins(12, 6, 12, 12)
         page_layout.setSpacing(4)
         page_layout.setAlignment(Qt.AlignTop)
         label = QLabel('<style>p { margin:0 0 5px 0; }</style>' + text)

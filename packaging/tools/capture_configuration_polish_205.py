@@ -57,6 +57,10 @@ with tempfile.TemporaryDirectory() as tmp,patch.object(QScreen,'availableGeometr
         return SimpleNamespace(models=list(state['models']),default_model='Extra catalogue model',provenance='offline')
     with patch.object(js,'_qt_imports',lambda:imports()|{'QSettings':factory}),patch.object(js,'credential_store',CredentialStore(backend=None)),patch.object(js,'application_dir',lambda:jana),patch.object(QDialog,'exec',lambda self:QDialog.Rejected),patch.object(js.SharpEDServerClient,'get_models',models):
         w=js._JanaWorkflowWizard([],source);w.run();w.dialog.show();settle(w)
+        # The fixture's native auxiliary field is not a measured uncertainty.
+        # Make the user's significance-bypass choice explicit.
+        assert w.observed_threshold.value()==2
+        w.observed_threshold.setValue(0)
         initial=QRect(w.dialog.geometry())
         def stable():
             settle(w)

@@ -36,7 +36,9 @@ def test_account_credential_storage_and_connection_are_independent():
         assert account_state(store)[:2] == ('Securely stored', connection)
         assert token not in repr(account_state(store))
     store._access_verification = {DEFAULT_SERVER_URL: (fingerprint, 'Authentication expired')}
-    assert account_state(store)[:2] == ('Invalid or rejected', 'Authentication rejected or expired')
+    assert account_state(store)[:2] == ('Expired', 'Expired; sign in again')
+    store._access_verification = {DEFAULT_SERVER_URL: (fingerprint, 'Authentication rejected')}
+    assert account_state(store)[:2] == ('Rejected', 'Explicitly rejected')
     assert account_state(store, entered_token='mock-replacement')[:2] == ('Available for the current session', 'Not checked')
     assert store.get() == token
 

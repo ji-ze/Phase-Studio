@@ -16,6 +16,7 @@ class ValidationIssue(str):
 
 
 RECOVERY_LABELS = {
+    'significance_unavailable': 'Review reflection settings',
     'significance_fwhm': 'Review significance threshold',
     'powder_wavelength': 'Set measured wavelength',
     'inflip_missing': 'Select .inflip…',

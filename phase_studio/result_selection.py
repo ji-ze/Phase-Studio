@@ -339,7 +339,7 @@ def _build_candidate_table(
     table.setEditTriggers(QAbstractItemView.NoEditTriggers)
     table.setSelectionBehavior(QAbstractItemView.SelectRows)
     table.setSelectionMode(QAbstractItemView.SingleSelection)
-    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
     table.verticalHeader().setVisible(False)
     header = table.horizontalHeader()
     header.setStyleSheet("QHeaderView::section { padding:3px 4px; font-size:9pt; }")
@@ -420,6 +420,7 @@ def _build_candidate_table(
     visible_rows = min(8, max(2, len(ordered)))
     table.setMaximumHeight(
         header.sizeHint().height()
+        + table.horizontalScrollBar().sizeHint().height()
         + visible_rows * table.verticalHeader().defaultSectionSize()
         + 2 * table.frameWidth()
     )
@@ -846,7 +847,8 @@ class ResultSelectionDialog(QDialog):
         self._camera_hint = camera_hint
         camera_hint.setVisible(True)
         preview_canvas.setToolTip("")
-        self._metadata_label = QLabel("")
+        self._metadata_label = PanelMetadataLabel()
+        self._metadata_label.setMaxLines(2)
         self._metadata_label.setObjectName("autosolveReviewDetail")
         self._metadata_label.setWordWrap(True)
         metadata_row=QHBoxLayout()
@@ -1320,10 +1322,11 @@ class ResultSelectionDialog(QDialog):
         self._run_log_viewer.show();self._run_log_viewer.raise_()
 
     def _show_recommendation_details(self):
-        from .run_review import recommendation_details
+        from .recommendation_ui import RecommendationDialog
         recommendation=self.active_recommendation
         if recommendation is not None:
-            self._show_detail_rows('Why this cycle?', [('Selection rule and exact values',recommendation_details(recommendation))])
+            self._recommendation_dialog = RecommendationDialog(self, recommendation)
+            self._recommendation_dialog.exec()
 
     def _show_detail_rows(self,title,rows):
         show_candidate_details(self,title,rows)
@@ -1781,15 +1784,15 @@ class ResultSelectionDialog(QDialog):
             ('Jana model SHA-256',candidate.jana_model_sha256),
         )
         self._candidate_info.setEnabled(True)
-        self._metadata_label.setToolTip(
-            "EDMA ASU composition\n\nComposition is determined from EDMA sites in the "
-            "crystallographic asymmetric unit. It may differ from the "
-            "composition-constrained Jana model.")
         self._metadata_label.setText(
             f"<b>ASU:</b> {html.escape((composition or 'Unavailable').translate(str.maketrans('0123456789', '₀₁₂₃₄₅₆₇₈₉')))}"
             f" · Jana model: {candidate.jana_model_site_count if candidate.jana_model_site_count is not None else 'unavailable'} atomic sites<br>"
             f"{html.escape(source)} · Cycle {candidate.cycle}{html.escape(model)}{html.escape(initialization)}"
         )
+        self._metadata_label.setToolTip(
+            "EDMA ASU composition\n\nComposition is determined from EDMA sites in the "
+            "crystallographic asymmetric unit. It may differ from the "
+            "composition-constrained Jana model.")
         self._threshold_status.setText(
             f"EDMA {candidate.edma_sigma:.2f} σ · {detected_count:,} EDMA sites"
             if candidate.edma_enabled and candidate.edma_sigma is not None else "EDMA disabled"

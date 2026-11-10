@@ -98,7 +98,7 @@ def run(directory):
                             fig.canvas.draw()
                             for axis in fig.axes:
                                 bbox=axis.get_tightbbox(fig.canvas.get_renderer())
-                                assert bbox.x0>=-1 and bbox.y0>=-1 and bbox.x1<=fig.bbox.width+1 and bbox.y1<=fig.bbox.height+1
+                                assert bbox.x0>=-1 and bbox.y0>=-1 and bbox.x1<=fig.bbox.width+1 and bbox.y1<=fig.bbox.height+1, (name,powder,i,pair,axis.get_title(),bbox.bounds,fig.bbox.bounds)
                     dialog.analysis_plot_pair.setCurrentIndex(0)
                 assert sum(r['records'] for r in dialog.analysis_rows)==84
                 assert source.read_bytes() and hashlib.sha256(source.read_bytes()).hexdigest()==before

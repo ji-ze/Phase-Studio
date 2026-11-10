@@ -312,6 +312,7 @@ COMMENT_PREFIXES = ("#", "!", ";")
 REFLECTION_DATA_MODE_SET_FROM_INFLIP = "set from inflip"
 REFLECTION_DATA_MODE_INTENSITY = "hkl I sigma"
 REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA = "hkl F sigma"
+REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA = "hkl F measured_sigma"
 REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA = "hkl I phase sigma"
 REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA = "hkl F phase sigma"
 REFLECTION_DATA_MODE_INTENSITY_FWHM = "hkl I fwhm"
@@ -2385,6 +2386,8 @@ def normalize_reflection_data_mode(value: str) -> str:
     # do -- checked before the alias lowering, which would otherwise mangle the
     # "·"/"σ" characters into something no alias recognizes.
     raw = str(value or "")
+    if raw == "h k l · F · σ(F)":
+        return REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA  # Historical saved display label.
     for token, label in REFLECTION_DATA_MODE_DISPLAY_LABELS.items():
         if raw == label:
             return token
@@ -2396,6 +2399,8 @@ def normalize_reflection_data_mode(value: str) -> str:
         "set_from_inflip": REFLECTION_DATA_MODE_SET_FROM_INFLIP,
         "hkl_i_sigma": REFLECTION_DATA_MODE_INTENSITY,
         "hkl_f_sigma": REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        "hkl_f_measured_sigma": REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA,
+        "amplitude_measured_sigma": REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA,
         "hkl_i_phase_sigma": REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
         "hkl_f_phase_sigma": REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
         "i": REFLECTION_DATA_MODE_INTENSITY,
@@ -2427,6 +2432,7 @@ def normalize_reflection_data_mode(value: str) -> str:
         return REFLECTION_DATA_MODE_AUTO
     if mode in {
         REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA,
         REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
         REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
         REFLECTION_DATA_MODE_INTENSITY_FWHM,
@@ -2439,7 +2445,8 @@ def normalize_reflection_data_mode(value: str) -> str:
 REFLECTION_DATA_MODE_DISPLAY_LABELS = {
     REFLECTION_DATA_MODE_SET_FROM_INFLIP: "Set from .inflip",
     REFLECTION_DATA_MODE_INTENSITY: "h k l · I · σ(I)",
-    REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA: "h k l · F · σ(F)",
+    REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA: "h k l · F · auxiliary (unverified)",
+    REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA: "h k l · F · measured σ(F)",
     REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA: "h k l · I · phase · σ(I)",
     REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA: "h k l · F · phase · σ(F)",
     REFLECTION_DATA_MODE_INTENSITY_FWHM: "h k l · I · FWHM",
@@ -2480,6 +2487,7 @@ def wrap_path_tooltip(path_text: str, width: int = 60) -> str:
 def reflection_mode_is_amplitude(data_mode: str) -> bool:
     return normalize_reflection_data_mode(data_mode) in {
         REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA,
+        REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA,
         REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA,
         REFLECTION_DATA_MODE_AMPLITUDE_FWHM,
     }
@@ -2651,7 +2659,7 @@ def merge_duplicate_reflections(reflections: Sequence[Reflection], data_mode: st
 
 def observed_hkl_name_for_mode(data_mode: str) -> str:
     mode = normalize_reflection_data_mode(data_mode)
-    if mode == REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA:
+    if mode in (REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA):
         return "observed_unique_amplitude_sigma_for_superflip.hkl"
     if mode == REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA:
         return "observed_unique_intensity_phase_sigma_for_superflip.hkl"
@@ -3302,9 +3310,8 @@ def powder_superflip_keywords(extra_keywords: str, wavelength: float = 0.0) -> s
 
 
 def filtered_reflections(reflections, data_mode, threshold, cell=None, resolution_d_min=0.0):
-    validate_reflection_filter_policy(data_mode,threshold)
-    if threshold>0 and reflections and not any(r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma>0 for r in reflections):
-        raise ValueError('Significance filtering requires genuine finite positive measurement uncertainties. Set Minimum observed value/σ to 0 for uncertainty-free input, or supply sigma(I)/sigma(F).')
+    from phase_studio.reflection_readiness import validate_loaded_significance
+    validate_loaded_significance(data_mode, threshold, reflections)
     return [r for r in reflections if _passes_reflection_filters(r,threshold,cell,resolution_d_min,data_mode)]
 
 
@@ -3857,7 +3864,7 @@ def map_feedback_intensity_significance(reflection: Reflection, data_mode: str) 
     """
     mode = normalize_reflection_data_mode(data_mode)
     if mode not in {REFLECTION_DATA_MODE_INTENSITY, REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA,
-                    REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+                    REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
         return None  # Unresolved formats and FWHM cannot supply significance.
     if reflection.sigma is None:
         return None
@@ -3865,7 +3872,7 @@ def map_feedback_intensity_significance(reflection: Reflection, data_mode: str) 
     if not math.isfinite(value) or not math.isfinite(sigma) or value <= 0 or sigma <= 0:
         return None
     significance = value / sigma
-    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
+    if mode in {REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA, REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA, REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA}:
         significance *= 0.5
     return significance if math.isfinite(significance) else None
 
@@ -4530,7 +4537,11 @@ def extract_embedded_hkl_from_inflip(inflip_path: Path, output_dir: Path, for_ex
     if not reflections:
         raise ValueError(f"No fbegin/endf reflection block was found in Jana2020 .inflip: {inflip_path}")
     output_dir.mkdir(parents=True, exist_ok=True)
-    out = output_dir / f"{Path(inflip_path).stem}_embedded_reflections.hkl"
+    source_stem = Path(inflip_path).stem
+    if len(source_stem) > 64:
+        import hashlib
+        source_stem = source_stem[:40] + '_' + hashlib.sha256(Path(inflip_path).name.encode('utf8')).hexdigest()[:12]
+    out = output_dir / f"{source_stem}_embedded_reflections.hkl"
     out.write_text(
         "# Reflections exported from the Jana2020 .inflip fbegin/endf block.\n"
         + ("# Native dummy columns are unavailable uncertainties (?); supply an explicit measured-sigma HKL file for significance filtering or sigma exports.\n" if dummy_columns else "")
@@ -10277,6 +10288,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 format_reflection_data_mode(REFLECTION_DATA_MODE_SET_FROM_INFLIP),
                 format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY),
                 format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA),
+                format_reflection_data_mode(REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA),
                 format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_PHASE_SIGMA),
                 format_reflection_data_mode(REFLECTION_DATA_MODE_FOBS_ZERO_PHASE_SIGMA),
                 format_reflection_data_mode(REFLECTION_DATA_MODE_INTENSITY_FWHM),
@@ -12016,6 +12028,10 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        cancellation = getattr(self, '_hkl_cancel_event', None)
+        if cancellation is not None:
+            cancellation.set()
+        self._active_hkl_task_id = None
         self.review_edma_executor.cancel_all()
         if self._run_diagnostic_log is not None:
             self._run_diagnostic_log.close()
@@ -13279,6 +13295,22 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     )
                     self._set_hkl_task_running(False)
                     self._show_hkl_load_result_dialog(payload)
+                elif kind == 'hkl_run_preflight':
+                    signature, identity, cfg, issues, details = payload
+                    from phase_studio.reflection_readiness import configuration_identity
+                    current = tuple((name, self._widget_value_as_string(widget)) for name, widget in self.inputs.items())
+                    try:
+                        same_source = identity == configuration_identity(cfg, None)
+                    except (OSError, ValueError):
+                        same_source = False
+                    if current != signature or not same_source:
+                        self._append_execution_log('Input or configuration changed during validation. Review it and start again.', level='WARNING', subsystem='Input')
+                    elif not getattr(self, '_hkl_cancel_event', threading.Event()).is_set():
+                        if issues:
+                            self._show_error_report(build_validation_report(issues, technical_details=details))
+                        else:
+                            self._validated_hkl_preflight = (signature, identity)
+                            QTimer.singleShot(0, self._start_run_checked)
                 elif kind == "hkl_completeness_result":
                     resolution = format_resolution_d(payload.d_min) if isinstance(payload, HklAnalysis) else "n/a"
                     self._append_execution_log(
@@ -15730,6 +15762,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         try:
             reflection_mode=self._resolve_configured_data_mode(cfg)
             validate_reflection_filter_policy(reflection_mode,cfg.i_over_sigma_min)
+            from phase_studio.reflection_readiness import validate_configuration_significance
+            validate_configuration_significance(cfg, reflection_mode)
             if reflection_mode_has_fwhm(reflection_mode):
                 from phase_studio.native_overlap import native_powder_keywords
                 native_powder_keywords(cfg.extra_superflip_keywords,cfg.powder_wavelength,cfg.powder_separation_factor)
@@ -15738,13 +15772,24 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 if normalize_map_export_format(cfg.map_export_format) in {'hkl_phases','shelx_fcf'}:
                     issues.append('FWHM cannot be exported as measurement uncertainty. Choose XPLOR, CCP4 or Jana map export instead of phased HKL/FCF.')
         except ValueError as exc:
-            code = 'significance_fwhm' if 'reflection_mode' in locals() and reflection_mode_has_fwhm(reflection_mode) and cfg.i_over_sigma_min > 0 else 'reflection_policy'
-            if code == 'significance_fwhm':
-                issues.append(ValidationIssue(str(exc), code, 'i_over_sigma_min', 'Superflip', True))
-            elif 'reflection_mode' in locals() and reflection_mode_has_fwhm(reflection_mode) and cfg.powder_wavelength <= 0:
-                issues.append(ValidationIssue(str(exc), 'powder_wavelength', 'powder_wavelength', 'Map feedback'))
+            from phase_studio.reflection_readiness import ReflectionReadinessError
+            if isinstance(exc, ReflectionReadinessError):
+                issues.append(exc.issue)
             else:
-                issues.append(ValidationIssue(str(exc), code, 'reflection_data_mode', 'Input'))
+                code = 'significance_fwhm' if 'reflection_mode' in locals() and reflection_mode_has_fwhm(reflection_mode) and cfg.i_over_sigma_min > 0 else 'reflection_policy'
+                if code == 'significance_fwhm':
+                    issues.append(ValidationIssue(str(exc), code, 'i_over_sigma_min', 'Superflip', True))
+                elif 'reflection_mode' in locals() and reflection_mode_has_fwhm(reflection_mode) and cfg.powder_wavelength <= 0:
+                    issues.append(ValidationIssue(str(exc), 'powder_wavelength', 'powder_wavelength', 'Map feedback'))
+                else:
+                    issues.append(ValidationIssue(str(exc), code, 'reflection_data_mode', 'Input'))
+        except OSError as exc:
+            from phase_studio.reflection_readiness import configuration_source
+            path, embedded = configuration_source(cfg)
+            if path.is_file():
+                issues.append(ValidationIssue('Reflection input could not be read. '+str(exc),
+                    'inflip_missing' if embedded else 'hkl_missing', 'jana_inflip' if embedded else 'hkl'))
+            details.append(str(exc))
         mode = normalize_input_source_mode(cfg.input_source_mode)
         ref_suffix = cfg.superflip_referencefile.suffix.lower() if cfg.superflip_referencefile is not None else ""
         if mode in {INPUT_MODE_INFLIP, INPUT_MODE_INFLIP_OVERRIDES}:
@@ -15912,12 +15957,32 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         if self.worker and self.worker.is_alive():
             self._append_execution_log("Workflow is already running.", level="WARNING", subsystem="Workflow")
             return
+        if getattr(self, 'hkl_task_worker', None) is not None and self.hkl_task_worker.is_alive():
+            self._append_execution_log('Wait for input validation to finish, or cancel it.', level='WARNING', subsystem='Input')
+            return
         try:
             cfg = self.get_config()
         except Exception as exc:
             self._show_error_report(build_error_report(exc, subsystem="Input", operation="Pre-run validation"))
             return
-        issues, technical_details = self._validate_run_config(cfg)
+        from phase_studio.reflection_readiness import configuration_source, configuration_identity
+        prevalidated = False
+        try:
+            path, _embedded = configuration_source(cfg) if getattr(cfg, 'i_over_sigma_min', 0) > 0 else (None, False)
+            if path is not None and path.is_file() and path.stat().st_size > 1_000_000:
+                signature = tuple((name, self._widget_value_as_string(widget)) for name, widget in self.inputs.items())
+                identity = configuration_identity(cfg, None)
+                prevalidated = getattr(self, '_validated_hkl_preflight', None) == (signature, identity)
+                self._validated_hkl_preflight = None
+                if not prevalidated:
+                    def validate_large_input():
+                        issues, details = self._validate_run_config(cfg)
+                        return signature, identity, cfg, issues, details
+                    self._start_hkl_background_task('Validate reflection settings', validate_large_input, 'hkl_run_preflight')
+                    return
+        except (ValueError, OSError):
+            pass  # Precise synchronous validation below reports the input issue.
+        issues, technical_details = ([], '') if prevalidated else self._validate_run_config(cfg)
         if issues:
             self._show_error_report(build_validation_report(issues, technical_details=technical_details))
             return
@@ -15998,6 +16063,13 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                 f"Increase Cycles above {state.completed_cycles} before continuing."
             ]))
             return
+        try:
+            from phase_studio.reflection_readiness import validate_loaded_significance
+            validate_loaded_significance(state.configured_data_mode, state.cfg.i_over_sigma_min, state.current_reflections,
+                verified=state.configured_data_mode != REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA)
+        except ValueError as error:
+            self._show_error_report(build_error_report(error, subsystem='Input', operation='Continue workflow validation'))
+            return
         state.cfg.cycles = requested_cycles
         # Continue preserves the captured scientific configuration. Only
         # connection controls may be repaired after a failed SharpED request;
@@ -16058,6 +16130,9 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             resume_state.performance_root = profiler.start("Total workflow")
             try:
                 with profiler.stage("Continue run preparation"):
+                    from phase_studio.reflection_readiness import validate_loaded_significance
+                    validate_loaded_significance(resume_state.configured_data_mode, resume_state.cfg.i_over_sigma_min, resume_state.current_reflections,
+                        verified=resume_state.configured_data_mode != REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA)
                     checkpoint = resume_state.ordinary_cycle_checkpoint
                     resume_cycle = checkpoint.cycle if checkpoint is not None else resume_state.completed_cycles + 1
                     resume_stage = checkpoint.first_incomplete_stage() if checkpoint is not None else "Preparing cycle"
@@ -16119,6 +16194,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
                     self.log(f"  Reference: {cfg.superflip_referencefile}")
             self.log(f"  HKL: {cfg.hkl}")
             configured_data_mode = self._resolve_configured_data_mode(cfg)
+            from phase_studio.reflection_readiness import validate_configuration_significance
+            validate_configuration_significance(cfg, configured_data_mode)
             value_col, sigma_col, include_000 = reflection_columns_for_mode(configured_data_mode)
             refl_raw = read_hkl(cfg.hkl, value_col=value_col, sigma_col=sigma_col, include_000=include_000)
             validate_reflection_filter_policy(configured_data_mode,cfg.i_over_sigma_min)
