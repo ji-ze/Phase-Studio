@@ -401,6 +401,12 @@ class SplitDistributionTests(unittest.TestCase):
                 for name in ('normalize_xplor_for_strict_reader','normalize_xplor_for_superflip_modelfile',
                              '_publish_protocol_transaction','write_map_quality_report'):
                     old[name]=io_functions[name]
+                # Reviewed local IO/metadata repair only. Numerical bodies retain
+                # their existing independent historical pins and goldens.
+                handoff_text=subprocess.check_output([git,'show','5cd82e4:phase_studio/app.py'],cwd=ROOT).decode('utf8')
+                handoff_functions=functions(handoff_text)
+                for name in ('_jana_original_m50','_publish_protocol_transaction'):
+                    old[name]=handoff_functions[name]
                 # Independent direct-sum/Gemmi/native-Superflip checks establish
                 # the intentional phase-sign correction. Pin exactly these three
                 # numerical bodies; all other historical comparisons remain strict.
