@@ -126,6 +126,19 @@ def test_native_evidence_failure_rolls_back_publication(tmp_path):
 
 
 @pytest.mark.skipif(not os.environ.get('PHASE_STUDIO_NATIVE_SUPERFLIP'),reason='opt-in installed native Superflip/EDMA')
+@pytest.mark.parametrize('root_length',[238,239])
+def test_native_log_path_crossing_windows_limit(tmp_path,root_length):
+    cfg,result,candidate=native_case(tmp_path/'case','deblurred',1)
+    work=tmp_path/('w'*(root_length-len(str(tmp_path))-1))
+    assert len(str(work))==root_length
+    work.mkdir()
+    cfg=replace(cfg,work_dir=work)
+    a.perform_jana_handoff(cfg,result,candidate,lambda _s:None)
+    assert filesystem_path(work/'jana2020_return_map.log').stat().st_size>0
+    assert a.file_sha256(Path(cfg.jana_inflip).parent/'measurement_Superflip_tmp.m40')==candidate.jana_model_sha256
+
+
+@pytest.mark.skipif(not os.environ.get('PHASE_STUDIO_NATIVE_SUPERFLIP'),reason='opt-in installed native Superflip/EDMA')
 def test_native_unicode_and_long_final_project_paths(tmp_path):
     cfg,result,candidate=native_case(tmp_path/'generation','deblurred',3)
     project=filesystem_path(tmp_path/('Jana žluť密 '+ 'long_project_'*10)/'original project')

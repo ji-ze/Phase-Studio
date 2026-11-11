@@ -5502,7 +5502,7 @@ def _return_phase_studio_result_staged(
             # The unchanged ASCII input is already in this exact working dir.
             [str(original), calc_map_inflip.name],
             cwd=calc_dir,
-            log_path=Path(cfg.work_dir) / "jana2020_return_map.log",
+            log_path=filesystem_path(Path(cfg.work_dir) / "jana2020_return_map.log"),
             log=log,
             stop_event=stop_event,
             allow_foreground=True,
