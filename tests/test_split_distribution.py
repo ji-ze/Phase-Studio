@@ -405,7 +405,7 @@ class SplitDistributionTests(unittest.TestCase):
                 # their existing independent historical pins and goldens.
                 handoff_text=subprocess.check_output([git,'show','5cd82e4:phase_studio/app.py'],cwd=ROOT).decode('utf8')
                 handoff_functions=functions(handoff_text)
-                for name in ('_jana_original_m50','_publish_protocol_transaction'):
+                for name in ('_jana_original_m50','_publish_protocol_transaction','_write_handoff_snapshot'):
                     old[name]=handoff_functions[name]
                 # Independent direct-sum/Gemmi/native-Superflip checks establish
                 # the intentional phase-sign correction. Pin exactly these three
