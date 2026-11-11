@@ -122,6 +122,7 @@ def test_native_evidence_failure_rolls_back_publication(tmp_path):
     with patch('phase_studio.jana_handoff_io.archive_handoff_staging',side_effect=PermissionError('controlled evidence archive failure')):
         with pytest.raises(PermissionError):a.perform_jana_handoff(cfg,result,candidate,lambda _s:None)
     assert {p.name:p.read_bytes() for p in project.iterdir() if p.is_file()}==before
+    assert not (project/'output').exists(), 'Archive failure must not leave a successful handoff receipt'
 
 
 @pytest.mark.skipif(not os.environ.get('PHASE_STUDIO_NATIVE_SUPERFLIP'),reason='opt-in installed native Superflip/EDMA')

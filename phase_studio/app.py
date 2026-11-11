@@ -5614,6 +5614,10 @@ def _return_phase_studio_result_staged(
         )
         for path, role in ((target_m80, "m80"), (target_m81, "m81")):
             log(f"Jana2020 protocol output ({role}): {path} · {path.stat().st_size} bytes · SHA-256 {file_sha256(path)}")
+        # Archive before writing the final success receipt. If archiving fails,
+        # publication can roll back without leaving a false successful handoff.
+        from .jana_handoff_io import archive_handoff_staging
+        archive_handoff_staging()
         _write_handoff_snapshot(
             cfg=cfg,
             candidate=candidate,
@@ -5624,8 +5628,6 @@ def _return_phase_studio_result_staged(
             artifacts=snapshot_artifacts,
             log=log,
         )
-        from .jana_handoff_io import archive_handoff_staging
-        archive_handoff_staging()
     _publish_protocol_transaction(publication,remove=tuple(stale_models),finalize=finalize_handoff,previous_files=calc_dir)
     log("Jana2020 final Superflip handoff completed.")
 
