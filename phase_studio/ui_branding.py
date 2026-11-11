@@ -30,7 +30,7 @@ def standard_ui_font(point_size: float = 10) -> QFont:
     families = set(QFontDatabase.families())
     if os.name == "nt" and "Segoe UI" not in families:
         fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
-        for filename in ("segoeui.ttf", "segoeuib.ttf", "seguisb.ttf", "segoeuii.ttf"):
+        for filename in ("segoeui.ttf", "segoeuib.ttf", "seguisb.ttf", "segoeuii.ttf", "seguisym.ttf"):
             try:
                 data = (fonts / filename).read_bytes()
             except OSError:

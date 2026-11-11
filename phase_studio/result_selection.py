@@ -712,14 +712,14 @@ class ResultSelectionDialog(QDialog):
         class PreviewCanvas(FigureCanvas):
             def sizeHint(self):
                 hint = super().sizeHint()
-                hint.setHeight(130)
+                hint.setHeight(200)
                 return hint
         preview_canvas = PreviewCanvas(self._preview_figure)
         preview_canvas.setObjectName("resultPreviewCanvas")
         preview_canvas.setFocusPolicy(Qt.StrongFocus)
         # The independent body scrolls on short screens while retaining a useful
         # preview. Its preferred height must not inherit the figure's pixel size.
-        preview_canvas.setMinimumHeight(130)
+        preview_canvas.setMinimumHeight(200)
         preview_canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         preview_host.structure_canvas = preview_canvas
         self._preview_canvas = preview_canvas
@@ -734,7 +734,7 @@ class ResultSelectionDialog(QDialog):
         preview_section = QWidget()
         self._preview_section = preview_section
         preview_section.setStyleSheet("QToolButton:disabled { color:#8a96ac; background:#f4f6f9; border:1px solid #dde3ed; }")
-        preview_section.setMinimumWidth(420)
+        preview_section.setMinimumWidth(360)
         preview_section.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Expanding)
         preview_layout = QVBoxLayout(preview_section)
         preview_layout.setContentsMargins(0, 0, 0, 0)
@@ -873,7 +873,14 @@ class ResultSelectionDialog(QDialog):
         self._element_legend.setWordWrap(True)
         self._element_legend.setVisible(False)
         preview_layout.addWidget(self._element_legend)
-        preview_layout.addWidget(preview_canvas, 1)
+        # Put the scientific viewport directly after Fit/Fullscreen. On short
+        # screens, descriptive and optional controls remain scrollable below
+        # the model instead of pushing the entire model below the fixed footer.
+        preview_layout.removeItem(feedback_row)
+        preview_layout.removeWidget(self._comparison_label)
+        preview_layout.insertWidget(1,preview_canvas,1)
+        preview_layout.addLayout(feedback_row)
+        preview_layout.addWidget(self._comparison_label)
 
         self._fit_button.clicked.connect(self._request_preview_fit)
         self._previous_cycle_button.clicked.connect(lambda: self._step_cycle(-1))
@@ -1043,7 +1050,7 @@ class ResultSelectionDialog(QDialog):
 
     def _apply_safe_initial_geometry(self) -> None:
         apply_safe_dialog_geometry(
-            self, 1120, 640, width_fraction=0.90, height_fraction=0.84,
+            self, 1120, 640, width_fraction=0.90, height_fraction=0.90,
         )
         # This is the measured practical minimum for the compact header,
         # toolbar, 150 px scientific canvas, and fixed handoff footer.  On a
@@ -1054,7 +1061,7 @@ class ResultSelectionDialog(QDialog):
 
     def _clamp_after_show(self) -> None:
         clamp_window_to_available_screen(
-            self, width_fraction=0.90, height_fraction=0.84,
+            self, width_fraction=0.90, height_fraction=0.90,
             center_if_resized=True,
         )
 
@@ -1203,7 +1210,7 @@ class ResultSelectionDialog(QDialog):
             + table.frameWidth() * 2 + table.verticalScrollBar().sizeHint().width() + 4
         )
         available = max(1, self._splitter.width() - self._splitter.handleWidth())
-        minimum_preview = max(420, int(available * 0.55))
+        minimum_preview = max(360, int(available * 0.60))
         # The candidate table is supporting evidence; the scientific viewer
         # remains the dominant 66-70% of the dialog while retaining enough room
         # for every compact heading.
@@ -1213,7 +1220,7 @@ class ResultSelectionDialog(QDialog):
         except (ValueError,TypeError):
             share = .33
         table_width = int(available * share)
-        table_width = max(table_width, required_width + 48)
+        table_width = max(table_width, min(required_width,320))
         table_width = min(table_width, max(1, available - minimum_preview))
         self._setting_splitter_sizes = True
         try:
@@ -1471,7 +1478,8 @@ class ResultSelectionDialog(QDialog):
             self._selected_output_summary.setText(
                 f"<b>Selected for {'Jana2020' if self._jana_context else 'export'}:</b> "
                 f"{family} · Cycle {candidate.cycle}{threshold}"
-                f"{provenance} · Jana model: {candidate.jana_model_site_count if candidate.jana_model_site_count is not None else 'unavailable'} atomic sites{transfer}"
+                f"{provenance} · Preview: {candidate.detected_atom_count if candidate.detected_atom_count is not None else 'unavailable'} CIF sites"
+                f" · Jana model: {candidate.jana_model_site_count if candidate.jana_model_site_count is not None else 'unavailable'} atomic sites (native EDMA selection){transfer}"
             )
         else:
             self._selected_output_summary.setText(
@@ -1539,6 +1547,10 @@ class ResultSelectionDialog(QDialog):
         required = max(layout.minimumSize().height(), layout.heightForWidth(self._preview_section.width()))
         if self._preview_section.minimumHeight() != required:
             self._preview_section.setMinimumHeight(required)
+        # Include late metadata/control reflow in the body's scroll extent.
+        if self._splitter.minimumHeight() != required:
+            self._splitter.setMinimumHeight(required)
+            self._content_scroll.widget().layout().activate()
 
     def _on_preview_resize(self, _event) -> None:
         if not self._closed and not self._preview_user_interacted:
@@ -1779,6 +1791,7 @@ class ResultSelectionDialog(QDialog):
             ('Jana model',f'{candidate.jana_model_site_count} atomic sites'
                 if candidate.jana_model_site_count is not None and candidate.jana_model_sha256
                 else 'prepared during handoff'),
+            ('Jana model selection','Native EDMA composition/charge selection; this subset may contain fewer sites than the CIF preview. The exact native artifact is transferred without rewriting its count.'),
             ('Candidate ID',candidate.candidate_id),('Run ID',candidate.run_id),
             ('Map SHA-256',candidate.map_sha256),('Structure SHA-256',candidate.structure_sha256),
             ('Jana model SHA-256',candidate.jana_model_sha256),
@@ -1786,7 +1799,7 @@ class ResultSelectionDialog(QDialog):
         self._candidate_info.setEnabled(True)
         self._metadata_label.setText(
             f"<b>ASU:</b> {html.escape((composition or 'Unavailable').translate(str.maketrans('0123456789', '₀₁₂₃₄₅₆₇₈₉')))}"
-            f" · Jana model: {candidate.jana_model_site_count if candidate.jana_model_site_count is not None else 'unavailable'} atomic sites<br>"
+            f" · Jana model: {candidate.jana_model_site_count if candidate.jana_model_site_count is not None else 'unavailable'} atomic sites (native EDMA selection)<br>"
             f"{html.escape(source)} · Cycle {candidate.cycle}{html.escape(model)}{html.escape(initialization)}"
         )
         self._metadata_label.setToolTip(

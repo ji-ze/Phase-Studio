@@ -5121,55 +5121,84 @@ def _jana_original_m50(inflip_path: Path, output_m50: Path) -> Path:
     stripped only when the corresponding canonical .inflip exists, so arbitrary
     user project names are never guessed.
     """
-    inflip_path = Path(inflip_path).resolve()
+    from .jana_handoff_io import filesystem_path, JanaProjectMetadataError
+    inflip_path = filesystem_path(Path(inflip_path).resolve())
     stem = inflip_path.stem
     candidates: List[Path] = []
     for suffix in ("_Superflip", "_Sol"):
         if stem.casefold().endswith(suffix.casefold()):
             canonical_stem = stem[:-len(suffix)]
             canonical_inflip = inflip_path.with_name(canonical_stem + inflip_path.suffix)
-            if canonical_inflip.is_file():
+            if canonical_inflip.is_file() or canonical_inflip.with_suffix('.m90').is_file():
                 candidates.append(inflip_path.with_name(canonical_stem + ".m50"))
     candidates.extend((inflip_path.with_suffix(".m50"), Path(output_m50)))
     seen: set[str] = set()
     errors: List[str] = []
     for candidate in candidates:
+        candidate = filesystem_path(candidate)
         key = str(candidate.resolve())
         if key in seen:
             continue
         seen.add(key)
         try:
+            candidate.stat()
+        except FileNotFoundError:
+            errors.append(f'Missing: {candidate}')
+            continue
+        # Permission/locking errors remain filesystem failures. An existing
+        # invalid canonical context is not replaced with an old output alias.
+        try:
             return _validate_jana_m50(candidate, "input/original m50")
         except RuntimeError as exc:
-            errors.append(str(exc))
-    raise RuntimeError(
-        "Jana2020 handoff could not find a valid canonical project m50. "
-        + " | ".join(errors)
+            raise JanaProjectMetadataError(str(exc)) from exc
+    raise JanaProjectMetadataError(
+        "Jana2020 handoff requires the original project .m50 context. "
+        "No .m50 was generated or substituted. Reopen the original Jana project "
+        "and restore its companion context before retrying this completed result. "
+        "Searched: " + " | ".join(errors)
     )
 
 
-def _publish_protocol_transaction(artifacts: Sequence[Tuple[Path, Path]], expected_hashes: Optional[Dict[Path, str]] = None) -> None:
+def _publish_protocol_transaction(artifacts: Sequence[Tuple[Path, Path]], expected_hashes: Optional[Dict[Path, str]] = None, *, remove: Sequence[Path] = (), finalize: Optional[Callable[[], None]] = None, previous_files: Optional[Path] = None) -> None:
     """Publish a validated protocol set and roll back if any replace fails."""
     prepared: List[Tuple[Path, Path]] = []
     backups: List[Tuple[Path, Optional[Path]]] = []
     token = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
     try:
-        for source, target in artifacts:
+        for index, (source, target) in enumerate(artifacts):
             source = Path(source).resolve()
             target = Path(target).resolve()
+            target.parent.mkdir(parents=True,exist_ok=True)
             _require_current_protocol_file(source, target.suffix or target.name)
-            temporary = target.with_name(f".{target.name}.publish-{token}")
+            temporary = target.with_name(f".psj-{token}-{index}.tmp")
             prepared.append((temporary, target))
             shutil.copyfile(source, temporary)
             if file_sha256(temporary) != file_sha256(source) or (expected_hashes is not None and file_sha256(temporary) != expected_hashes.get(target)):
                 raise RuntimeError(f"Jana2020 staged publication check failed: {target}")
-        for temporary, target in prepared:
+        for index, (temporary, target) in enumerate(prepared):
             backup: Optional[Path] = None
             if target.exists():
-                backup = target.with_name(f".{target.name}.backup-{token}")
+                backup = target.with_name(f".psj-{token}-{index}.bak")
                 os.replace(target, backup)
             backups.append((target, backup))
             os.replace(temporary, target)
+        published_targets={target for _,target in prepared}
+        for index, target in enumerate(remove,len(prepared)):
+            target=Path(target).resolve()
+            if target not in published_targets and target.exists():
+                backup=target.with_name(f'.psj-{token}-{index}.bak')
+                os.replace(target,backup)
+                backups.append((target,backup))
+        if previous_files is not None:
+            from .jana_handoff_io import copy_protocol_file
+            previous=[]
+            for index,(target,backup) in enumerate(backups):
+                if backup is not None:
+                    retained=Path(previous_files)/f'previous-{index:04d}{target.suffix}'
+                    copy_protocol_file(backup,retained)
+                    previous.append(dict(original_target=str(target),retained_file=retained.name,sha256=file_sha256(retained)))
+            (Path(previous_files)/'previous-project-files.json').write_text(json.dumps(previous,indent=2),encoding='utf8')
+        if finalize is not None:finalize()
         for _target, backup in backups:
             if backup is not None and backup.exists():
                 try:
@@ -5214,7 +5243,7 @@ def _write_handoff_snapshot(
     workflow: str, source_label: str, superflip_exe: Path,
     artifacts: Sequence[Tuple[str, Path, Path]], log: Callable[[str], None],
 ) -> Path:
-    """Archive exact final live bytes after a successful verified publication."""
+    """Archive verified live bytes inside the publication transaction."""
     snapshot_dir = _next_handoff_snapshot_dir(jana_cwd)
     records: List[Tuple[str, Path, Path, Path, int, str]] = []
     try:
@@ -5267,7 +5296,7 @@ def _write_handoff_snapshot(
         manifest.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
     except Exception:
         failure = snapshot_dir / "handoff_failed.txt"
-        failure.write_text("HANDED TO JANA: YES\nSNAPSHOT COMPLETE: NO\n", encoding="utf-8")
+        failure.write_text("HANDED TO JANA: NO\nPUBLICATION: NOT COMMITTED\nSNAPSHOT COMPLETE: NO\n", encoding="utf-8")
         raise
     log(f"Jana2020 handoff snapshot: {snapshot_dir}")
     return snapshot_dir
@@ -5280,28 +5309,39 @@ def return_phase_studio_result_to_jana(
     log: Callable[[str], None],
     stop_event: Optional[threading.Event] = None,
 ) -> None:
+    from .jana_handoff_io import handoff_staging
+    name_length = len(Path(cfg.jana_inflip).stem) + 100 if cfg.jana_inflip else 120
+    with handoff_staging(cfg.work_dir, candidate.candidate_id or candidate.run_id, name_length) as stage:
+        _return_phase_studio_result_staged(cfg, result, candidate, log, stop_event, stage)
+
+
+def _return_phase_studio_result_staged(
+    cfg: RunConfig, result: CycleResult, candidate: ResultCandidate,
+    log: Callable[[str], None], stop_event: Optional[threading.Event], calc_dir: Path,
+) -> None:
+    from .jana_handoff_io import copy_protocol_file, filesystem_path
     if not cfg.jana_return_to_jana or cfg.jana_inflip is None:
         raise RuntimeError("Jana2020 handoff requires a Jana2020 .inflip primary input.")
-    inflip_path = Path(cfg.jana_inflip)
+    inflip_path = filesystem_path(cfg.jana_inflip)
     if not inflip_path.is_file():
         raise RuntimeError(f"Jana2020 .inflip no longer exists: {inflip_path}")
     jana_cwd = inflip_path.parent
     base_name = inflip_path.stem
     source_key = str(candidate.source).strip().lower()
     if source_key.startswith("super"):
-        expected_map = Path(result.superflip_map).resolve()
-        expected_structure = Path(result.superflip_edma_cif).resolve()
+        expected_map = filesystem_path(Path(result.superflip_map).resolve())
+        expected_structure = filesystem_path(Path(result.superflip_edma_cif).resolve()) if candidate.edma_enabled else None
         target_map = jana_cwd / f"{base_name}-phase-studio-superflip-cycle_{int(result.cycle):03d}.xplor"
         source_label = result_map_label("superflip")
         family_name = "phase-rietveld"
     else:
-        expected_map = Path(result.deblur_map).resolve()
-        expected_structure = Path(result.deblur_edma_cif).resolve()
+        expected_map = filesystem_path(Path(result.deblur_map).resolve())
+        expected_structure = filesystem_path(Path(result.deblur_edma_cif).resolve()) if candidate.edma_enabled else None
         target_map = jana_cwd / f"{base_name}-deb.xplor"
         source_label = result_map_label("deblurred")
         family_name = "model-prediction"
-    source_map = Path(candidate.map_path).resolve()
-    source_structure = Path(candidate.structure_path).resolve() if candidate.structure_path else None
+    source_map = filesystem_path(Path(candidate.map_path).resolve())
+    source_structure = filesystem_path(Path(candidate.structure_path).resolve()) if candidate.structure_path else None
     run_ids = {
         str(value).strip() for value in (cfg.run_id, result.run_id, candidate.run_id)
         if str(value).strip()
@@ -5343,7 +5383,7 @@ def return_phase_studio_result_to_jana(
         if file_sha256(source_structure) != candidate.structure_sha256:
             raise RuntimeError("Jana2020 selected structure changed after completion. No alternative result was substituted.")
         source_m40 = _edma_m40_for_structure(source_structure)
-        if source_m40 != Path(candidate.jana_model_path).expanduser().resolve():
+        if source_m40 != filesystem_path(Path(candidate.jana_model_path).expanduser().resolve()):
             raise RuntimeError(
                 "Jana2020 handoff was stopped because the selected EDMA model "
                 "does not match the completed candidate identity."
@@ -5396,13 +5436,6 @@ def return_phase_studio_result_to_jana(
         raise RuntimeError(f"Jana2020 handoff Superflip executable was not found: {original}")
     # The conversion is isolated from every live project output.  This keeps a
     # second run from consuming an m40/m50/m80/m81 left by the first run.
-    candidate_dir_name = re.sub(
-        r"[^A-Za-z0-9_.-]+", "_", candidate.candidate_id or candidate.run_id or "legacy",
-    ).strip("._") or "candidate"
-    calc_dir = Path(cfg.work_dir).expanduser().resolve() / "jana_handoff" / candidate_dir_name
-    if calc_dir.exists():
-        shutil.rmtree(calc_dir)
-    calc_dir.mkdir(parents=True)
     calc_map_inflip = calc_dir / "calc_m81.inflip"
     original_lines = inflip_path.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n").split("\n")
     target_m80, target_m81 = _jana_protocol_output_paths(original_lines, jana_cwd)
@@ -5417,8 +5450,10 @@ def return_phase_studio_result_to_jana(
     original_m50 = _jana_original_m50(inflip_path, target_m50)
     original_m50_hash = file_sha256(original_m50)
     original_m50_size = original_m50.stat().st_size
-    staged_original_m50 = calc_dir / target_m50.name
-    shutil.copyfile(original_m50, staged_original_m50)
+    staged_original_m50 = calc_dir / 'original_project.m50'
+    log(f'  Validated original m50 source: {original_m50} · SHA-256 {original_m50_hash}')
+    log(f'  Local m50 staging destination: {staged_original_m50}')
+    copy_protocol_file(original_m50, staged_original_m50)
     _validate_jana_m50(staged_original_m50, "staged input/original m50")
     log(
         f"  Input/original m50: {original_m50} · {original_m50_size} bytes · "
@@ -5432,24 +5467,29 @@ def return_phase_studio_result_to_jana(
     target_ready = jana_cwd / f"{base_name}-ready.xplor"
     staging_started = time.perf_counter()
     staged_map = calc_dir / "selected_map.xplor"
-    shutil.copyfile(source_map, staged_map)
+    copy_protocol_file(source_map, staged_map)
     if file_sha256(staged_map) != candidate.map_sha256:
         raise RuntimeError("Jana2020 selected map changed while staging the handoff")
     staged_structure: Optional[Path] = None
     if candidate.edma_enabled:
         assert source_structure is not None
         staged_structure = calc_dir / "selected_structure.cif"
-        shutil.copyfile(source_structure, staged_structure)
+        copy_protocol_file(source_structure, staged_structure)
         if file_sha256(staged_structure) != candidate.structure_sha256:
             raise RuntimeError("Jana2020 selected structure changed while staging the handoff")
-    map_m81 = calc_dir / target_m81.name
-    map_m80 = calc_dir / target_m80.name
-    map_xplor = calc_dir / target_ready.name
+    map_m81 = calc_dir / 'converted.m81'
+    map_m80 = calc_dir / 'converted.m80'
+    map_xplor = calc_dir / 'converted.xplor'
     map_lines = _jana_conversion_lines(
         original_lines, base_name, staged_map.name,
         map_m81.name, map_m80.name, map_xplor.name,
     )
     map_lines = origin_preserving_conversion_lines(map_lines, staged_map)
+    # Native IO stays inside this attempt, even when the original protocol
+    # declares absolute outputbase/writem40 paths. Final names are published
+    # only by the verified transaction below, not by the converter.
+    map_lines = [line for line in map_lines if inflip_first_token(line) not in {'outputbase','writem40'}]
+    map_lines.extend(['outputbase handoff_conversion','writem40 native_unused.m40'])
     write_text_lines_platform(calc_map_inflip, map_lines)
     staging_seconds = time.perf_counter() - staging_started
     log("  Preparing m80/m81 pair...")
@@ -5496,8 +5536,8 @@ def return_phase_studio_result_to_jana(
     # and leaves m50 unchanged; Jana copies that valid context to the solution
     # stem while m40 carries the selected sites.  Reproduce those semantics
     # explicitly so the GUI handoff does not delete m50 and return a zero model.
-    staged_m50 = calc_dir / f"published-{target_m50.name}"
-    shutil.copyfile(staged_original_m50, staged_m50)
+    staged_m50 = calc_dir / 'published_context.m50'
+    copy_protocol_file(staged_original_m50, staged_m50)
     _validate_jana_m50(staged_m50, "output m50")
     publication: List[Tuple[Path, Path]] = [
         (staged_map, target_map),
@@ -5519,74 +5559,74 @@ def return_phase_studio_result_to_jana(
         assert staged_structure is not None
         publication.append((staged_structure, target_structure))
         snapshot_artifacts.append(("exact selected EDMA CIF", source_structure, target_structure))
-        staged_m40 = calc_dir / f"published-{target_edma_m40.name}"
-        shutil.copyfile(source_m40, staged_m40)
+        staged_m40 = calc_dir / 'published_model.m40'
+        copy_protocol_file(source_m40, staged_m40)
         if file_sha256(staged_m40) != source_m40_hash or _m40_model_count(staged_m40) != source_m40_sites:
             raise RuntimeError("Jana2020 staged m40 does not match the selected EDMA candidate.")
         publication.append((staged_m40, target_edma_m40))
         snapshot_artifacts.append(("exact selected EDMA writem40 input", source_m40, target_edma_m40))
     snapshot_artifacts.append(("density frame validation", calc_dir / "density_alignment.json", calc_dir / "density_alignment.json"))
-    _publish_protocol_transaction(publication)
+    # Python filesystem IO accepts the extended namespace; the legacy native
+    # converter sees only short relative filenames inside its private directory.
+    publication = [(filesystem_path(source), filesystem_path(target)) for source, target in publication]
+    stale_models=set()
     if target_m40.resolve() != (target_edma_m40.resolve() if target_edma_m40 else None):
-        # outputbase.m40 is created by Jana from the declared writem40 input.
-        # A raw EDMA m40 has a different header/origin representation and must
-        # never be published under this post-import name.
-        if target_m40.exists():
-            target_m40.unlink()
+        stale_models.add(target_m40)
     if not candidate.edma_enabled:
-        # Map-driven Jana continuation must not see a model from an earlier
-        # selected candidate.  No replacement m40 is fabricated.
-        for stale in {target_m40.resolve(), target_edma_m40.resolve() if target_edma_m40 else None}:
-            if stale is not None and stale.exists():
-                stale.unlink()
-    for output, role in (
-        (target_m81, "selected-map m81"),
-        (target_m80, "selected-map m80"),
-        (target_ready, "selected-map XPLOR"),
-    ):
-        _require_current_protocol_file(output, role)
-        log(f"Jana2020 protocol output ({role}): {output.name} · SHA-256 {file_sha256(output)[:12]}")
-    if candidate.edma_enabled:
-        assert target_edma_m40 is not None
-        _require_current_protocol_file(target_edma_m40, "selected-model writem40")
-        log(
-            f"Jana2020 model protocol input: {target_edma_m40} · "
-            f"sites {_m40_model_count(target_edma_m40)} · "
-            f"SHA-256 {file_sha256(target_edma_m40)[:12]}"
-        )
-        live_protocol_sites = _m40_model_count(target_edma_m40)
-        log(f"Selected model sites: {source_m40_sites}")
-        log(f"Live Jana writem40 sites: {live_protocol_sites}")
-        if source_m40_sites > 0 and live_protocol_sites <= 0:
-            log("ERROR: Jana2020 handoff aborted because live writem40 is empty.")
-            raise RuntimeError(
-                "Jana2020 handoff was stopped because the selected model has sites "
-                "but the live writem40 artifact is empty."
+        stale_models.update(path for path in (target_m40,target_edma_m40) if path is not None)
+    stale_models={filesystem_path(path) for path in stale_models}
+    def finalize_handoff():
+        for output, role in (
+            (target_m81, "selected-map m81"),
+            (target_m80, "selected-map m80"),
+            (target_ready, "selected-map XPLOR"),
+        ):
+            _require_current_protocol_file(output, role)
+            log(f"Jana2020 protocol output ({role}): {output.name} · SHA-256 {file_sha256(output)[:12]}")
+        if candidate.edma_enabled:
+            assert target_edma_m40 is not None
+            _require_current_protocol_file(target_edma_m40, "selected-model writem40")
+            log(
+                f"Jana2020 model protocol input: {target_edma_m40} · "
+                f"sites {_m40_model_count(target_edma_m40)} · "
+                f"SHA-256 {file_sha256(target_edma_m40)[:12]}"
             )
-        _require_current_protocol_file(target_edma_m40, "selected-model writem40")
-        if file_sha256(target_edma_m40) != source_m40_hash:
-            raise RuntimeError("Jana2020 live writem40 does not match the selected EDMA candidate.")
-        log(f"Jana2020 model input for Jana import: {target_edma_m40}")
-        log(f"Jana2020 post-import model pathname: {target_m40}")
-    _validate_jana_m50(target_m50, "published m50")
-    if file_sha256(target_m50) != original_m50_hash:
-        raise RuntimeError("Jana2020 published m50 does not match the captured project context.")
-    log(
-        f"Jana2020 protocol output (m50): {target_m50} · {target_m50.stat().st_size} bytes · "
-        f"SHA-256 {file_sha256(target_m50)} · validation PASS"
-    )
-    for path, role in ((target_m80, "m80"), (target_m81, "m81")):
-        log(f"Jana2020 protocol output ({role}): {path} · {path.stat().st_size} bytes · SHA-256 {file_sha256(path)}")
-    _write_handoff_snapshot(
-        cfg=cfg,
-        candidate=candidate,
-        jana_cwd=jana_cwd,
-        workflow="Phase recycling" if int(cfg.cycles) > 1 else "Single-cycle",
-        source_label=source_label,
-        superflip_exe=original,
-        artifacts=snapshot_artifacts,
-        log=log,
-    )
+            live_protocol_sites = _m40_model_count(target_edma_m40)
+            log(f"Selected model sites: {source_m40_sites}")
+            log(f"Live Jana writem40 sites: {live_protocol_sites}")
+            if source_m40_sites > 0 and live_protocol_sites <= 0:
+                log("ERROR: Jana2020 handoff aborted because live writem40 is empty.")
+                raise RuntimeError(
+                    "Jana2020 handoff was stopped because the selected model has sites "
+                    "but the live writem40 artifact is empty."
+                )
+            _require_current_protocol_file(target_edma_m40, "selected-model writem40")
+            if file_sha256(target_edma_m40) != source_m40_hash:
+                raise RuntimeError("Jana2020 live writem40 does not match the selected EDMA candidate.")
+            log(f"Jana2020 model input for Jana import: {target_edma_m40}")
+            log(f"Jana2020 post-import model pathname: {target_m40}")
+        _validate_jana_m50(target_m50, "published m50")
+        if file_sha256(target_m50) != original_m50_hash:
+            raise RuntimeError("Jana2020 published m50 does not match the captured project context.")
+        log(
+            f"Jana2020 protocol output (m50): {target_m50} · {target_m50.stat().st_size} bytes · "
+            f"SHA-256 {file_sha256(target_m50)} · validation PASS"
+        )
+        for path, role in ((target_m80, "m80"), (target_m81, "m81")):
+            log(f"Jana2020 protocol output ({role}): {path} · {path.stat().st_size} bytes · SHA-256 {file_sha256(path)}")
+        _write_handoff_snapshot(
+            cfg=cfg,
+            candidate=candidate,
+            jana_cwd=jana_cwd,
+            workflow="Phase recycling" if int(cfg.cycles) > 1 else "Single-cycle",
+            source_label=source_label,
+            superflip_exe=original,
+            artifacts=snapshot_artifacts,
+            log=log,
+        )
+        from .jana_handoff_io import archive_handoff_staging
+        archive_handoff_staging()
+    _publish_protocol_transaction(publication,remove=tuple(stale_models),finalize=finalize_handoff,previous_files=calc_dir)
     log("Jana2020 final Superflip handoff completed.")
 
 
@@ -8683,6 +8723,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.input_labels: Dict[str, QWidget] = {}
         self.settings = QSettings("PhaseStudio", "PhaseStudio")
         self._build_ui()
+        from phase_studio.significance_preferences import SignificancePreferenceController
+        self.significance_preferences = SignificancePreferenceController(self)
         from phase_studio.setting_provenance import SettingOrigins
         self._setting_origins=SettingOrigins(self)
         QTimer.singleShot(0, self._apply_adaptive_window_geometry)
@@ -8690,6 +8732,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self.help_shortcut.setContext(Qt.WindowShortcut)
         self.help_shortcut.activated.connect(self._open_context_help)
         self.load_settings()
+        self.significance_preferences.reload()
         self._setting_origins.loaded(self.settings)
         QTimer.singleShot(250, self.refresh_sharped_models)
         self.timer = QTimer(self)
@@ -9258,7 +9301,16 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         self._add_text(density_form, "derivesymmetry", "Derive symmetry", "yes")
 
         reflection_form = self._add_form_group(superflip_tab, "Reflection handling")
-        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum observed value/σ", 2.0, 0.0, 100.0, 0.5, 3)
+        self._add_dspin(reflection_form, "i_over_sigma_min", "Minimum observed value/σ", 0.0, 0.0, 100.0, 0.5, 3)
+        preference_actions=QWidget()
+        preference_row=QHBoxLayout(preference_actions);preference_row.setContentsMargins(0,0,0,0)
+        self.significance_save_button=QPushButton('Save threshold')
+        self.significance_reset_button=QPushButton('Reset to zero')
+        preference_row.addWidget(self.significance_save_button);preference_row.addWidget(self.significance_reset_button);preference_row.addStretch(1)
+        reflection_form.addRow('',preference_actions)
+        self.significance_status=QLabel('No significance filtering (0).')
+        self.significance_status.setWordWrap(True)
+        reflection_form.addRow('',self.significance_status)
         self._add_dspin(reflection_form, "resolution_d_min", "High-resolution cutoff dmin (Å)", 0.0, 0.0, 20.0, 0.1, 3)
         self._add_combo(reflection_form, "normalize", "Normalization", ["none", "local", "atoms", "wilson"], "atoms")
         try:
@@ -9645,6 +9697,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             )
         self.metrics_tabs.setTabVisible(len(tab_specs) - 1, False)
         self.assessment_label = QLabel(f"Assessment: {initial_definition.assessment_label}")
+        self.assessment_label.setToolTip('R and amplitude CC describe agreement with the supplied observed amplitudes; imposed amplitudes can make that agreement optimistic. Weighted triplet C3 measures phase consistency. Reference-free metrics without a holdout are not independently verified structural accuracy.')
+        self.assessment_label.setAccessibleDescription(self.assessment_label.toolTip())
         self.assessment_label.setObjectName("metricsAssessmentLabel")
         metrics_layout.addWidget(self.assessment_label)
         # ----- Shared interaction control strip: its own row, ABOVE the tab
@@ -11444,6 +11498,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
             action = getattr(self, name, None)
             if action is not None:
                 action.setEnabled(not locked)
+        preferences=getattr(self,'significance_preferences',None)
+        if preferences is not None:preferences.sync_enabled()
         if hasattr(self, "configuration_lock_hint"):
             self.configuration_lock_hint.setVisible(locked)
         if was_locked and not locked:
@@ -11525,7 +11581,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
     def load_settings(self) -> None:
         saved_metadata_source = self.settings.value("inputs/metadata_source", None)
         for key, widget in self.inputs.items():
-            if key == "sharped_api_token":
+            if key in {"sharped_api_token", "i_over_sigma_min"}:
                 continue
             value = self.settings.value(f"inputs/{key}", None)
             if value is not None:
@@ -11984,7 +12040,7 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
 
     def save_settings(self) -> None:
         for key, widget in self.inputs.items():
-            if key == "sharped_api_token":
+            if key in {"sharped_api_token", "i_over_sigma_min"}:
                 continue
             self.settings.setValue(f"inputs/{key}", self._widget_value_as_string(widget))
         try:
@@ -12028,6 +12084,8 @@ class IterativeSuperflipPipelineQtGUI(QMainWindow):
         )
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        preferences=getattr(self,'significance_preferences',None)
+        if preferences is not None:preferences.loader.cancel()
         cancellation = getattr(self, '_hkl_cancel_event', None)
         if cancellation is not None:
             cancellation.set()

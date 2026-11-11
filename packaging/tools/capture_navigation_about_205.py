@@ -82,8 +82,8 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
             patch.object(QDialog, 'exec', lambda self: QDialog.Rejected):
         w = js._JanaWorkflowWizard([], source)
         w.run();w.dialog.show();settle()
-        assert w.observed_threshold.value() == 2
-        w.observed_threshold.setValue(0)  # Explicit fixture user choice; native dummy is not sigma.
+        assert not hasattr(w,'observed_threshold')
+        assert w._observed_filter_threshold() == 0
         assert '432 HKL records' in w.reflections_value.text()
         capture('01-workflow', w.dialog)
         w.superflip_sharped_tile._trigger();pump(w)
@@ -222,7 +222,7 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
             run_w = js._JanaWorkflowWizard([], source)
             def execute(dialog):
                 dialog.show();settle()
-                run_w.observed_threshold.setValue(0)
+                assert run_w._observed_filter_threshold() == 0
                 run_w.superflip_sharped_tile._trigger();pump(run_w)
                 run_w.cycles.setValue(3);run_w.primary_button.click()
                 run_w.missing_enabled_checkbox.setChecked(True)

@@ -39,8 +39,8 @@ def probe(scale):
         w.run()
         # Native intensity's trailing dummy is not measured sigma. The user
         # must explicitly choose the bypass before the Run dependency check.
-        assert w.observed_threshold.value() == 2
-        w.observed_threshold.setValue(0)
+        assert not hasattr(w, 'observed_threshold')
+        assert w._observed_filter_threshold() == 0
         w.dialog.show()
         for _ in range(20):
             app.processEvents()

@@ -313,7 +313,9 @@ def build_jana_handoff_import(
     limitations: list[str] = []
     if options.observed_filter_threshold is not None:
         handoff_values['i_over_sigma_min']=str(options.observed_filter_threshold)
-        limitations.append('Observed significance filter explicitly set by the Wizard to '+str(options.observed_filter_threshold)+'. FWHM is not a measurement uncertainty.')
+        limitations.append('Simple Jana workflow: observed significance threshold 0 (no filtering).'
+            if options.observed_filter_threshold == 0 else
+            'Explicit advanced observed significance threshold '+str(options.observed_filter_threshold)+'. FWHM is not a measurement uncertainty.')
     if explicit_reference:
         handoff_values["reference_cif"] = explicit_reference
         handoff_values["referencefile_mode"] = "reference_density" if Path(explicit_reference).suffix.lower() in {".xplor", ".ccp4", ".map", ".m80", ".m81", ".jana"} else "reference_cif"
@@ -1468,6 +1470,66 @@ class _JanaWorkflowWizard:
             request.powder_wavelength = self.powder_wavelength_spin.value()
         return request
 
+    @staticmethod
+    def _diagnostic_request_key(request):
+        from .hkl_diagnostics import source_identity
+        sources = tuple(source_identity(Path(value)) if Path(value).is_file() else value
+                        for value in (request.hkl_text, request.jana_text, request.ref_text) if value)
+        return request.mode, request.configured_mode, request.powder_wavelength, sources
+
+    def _open_input_diagnostic(self, kind):
+        from .error_reporting import build_error_report, show_phase_studio_error
+        from .app import build_hkl_load_result
+        from .hkl_diagnostics import cached_analysis
+        from shiboken6 import isValid
+        existing = getattr(self, '_diagnostic_dialog', None)
+        if existing is not None and isValid(existing) and existing.isVisible():
+            existing.raise_(); existing.activateWindow(); return
+        try:
+            request = self._hkl_diagnostic_request()
+            key = self._diagnostic_request_key(request)
+            self.validate_hkl_button.setEnabled(False)
+            self.analyze_completeness_button.setEnabled(False)
+            self.input_readiness_label.setText('Opening ' + ('View data' if kind == 'view' else 'Analyze data') + '…')
+            self.diagnostic_loader.start((kind,key),lambda _metadata:
+                (kind,key,request,build_hkl_load_result(request) if kind=='view' else cached_analysis(request)))
+        except Exception as error:
+            self._input_diagnostic_failed(error)
+
+    def _input_diagnostic_failed(self, error):
+        import traceback
+        from .error_reporting import build_error_report, show_phase_studio_error
+        self._refresh_input_summary_and_refit()
+        show_phase_studio_error(self.dialog, build_error_report(error, subsystem='HKL',
+            operation='Wizard input diagnostics', extra_details=''.join(traceback.format_exception(error))))
+
+    def _input_diagnostic_ready(self, payload):
+        from PySide6.QtCore import Qt
+        from .input_analysis_ui import analyze_data_dialog
+        from .diagnostic_presenter import DiagnosticPresenter
+        from shiboken6 import isValid
+        if not isValid(self.dialog) or not self.dialog.isVisible():
+            return
+        try:
+            kind,key,request,result = payload
+            self.diagnostic_loader.cancel()  # The same source may be opened again.
+            self._refresh_input_summary_and_refit()
+            if key != self._diagnostic_request_key(self._hkl_diagnostic_request()):
+                return
+            if not hasattr(self, '_diagnostic_presenter'):
+                self._diagnostic_presenter = DiagnosticPresenter(self.dialog)
+            host = self._diagnostic_presenter
+            dialog = host._build_hkl_validation_dialog(result) if kind=='view' else analyze_data_dialog(host,result)
+            dialog.setParent(self.dialog,dialog.windowFlags())
+            dialog.setWindowModality(Qt.WindowModal)
+            dialog.setAttribute(Qt.WA_DeleteOnClose)
+            dialog._phase_studio_hkl_request = request
+            self._diagnostic_dialog = dialog
+            dialog.finished.connect(lambda _result:setattr(self,'_diagnostic_dialog',None))
+            dialog.open()
+        except Exception as error:
+            self._input_diagnostic_failed(error)
+
     def _get_backing_window(self):
         win = self.backing_window_holder.get("win")
         if win is not None:
@@ -1505,7 +1567,9 @@ class _JanaWorkflowWizard:
         return mode
 
     def _observed_filter_threshold(self) -> Optional[float]:
-        return self.observed_threshold.value() if hasattr(self, 'observed_threshold') else None
+        # The simple workflow does not expose or inherit an advanced filter.
+        # A positive threshold requires an explicit Full Configuration choice.
+        return 0.0
 
     def _scientific_input_issue(self):
         from .validation_issues import ValidationIssue
@@ -1521,10 +1585,10 @@ class _JanaWorkflowWizard:
         from .app import validate_reflection_filter_policy, REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
         from .reflection_readiness import genuine_uncertainties, significance_issue
         try:
-            validate_reflection_filter_policy(result.data_mode, self.observed_threshold.value())
+            validate_reflection_filter_policy(result.data_mode, self._observed_filter_threshold())
         except ValueError as error:
             return ValidationIssue(str(error), 'significance_fwhm', 'i_over_sigma_min', 'Superflip', True)
-        return significance_issue(result.data_mode, self.observed_threshold.value(),
+        return significance_issue(result.data_mode, self._observed_filter_threshold(),
             genuine_uncertainties(result.data_mode, result.reflections, verified=result.format_verified and result.data_mode != REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA))
 
     def _sync_page3_for_data_type(self) -> None:
@@ -2112,6 +2176,9 @@ class _JanaWorkflowWizard:
             self.input_readiness = state
             self.input_readiness_label.setText(state + ' · ' + detail)
             self.input_readiness_label.setToolTip('Parsing, metadata verification and workflow readiness are distinct. Scientific settings are checked before Run.')
+            enabled = state in ('Validated','Warning')
+            self.validate_hkl_button.setEnabled(enabled)
+            self.analyze_completeness_button.setEnabled(enabled)
 
         def apply_crystal_summary(metadata):
             if isinstance(metadata, tuple):
@@ -2214,7 +2281,7 @@ class _JanaWorkflowWizard:
                 return
             errors = any(severity=='ERROR' for severity,_text in result.diagnostics.warnings)
             warnings = any(severity=='WARNING' for severity,_text in result.diagnostics.warnings)
-            set_readiness('Warning' if errors or warnings else 'Validated',
+            set_readiness('Invalid' if not result.reflections else 'Warning' if errors or warnings else 'Validated',
                           'Input diagnostics complete; workflow settings checked before Run')
             self.reflections_value.setText(f"{len(result.reflections):,} HKL records · {len(result.unique_reflections):,} unique indices")
             self.reflections_value.setToolTip(
@@ -2238,8 +2305,8 @@ class _JanaWorkflowWizard:
             self.data_type_value.setText(('Powder / polycrystalline' if report.data_type.startswith('Powder') else 'Single crystal') if verified else 'Not available / unverified')
             self.format_value.setToolTip('FWHM is a peak width in degrees 2θ, not a measurement uncertainty.' if verified and report.data_type.startswith('Powder') and report.fwhm_units=='degrees_2theta' else 'Declared reflection-column layout; data type is shown only when verified.')
             apply_crystal_summary(request.metadata)
-            self.validate_hkl_button.setEnabled(True)
-            self.analyze_completeness_button.setEnabled(True)
+            self.validate_hkl_button.setEnabled(bool(result.reflections))
+            self.analyze_completeness_button.setEnabled(bool(result.reflections))
             # These short hints need no application-wide rich-text wrapping.
             self.validate_hkl_button.setProperty("toolTip",
                 "Check reflection data and input format."
@@ -2248,32 +2315,14 @@ class _JanaWorkflowWizard:
                 "Show reflection completeness and intensity statistics."
             )
 
-        def validate_hkl_clicked() -> None:
-            try:
-                from phase_studio.app import build_hkl_load_result
-                request = self._hkl_diagnostic_request()
-                self._get_backing_window()._start_hkl_background_task(
-                    "HKL validation", lambda: build_hkl_load_result(request), "hkl_load_result"
-                )
-            except Exception as exc:
-                report = build_error_report(exc, subsystem="HKL", operation="HKL validation")
-                show_phase_studio_error(self.dialog, report)
-
-        def analyze_completeness_clicked() -> None:
-            try:
-                from phase_studio.hkl_diagnostics import cached_analysis
-                request = self._hkl_diagnostic_request()
-                self._get_backing_window()._start_hkl_background_task(
-                    "HKL completeness analysis", lambda: cached_analysis(request), "hkl_completeness_result"
-                )
-            except Exception as exc:
-                report = build_error_report(exc, subsystem="HKL", operation="HKL completeness")
-                show_phase_studio_error(self.dialog, report)
-
         self.validate_hkl_button.setEnabled(False)
         self.analyze_completeness_button.setEnabled(False)
-        self.validate_hkl_button.clicked.connect(validate_hkl_clicked)
-        self.analyze_completeness_button.clicked.connect(analyze_completeness_clicked)
+        self.validate_hkl_button.clicked.connect(lambda:self._open_input_diagnostic('view'))
+        self.analyze_completeness_button.clicked.connect(lambda:self._open_input_diagnostic('analyze'))
+        self.diagnostic_loader = InputReadinessLoader(self.dialog)
+        self.dialog.finished.connect(lambda _result:self.diagnostic_loader.cancel())
+        self.diagnostic_loader.completed.connect(self._input_diagnostic_ready)
+        self.diagnostic_loader.failed.connect(self._input_diagnostic_failed)
         # Deferred so the wizard's first page paints immediately; the summary
         # (and the one-time backing-window construction it triggers) fills in
         # right after, once the dialog's event loop actually starts.
@@ -2906,16 +2955,6 @@ class _JanaWorkflowWizard:
         cycles_layout.addWidget(self.cycles_recommendation, 1)
         self.processing_form.addRow("Number of cycles", self.cycles_row)
         self.cycles_label = self.processing_form.labelForField(self.cycles_row)
-        self.observed_threshold = qt['QDoubleSpinBox']()
-        self.observed_threshold.setRange(0, 100)
-        self.observed_threshold.setDecimals(3)
-        self.observed_threshold.setSingleStep(.5)
-        self.observed_threshold.setMaximumWidth(120)
-        self.observed_threshold.setValue(float(self.settings.value('observed_filter_threshold',
-            self.shared_settings.value('inputs/i_over_sigma_min', 2.0))))
-        self.observed_threshold.setAccessibleName('Reflection significance threshold')
-        self.observed_threshold.setToolTip('Direct I/σ(I) for intensity or F/σ(F) for amplitude input. 0 bypasses significance filtering. FWHM and dummy fields are not measured uncertainties. This value is never reset automatically.')
-        self.processing_form.addRow('Minimum observed value/σ', self.observed_threshold)
 
         def update_cycle_guidance(value: int) -> None:
             self.cycles_recommendation.setText(
@@ -4053,7 +4092,6 @@ class _JanaWorkflowWizard:
             return effective_cycles() > 1 and self._current_workflow() in (WORKFLOW_SUPERFLIP_SHARPED, WORKFLOW_PHASE_RECYCLING)
 
         def save_values() -> None:
-            self.settings.setValue('observed_filter_threshold', self.observed_threshold.value())
             next_cycle_mode = effective_next_cycle_mode()
             self.settings.setValue("workflow", self._current_workflow())
             self.settings.setValue("cycles", effective_cycles())
@@ -4086,7 +4124,7 @@ class _JanaWorkflowWizard:
             run_model = self.model.currentText().strip()
             return JanaRunOptions(
                 action=action,
-                observed_filter_threshold=self._observed_filter_threshold(),
+                observed_filter_threshold=None if action == 'edit' else self._observed_filter_threshold(),
                 cycles=effective_cycles(),
                 # The recommended workflow always retains both completed
                 # result families. Its initial Result Selection source is the
@@ -4137,9 +4175,8 @@ class _JanaWorkflowWizard:
                 if issue:
                     from .error_reporting import build_validation_report, ErrorAction
                     def review_reflections():
-                        go_to_page2()
-                        self.observed_threshold.setFocus()
-                        self.scroll_area.ensureWidgetVisible(self.observed_threshold)
+                        go_to_page1()
+                        self.validate_hkl_button.setFocus()
                     show_phase_studio_error(self.dialog, build_validation_report([issue]),
                         [ErrorAction('Review reflection settings', review_reflections, True)])
                     return
@@ -4194,7 +4231,15 @@ class _JanaWorkflowWizard:
         self._attempt_run = attempt_run
         self._attempt_edit = edit_clicked
 
-        self.primary_button.clicked.connect(attempt_run)
+        def safe_attempt_run():
+            try:
+                attempt_run()
+            except Exception as error:
+                import traceback
+                show_phase_studio_error(self.dialog, build_error_report(error,
+                    subsystem='Jana2020 Wizard', operation='Wizard navigation',
+                    extra_details=traceback.format_exc()))
+        self.primary_button.clicked.connect(safe_attempt_run)
         # "Professional mode" is the one authoritative entry to the full
         # Phase Studio GUI (2.0.0: the old "Open full configuration" footer
         # button duplicated it and has been removed).
@@ -4310,6 +4355,8 @@ def launch_phase_studio_from_jana(
             win._input_mode_user_changed()
             win._sync_input_source_mode_widgets()
             win._sync_workflow_widgets()
+            if 'i_over_sigma_min' not in handoff_import.values:
+                win.significance_preferences.reload()
             for line in jana_handoff_log_lines(handoff_import, inflip_path, applied_keys):
                 win._append_execution_log(line, subsystem="Jana2020")
             win._append_execution_log(

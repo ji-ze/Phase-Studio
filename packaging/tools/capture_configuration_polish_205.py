@@ -59,8 +59,8 @@ with tempfile.TemporaryDirectory() as tmp,patch.object(QScreen,'availableGeometr
         w=js._JanaWorkflowWizard([],source);w.run();w.dialog.show();settle(w)
         # The fixture's native auxiliary field is not a measured uncertainty.
         # Make the user's significance-bypass choice explicit.
-        assert w.observed_threshold.value()==2
-        w.observed_threshold.setValue(0)
+        assert not hasattr(w,'observed_threshold')
+        assert w._observed_filter_threshold()==0
         initial=QRect(w.dialog.geometry())
         def stable():
             settle(w)

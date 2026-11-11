@@ -27,6 +27,8 @@ class SettingOrigins:
 
     def loaded(self,settings):
         for key,record in self.records.items():
+            if key=='i_over_sigma_min':
+                continue  # Legacy autosaved defaults are not explicit consent.
             if callable(getattr(settings,'contains',None)) and settings.contains('inputs/'+key):
                 record.update(source='Persisted setting, after existing load-time normalization',
                     persisted_value=str(settings.value('inputs/'+key)),

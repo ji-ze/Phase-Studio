@@ -121,7 +121,34 @@ def build_error_report(
     summary = "The current operation could not be completed."
     guidance = "Review the Execution Log and copy the technical details if you need to report the problem."
 
-    if "immediate stop requested" in lower or "cancelled by the user" in lower or "canceled by the user" in lower:
+    from urllib.error import HTTPError, URLError
+    remote_error = isinstance(error, (HTTPError, URLError)) or type(error).__module__ == 'phase_studio.sharped_server_client'
+    local_handoff = 'jana2020 handoff' in operation.casefold() and not remote_error
+    if remote_error:
+        resolved_subsystem = 'SharpED'
+    if local_handoff:
+        from .jana_handoff_io import JanaProjectMetadataError
+        resolved_subsystem = 'Jana2020 handoff'
+        title = 'Jana2020 handoff could not complete'
+        summary = 'The selected result could not be transferred locally to Jana2020.'
+        guidance = 'The completed prediction is retained. Review the local project and technical details, then retry the same selected result; no new prediction is needed.'
+        if isinstance(error, JanaProjectMetadataError):
+            category = 'jana_handoff_metadata'
+            summary = 'The original Jana project .m50 context is missing or invalid.'
+            guidance = 'Restore the original project context using Jana2020. The searched paths are in Technical details. Do not create an empty .m50 or substitute another project.'
+        elif isinstance(error, FileNotFoundError):
+            category = 'jana_handoff_missing'
+            summary = 'A required local handoff path could not be opened.'
+        elif isinstance(error, PermissionError):
+            category = 'jana_handoff_permission'
+            summary = 'Windows denied access to a local handoff file or folder.'
+            guidance = 'Close applications locking the project files and check folder permissions, then retry the retained result.'
+        elif isinstance(error, OSError):
+            category = 'jana_handoff_filesystem'
+            summary = 'A local filesystem operation failed during Jana2020 handoff.'
+        else:
+            category = 'jana_handoff'
+    elif "immediate stop requested" in lower or "cancelled by the user" in lower or "canceled by the user" in lower:
         category = "cancelled"
         title = "Operation stopped"
         summary = "The current operation was stopped at your request."

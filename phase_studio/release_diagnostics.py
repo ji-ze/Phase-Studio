@@ -60,9 +60,8 @@ def run_release_ui_check(output_path):
                     assert time.monotonic() < deadline
                 wizard.cycles.setValue(1)
                 assert wizard.model.currentText() == models[0]
-                # This native fixture has no measured uncertainties. Disabling
-                # significance is an explicit fixture choice, never a UI reset.
-                wizard.observed_threshold.setValue(0)
+                assert not hasattr(wizard, 'observed_threshold')
+                assert wizard._observed_filter_threshold() == 0
                 assert wizard.primary_button.text() == 'Next: Map feedback →'
                 wizard._ensure_workflow_requirements = lambda **kwargs: False
                 wizard.primary_button.click()

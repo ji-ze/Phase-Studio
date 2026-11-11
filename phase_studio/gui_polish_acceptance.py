@@ -42,6 +42,7 @@ def run(directory):
         app._phase_studio_updates=update_ui.UpdateService(app,state=state,automatic_allowed=False)
         with patch.object(a.IterativeSuperflipPipelineQtGUI,'load_settings',lambda self:None),patch.object(a.IterativeSuperflipPipelineQtGUI,'save_settings',lambda self:None),patch.object(a.IterativeSuperflipPipelineQtGUI,'refresh_sharped_models',lambda self:None):
             main=a.IterativeSuperflipPipelineQtGUI();main.timer.stop();main.resize(1440,900);main.show();settle()
+            main.showMaximized();snap('main-maximized',main);main.showNormal();main.resize(1440,900);settle()
             for advanced,name in ((False,'Input'),(False,'Workflow'),(False,'Help'),(True,'Help'),(True,'Setup'),(True,'Superflip')):
                 main.category_tabs.setCurrentIndex(int(advanced));tabs=main.advanced_tabs if advanced else main.basic_tabs
                 tabs.setCurrentIndex(next(i for i in range(tabs.count()) if tabs.tabText(i)==name));snap(('advanced-' if advanced else 'basic-')+name.lower(),main)
@@ -112,6 +113,20 @@ def run(directory):
         access._present('expired');snap('account-expired',access);access.close()
         with patch.object(js,'application_dir',lambda:Path(temporary)/'Jana2020/SharpED'),patch.object(js,'resolve_active_jana_superflip',lambda _directory:Path(temporary)/'mock-tools/superflip.exe'),patch.object(js,'credential_store',store),patch.object(QDialog,'exec',lambda self:QDialog.Rejected),patch.object(js.SharpEDServerClient,'get_models',lambda self:SimpleNamespace(models=[js.SHARPED_ONE_CYCLE_MODEL,js.SHARPED_ITERATIVE_MODEL,'controlled-model-3','controlled-model-4'],default_model=js.SHARPED_ONE_CYCLE_MODEL,provenance='offline')):
             wizard=js._JanaWorkflowWizard([],local);wizard.run();wizard.dialog.show();settle();snap('wizard-workflow',wizard.dialog)
+            diagnostic_launches=[]
+            for name,button in [('view-data',wizard.validate_hkl_button),('analyze-data',wizard.analyze_completeness_button)]:
+                assert button.isEnabled()
+                button.click()
+                deadline=time.monotonic()+15
+                while getattr(wizard,'_diagnostic_dialog',None) is None:
+                    app.processEvents();time.sleep(.005)
+                    assert time.monotonic()<deadline,'Wizard diagnostic did not open: '+name
+                diagnostic=wizard._diagnostic_dialog
+                assert diagnostic.isVisible() and diagnostic.parentWidget() is wizard.dialog
+                snap('wizard-'+name,diagnostic)
+                diagnostic_launches.append(dict(kind=name,opened=True,owned_by_wizard=True))
+                diagnostic.close();settle()
+            rows['wizard_diagnostic_launches']=diagnostic_launches
             def responsive_wizard(page):
                 size=wizard.dialog.size();position=wizard.scroll_area.verticalScrollBar().value()
                 for width,height in ((680,500),(800,400)):

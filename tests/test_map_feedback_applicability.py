@@ -235,10 +235,10 @@ class FeedbackTests(unittest.TestCase):
         from PySide6.QtWidgets import QDialog
         w = self.j._JanaWorkflowWizard([],self.input_file(powder))
         with patch.object(QDialog,'exec',return_value=QDialog.Rejected): w.run()
-        # Feedback tests explicitly bypass observed significance; FWHM and
-        # auxiliary fields must never silently reset a user's threshold.
-        self.assertEqual(w.observed_threshold.value(), 2.0)
-        w.observed_threshold.setValue(0)
+        # The user-authorized simple path has no significance editor and
+        # always bypasses observed filtering; Full Configuration owns it.
+        self.assertFalse(hasattr(w,'observed_threshold'))
+        self.assertEqual(w._observed_filter_threshold(), 0.0)
         w.dialog.show()
         for _ in range(20): self.qtapp.processEvents()
         w.cycles.setValue(3)
@@ -388,14 +388,13 @@ class FeedbackTests(unittest.TestCase):
         w.powder_enabled_checkbox.setChecked(True)
         options = w._build_options('recycle')
         self.assertEqual(options.intensity_sigma_threshold, 0.0)
-        self.assertEqual(options.observed_filter_threshold, 2.0)
-        self.assertIn('FWHM', w._check_page3_validity())
-        w.observed_threshold.setValue(0)
+        self.assertEqual(options.observed_filter_threshold, 0.0)
+        self.assertNotIn('FWHM', w._check_page3_validity() or '')
         options = w._build_options('recycle')
         self.assertEqual(options.observed_filter_threshold,0.0)
         handoff=self.j.build_jana_handoff_import(path,options,self.a.parse_inflip_settings(path))
         self.assertEqual(handoff.values['i_over_sigma_min'],'0.0')
-        self.assertTrue(any('Observed significance filter explicitly set' in message for message in handoff.limitations))
+        self.assertTrue(any('no filtering' in message for message in handoff.limitations))
         self.assertTrue(options.enable_powder_repartition)
         w.dialog.close()
 

@@ -424,7 +424,9 @@ class AboutDialog(QDialog):
             row.setSpacing(9)
             icon = QLabel()
             icon.setPixmap(self.style().standardIcon(icons[index]).pixmap(18, 18))
-            icon.setFixedWidth(18)
+            icon.setFixedSize(18,18)
+            icon.setAlignment(Qt.AlignCenter)
+            icon.setStyleSheet('background:transparent;')
             icon.setAttribute(Qt.WA_TransparentForMouseEvents)
             row.addWidget(icon)
             captions = QVBoxLayout()
@@ -545,7 +547,7 @@ class AboutDialog(QDialog):
 
     def _fit(self):
         self.layout().activate()
-        fit_dialog_to_available_screen(self, QSize(720, 420))
+        fit_dialog_to_available_screen(self, QSize(720, 390))
         self.setMinimumSize(min(430, self.width()), min(330, self.height()))
 
     def showEvent(self, event):
