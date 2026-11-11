@@ -22,7 +22,7 @@ def test_about_font_and_reader_matrix(scale, tmp_path):
         assert profile['body_font']['family'] != 'Science Gothic'
         assert profile['reader_font']['family'] != 'Science Gothic'
         assert profile['brand_font']['family'] == 'Science Gothic'
-        assert profile['geometry'][2:] == [720, 420]
+        assert profile['geometry'][2:] == [720, 390]
         assert profile['reader_font']['point_size'] >= 10
     assert report['narrow']['geometry'][2] <= 480
     assert len(report['screenshots']) == 28
