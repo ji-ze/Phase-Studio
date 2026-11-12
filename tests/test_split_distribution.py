@@ -428,6 +428,16 @@ class SplitDistributionTests(unittest.TestCase):
                 old['compute_rfree']=functions(holdout_text)['compute_rfree']
                 export_text=subprocess.check_output([git,'show','7011573:phase_studio/app.py'],cwd=ROOT).decode('utf8')
                 old['write_superflip_input']=functions(export_text)['write_superflip_input']
+                # Adversarial audit corrections retain immutable body guards;
+                # independent counterexamples live in test_numerical_adversarial_207.
+                audit_text=subprocess.check_output([git,'show','54f63e6:phase_studio/app.py'],cwd=ROOT).decode('utf8')
+                audit_functions=functions(audit_text)
+                for name in ('frac_distance_angstrom','parse_cif_atoms','expanded_unique_atoms',
+                             '_phase_studio_float7','format_superflip_fixed_reflection',
+                             'write_observed_reflections','write_standardized_hkl_with_phase','write_shelx_fcf',
+                             'xplor_fft_intensity_phase','xplor_fft_predictions_from_map',
+                             'synthesize_xplor_map_from_phases','compose_random_phase_map','xplor_map_correlation'):
+                    old[name]=audit_functions[name]
             excluded = {"create_phase_studio_logo_pixmap", "create_phase_studio_app_icon", "apply_phase_studio_app_icon",
                         "create_phase_studio_brand_header", "create_phase_studio_context_banner", "apply_safe_dialog_geometry",
                         "fitted_dialog_client_size", "fit_dialog_to_available_screen", "classify_log_record",
