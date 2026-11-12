@@ -125,13 +125,16 @@ def check_ui():
         assert tooltip_text(w.validate_hkl_button) == 'Check reflection data and input format.'
         assert tooltip_text(w.analyze_completeness_button) == 'Show reflection completeness and intensity statistics.'
         calls = []
-        class Diagnostics:
-            def _start_hkl_background_task(self, label, worker, kind):
-                assert callable(worker)
-                calls.append('validate' if kind == 'hkl_load_result' else 'analyze')
-        w._get_backing_window = lambda: Diagnostics()
-        for button in [w.validate_hkl_button,w.analyze_completeness_button]:
+        for kind,button in [('validate',w.validate_hkl_button),('analyze',w.analyze_completeness_button)]:
             button.click()
+            for _ in range(1600):
+                settle();QTest.qWait(5)
+                if getattr(w,'_diagnostic_dialog',None) is not None:break
+            diagnostic=w._diagnostic_dialog
+            assert diagnostic.isVisible() and diagnostic.parentWidget() is w.dialog
+            assert QApplication.activeModalWidget() is diagnostic
+            assert w.backing_window_holder['win'] is None
+            calls.append(kind);diagnostic.close();settle()
             size = button.size()
             button.setFocus(Qt.TabFocusReason)
             QTest.mouseMove(button, button.rect().center())

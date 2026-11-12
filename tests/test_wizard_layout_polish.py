@@ -66,12 +66,19 @@ def run_checks():
   w.files_toggle.click();settle();assert not w.files_form_widget.isVisible() and w.scroll_area.verticalScrollBar().maximum()==0
   assert w.backing_window_holder['win'] is None
   calls=[]
-  class Diagnostics:
-   def _start_hkl_background_task(self,label,worker,kind):
-    assert callable(worker)
-    calls.append('validate' if kind=='hkl_load_result' else 'completeness')
-  w._get_backing_window=lambda:Diagnostics()
-  w.validate_hkl_button.click();w.analyze_completeness_button.click();assert calls==['validate','completeness']
+  for kind,button in [('validate',w.validate_hkl_button),('completeness',w.analyze_completeness_button)]:
+   button.click()
+   for _ in range(1600):
+    settle();QTest.qWait(5)
+    if getattr(w,'_diagnostic_dialog',None) is not None:break
+   diagnostic=w._diagnostic_dialog
+   assert diagnostic.isVisible() and diagnostic.parentWidget() is w.dialog
+   assert QApplication.activeModalWidget() is diagnostic
+   assert w.backing_window_holder['win'] is None
+   calls.append(kind);diagnostic.close();settle()
+   # The offscreen plugin has no window manager to reactivate the owner.
+   w.dialog.activateWindow();settle()
+  assert calls==['validate','completeness']
   tile=tiles[0];tile._on_click=lambda:calls.append('activate')
   tile.setFocus(Qt.TabFocusReason);QTest.keyClick(tile,Qt.Key_Space);assert calls[-1]=='activate'
   QTest.qWait(360);QTest.mouseClick(tile,Qt.LeftButton,pos=tile.rect().center());assert calls.count('activate')==2
