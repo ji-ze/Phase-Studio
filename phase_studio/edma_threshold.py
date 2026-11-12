@@ -72,7 +72,7 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 import gemmi
 import numpy as np
 
-from phase_studio.map_quality import ValidationContext, scaled_amplitude_metrics
+from phase_studio.map_quality import ValidationContext, scaled_amplitude_metrics, amplitude_r_factor_at_scale
 
 # ---------------------------------------------------------------------------
 # Central configuration (every threshold-search literal lives here).
@@ -235,6 +235,7 @@ class ModelAgreementEvaluator:
         self.fo = np.asarray([r.amplitude for r in measured], dtype=np.float64)
         free_keys = {r.hkl for r in context.free_reflections}
         self.free_mask = np.asarray([tuple(h) in free_keys for h in map(tuple, self.hkl)], dtype=bool)
+        self.has_holdout = bool(self.free_mask.any())
         self.holdout_available = int(self.free_mask.sum()) >= MIN_CRITERION_REFLECTIONS
         self.work_mask = ~self.free_mask
         self.s2 = np.asarray([1.0 / cell.calculate_d([int(h), int(k), int(l)]) ** 2 for h, k, l in self.hkl], dtype=np.float64)
@@ -243,9 +244,11 @@ class ModelAgreementEvaluator:
     def criterion_mask(self) -> np.ndarray:
         """Reflections the ACCEPTANCE decision uses: the genuine free set when
         it exists, otherwise all measured reflections."""
-        return self.free_mask if self.holdout_available else np.ones(len(self.fo), dtype=bool)
+        return self.free_mask if self.has_holdout else np.ones(len(self.fo), dtype=bool)
 
     def criterion_label(self) -> str:
+        if self.has_holdout and not self.holdout_available:
+            return 'Insufficient held-out reflections; automatic calibration unavailable'
         return "model R_free / CC_free (genuine holdout)" if self.holdout_available else (
             "all-data model R_F / CC_F (non-independent agreement)"
         )
@@ -276,7 +279,7 @@ class ModelAgreementEvaluator:
         """Reflections the overall-B fit may see: WORK reflections only when a
         genuine holdout exists (so no free-set information enters the
         scaling), otherwise all."""
-        return self.work_mask if self.holdout_available else np.ones(len(self.fo), dtype=bool)
+        return self.work_mask if self.has_holdout else np.ones(len(self.fo), dtype=bool)
 
 
 def apply_overall_b(fo: np.ndarray, fc: np.ndarray, s2: np.ndarray, fit_mask: np.ndarray) -> np.ndarray:
@@ -287,7 +290,7 @@ def apply_overall_b(fo: np.ndarray, fc: np.ndarray, s2: np.ndarray, fit_mask: np
     if int(ok.sum()) < MIN_CRITERION_REFLECTIONS:
         return fc
     x = s2[ok] / 4.0
-    y = np.log(fo[ok] / fc[ok])
+    y = np.log(fo[ok]) - np.log(fc[ok])
     x_mean = float(np.mean(x))
     denominator = float(np.sum((x - x_mean) ** 2))
     if denominator <= 1.0e-15:
@@ -296,28 +299,27 @@ def apply_overall_b(fo: np.ndarray, fc: np.ndarray, s2: np.ndarray, fit_mask: np
     return fc * np.exp(-b_value * s2 / 4.0)
 
 
-def assess_model_data_agreement(fo: np.ndarray, fc: np.ndarray, mask: np.ndarray) -> Tuple[Optional[float], Optional[float]]:
+def assess_model_data_agreement(fo: np.ndarray, fc: np.ndarray, mask: np.ndarray, fit_mask: Optional[np.ndarray] = None) -> Tuple[Optional[float], Optional[float]]:
     """Established least-squares-scaled R and Pearson CC on `mask`."""
     if int(mask.sum()) < MIN_CRITERION_REFLECTIONS:
         return None, None
     metrics = scaled_amplitude_metrics(fo[mask], fc[mask])
-    return metrics.r_factor, metrics.correlation
+    if fit_mask is None:
+        return metrics.r_factor, metrics.correlation
+    work_scale = scaled_amplitude_metrics(fo[fit_mask], fc[fit_mask]).scale
+    return amplitude_r_factor_at_scale(fo[mask], fc[mask], work_scale), metrics.correlation
 
 
-def _bootstrap_r_cc(fo: np.ndarray, fc: np.ndarray, samples: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _bootstrap_r_cc(fo: np.ndarray, fc: np.ndarray, samples: np.ndarray, fixed_scale: Optional[float] = None) -> Tuple[np.ndarray, np.ndarray]:
     """R and CC for every bootstrap resample (rows of `samples` are index
     draws over the criterion reflections), re-scaling per resample exactly
     like scaled_amplitude_metrics does."""
-    fo_b = fo[samples]
-    fc_b = fc[samples]
-    scale = np.maximum(0.0, np.sum(fo_b * fc_b, axis=1) / np.maximum(np.sum(fc_b * fc_b, axis=1), 1.0e-15))
-    r = np.sum(np.abs(fo_b - scale[:, None] * fc_b), axis=1) / np.maximum(np.sum(fo_b, axis=1), 1.0e-15)
-    fo_c = fo_b - fo_b.mean(axis=1, keepdims=True)
-    fc_c = fc_b - fc_b.mean(axis=1, keepdims=True)
-    cc = np.sum(fo_c * fc_c, axis=1) / np.maximum(
-        np.sqrt(np.sum(fo_c * fo_c, axis=1) * np.sum(fc_c * fc_c, axis=1)), 1.0e-15
-    )
-    return r, cc
+    metrics = [scaled_amplitude_metrics(fo[index], fc[index]) for index in samples]
+    # Free samples keep the scale fitted to work; all-data samples retain their
+    # established refit policy. Both use the overflow-safe residual authority.
+    residuals = ([amplitude_r_factor_at_scale(fo[index], fc[index], fixed_scale) for index in samples]
+                 if fixed_scale is not None else [m.r_factor for m in metrics])
+    return np.asarray(residuals, dtype=float), np.asarray([m.correlation for m in metrics], dtype=float)
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +425,10 @@ def evaluate_edma_candidate(
     fc = evaluator.fcalc(observed)
     info.r_all, info.cc_all = assess_model_data_agreement(evaluator.fo, fc, np.ones(len(fc), dtype=bool))
     if evaluator.holdout_available:
-        info.r_free, info.cc_free = assess_model_data_agreement(evaluator.fo, fc, evaluator.free_mask)
+        info.r_free, info.cc_free = assess_model_data_agreement(evaluator.fo, fc, evaluator.free_mask, evaluator.work_mask)
+        if info.r_free is None or info.cc_free is None:
+            info.rejected.append('Working-set scale or held-out agreement unavailable')
+            return _Evaluated(info, None)
     if info.r_all is None or info.cc_all is None:
         info.rejected.append("structure-factor agreement unavailable")
         return _Evaluated(info, None)
@@ -447,7 +452,11 @@ def select_lowest_supported_threshold(
     boot: Dict[float, Tuple[np.ndarray, np.ndarray]] = {}
     for item in ordered:
         if item.fc is not None:
-            boot[item.info.sigma] = _bootstrap_r_cc(fo, item.fc, samples)
+            scale = scaled_amplitude_metrics(fo[evaluator.work_mask], item.fc[evaluator.work_mask]).scale if evaluator.holdout_available else None
+            if evaluator.holdout_available and scale is None:
+                item.info.rejected.append('Working-set scale unavailable')
+                return None
+            boot[item.info.sigma] = _bootstrap_r_cc(fo, item.fc, samples, fixed_scale=scale)
 
     def significantly_better(lower: _Evaluated, higher: _Evaluated) -> bool:
         """Agreement at `lower` significantly better than at `higher`."""

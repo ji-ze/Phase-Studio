@@ -83,7 +83,7 @@ TRIPLET_C3 = MetricDefinition("triplet_c3", "Weighted triplet C3", True)
 ENTROPY = MetricDefinition("entropy_normalized", "Normalized map entropy", False)
 CONCENTRATION = MetricDefinition("map_concentration", "Map concentration", True)
 PEAKINESS = MetricDefinition("standardized_peakiness", "Standardized peakiness", True)
-NEGATIVE_MASS = MetricDefinition("negative_density_mass", "Negative-density mass fraction", False)
+NEGATIVE_MASS = MetricDefinition("negative_density_mass", "Centered negative-mass fraction (0.5 by construction)", False)
 
 COMMON_REPORT_METRICS = (
     REFERENCE_PRECISION, REFERENCE_RECALL, REFERENCE_TP, REFERENCE_FP,
@@ -110,7 +110,7 @@ PROFILE_DEFINITIONS = {
     ValidationProfile.HOLDOUT_ONLY: ValidationProfileDefinition(
         ValidationProfile.HOLDOUT_ONLY,
         "Cross-validation",
-        "Independent assessment against a frozen 5% experimental holdout.",
+        "Agreement against a frozen 5% experimental holdout. Independence depends on observation correlations and prior-model provenance; selecting a candidate reuses this validation set.",
         (R_FREE, CC_FREE, OMIT_CC),
         COMMON_REPORT_METRICS,
     ),
@@ -261,14 +261,19 @@ def scaled_amplitude_metrics(observed: Sequence[float], calculated: Sequence[flo
         return ScaledAmplitudeMetrics(None, None, None, 0)
     fo = np.asarray([pair[0] for pair in pairs], dtype=np.float64)
     fc = np.asarray([pair[1] for pair in pairs], dtype=np.float64)
-    denominator = float(np.dot(fc, fc))
-    fo_sum = float(np.sum(fo))
-    if denominator <= 1.0e-15 or fo_sum <= 1.0e-15:
+    fo_max, fc_max = float(np.max(fo)), float(np.max(fc))
+    if fo_max == 0 or fc_max == 0:
         return ScaledAmplitudeMetrics(None, None, None, len(pairs))
-    scale = max(0.0, float(np.dot(fo, fc)) / denominator)
-    r_factor = float(np.sum(np.abs(fo - scale * fc)) / fo_sum)
+    # Normalize separately before products: common units must not change R,
+    # and finite input amplitudes need not have representable squares.
+    fo, fc = fo / fo_max, fc / fc_max
+    normalized_scale = float(np.dot(fo, fc) / np.dot(fc, fc))
+    scale = normalized_scale * (fo_max / fc_max)
+    if not math.isfinite(scale):
+        return ScaledAmplitudeMetrics(None, None, None, len(pairs))
+    r_factor = float(np.sum(np.abs(fo - normalized_scale * fc)) / np.sum(fo))
     correlation = None
-    if len(pairs) >= 2 and float(np.std(fo)) > 1.0e-15 and float(np.std(fc)) > 1.0e-15:
+    if len(pairs) >= 2 and float(np.std(fo)) > 0 and float(np.std(fc)) > 0:
         correlation = float(np.corrcoef(fo, fc)[0, 1])
     return ScaledAmplitudeMetrics(r_factor, correlation, scale, len(pairs))
 
@@ -283,10 +288,18 @@ def amplitude_r_factor_at_scale(observed, calculated, scale):
         return None
     fo=np.asarray([p[0] for p in pairs],dtype=np.float64)
     fc=np.asarray([p[1] for p in pairs],dtype=np.float64)
-    denominator=float(np.sum(fo))
-    if denominator<=1e-15:
+    maximum=float(np.max(fo))
+    if maximum==0:
         return None
-    return float(np.sum(np.abs(fo-float(scale)*fc))/denominator)
+    fo=fo/maximum
+    fc_max=float(np.max(fc))
+    if fc_max==0 or scale==0:
+        return 1.0
+    factor=float(scale)*(fc_max/maximum)
+    if not math.isfinite(factor):
+        return None
+    residual=float(np.sum(np.abs(fo-factor*(fc/fc_max)))/np.sum(fo))
+    return residual if math.isfinite(residual) else None
 
 
 @dataclass(frozen=True)

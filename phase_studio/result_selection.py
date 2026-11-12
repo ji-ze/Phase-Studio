@@ -70,9 +70,9 @@ def show_candidate_details(parent,title,rows,*,confirm=False):
 
 _COMPACT_METRIC_COLUMNS = {
     "reference_f05": ("F0.5 ↑", "Reference F0.5"),
-    "reference_rmsd": ("RMSD (Å) ↓", "Matched-peak RMSD"),
-    "reference_phase_agreement": ("Phase agreement ↑", "Reference phase agreement"),
-    "r_free": ("R_free ↓", "R_free"),
+    "reference_rmsd": ("RMSD (Å) ↓", "Symmetric nearest-neighbor RMS distance in the supplied coordinate frame; many-to-one matches are possible. This is not an aligned one-to-one structural RMSD."),
+    "reference_phase_agreement": ("Phase agreement ↑", "Atomic-number-weighted reference phase proxy in the supplied origin; occupancy, ADPs and resolution-dependent form factors are not modeled."),
+    "r_free": ("R_free ↓", "Held-out amplitude residual at the work-set scale. Powder correlations and prior-model information can limit independence; selecting the best cycle reuses this validation set."),
     "cc_free": ("CC_free ↑", "CC_free"),
     "omit_map_correlation": ("OMIT CC ↑", "OMIT map correlation"),
     "amplitude_rf": ("R factor ↓", "Amplitude consistency with original measured reflections; not independent refinement R. Scale is fitted to map FFT amplitudes."),

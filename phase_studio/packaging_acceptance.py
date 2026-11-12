@@ -267,6 +267,27 @@ def _check_scientific_interchange(a, report, directory):
     metrics=a.compute_map_quality(density,(32,0,31,1,0,0,1,0,0),(10,10,10,90,90,90),'ZYX',context)
     assert abs(metrics.r_work)<1e-12 and abs(metrics.r_free-1)<1e-12
     report['scientific_interchange']['work_scaled_free_r']=metrics.r_free
+    # Adversarial audit counterexamples must execute from each frozen bundle.
+    import gemmi
+    cell=gemmi.UnitCell(10,10,12,90,90,60)
+    distance=a.frac_distance_angstrom(cell,[.49,.49,0],[0,0,0])
+    assert abs(distance-(25.03**.5))<1e-12
+    atom=a.AtomSite('C','C',np.array([.137,.219,.323]))
+    assert len(a.expanded_unique_atoms([atom],cell,gemmi.SpaceGroup('C 2')))==4
+    forbidden,_=a.synthesize_xplor_map_from_phases([a.Reflection(0,1,0,1,None)],
+        a.REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA,xmap.grid,xmap.cell,'ZYX',
+        {(0,1,0):0},'forbidden',gemmi.SpaceGroup('P 21'))
+    assert np.max(abs(forbidden.data))==0
+    scaled=a.scaled_amplitude_metrics(np.array([2.,4.,6.])*1e200,np.array([1.,2.,3.])*1e200)
+    assert abs(scaled.scale-2)<1e-14 and scaled.r_factor<1e-14
+    tiny=directory/'scientific-tiny.hkl'
+    a.write_observed_reflections(tiny,[a.Reflection(1,0,0,1e-9,2e-10)],0,a.REFLECTION_DATA_MODE_INTENSITY)
+    restored=a.read_hkl(tiny)[0]
+    assert restored.value==1e-9 and restored.sigma==2e-10
+    report['scientific_interchange']['adversarial_audit']={
+        'periodic_distance_angstrom':distance,'centered_sites':4,
+        'forbidden_density_max':0,'extreme_scale_r':scaled.r_factor,
+        'small_intensity':restored.value,'small_sigma':restored.sigma}
 
 
 def _check_feedback_significance(a, backend, wizard, report, directory, snap):

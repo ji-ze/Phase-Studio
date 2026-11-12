@@ -1403,10 +1403,8 @@ def full_spacegroup_ops(sg: gemmi.SpaceGroup) -> List[gemmi.Op]:
         return []
 
 def frac_distance_angstrom(cell: gemmi.UnitCell, f1: Sequence[float], f2: Sequence[float]) -> float:
-    d = np.asarray(f1, dtype=np.float64) - np.asarray(f2, dtype=np.float64)
-    d -= np.round(d)
-    pos = cell.orthogonalize(gemmi.Fractional(float(d[0]), float(d[1]), float(d[2])))
-    return float(math.sqrt(pos.x * pos.x + pos.y * pos.y + pos.z * pos.z))
+    from phase_studio.scientific_numerics import periodic_distance
+    return periodic_distance(tuple(cell.parameters), f1, f2)
 
 def spacegroup_name_candidates(name: str) -> List[str]:
     raw = str(name or "").strip().strip("'\"")
@@ -1872,6 +1870,29 @@ def parse_cif_cell_and_sg(cif_path: Path) -> Tuple[gemmi.UnitCell, gemmi.SpaceGr
 
 
 def parse_cif_atoms(cif_path: Path) -> List[AtomSite]:
+    # CIF records are token streams, not physical lines. Parse valid CIF first;
+    # retain the legacy reader below for nonstandard native output only.
+    try:
+        document = gemmi.cif.read_file(str(cif_path))
+        for block in document:
+            structure = gemmi.make_small_structure_from_block(block)
+            if structure.sites:
+                parsed = []
+                has_displacement = bool(block.find_values('_atom_site_U_iso_or_equiv')) or bool(block.find_values('_atom_site_B_iso_or_equiv'))
+                for site in structure.sites:
+                    frac = np.asarray([site.fract.x, site.fract.y, site.fract.z])
+                    if not np.all(np.isfinite(frac)):
+                        raise ValueError('Nonfinite CIF fractional coordinates')
+                    uiso = float(site.u_iso)
+                    parsed.append(AtomSite(
+                        label=site.label,
+                        element=clean_element_symbol(site.element.name or site.label),
+                        frac=wrap_frac(frac),
+                        uiso_angstrom2=uiso if has_displacement and math.isfinite(uiso) and uiso >= 0 else None,
+                    ))
+                return parsed
+    except RuntimeError:
+        pass
     atoms: List[AtomSite] = []
     lines = cif_path.read_text(encoding="utf-8", errors="replace").splitlines()
     i = 0
@@ -2269,7 +2290,7 @@ def reference_context_with_external_atom_sites(
 
 
 def expanded_unique_atoms(atoms: Sequence[AtomSite], cell: gemmi.UnitCell, sg: gemmi.SpaceGroup, merge_tol_a: float = 0.25) -> List[AtomSite]:
-    ops = sg.operations().sym_ops
+    ops = list(sg.operations())
     out: List[AtomSite] = []
     for a in atoms:
         for op in ops:
@@ -3204,13 +3225,8 @@ def analyze_hkl_data(
     return analysis
 
 def _phase_studio_float7(value: float) -> str:
-    try:
-        x = float(value)
-        if not math.isfinite(x):
-            x = 0.0
-    except Exception:
-        x = 0.0
-    return f"{x:.7f}"
+    from phase_studio.scientific_numerics import reflection_number
+    return reflection_number(value)
 
 
 def calculate_superflip_dataitemwidths(records: Sequence[Tuple[int, int, int, float, float, float]]) -> Tuple[int, int, int]:
@@ -3256,9 +3272,9 @@ def format_superflip_fixed_reflection(
         f"{int(h):{hkl_width}d}"
         f"{int(k):{hkl_width}d}"
         f"{int(l):{hkl_width}d}"
-        f"{float(value):{value_width}.7f}"
-        f"{float(phase):{phase_width}.7f}"
-        f"{float(sigma):{sigma_width}.7f}"
+        f"{_phase_studio_float7(value):>{value_width}}"
+        f"{_phase_studio_float7(phase):>{phase_width}}"
+        f"{_phase_studio_float7(sigma):>{sigma_width}}"
     )
 
 
@@ -3386,9 +3402,9 @@ def write_observed_reflections(out_hkl: Path, reflections: Sequence[Reflection],
             sigma = float(r.sigma) if r.sigma is not None and math.isfinite(float(r.sigma)) and r.sigma>0 else 0.0
             if reflection_mode_has_phase(mode):
                 phase_text = f'{float(r.phase)/360.0:14.9f}' if r.phase is not None and math.isfinite(float(r.phase)) else '?'.rjust(14)
-                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {phase_text} {sigma:14.7f}\n")
+                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {_phase_studio_float7(value):>14} {phase_text} {_phase_studio_float7(sigma):>14}\n")
             else:
-                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {value:14.7f} {sigma:14.7f}\n")
+                f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {_phase_studio_float7(value):>14} {_phase_studio_float7(sigma):>14}\n")
             n += 1
     return n
 
@@ -3420,7 +3436,7 @@ def write_standardized_hkl_with_phase(
                 sigma_i = 2.0 * value * sigma_f
             calc = calc_by_hkl.get((int(r.h), int(r.k), int(r.l))) if calc_by_hkl else None
             phase = float(calc[1]) if calc is not None else (0.0 if r.phase is None else float(r.phase))
-            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {phase:12.6f}\n")
+            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {_phase_studio_float7(intensity):>14} {_phase_studio_float7(sigma_i):>14} {phase:12.6f}\n")
             n += 1
     return n
 
@@ -3460,7 +3476,7 @@ def write_shelx_fcf(
             calc = calc_by_hkl.get((int(r.h), int(r.k), int(r.l))) if calc_by_hkl else None
             intensity_calc = float(calc[0]) if calc is not None else intensity
             phase = float(calc[1]) if calc is not None else 0.0
-            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {intensity:14.7f} {sigma_i:14.7f} {intensity_calc:14.7f} {phase:12.6f}\n")
+            f.write(f"{r.h:5d} {r.k:5d} {r.l:5d} {_phase_studio_float7(intensity):>14} {_phase_studio_float7(sigma_i):>14} {_phase_studio_float7(intensity_calc):>14} {phase:12.6f}\n")
             n += 1
     return n
 
@@ -3505,18 +3521,7 @@ def estimate_sigma_for_reflection_value(reflections: Sequence[Reflection], value
     return None
 
 def xplor_fft_intensity_phase(xplor_map: Path, hkl: Tuple[int, int, int]) -> Tuple[float, float]:
-    xmap = read_xplor_map(xplor_map)
-    grid = tuple(int(v) for v in xmap.grid)
-    nx, ny, nz = grid[0], grid[3], grid[6]
-    data = np.asarray(xmap.data, dtype=np.float64).reshape((nz, ny, nx))
-    # Crystallographic F(h) uses exp(+2*pi*i*h.r), opposite to numpy.fftn.
-    # For a real density conjugation preserves magnitudes and corrects phases.
-    coeffs = np.fft.fftn(data).conjugate()
-    h, k, l = hkl
-    coeff = coeffs[int(l) % nz, int(k) % ny, int(h) % nx]
-    intensity = float(abs(coeff) ** 2)
-    phase = float(math.degrees(math.atan2(float(coeff.imag), float(coeff.real))))
-    return intensity, phase
+    return xplor_fft_predictions_from_map(read_xplor_map(xplor_map), [hkl])[hkl]
 
 def xplor_fft_predictions(xplor_map: Path, hkls: Sequence[Tuple[int, int, int]]) -> Dict[Tuple[int, int, int], Tuple[float, float]]:
     xmap = read_xplor_map(xplor_map)
@@ -3528,16 +3533,25 @@ def xplor_fft_predictions_from_map(
     hkls: Sequence[Tuple[int, int, int]],
 ) -> Dict[Tuple[int, int, int], Tuple[float, float]]:
     """Calculate requested coefficients from an XPLOR map already in memory."""
+    from phase_studio.xplor_io import validate_xplor_layout
+    from phase_studio.scientific_numerics import validate_fourier_hkls
+    validate_xplor_layout(xmap.grid, xmap.axis_order)
     grid = tuple(int(v) for v in xmap.grid)
     nx, ny, nz = grid[0], grid[3], grid[6]
+    validate_fourier_hkls((nx, ny, nz), hkls)
     data = np.asarray(xmap.data, dtype=np.float64).reshape((nz, ny, nx))
+    if not np.all(np.isfinite(data)):
+        raise ValueError('Fourier sampling requires finite map values.')
     # Match native Superflip/Gemmi phases, not NumPy's negative-exponent phase.
     coeffs = np.fft.fftn(data).conjugate()
     predictions: Dict[Tuple[int, int, int], Tuple[float, float]] = {}
     for h, k, l in hkls:
         coeff = coeffs[int(l) % nz, int(k) % ny, int(h) % nx]
+        magnitude = float(abs(coeff))
+        if not math.isfinite(magnitude) or magnitude > math.sqrt(np.finfo(float).max):
+            raise ValueError('Map Fourier intensity exceeds the supported numerical range; rescale the map.')
         predictions[(int(h), int(k), int(l))] = (
-            float(abs(coeff) ** 2),
+            magnitude ** 2,
             float(math.degrees(math.atan2(float(coeff.imag), float(coeff.real)))),
         )
     return predictions
@@ -3561,6 +3575,9 @@ def synthesize_xplor_map_from_phases(
     still missing afterwards (non-centrosymmetric space groups) is filled by Hermitian
     symmetry so the resulting map is real."""
     nx, ny, nz = int(grid[0]), int(grid[3]), int(grid[6])
+    from phase_studio.xplor_io import validate_xplor_layout
+    from phase_studio.scientific_numerics import validate_fourier_hkls
+    validate_xplor_layout(grid, axis_order or 'ZYX')
     coeffs = np.zeros((nz, ny, nx), dtype=np.complex128)
     direct: set = set()
     ops = full_spacegroup_ops(spacegroup) or [gemmi.Op("x,y,z")]
@@ -3570,21 +3587,38 @@ def synthesize_xplor_map_from_phases(
         phase_deg = phases_by_hkl.get((h, k, l))
         if phase_deg is None:
             continue
-        amplitude = math.sqrt(reflection_value_as_intensity(r, data_mode))
+        if spacegroup.operations().is_systematically_absent((h, k, l)):
+            continue
+        amplitude = max(0.0, float(r.value)) if reflection_mode_is_amplitude(data_mode) else math.sqrt(reflection_value_as_intensity(r, data_mode))
+        if not math.isfinite(amplitude) or not math.isfinite(float(phase_deg)):
+            raise ValueError('Fourier synthesis requires finite amplitudes and phases.')
         if amplitude <= 0:
             continue
-        base_phase = math.radians(float(phase_deg))
+        base_phase = math.radians(math.remainder(float(phase_deg), 360.0))
+        # An operation taking h to -h restricts its phase modulo pi. Project
+        # to the nearest allowed phase without attenuating measured |F|.
+        for op in ops:
+            if tuple(op.apply_to_hkl((h, k, l))) == (-h, -k, -l):
+                allowed = -op.phase_shift((h, k, l)) / 2.0
+                base_phase = allowed + math.pi * round((base_phase - allowed) / math.pi)
+                break
         for op in ops:
             eh, ek, el = op.apply_to_hkl((h, k, l))
+            validate_fourier_hkls((nx, ny, nz), [(eh, ek, el)])
             phase = base_phase + op.phase_shift((h, k, l))
             index = (int(el) % nz, int(ek) % ny, int(eh) % nx)
-            coeffs[index] = complex(amplitude * math.cos(phase), amplitude * math.sin(phase))
+            value = complex(amplitude * math.cos(phase), amplitude * math.sin(phase))
+            if index in direct and not np.isclose(coeffs[index], value, rtol=1e-10, atol=0):
+                raise ValueError('Fourier synthesis has inconsistent symmetry-equivalent amplitudes/phases or aliased indices; merge equivalent observations and use a finer grid.')
+            coeffs[index] = value
             direct.add(index)
         used += 1
     for lz, ky, hx in list(direct):
         mate = ((-lz) % nz, (-ky) % ny, (-hx) % nx)
         if mate not in direct:
             coeffs[mate] = np.conj(coeffs[lz, ky, hx])
+        elif not np.isclose(coeffs[mate], np.conj(coeffs[lz, ky, hx]), rtol=1e-10, atol=0):
+            raise ValueError('Fourier synthesis violates Hermitian symmetry (inconsistent Friedel values or a complex Nyquist coefficient); use consistent phases and a finer grid.')
     # rho(r) = sum_h F(h) exp(-2*pi*i*h.r) / N. Retain the existing
     # discrete-map normalization while using the crystallographic phase sign.
     data = np.fft.fftn(coeffs).real / coeffs.size
@@ -3636,9 +3670,16 @@ def compose_random_phase_map(
     cell_tuple = (cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
     seed_text = str(randomseed or "").strip()
     rng = np.random.default_rng(int(seed_text)) if seed_text.isdigit() else np.random.default_rng()
-    phases_by_hkl = {
-        (int(r.h), int(r.k), int(r.l)): float(rng.uniform(0.0, 360.0)) for r in reflections
-    }
+    phases_by_hkl = {}
+    for hkl in sorted({(int(r.h), int(r.k), int(r.l)) for r in reflections}):
+        if hkl in phases_by_hkl:
+            continue
+        phase = float(rng.uniform(0.0, 360.0))
+        for op in full_spacegroup_ops(spacegroup):
+            mate = tuple(map(int, op.apply_to_hkl(hkl)))
+            transformed = phase + math.degrees(op.phase_shift(hkl))
+            phases_by_hkl[mate] = transformed
+            phases_by_hkl[tuple(-v for v in mate)] = -transformed
     new_xmap, used = synthesize_xplor_map_from_phases(
         reflections, data_mode, grid, cell_tuple, "ZYX", phases_by_hkl, title, spacegroup
     )
@@ -3651,8 +3692,11 @@ def xplor_map_correlation(map_a: Path, map_b: Path) -> Optional[float]:
     reference-free convergence proxy for the SharpED phase-recycling cycle loop
     (no EDMA/reference structure required, unlike the other per-cycle metrics)."""
     try:
-        a = read_xplor_map(map_a).data.ravel()
-        b = read_xplor_map(map_b).data.ravel()
+        first, second = read_xplor_map(map_a), read_xplor_map(map_b)
+        if first.grid != second.grid or first.axis_order != second.axis_order or not np.allclose(first.cell, second.cell, rtol=5e-5, atol=5e-4):
+            return None
+        a = first.data.ravel()
+        b = second.data.ravel()
         if a.shape != b.shape or a.size == 0:
             return None
         if np.std(a) < 1e-12 or np.std(b) < 1e-12:
