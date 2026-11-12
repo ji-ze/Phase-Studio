@@ -114,6 +114,10 @@ def test_cif_wrapped_rows_are_not_silently_dropped(tmp_path):
 def test_small_measurements_survive_native_serialization(tmp_path,mode):
     p=tmp_path/'small.hkl';row=a.Reflection(1,0,0,1e-9,2e-10,90.)
     assert a.write_observed_reflections(p,[row],0,mode)==1
+    # Native Superflip rejects exponent notation in reflection records.
+    for line in p.read_text().splitlines():
+        if line.strip() and not line.lstrip().startswith('#'):
+            assert 'e' not in line.lower()
     columns=a.reflection_columns_for_mode(mode)
     actual=a.read_hkl(p,*columns[:2])[0]
     assert actual.value==pytest.approx(row.value,rel=1e-14,abs=0)

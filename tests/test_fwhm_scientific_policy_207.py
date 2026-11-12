@@ -18,7 +18,9 @@ def test_observed_column_meaning_and_value_policy(tmp_path,mode):
     path=tmp_path/'observed.hkl'
     assert a.write_observed_reflections(path,rows,0,mode)==3
     records=[line.split() for line in path.read_text().splitlines() if not line.startswith('#')]
-    assert [float(r[3]) for r in records]==[0.,0.,10.] # documented 7-decimal native serialization
+    # Audit N09: the mathematical value must survive serialization. The prior
+    # expectation explicitly encoded the independently reproduced loss to zero.
+    assert [float(r[3]) for r in records]==[0.,1e-8,10.]
     assert all(float(r[-1])==.125 for r in records)
     if mode in WIDTH:
         assert 'FWHM(degrees_2theta)' in path.read_text()

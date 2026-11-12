@@ -52,6 +52,16 @@ that conflicting experimental observations are physically impossible.
 
 ## Verification policy
 
+Native verification found that Superflip rejects both lower- and uppercase
+exponent notation in reflection records. Small numbers therefore use expanded
+plain decimal notation, retaining significant digits. The rejected native input
+and successful decimal counterexample remain local evidence. Six pre-existing
+serialization assertions explicitly expected a measured `1e-8` to become zero;
+only that independently disproved expectation was changed to `1e-8`. No other
+scientific golden was regenerated. The exact lattice calculation also uses a
+separable orthogonal-cell fast path and scalar triangular arithmetic to avoid
+unnecessary per-pair array allocation during atom deduplication.
+
 New regressions encode independent expectations and retain the original failing
 cases. Historical AST guards must pin only the specifically reviewed corrected
 functions to the correction commit; numerical golden values are not refreshed.
