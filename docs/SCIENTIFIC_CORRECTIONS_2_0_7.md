@@ -3,7 +3,8 @@
 This development-only change addresses the independently reproduced findings in
 [SCIENTIFIC_FINDINGS_2_0_7.md](SCIENTIFIC_FINDINGS_2_0_7.md). Original experimental
 files, saved outputs and failed evidence are preserved. Previous results are
-not rewritten and no inference is submitted.
+not rewritten and no inference is submitted. Final application/test source:
+`2d381b7a8503111c093a3f24e31d4ae5cd351ee8`.
 
 ## Minimal changes and scientific impact
 
@@ -64,8 +65,11 @@ unnecessary per-pair array allocation during atom deduplication.
 
 New regressions encode independent expectations and retain the original failing
 cases. Historical AST guards must pin only the specifically reviewed corrected
-functions to the correction commit; numerical golden values are not refreshed.
+functions to the correction commit. The six independently disproved serializer
+expectations described above are the only changed numerical expected values.
 The final exact-source full-suite, nine authorities, native all-group conservation,
 source/frozen scientific checks and two development builds are required before
-acceptance. See [the audit report](NUMERICAL_METHODOLOGICAL_AUDIT_2_0_7.md) for
-the completed campaign status; a focused pass alone is not final acceptance.
+acceptance. These gates passed on the final source: 1,026 tests, four explicit
+skips, 37 subtests, nine authorities and both development distributions. See
+[the audit report](NUMERICAL_METHODOLOGICAL_AUDIT_2_0_7.md) for the complete
+matrix, scientific qualifications and exact-distance performance limitation.

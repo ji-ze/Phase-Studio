@@ -3,7 +3,15 @@
 Baseline: `6e59aecbe5df4811783f0c999ca1d211347b2570` (application identical to
 `836cd26`). Fresh baseline: 993 passed, four skipped, 37 subtests; all nine
 authority entry points passed. These regression gates did not detect the
-counterexamples below. No historical numerical golden was regenerated.
+counterexamples below. No numerical golden was regenerated without independent
+justification: six serializer assertions that encoded loss of `1e-8` to zero
+were corrected after mathematical and native verification.
+
+N01–N11 are corrected in final source
+`2d381b7a8503111c093a3f24e31d4ae5cd351ee8`: three P0, six P1 and two P2 findings.
+Final verification: 1,026 pytest passes, four explicit skips, 37 subtests, all nine
+authorities, native comparisons and both development profiles. See the
+[complete audit](NUMERICAL_METHODOLOGICAL_AUDIT_2_0_7.md) for tolerances and limits.
 
 | ID / severity | Independently established counterexample | Cause and affected result |
 |---|---|---|
