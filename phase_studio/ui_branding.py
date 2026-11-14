@@ -18,12 +18,48 @@ _science_gothic_font_id: Optional[int] = None
 _science_gothic_families: tuple[str, ...] = ()
 
 
+def standard_ui_font(point_size: float = 10) -> QFont:
+    """Resolve a readable UI face even in Qt's fontless Windows offscreen backend.
+
+    Native Windows normally provides Segoe UI. Offscreen can enumerate no OS
+    fonts; after loading the wordmark, every missing family then falls back to
+    Science Gothic. Register installed UI font bytes in that case, including
+    when branding was initialized first. No system font is bundled or copied.
+    """
+    import os
+    families = set(QFontDatabase.families())
+    if os.name == "nt" and "Segoe UI" not in families:
+        fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
+        for filename in ("segoeui.ttf", "segoeuib.ttf", "seguisb.ttf", "segoeuii.ttf", "seguisym.ttf"):
+            try:
+                data = (fonts / filename).read_bytes()
+            except OSError:
+                continue
+            QFontDatabase.addApplicationFontFromData(data)
+        families = set(QFontDatabase.families())
+    candidates = ("Segoe UI", "Arial", "Noto Sans", "DejaVu Sans", "Liberation Sans")
+    family = next((name for name in candidates if name in families),
+                  QFontDatabase.systemFont(QFontDatabase.GeneralFont).family())
+    font = QFont(family)
+    font.setPointSizeF(point_size)
+    font.setWeight(QFont.Normal)
+    return font
+
+
 def register_science_gothic_font() -> tuple[str, ...]:
     """Register the bundled OFL face once and return Qt's actual families."""
     global _science_gothic_font_id, _science_gothic_families
     if _science_gothic_font_id is not None:
         return _science_gothic_families
-    _science_gothic_font_id = QFontDatabase.addApplicationFont(str(SCIENCE_GOTHIC_ASSET))
+    # Qt's Windows filename-based font loader can reject a valid Unicode
+    # installation path. Python reads the original bytes using Unicode APIs;
+    # loading those bytes also supports extended-length Windows paths.
+    try:
+        data = SCIENCE_GOTHIC_ASSET.read_bytes()
+    except OSError:
+        _science_gothic_font_id = -1
+    else:
+        _science_gothic_font_id = QFontDatabase.addApplicationFontFromData(data)
     if _science_gothic_font_id >= 0:
         _science_gothic_families = tuple(
             str(family) for family in QFontDatabase.applicationFontFamilies(_science_gothic_font_id)
@@ -762,3 +798,45 @@ def guard_numeric_wheel(editor):
     guard = _IntentionalWheel(editor)
     editor.installEventFilter(guard)
     editor._intentional_wheel_guard = guard
+
+
+def create_help_topic_navigation(entries, callback):
+    """One accessible standard selector; topic links never wrap into orphan rows."""
+    from PySide6.QtWidgets import QComboBox
+    widget = QWidget()
+    widget.setObjectName('helpTopicNavigation')
+    row = QHBoxLayout(widget)
+    row.setContentsMargins(0, 0, 0, 0)
+    label = QLabel('CONTENTS')
+    label.setObjectName('helpContentsLabel')
+    row.addWidget(label)
+    selector = QComboBox()
+    selector.setAccessibleName('Help topic')
+    selector.addItem('Choose a topic…', None)
+    for title, anchor in entries:
+        selector.addItem(title, anchor)
+    selector.setMaximumWidth(260)
+    selector.setMinimumContentsLength(15)
+    selector.activated.connect(lambda index: callback(selector.itemData(index))
+                               if selector.itemData(index) is not None else None)
+    label.setBuddy(selector)
+    row.addWidget(selector, 1)
+    row.addStretch()
+    widget.selector = selector
+    return widget
+
+
+def bounded_tooltip(text, width=64):
+    """Wrap presentation only; exact source strings stay in copy/details APIs."""
+    from html import escape
+    import textwrap
+    from .ui_style import _TOOLTIP_WRAP_PREFIX
+    if str(text).startswith(_TOOLTIP_WRAP_PREFIX):
+        from PySide6.QtGui import QTextDocument
+        document = QTextDocument()
+        document.setHtml(str(text))
+        text = document.toPlainText()
+    lines = [textwrap.fill(line, width=width, break_long_words=True,
+                          break_on_hyphens=False) for line in str(text).splitlines()]
+    body = escape('\n'.join(lines)).replace('\n', '<br>')
+    return f'{_TOOLTIP_WRAP_PREFIX}380px;">{body}</div>'

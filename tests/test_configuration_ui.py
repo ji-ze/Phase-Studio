@@ -37,6 +37,10 @@ def probe(scale):
                           "dataformat intensity\nfbegin\n1 0 0 10 2\nendf\n", encoding="utf8")
         w = js._JanaWorkflowWizard([], source)
         w.run()
+        # Native intensity's trailing dummy is not measured sigma. The user
+        # must explicitly choose the bypass before the Run dependency check.
+        assert not hasattr(w, 'observed_threshold')
+        assert w._observed_filter_threshold() == 0
         w.dialog.show()
         for _ in range(20):
             app.processEvents()
@@ -82,7 +86,8 @@ def probe(scale):
                 assert box(w.processing_heading).top()>box(w.inflip_info).bottom()
                 assert box(w.cycles).top() - box(w.processing_heading).bottom() <= 12
                 gap = box(w.inflip_info).top() - box(w.context_banner).bottom()
-                assert 12 <= gap <= 24, (gap, height, expanded)
+                from phase_studio.ui_style import PHASE_STUDIO_SPACING
+                assert PHASE_STUDIO_SPACING['heading_gap'] <= gap <= 24, (gap, height, expanded)
                 assert box(w.validation_group).bottom() < 650, "extra height must stay below the compact form"
                 assert w.primary_button.isVisible() and w.back_button.isVisible()
                 assert w.warning_text.height() >= w.warning_text.heightForWidth(w.warning_text.width())
@@ -119,8 +124,14 @@ def probe(scale):
         preflight = []
         w._ensure_workflow_requirements = lambda **kw: preflight.append(kw) or False
         w.primary_button.click()
+        assert w.stack.currentWidget() is w.page3
+        assert preflight == []
+        assert w._check_page3_validity() is None, w._check_page3_validity()
+        w.primary_button.click()
+        assert w.stack.currentWidget() is w.page3
+        assert preflight == [{'needs_sharped': True}], repr(preflight)
+        w.back_button.click()
         assert w.stack.currentWidget() is w.page2
-        assert preflight == [{'needs_sharped': True}]
         w.cycles.setValue(3)
         w.primary_button.click()
         assert w.stack.currentWidget() is w.page3

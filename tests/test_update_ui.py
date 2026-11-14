@@ -112,7 +112,8 @@ def check():
         assert opens==['https://github.com/ji-ze/Phase-Studio/releases']
         latest[0]=Release((2,0,3));service.check(parent,manual=True);settle(service)
         assert not version_button.update_available
-        assert service.notice.title.text()=='Phase Studio is up to date' and VERSION in service.notice.message.text()
+        assert service.notice.title.text()=='Development version installed'
+        assert VERSION in service.notice.message.text() and '2.0.3' in service.notice.message.text()
         latest[0]=Release(future);service.check(parent,manual=True);settle(service)
         assert service.notice.release.version==future
         service.notice.close();settle()

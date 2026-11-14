@@ -1,0 +1,195 @@
+{
+  "historical": {
+    "original": 4690,
+    "legacy_written": 4413,
+    "corrected_written": 4690,
+    "formerly_excluded_restored": 277,
+    "restored_zero": 136,
+    "restored_positive": 141,
+    "corrected_threshold": 0,
+    "historical_effective_threshold": "Unavailable; legacy ratio cutoff 2 reproduces the saved HKL set but is not independently serialized.",
+    "uncertainty": "None supplied: fifth field is FWHM",
+    "unchanged_original_files": true,
+    "protected_files": 746,
+    "reconstruction_rerun": false,
+    "serialized_inventory": {
+      "records": 4690,
+      "zero": 136,
+      "positive": 4554,
+      "minimum_positive": 0.0001,
+      "maximum_intensity_error": 0.0,
+      "maximum_fwhm_error": 0.0
+    }
+  },
+  "native": [
+    {
+      "mode": "hkl I sigma",
+      "uncertainty_free": false,
+      "exit_code": 0,
+      "executable_sha256": "2933a0c5245f4addc6365f26e5e4ca73a113e875a5901587db2bdd201a80bf3e",
+      "input_sha256": "2bc5b4ba9fc2d89f6251578665251a1fd784e5d2f751c24ec2e824b0a7663390",
+      "map_sha256": "70825af6d483345b57c620f1ab424354ed7243c6540f3b8445f6ae1e6d3f3476",
+      "note": "Controlled Fourier compatibility check only; not a rerun of the recorded reconstruction."
+    },
+    {
+      "mode": "hkl F sigma",
+      "uncertainty_free": false,
+      "exit_code": 0,
+      "executable_sha256": "2933a0c5245f4addc6365f26e5e4ca73a113e875a5901587db2bdd201a80bf3e",
+      "input_sha256": "2d41e51774dd18484ccdd1a0d9bf3964f1f115caf19630a27d35c40e2f2b5601",
+      "map_sha256": "8948a2b5e918311a5bcc824ab0b7118887d5089e579b2b509bef6a74e7df2def",
+      "note": "Controlled Fourier compatibility check only; not a rerun of the recorded reconstruction."
+    },
+    {
+      "mode": "hkl I phase sigma",
+      "uncertainty_free": false,
+      "exit_code": 0,
+      "executable_sha256": "2933a0c5245f4addc6365f26e5e4ca73a113e875a5901587db2bdd201a80bf3e",
+      "input_sha256": "f905948bb57f7161b427fdfd73f90f86af8dd1775b5abc2eae9d6c7b4a056273",
+      "map_sha256": "1aeb070a58131c2b1ee49ecfe2cf4e1375fe4d2e5b305e8aec0f5734fec9782f",
+      "note": "Controlled Fourier compatibility check only; not a rerun of the recorded reconstruction."
+    },
+    {
+      "mode": "hkl F phase sigma",
+      "uncertainty_free": false,
+      "exit_code": 0,
+      "executable_sha256": "2933a0c5245f4addc6365f26e5e4ca73a113e875a5901587db2bdd201a80bf3e",
+      "input_sha256": "965594a1dd8e90cc988ee8af1f83e60bf46ac6d7f635d1126dd50c1a60b1ba2b",
+      "map_sha256": "dfe318eab055ee5272c99e7224daae0594bd6481244e786bb662765db29df09c",
+      "note": "Controlled Fourier compatibility check only; not a rerun of the recorded reconstruction."
+    },
+    {
+      "mode": "hkl I fwhm",
+      "uncertainty_free": false,
+      "exit_code": 0,
+      "executable_sha256": "2933a0c5245f4addc6365f26e5e4ca73a113e875a5901587db2bdd201a80bf3e",
+      "input_sha256": "7e9ed8633d9c332fb2782188d4a3b2458e293ea607407acc753ccee04a2390ca",
+      "map_sha256": "70825af6d483345b57c620f1ab424354ed7243c6540f3b8445f6ae1e6d3f3476",
+      "note": "Controlled Fourier compatibility check only; not a rerun of the recorded reconstruction."
+    },
+    {
+      "mode": "hkl F fwhm",
+      "uncertainty_free": false,
+      "exit_code": 0,
+      "executable_sha256": "2933a0c5245f4addc6365f26e5e4ca73a113e875a5901587db2bdd201a80bf3e",
+      "input_sha256": "09e1c7557756d8cc318310b1f377a4d792fd2ff5d415f66d38c5aa1fdef90a63",
+      "map_sha256": "8948a2b5e918311a5bcc824ab0b7118887d5089e579b2b509bef6a74e7df2def",
+      "note": "Controlled Fourier compatibility check only; not a rerun of the recorded reconstruction."
+    },
+    {
+      "mode": "hkl I sigma",
+      "uncertainty_free": true,
+      "exit_code": 0,
+      "executable_sha256": "2933a0c5245f4addc6365f26e5e4ca73a113e875a5901587db2bdd201a80bf3e",
+      "input_sha256": "612b9d5c6118a32e658c05c7431cf867c488b29b4a24db35bdb0d815d4c59c55",
+      "map_sha256": "70825af6d483345b57c620f1ab424354ed7243c6540f3b8445f6ae1e6d3f3476",
+      "note": "Controlled Fourier compatibility check only; not a rerun of the recorded reconstruction."
+    }
+  ],
+  "independent_native_overlap": {
+    "separated": {
+      "records": 3,
+      "overlap_groups": 0,
+      "affected": 0,
+      "membership_equal": true,
+      "wavelength": 1,
+      "separation_factor": 0.2
+    },
+    "identical": {
+      "records": 6,
+      "overlap_groups": 1,
+      "affected": 2,
+      "membership_equal": true,
+      "wavelength": 1,
+      "separation_factor": 0.2
+    },
+    "transitive": {
+      "records": 6,
+      "overlap_groups": 1,
+      "affected": 6,
+      "membership_equal": true,
+      "wavelength": 1,
+      "separation_factor": 1
+    },
+    "variable": {
+      "records": 6,
+      "overlap_groups": 2,
+      "affected": 5,
+      "membership_equal": true,
+      "wavelength": 1,
+      "separation_factor": 0.5
+    },
+    "wavelength": {
+      "records": 6,
+      "overlap_groups": 1,
+      "affected": 2,
+      "membership_equal": true,
+      "wavelength": 1.7,
+      "separation_factor": 0.5
+    },
+    "default": {
+      "records": 6,
+      "overlap_groups": 1,
+      "affected": 2,
+      "membership_equal": true,
+      "wavelength": 1,
+      "separation_factor": 0.2
+    },
+    "explicit": {
+      "records": 3,
+      "overlap_groups": 1,
+      "affected": 2,
+      "membership_equal": true,
+      "wavelength": 1,
+      "separation_factor": 0.2
+    },
+    "ochlor": {
+      "records": 631,
+      "overlap_groups": 91,
+      "affected": 193,
+      "membership_equal": true,
+      "wavelength": 1.541866,
+      "separation_factor": 0.2
+    },
+    "executable_sha256": "2933a0c5245f4addc6365f26e5e4ca73a113e875a5901587db2bdd201a80bf3e",
+    "source_sha256": "9136270c5e8ab6850ac6bd4390c301f17a32dcc83994184d8562735b9a26b88c"
+  },
+  "final_regression": {
+    "passed": 692,
+    "skipped": 4,
+    "subtests_passed": 37,
+    "seconds": 564.9
+  },
+  "frozen_acceptance": {
+    "profiles": [
+      {
+        "profile": "standalone",
+        "exit_code": 0,
+        "ok": true,
+        "original_input_unchanged": true,
+        "executable_sha256": "92117e803287b377759c8a4c944c76b980c0e8c99b1c9d7904262224d2906277"
+      },
+      {
+        "profile": "jana",
+        "exit_code": 0,
+        "ok": true,
+        "original_input_unchanged": true,
+        "executable_sha256": "8922142ef37bbe23100b81930450a1cbcc68eaa9ceb6e52f47ca587d9e9b0adb"
+      }
+    ],
+    "runtime_sources_match_snapshot": true
+  },
+  "independent_authorities": {
+    "scientific_core": 46,
+    "jana_completion": 195,
+    "autosolve_orchestration": 79,
+    "workflow_states": 141,
+    "result_selection_viewer": 72,
+    "review_edma": 20,
+    "displacement_parameters": 42,
+    "execution_logging": 16,
+    "fullscreen_exit_code": 0
+  },
+  "runtime_code_commit": "ca40e03",
+  "ast_policy_baseline": "ca40e03"
+}

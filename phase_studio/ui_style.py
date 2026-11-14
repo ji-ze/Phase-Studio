@@ -24,6 +24,19 @@ PHASE_STUDIO_SPACING = {
     "numeric_editor_width": 230,
 }
 
+# Existing main-GUI roles, shared by compact document surfaces as well.
+PHASE_STUDIO_COLORS = dict(navy='#001170', accent='#2264b8', cyan='#44b7ff',
+                          text='#14204a', secondary='#52658b', border='#cbd7ea',
+                          surface='#f2f4f9', selected='#f3f8ff')
+
+
+def apply_standard_dialog_style(dialog, extra=''):
+    """Use the actual main-GUI rules locally, without changing scientific UI."""
+    from .ui_branding import standard_ui_font
+    font = standard_ui_font()
+    dialog.setFont(font)
+    dialog.setStyleSheet(_SHARPED_QSS.replace('"Segoe UI", "Arial"', '"' + font.family() + '"') + extra)
+
 _SHARPED_QSS = """
 QWidget {
     background-color: #ffffff;
@@ -1479,18 +1492,8 @@ def apply_phase_studio_style(app: object) -> None:
     # Windows' offscreen Qt plugin can start with an empty font database.
     # Register its existing UI fonts before a bundled display face becomes
     # the fallback for every unrelated control in generated previews.
-    import os
-    if os.name == "nt":
-        from pathlib import Path
-        from PySide6.QtGui import QFontDatabase
-        if not QFontDatabase.families():
-            fonts = Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts"
-            for filename in ("segoeui.ttf", "segoeuib.ttf"):
-                QFontDatabase.addApplicationFont(str(fonts / filename))
-        if "Segoe UI" in QFontDatabase.families():
-            normal_font = app.font()
-            normal_font.setFamily("Segoe UI")
-            app.setFont(normal_font)
+    from .ui_branding import standard_ui_font
+    app.setFont(standard_ui_font())
     try:
         _install_tooltip_width_cap(app)
     except Exception:

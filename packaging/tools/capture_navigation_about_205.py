@@ -82,12 +82,14 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
             patch.object(QDialog, 'exec', lambda self: QDialog.Rejected):
         w = js._JanaWorkflowWizard([], source)
         w.run();w.dialog.show();settle()
+        assert not hasattr(w,'observed_threshold')
+        assert w._observed_filter_threshold() == 0
         assert '432 HKL records' in w.reflections_value.text()
         capture('01-workflow', w.dialog)
         w.superflip_sharped_tile._trigger();pump(w)
         w.cycles.setValue(1);settle()
-        assert w.primary_button.text() == 'Run phasing'
-        assert 'Map feedback' not in w.processing_progress.text()
+        assert w.primary_button.text() == 'Next: Map feedback →'
+        assert 'Map feedback' in w.processing_progress.text()
         assert w.model.currentText() == js.SHARPED_ONE_CYCLE_MODEL
         capture('02-one-cycle-peak', w.dialog)
         for count in (2, 3):
@@ -128,7 +130,7 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
         assert w.account_state['connection'] == 'Not checked'
         capture('06-unverified-credentials-fixture', w.dialog)
         fingerprint = hashlib.sha256(token.encode()).hexdigest()
-        for status, expected in (('Authentication expired', 'rejected'), ('Connection unavailable', 'Unavailable'),
+        for status, expected in (('Authentication expired', 'Expired'), ('Authentication rejected', 'Explicitly rejected'), ('Connection unavailable', 'Unavailable'),
                                  ('Connected', 'Authorization verified')):
             store._access_verification = {js.DEFAULT_SERVER_URL: (fingerprint, status)}
             w._update_account_presentation()
@@ -148,8 +150,12 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
         w.cycles.setValue(1)
         w.model_policy_error = 'Required automatic model is unavailable. Refresh models.'
         w.primary_button.click()
-        assert not checks and w.stack.currentWidget() is w.page2
-        assert 'unavailable' in w.model_status.text()
+        assert not checks and w.stack.currentWidget() is w.page3
+        assert 'unavailable' in w._check_page3_validity()
+        w.primary_button.click()
+        assert not checks and w.stack.currentWidget() is w.page3
+        w.back_button.click()
+        w.model_policy_error = ''
         w.cycles.setValue(3)
         w.primary_button.click();settle()
         assert w.stack.currentWidget() is w.page3 and not checks
@@ -158,7 +164,9 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
         w.intensity_enabled_checkbox.setChecked(True)
         w.back_button.click();w.cycles.setValue(1)
         w.primary_button.click()
-        assert checks == [{'needs_sharped': True}] and w.stack.currentWidget() is w.page2
+        assert not checks and w.stack.currentWidget() is w.page3
+        w.primary_button.click()
+        assert checks == [{'needs_sharped': True}] and w.stack.currentWidget() is w.page3
         assert w.result['action'] == 'cancel'
         w._go_to_map_feedback();settle()
         assert not w.missing_enabled_checkbox.isEnabled()
@@ -177,29 +185,34 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
         p.dialog.close()
         w.update_menu.menu().actions()[-1].trigger();settle()
         about = w.dialog._phase_studio_about
-        assert isinstance(about, AboutDialog) and 'Jana2020' in about.mode_label.text()
-        assert VERSION in about.version_label.text() and area.contains(about.frameGeometry())
+        from PySide6.QtWidgets import QLabel
+        assert isinstance(about, AboutDialog)
+        assert any('Jana2020 integration' in label.text() for label in about.findChildren(QLabel))
+        assert area.contains(about.frameGeometry())
         assert show_about_dialog(w.dialog, jana=True) is about
         capture('10-about-jana', about)
         with patch.object(QDesktopServices, 'openUrl', return_value=True) as open_url:
             from PySide6.QtWidgets import QPushButton
-            next(b for b in about.findChildren(QPushButton) if b.text() == 'Official GitHub Releases').click()
+            next(b for b in about.findChildren(QPushButton) if b.text() == 'Official releases').click()
             open_url.assert_called_once_with(QUrl(RELEASES_URL))
-        about.credits_button.click();settle()
-        assert (ROOT/'LICENSE').read_text(encoding='utf8') in about.credits.toPlainText()
-        assert area.contains(about.frameGeometry())
-        about.credits_button.click();QTest.keyClick(about, Qt.Key_Escape);settle()
+        geometry = about.geometry()
+        about.cards[1].click();settle()
+        viewer = about.open_document('LICENSE');settle()
+        assert (ROOT/'LICENSE').read_bytes() == viewer.raw_bytes
+        viewer.close();settle()
+        assert about.geometry() == geometry and area.contains(about.frameGeometry())
+        about.cards[0].click();QTest.keyClick(about, Qt.Key_Escape);settle()
         assert not about.isVisible()
         about = show_about_dialog(w.dialog, jana=False);settle()
-        assert about.mode_label.text() == 'Standalone application'
+        assert any('Standalone application' in label.text() for label in about.findChildren(QLabel))
         capture('11-about-standalone', about)
-        about.findChild(QDialogButtonBox).button(QDialogButtonBox.Close).click();settle()
+        next(b for b in about.findChildren(QPushButton) if b.text() == 'Close').click();settle()
         assert not about.isVisible()
         about = show_about_dialog(w.dialog, jana=True);settle();about.close();settle()
         assert not about.isVisible()
         with patch('phase_studio.about_ui.version.VERSION', '9.8.7'):
             dynamic = AboutDialog(w.dialog, jana=False)
-            assert dynamic.version_label.text() == 'Version 9.8.7'
+            assert '9.8.7' in dynamic.citation
             dynamic.deleteLater()
         menu = w.update_menu.menu();menu.popup(w.update_menu.mapToGlobal(w.update_menu.rect().bottomLeft()))
         capture('12-ellipsis-menu', menu);menu.close()
@@ -209,24 +222,29 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
             run_w = js._JanaWorkflowWizard([], source)
             def execute(dialog):
                 dialog.show();settle()
+                assert run_w._observed_filter_threshold() == 0
                 run_w.superflip_sharped_tile._trigger();pump(run_w)
                 run_w.cycles.setValue(3);run_w.primary_button.click()
                 run_w.missing_enabled_checkbox.setChecked(True)
                 run_w.intensity_enabled_checkbox.setChecked(True)
                 run_w.powder_enabled_checkbox.setChecked(True)
                 run_w.back_button.click();run_w.cycles.setValue(1)
-                if direct: run_w._go_to_map_feedback()
+                if direct:
+                    run_w._go_to_map_feedback()
+                else:
+                    run_w.primary_button.click()
+                    assert run_w.stack.currentWidget() is run_w.page3
                 run_w._ensure_workflow_requirements = lambda **kw: True
                 run_w.primary_button.click()
                 assert run_w.result['action'] == 'recycle'
-                assert run_w.stack.currentWidget() is (run_w.page3 if direct else run_w.page2)
+                assert run_w.stack.currentWidget() is run_w.page3
                 return QDialog.Accepted
             with patch.object(QDialog, 'exec', execute):
                 options = run_w.run()
             assert options.cycles == 1 and options.model == js.SHARPED_ONE_CYCLE_MODEL
             assert not any((options.enable_missing_completion, options.enable_intensity_correction,
                             options.enable_powder_repartition))
-            records['one-cycle-direct-page' if direct else 'one-cycle-skip-interaction'] = dict(
+            records['one-cycle-direct-page' if direct else 'one-cycle-normal-navigation'] = dict(
                 cycles=options.cycles, action=options.action, model=options.model, feedback_enabled=False)
         assert source.read_bytes() == original
 (out/'acceptance.json').write_text(json.dumps(records, indent=2), encoding='utf8')

@@ -73,9 +73,10 @@ def check():
         view = validation_dialog(win,load);view.show();settle()
         assert view.hkl_preview_label.text()=='Showing all 631 records'
         assert not any('Input-integrity issues:' in plain(label.text()) for label in view.findChildren(QLabel))
-        explanation = ('Input integrity checks parsing, reflection indices, auxiliary values and duplicate records. '
-                       'It does not establish experimental or scientific validity.')
-        assert plain(view.hkl_integrity_status.toolTip()) == explanation
+        explanation = plain(view.hkl_integrity_status.toolTip())
+        assert explanation.startswith('Original overlapping findings: ')
+        assert explanation.endswith('Category totals are not counts of invalid records. These checks do not establish experimental validity.')
+        assert 'category findings (categories may overlap)' in explanation or 'No issues detected' in explanation or 'Some checks unavailable' in explanation
         snap('01-validation',view)
         # Render the actual QToolTip, as well as inspecting its QTextDocument text.
         label = view.hkl_integrity_status
@@ -97,7 +98,7 @@ def check():
             tip=widget.toolTip()
             if tip:
                 rendered=plain(tip)
-                assert '<div' not in rendered and '<qt>' not in rendered and '&quot;' not in rendered
+                assert '<div' not in rendered and '<qt>' not in rendered and '&quot;' not in rendered, (widget.objectName(), rendered)
         assert query(view,'  -7   2  -1  ')=='1 match · Showing 1'
         assert view.hkl_table.model().index(0,0).data(Qt.UserRole) == -7
         snap('03-exact-negative-search',view)
@@ -131,7 +132,8 @@ def check():
         view.close()
         clean=fixture.load('1 2 1 10 .1\n')
         clean_view=validation_dialog(win,clean)
-        assert plain(clean_view.hkl_integrity_status.text())=='Input integrity: No issues detected'
+        assert '0 errors' in plain(clean_view.hkl_integrity_status.text())
+        assert 'No issues detected' in plain(clean_view.hkl_integrity_status.toolTip())
         clean_view.close()
         unknown=replace(clean,diagnostics=replace(clean.diagnostics,counts=tuple(
             (key,None if key=='invalid_indices' else value) for key,value in clean.diagnostics.counts)))

@@ -103,11 +103,11 @@ page("7 · Select the demonstration input","""Use the accompanying **demo/tutori
 Choose **Input mode: External HKL + CIF reference**, select the HKL, choose **HKL format: h k l · I · σ(I)**, and use **Metadata source: Reference structure** with the supplied CIF. The CIF supplies the 10 × 10 × 10 Å cell, 90° angles, P1 and C6 composition.
 
 The **Reference model** supplies metadata/evaluation context; it is not automatically the **Initial model (cycle 1)**. Leave that initial-model field empty for this demonstration. Validate the interpreted columns before phasing. Your real experiment must use its own correct cell, symmetry, composition and column meaning.""",S+"standalone-input.png",crop="configuration"),
-page("8 · Validate the HKL interpretation","""Click **Validate HKL**. Check parsed/unique counts, indices, values, uncertainty and any phase column. A successful parse means the selected format can be read; it does not certify measurement quality, correctness of the space group or completeness.
+page("8 · Validate the HKL interpretation","""Click **View data**. Check parsed/unique counts, indices, values, uncertainty and any phase column. A successful parse means the selected format can be read; it does not certify measurement quality, correctness of the space group or completeness.
 
 For the teaching file, the displayed values are synthetic intensities with σ(I). **F** is an amplitude, **I** is an intensity, and **FWHM** is a peak width. Choose the format that matches your file, not whichever gives a desirable score.
 
-**Analyze completeness** checks coverage within the observed reciprocal-space/resolution range using the selected symmetry. The complete guide explains its plots and limitations.""",W+"hkl-validation.png",crop="validation"),
+**Analyze data** checks coverage within the observed reciprocal-space/resolution range using the selected symmetry. The complete guide explains its plots and limitations.""",W+"hkl-validation.png",crop="validation"),
 page("9 · Configure a short local run","""For the first teaching calculation choose **Phasing method: Superflip**, **Cycles: 1**, enable **Run EDMA on Superflip map**, and disable **Run SharpED** and **Run EDMA on SharpED map**. Use **Output → Working directory** for a new project folder.
 
 For a fast synthetic exercise, set **Advanced → Superflip → Maximum iterations: 100**, **Repeat mode: 1**, and **Voxel grid: 32 32 32**. These demonstration limits are not recommended defaults for a real structure solution. The real local capture used **Normalization: none**. Normal full-configuration defaults differ and are documented in the complete guide.
@@ -129,7 +129,7 @@ page("Common problems · local tools and input","""**Superflip/EDMA not found:**
 
 **Found but incompatible / cannot launch:** choose a compatible installation and repair missing supporting runtime files. Phase Studio does not accept a file solely because its name ends in `.exe`.
 
-**Unsupported input / missing metadata:** check Input mode, HKL format, cell, symmetry and composition. Empty/manual unset fields are not valid crystallographic metadata. Validate HKL before running.
+**Unsupported input / missing metadata:** check Input mode, HKL format, cell, symmetry and composition. Empty/manual unset fields are not valid crystallographic metadata. View data before running.
 
 **No atomic sites:** inspect the map and selected threshold, whether EDMA was enabled and whether extraction completed. Adjusting a completed candidate reruns EDMA only. Do not assume empty output means a correct absence of atoms.""",S+"setup-edma.png"),
 page("Common problems · access and diagnostics","""**Missing key:** open Account access and follow the verified token-page procedure. **Invalid key:** replace it with a newly generated key from the proper account; do not send passwords or keys in a support report.
@@ -165,12 +165,12 @@ page("3 · Read Input Summary","""Check **Jana2020 input**, **Reflections**, **F
 The displayed cell and space group come from the interpreted input context. Search composition helps Superflip/EDMA; it need not equal the final EDMA-detected asymmetric-unit composition.
 
 Expand **Show optional reference and initial model** only when needed. Reference and initial model have different roles. A reference aids metadata/evaluation; an explicit first-cycle model can supply a seed. Do not infer random phases merely from the phrase cycle 1.""",J+"wizard-input.png",crop="wizard-summary"),
-page("4 · Validate the reflections","""Click **Validate HKL** and check the interpreted columns and counts. Successful parsing is a format/context check, not an experimental validation certificate.
+page("4 · Validate the reflections","""Click **View data** and check the interpreted columns and counts. Successful parsing is a format/context check, not an experimental validation certificate.
 
 **h k l · F · σ(F):** amplitude and amplitude uncertainty. **h k l · I · σ(I):** intensity and intensity uncertainty. **h k l · I · FWHM:** intensity and peak width. FWHM is not σ(I), so I/FWHM must not be interpreted as a significance ratio.
 
 Phase columns use the selected displayed convention; the client converts degrees for its generated Superflip representation. Do not guess a phase/uncertainty column from its numerical size.""",W+"hkl-validation.png",crop="validation"),
-page("5 · Analyze completeness","""Click **Analyze completeness**. Inspect resolution bins, completeness versus sinθ/λ, dmin, observed/theoretical unique-reflection counts and available intensity/uncertainty statistics.
+page("5 · Analyze data","""Click **Analyze data**. Inspect resolution bins, completeness versus sinθ/λ, dmin, observed/theoretical unique-reflection counts and available intensity/uncertainty statistics.
 
 The calculation depends on the selected cell, symmetry, observed bounds and resolution range. High completeness over that range does not establish correct measurements, correct symmetry or a correct model. Check bin coverage, not only one total percentage.
 
@@ -234,12 +234,12 @@ page("1 · Verify input and optional models","""Read Input Summary and expand op
 Input composition is the Superflip search composition. EDMA ASU composition is calculated from the selected candidate; it is not a relabelled search composition.
 
 A **Reference model** is evaluation/metadata context; **Initial model (cycle 1)** supplies a deliberate seed. An initial model may change cycle 1 from random phases. Later-cycle provenance identifies the actual reused source; cycle number alone cannot prove which seed was used.""",J+"wizard-input.png",crop="wizard-summary"),
-page("2 · Validate HKL before phasing","""Validate HKL reports how rows/columns, uncertainties, phases and symmetry-unique reflections were interpreted. Check the selected layout and samples, not only a green status.
+page("2 · View data before phasing","""View data reports how rows/columns, uncertainties, phases and symmetry-unique reflections were interpreted. Check the selected layout and samples, not only a green status.
 
 Amplitude formats use F and σ(F); intensity formats use I and σ(I). Intensity is converted to amplitude when required by crystallographic comparisons; phase-bearing formats keep their specified convention. FWHM formats store a peak width and do not supply a significance uncertainty.
 
 Standalone manual metadata needs positive cell lengths, angles strictly between 0° and 180°, a resolvable space group and composition. Manual empty/Not set values are not physical metadata.""",W+"hkl-validation.png",crop="validation"),
-page("3 · Understand completeness","""Analyze completeness enumerates theoretical symmetry-unique reflections within the observed reciprocal-space/resolution bounds and compares observed unique coverage in sinθ/λ bins. It reports dmin and the available coverage/statistical summaries, including the 98% cumulative point where defined.
+page("3 · Understand completeness","""Analyze data enumerates theoretical symmetry-unique reflections within the observed reciprocal-space/resolution bounds and compares observed unique coverage in sinθ/λ bins. It reports dmin and the available coverage/statistical summaries, including the 98% cumulative point where defined.
 
 Intensity/uncertainty curves depend on the selected format and available uncertainty. A width column cannot substitute for σ(I). Coverage outside the analyzed bounds is not demonstrated by the plot.
 

@@ -23,6 +23,6 @@ def test_about_citation_uses_runtime_version():
     assert len(calls) == 1
     expression = ast.Expression(calls[0].args[3])
     for version in (VERSION, '9.8.7'):
-        html = eval(compile(expression, '<About HTML>', 'eval'), {'__version__': version})
+        html = eval(compile(expression, '<About HTML>', 'eval'), {'__version__': version, 'overview_html': __import__('phase_studio.legal_content',fromlist=['overview_html']).overview_html})
         assert f'Phase Studio, version {version},' in html
         assert 'version 2.0.2' not in html

@@ -1,80 +1,554 @@
-"""Owned, branded application information with bundled legal authorities."""
+"""Compact owned About dialog and safe bundled-document viewer."""
+from html import escape
 from pathlib import Path
+import re
 import sys
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (
-    QDialog, QDialogButtonBox, QLabel, QPushButton, QTextBrowser, QVBoxLayout,
-)
+from PySide6.QtGui import QDesktopServices, QFontInfo, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument, QTextFormat
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QComboBox, QDialog,
+    QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
+    QSizePolicy, QStackedWidget, QStyle, QTextBrowser, QVBoxLayout, QWidget)
 
 from phase_studio import version
-from phase_studio.ui_branding import (
-    activate_owned_dialog, create_phase_studio_brand_header, fit_dialog_to_available_screen,
-)
+from phase_studio.legal_content import legal_directory, source_text, citation_text
+from phase_studio.ui_branding import (activate_owned_dialog, create_phase_studio_brand_header,
+                                     fit_dialog_to_available_screen, standard_ui_font)
 
 RELEASES_URL = 'https://github.com/ji-ze/Phase-Studio/releases'
+REPOSITORY_URL = 'https://github.com/ji-ze/Phase-Studio'
+
+CONTACTS_HTML = '''<h2>Phase Studio</h2>
+<p><a href="mailto:zelenka@fzu.cz">Jiří Zelenka</a> — author and lead developer.</p>
+<p><a href="https://github.com/ji-ze/Phase-Studio">GitHub repository</a> ·
+<a href="https://sharped.fzu.cz/">SharpED website</a> ·
+<a href="mailto:sharped@fzu.cz">sharped@fzu.cz</a></p>
+<h3>SharpED development team</h3>
+<p><a href="mailto:rohlicek@fzu.cz">Jan Rohlíček</a><br>
+<a href="mailto:zelenka@fzu.cz">Jiří Zelenka</a><br>
+<a href="mailto:kucerakova@fzu.cz">Monika Kučeráková</a><br>
+<a href="mailto:buk@fzu.cz">Zdeněk Buk</a></p>
+<h3>Scientific collaboration</h3>
+<p>We welcome questions about the SharpED method, possible applications to
+crystallographic data and opportunities for scientific collaboration.</p>
+<p><a href="mailto:sharped@fzu.cz?subject=SharpED%20scientific%20collaboration">Contact us about a collaboration</a></p>
+<h3>Institution</h3><p>Institute of Physics of the Czech Academy of Sciences<br>
+Fyzikální ústav AV ČR, v. v. i.<br>Na Slovance 1999/2<br>
+182 00 Prague 8<br>Czech Republic<br><a href="https://www.fzu.cz/en">www.fzu.cz/en</a></p>
+<p>Use Original AUTHORS.md to read the complete original credits.
+Copy original and Open original always use that unchanged source document.</p>'''
+
+# Scoped to the two About surfaces. The wordmark is the only plain-text
+# widget that requests the branding face; the SharpED subtitle retains its
+# established, explicitly marked rich-text spans.
+def _style(dialog):
+    from .ui_style import apply_standard_dialog_style, PHASE_STUDIO_COLORS as colors
+    # Buttons, inputs, scrollbars and brand typography come from the main GUI.
+    # Only the compact navigation layout requires local semantic selectors.
+    extra = """
+    QWidget#phaseStudioAbout, QWidget#phaseStudioDocument { background:#ffffff; }
+    QLabel#aboutDescription, QLabel#documentSource { color:@secondary@; font-size:9pt; }
+    QLabel#versionBadge { background:transparent; color:@secondary@; font-weight:400; padding:0; }
+    QPushButton#aboutCard { border:1px solid @border@; border-radius:4px; background:#ffffff; padding:0; min-height:44px; }
+    QPushButton#aboutCard:hover { background:#edf3fa; border-color:@accent@; }
+    QPushButton#aboutCard:checked { background:@selected@; border-color:@accent@; }
+    QPushButton#aboutCard[keyboardFocus="true"] { border:2px solid @navy@; }
+    QLabel#aboutCardTitle { color:@navy@; font-size:10pt; font-weight:600; background:transparent; }
+    QLabel#aboutCardSubtitle { color:@secondary@; font-size:9pt; background:transparent; }
+    QScrollArea#aboutContent { border:0; background:#ffffff; }
+    QWidget#aboutPage { background:#ffffff; }
+    QLabel#documentTitle { color:@navy@; font-size:12pt; font-weight:600; }
+    QPushButton#aboutLink { border:0; color:@accent@; padding:2px 0; font-weight:400; }
+    QPushButton:focus { border:2px solid @accent@; }
+    QTextBrowser { border:1px solid @border@; font-size:10.5pt; padding:8px; }
+    """
+    for role, value in colors.items():
+        extra = extra.replace('@' + role + '@', value)
+    apply_standard_dialog_style(dialog, extra)
 
 
-def legal_directory() -> Path:
-    if getattr(sys, 'frozen', False):
-        return Path(sys._MEIPASS) / 'PhaseStudioLegal'
-    return Path(__file__).resolve().parents[1]
+class _NavigationCard(QPushButton):
+    def focusInEvent(self, event):
+        self.setProperty('keyboardFocus', event.reason() in (Qt.TabFocusReason, Qt.BacktabFocusReason, Qt.ShortcutFocusReason))
+        self.style().unpolish(self)
+        self.style().polish(self)
+        super().focusInEvent(event)
+
+    def focusOutEvent(self, event):
+        self.setProperty('keyboardFocus', False)
+        self.style().unpolish(self)
+        self.style().polish(self)
+        super().focusOutEvent(event)
+
+
+def _restore_focus(widget):
+    if widget is not None:
+        try:
+            if widget.isVisible() and widget.isEnabled():
+                widget.setFocus(Qt.OtherFocusReason)
+        except RuntimeError:
+            pass  # Owner may have been destroyed with the dialog.
+
+
+class LegalBrowser(QTextBrowser):
+    def loadResource(self, resource_type, url):
+        # Neither Markdown nor rich text may fetch embedded local/remote data.
+        return None
+
+    def __init__(self):
+        super().__init__()
+        self.setOpenLinks(False)
+        self.setOpenExternalLinks(False)
+        self.anchorClicked.connect(self._open_link)
+
+    def _open_link(self, url):
+        if url.scheme().lower() in ('https', 'mailto'):
+            QDesktopServices.openUrl(url)
+
+
+def _document_title(path):
+    originals = {'LICENSE': 'MIT License', 'AUTHORS.md': 'Authors and acknowledgements',
+                 'THIRD_PARTY_NOTICES.md': 'Third-party notices', 'CITATION.cff': 'Citation metadata'}
+    if path.name in originals and (path.parent == Path('.') or path.parent.resolve() == legal_directory().resolve()):
+        return originals[path.name]
+    known = {'GFDL-1.3.txt': 'GNU Free Documentation License 1.3',
+             'LGPL-3.0.txt': 'GNU Lesser General Public License 3.0',
+             'GPL-3.0.txt': 'GNU General Public License 3.0',
+             'OFL-Science-Gothic.txt': 'Science Gothic — SIL Open Font License'}
+    if path.name in known:
+        return known[path.name]
+    # Frozen metadata paths include actual distribution/version information.
+    package = next((part.removesuffix('.dist-info') for part in path.parts if part.endswith('.dist-info')), '')
+    if not package:
+        package = path.parent.name if path.parent.name not in ('third_party_licenses', 'upstream', 'dependencies', 'licenses', 'license') else ''
+    label = path.stem.replace('_', ' ').replace('LICENSE.', '').replace('LICENSE-', '')
+    if label.upper() in ('LICENSE', 'COPYING', 'LICENCE'):
+        label = 'License'
+    return f'{package} · {label}' if package and package.lower() != label.lower() else label
+
+
+class DocumentDialog(QDialog):
+    """Display only enumerated bundled authorities; copy exact decoded source."""
+    def __init__(self, parent, name, *, third_party=False, contacts=False):
+        super().__init__(parent)
+        if name not in {'AUTHORS.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'CITATION.cff'}:
+            raise ValueError('Unknown bundled document')
+        self.setObjectName('phaseStudioDocument')
+        self.contacts = contacts and name == 'AUTHORS.md'
+        _style(self)
+        self.setWindowTitle('Third-party licenses' if third_party else _document_title(Path(name)))
+        self.setWindowModality(Qt.WindowModal)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 12, 16, 12)
+        layout.setSpacing(8)
+        title_row = QHBoxLayout()
+        self.title_label = QLabel()
+        self.title_label.setObjectName('documentTitle')
+        self.title_label.setWordWrap(True)
+        title_row.addWidget(self.title_label, 1)
+        self.original_layout = QPushButton('Original formatting')
+        self.original_layout.setObjectName('documentLayoutButton')
+        self.original_layout.setCheckable(True)
+        self.original_layout.setToolTip('Show original line breaks. Copy original always copies the complete original source.')
+        title_row.addWidget(self.original_layout)
+        self.original_authors = QPushButton('Original AUTHORS.md')
+        self.original_authors.setCheckable(True)
+        self.original_authors.setVisible(self.contacts)
+        self.original_authors.toggled.connect(self.render_document)
+        title_row.addWidget(self.original_authors)
+        layout.addLayout(title_row)
+        self.paths = [legal_directory() / name]
+        self.allowed_paths = [self.paths[0].resolve()]
+        self.selector = QComboBox()
+        self.selector.setAccessibleName('Choose dependency license')
+        self.selector.addItem(_document_title(self.paths[0]))
+        if third_party:
+            self.selector.setEditable(True)
+            self.selector.setInsertPolicy(QComboBox.NoInsert)
+            self.selector.completer().setCaseSensitivity(Qt.CaseInsensitive)
+            self.selector.completer().setFilterMode(Qt.MatchContains)
+            roots = ([legal_directory() / 'dependencies', legal_directory() / 'upstream']
+                     if getattr(sys, 'frozen', False) else [legal_directory() / 'third_party_licenses'])
+            for root in roots:
+                if root.is_dir():
+                    for path in sorted(root.rglob('*')):
+                        if path.is_file() and path.resolve().is_relative_to(root.resolve()):
+                            self.paths.append(path)
+                            self.allowed_paths.append(path.resolve())
+                            self.selector.addItem(_document_title(path))
+                            self.selector.setItemData(self.selector.count() - 1,
+                                path.relative_to(legal_directory()).as_posix(), Qt.ToolTipRole)
+            layout.addWidget(self.selector)
+        self.source_label = QLabel()
+        self.source_label.setObjectName('documentSource')
+        self.source_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.source_label.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+        layout.addWidget(self.source_label)
+        self.browser = LegalBrowser()
+        self.browser.setAccessibleName('Original license document')
+        self.browser.setFont(standard_ui_font(10.5))
+        self.browser.document().setDefaultFont(standard_ui_font(10.5))
+        layout.addWidget(self.browser, 1)
+        search_row = QHBoxLayout()
+        self.search = QLineEdit()
+        self.search.setPlaceholderText('Find in document')
+        self.search.setAccessibleName('Find in document')
+        search_row.addWidget(self.search, 1)
+        find = QPushButton('Find next')
+        find.clicked.connect(self.find_next)
+        self.search.returnPressed.connect(self.find_next)
+        search_row.addWidget(find)
+        layout.addLayout(search_row)
+        tools = QHBoxLayout()
+        self.copy_button = QPushButton('Copy original')
+        self.copy_button.clicked.connect(lambda: QApplication.clipboard().setText(self.raw_text))
+        tools.addWidget(self.copy_button)
+        self.original_button = QPushButton('Open original')
+        self.original_button.clicked.connect(self.open_original)
+        tools.addWidget(self.original_button)
+        tools.addStretch(1)
+        self.close_button = QPushButton('Close')
+        self.close_button.clicked.connect(self.reject)
+        tools.addWidget(self.close_button)
+        layout.addLayout(tools)
+        self.selector.currentIndexChanged.connect(self.load_document)
+        self.original_layout.toggled.connect(self.render_document)
+        self.load_document()
+        self.resize(680, 560)
+
+    def _trusted(self):
+        return (self.path is not None and self.path.resolve() == self.allowed_path
+                and self.path.resolve().is_relative_to(legal_directory().resolve()))
+
+    def load_document(self):
+        index = self.selector.currentIndex()
+        self.path = self.paths[index] if 0 <= index < len(self.paths) else None
+        self.allowed_path = self.allowed_paths[index] if 0 <= index < len(self.allowed_paths) else None
+        self.available = False
+        try:
+            if not self._trusted():
+                raise OSError('Untrusted document path')
+            self.raw_bytes = self.path.read_bytes()
+            self.raw_text = self.raw_bytes.decode('utf8', errors='replace')
+            self.available = True
+        except (OSError, AttributeError):
+            self.raw_bytes = b''
+            self.raw_text = 'Bundled notice unavailable.'
+        try:
+            self.source = self.path.relative_to(legal_directory()).as_posix()
+        except (ValueError, AttributeError):
+            self.source = 'Unavailable'
+        self.title_label.setText(_document_title(self.path) if self.path else 'Document unavailable')
+        self.source_label.setToolTip('Original source: ' + self.source)
+        self.source_label.setAccessibleDescription('Original source: ' + self.source)
+        self._update_source_label()
+        self.original_button.setEnabled(self.available)
+        self.render_document()
+
+    def _update_source_label(self):
+        prefix = ('Contact summary · Original source: ' if self.contacts and
+                  not self.original_authors.isChecked() else 'Original source: ')
+        self.source_label.setText(self.source_label.fontMetrics().elidedText(
+            prefix + self.source, Qt.ElideMiddle, max(80, self.source_label.width())))
+
+    def render_document(self):
+        original = self.original_layout.isChecked()
+        self.title_label.setVisible(True)
+        # QTextEdit.setPlainText retains currentCharFormat. Clear a previous
+        # Markdown heading before switching to a plain-text notice.
+        self.browser.setCurrentCharFormat(QTextCharFormat())
+        self.browser.document().setDefaultFont(standard_ui_font(10.5))
+        self.original_layout.setEnabled(not (self.path and self.path.suffix.lower() == '.cff'))
+        summary = self.contacts and not self.original_authors.isChecked()
+        if summary:
+            self.title_label.setText('Contacts and collaboration')
+            self.original_layout.setEnabled(False)
+            self.browser.setHtml(CONTACTS_HTML)
+        elif self.path and self.path.suffix.lower() == '.md' and not original:
+            self.title_label.setText(_document_title(self.path))
+            first_line = self.raw_text.lstrip().splitlines()[0] if self.raw_text.strip() else ''
+            if first_line.startswith('#'):
+                # Keep the original heading in the document; avoid a second
+                # competing title above it. Copy/Open always retain the source.
+                self.title_label.setVisible(False)
+            self.browser.document().setMarkdown(self.raw_text,
+                QTextDocument.MarkdownDialectGitHub | QTextDocument.MarkdownNoHTML)
+        elif self.path and self.path.suffix.lower() in ('.html', '.htm') and not original:
+            # LegalBrowser blocks embedded resource loading. Render the
+            # bundled document, keeping raw bytes available to Copy/Open.
+            self.browser.setHtml(self.raw_text)
+            self.title_label.setVisible(not bool(re.search(r'<h1\b', self.raw_text, re.I)))
+        else:
+            text = self.raw_text
+            first_line = next((line.strip() for line in text.splitlines() if line.strip()), '')
+            if first_line.casefold() == self.title_label.text().strip().casefold():
+                self.title_label.hide()
+            if not original and self.path and self.path.suffix.lower() != '.cff':
+                # Reflow source-wrapped paragraphs for the reader. Every word
+                # and paragraph remains; raw copy/open and Original layout
+                # retain the untouched source bytes/line breaks.
+                text = '\n\n'.join(re.sub(r'\s*\n\s*', ' ', paragraph).strip()
+                                   for paragraph in re.split(r'\n\s*\n', text))
+            self.browser.setPlainText(text)
+            cursor = QTextCursor(self.browser.document())
+            cursor.select(QTextCursor.Document)
+            body_format = QTextCharFormat()
+            body_format.setFont(standard_ui_font(10.5))
+            cursor.setCharFormat(body_format)
+        # Markdown headings and code spans must not inherit the branding font
+        # when the offscreen font database starts with only Science Gothic.
+        block = self.browser.document().begin()
+        while block.isValid():
+            iterator = block.begin()
+            while not iterator.atEnd():
+                fragment = iterator.fragment()
+                if fragment.isValid():
+                    correction = QTextCharFormat(fragment.charFormat())
+                    if QFontInfo(correction.font()).family() in ('', 'Science Gothic'):
+                        correction.setFontFamilies([standard_ui_font().family()])
+                    heading = block.blockFormat().headingLevel()
+                    if heading:
+                        correction.clearProperty(QTextFormat.FontSizeAdjustment)
+                        correction.setFontPointSize(12 if heading == 1 else 11)
+                    cursor = QTextCursor(self.browser.document())
+                    cursor.setPosition(fragment.position())
+                    cursor.setPosition(fragment.position() + fragment.length(), QTextCursor.KeepAnchor)
+                    cursor.setCharFormat(correction)
+                iterator += 1
+            block = block.next()
+        cursor = QTextCursor(self.browser.document())
+        cursor.select(QTextCursor.Document)
+        spacing = QTextBlockFormat()
+        spacing.setLineHeight(120, QTextBlockFormat.ProportionalHeight.value)
+        cursor.mergeBlockFormat(spacing)
+        self.browser.moveCursor(QTextCursor.Start)
+        self._update_source_label()
+
+    def find_next(self):
+        if not self.browser.find(self.search.text()):
+            self.browser.moveCursor(QTextCursor.Start)
+            self.browser.find(self.search.text())
+
+    def open_original(self):
+        if self.available and self._trusted() and self.path.is_file():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self.path)))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, 'source'):
+            self._update_source_label()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        fit_dialog_to_available_screen(self, QSize(680, 560))
+        # The common helper's large-dialog minimum is inappropriate here.
+        self.setMinimumSize(min(420, self.width()), min(300, self.height()))
+        self._update_source_label()
+        if not getattr(self, '_document_fit_initialized', False):
+            self._document_fit_initialized = True
+            QTimer.singleShot(0, self._fit_document_content)
+
+    def _fit_document_content(self):
+        if not self.isVisible():
+            return
+        chrome = self.height() - self.browser.height()
+        height = int(self.browser.document().size().height()) + chrome + 24
+        fit_dialog_to_available_screen(self, QSize(680, min(560, max(340, height))))
+        self.setMinimumSize(min(420, self.width()), min(280, self.height()))
+
+
+class _ContentPanel(QScrollArea):
+    def sizeHint(self):
+        height = self.widget().sizeHint().height() + 2 if self.widget() else 130
+        return QSize(640, min(180, max(108, height)))
+
+    def minimumSizeHint(self):
+        return QSize(0, 76)
 
 
 class AboutDialog(QDialog):
     def __init__(self, parent, *, jana: bool):
         super().__init__(parent)
         self.setObjectName('phaseStudioAbout')
+        _style(self)
         self.setWindowTitle('About Phase Studio')
         self.setWindowModality(Qt.WindowModal)
-        self.setStyleSheet('QDialog#phaseStudioAbout {background:white;}')
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(12)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(4)
         header = create_phase_studio_brand_header()
-        header.findChild(QLabel, 'versionBadge').hide()
+        header.layout().setContentsMargins(0, 0, 0, 0)
+        logo = header.findChild(QLabel, 'brandLogo')
+        logo.setPixmap(logo.pixmap().scaled(42, 42, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        logo.setFixedSize(42, 42)
+        header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        badge = header.findChild(QLabel, 'versionBadge')
+        badge.setText('v' + version.VERSION + '\nDevelopment')
+        badge.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.version_label = badge
         layout.addWidget(header)
-        self.version_label = QLabel('Version ' + version.VERSION)
-        layout.addWidget(self.version_label)
-        description = QLabel('Crystallographic structure solution and electron-density processing '
-                             'with Superflip, SharpED and EDMA.')
+        profile = 'Jana2020 integration' if jana else 'Standalone application'
+        description = QLabel('Crystallographic structure solution and electron-density processing. · ' + profile)
+        description.setObjectName('aboutDescription')
         description.setWordWrap(True)
+        description.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        description.setToolTip(profile)
+        description.setAccessibleDescription(description.toolTip())
+        self.mode_label = description
         layout.addWidget(description)
-        self.mode_label = QLabel('Jana2020 integration' if jana else 'Standalone application')
-        layout.addWidget(self.mode_label)
-        releases = QPushButton('Official GitHub Releases')
-        releases.setToolTip(RELEASES_URL)
-        releases.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(RELEASES_URL)))
-        layout.addWidget(releases)
-        self.credits_button = QPushButton('Licenses and credits')
-        self.credits_button.setCheckable(True)
-        layout.addWidget(self.credits_button)
-        self.credits = QTextBrowser()
-        self.credits.setMinimumHeight(120)
-        self.credits.setOpenExternalLinks(False)
-        # Read the existing notices verbatim; do not maintain a second set of
-        # authors, license terms or bibliographic assertions in the UI.
-        notices = []
-        for name in ('AUTHORS.md', 'LICENSE', 'CITATION.cff', 'THIRD_PARTY_NOTICES.md'):
-            path = legal_directory() / name
-            notices.append(name + '\n\n' + (path.read_text(encoding='utf8') if path.is_file()
-                                           else 'Bundled notice unavailable: ' + name))
-        self.credits.setPlainText('\n\n'.join(notices))
-        self.credits.hide()
-        layout.addWidget(self.credits)
-        self.credits_button.toggled.connect(self._toggle_credits)
-        buttons = QDialogButtonBox(QDialogButtonBox.Close)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        navigation = QWidget()
+        navigation.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        grid = QGridLayout(navigation)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setSpacing(6)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        self.cards = []
+        self.card_group = QButtonGroup(self)
+        self.card_group.setExclusive(True)
+        entries = [('Authors & contacts', 'Credits and contacts'), ('License', 'MIT and copyright'),
+                   ('Third-party licenses', 'Original notices'), ('How to cite', 'Software and methods')]
+        icons = (QStyle.SP_FileDialogInfoView, QStyle.SP_FileDialogDetailedView,
+                 QStyle.SP_FileDialogListView, QStyle.SP_FileIcon)
+        for index, (title, subtitle) in enumerate(entries):
+            card = _NavigationCard()
+            card.setObjectName('aboutCard')
+            card.setFocusPolicy(Qt.StrongFocus)
+            card.setCheckable(True)
+            card.setAccessibleName(title)
+            card.setAccessibleDescription(subtitle)
+            card.setMinimumHeight(44)
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            row = QHBoxLayout(card)
+            row.setContentsMargins(10, 5, 10, 5)
+            row.setSpacing(9)
+            icon = QLabel()
+            icon.setPixmap(self.style().standardIcon(icons[index]).pixmap(18, 18))
+            icon.setFixedSize(18,18)
+            icon.setAlignment(Qt.AlignCenter)
+            icon.setStyleSheet('background:transparent;')
+            icon.setAttribute(Qt.WA_TransparentForMouseEvents)
+            row.addWidget(icon)
+            captions = QVBoxLayout()
+            captions.setSpacing(1)
+            for caption, object_name in ((title, 'aboutCardTitle'), (subtitle, 'aboutCardSubtitle')):
+                label = QLabel(caption)
+                label.setObjectName(object_name)
+                label.setWordWrap(True)
+                label.setAttribute(Qt.WA_TransparentForMouseEvents)
+                captions.addWidget(label)
+            row.addLayout(captions, 1)
+            self.card_group.addButton(card, index)
+            grid.addWidget(card, index // 2, index % 2)
+            self.cards.append(card)
+        layout.addWidget(navigation)
+        self.stack = QStackedWidget()
+        self.stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.stack.setMinimumHeight(76)
+        layout.addWidget(self.stack, 1)
+        self._page('<p><b>Phase Studio</b><br>Jiří Zelenka — author and lead developer.<br>'
+                   'Institute of Physics of the Czech Academy of Sciences · '
+                   '<a href="mailto:zelenka@fzu.cz">zelenka@fzu.cz</a></p>'
+                   '<p><b>SharpED development team</b><br>'
+                   'Jiří Zelenka, Jan Rohlíček, Monika Kučeráková and Zdeněk Buk.</p>',
+                   [('Contacts and credits', lambda: self.open_document('AUTHORS.md', contacts=True))])
+        copyright_line = next((line for line in source_text('LICENSE').splitlines() if line.startswith('Copyright')), '').replace('(c)', '©')
+        self._page('<p><b>MIT License</b></p><p>' + escape(copyright_line) + '</p>'
+                   '<p>Permits use, modification and distribution under the terms of the license.</p>',
+                   [('Read full license', lambda: self.open_document('LICENSE'))])
+        self._page('<p><b>Third-party components</b></p>'
+                   '<p>Bundled dependencies retain their own licenses. Complete original notices are available locally.</p>',
+                   [('Browse licenses', lambda: self.open_document('THIRD_PARTY_NOTICES.md', third_party=True))])
+        self.citation = citation_text(version.VERSION)
+        self._page('<p><b>How to cite</b></p><p>Cite the components actually used: Phase Studio, Superflip, EDMA or SharpED.</p>',
+                   [('Copy citation', lambda: QApplication.clipboard().setText(self.citation)),
+                    ('View citations', self.open_citations)])
+        self.card_group.idClicked.connect(self.stack.setCurrentIndex)
+        self.cards[0].setChecked(True)
+        footer = QHBoxLayout()
+        footer.setSpacing(16)
+        for title, url in [('GitHub repository', REPOSITORY_URL), ('Official releases', RELEASES_URL)]:
+            link = QPushButton(title)
+            link.setObjectName('aboutLink')
+            link.setFlat(True)
+            link.setSizePolicy(QSizePolicy.Maximum, QSizePolicy.Fixed)
+            link.setToolTip(url)
+            link.clicked.connect(lambda checked=False, u=url: QDesktopServices.openUrl(QUrl(u)))
+            footer.addWidget(link)
+        footer.addStretch(1)
+        self.close_button = QPushButton('Close')
+        self.close_button.setMinimumWidth(72)
+        self.close_button.clicked.connect(self.reject)
+        footer.addWidget(self.close_button)
+        layout.addLayout(footer)
+        self.viewer = None
+        self.citations_viewer = None
+        self.resize(720, 420)
 
-    def _toggle_credits(self, checked):
-        self.credits.setVisible(checked)
-        self._fit()
+    def _page(self, text, actions):
+        scroll = _ContentPanel()
+        scroll.setObjectName('aboutContent')
+        scroll.setWidgetResizable(True)
+        body = QWidget()
+        body.setObjectName('aboutPage')
+        page_layout = QVBoxLayout(body)
+        page_layout.setContentsMargins(12, 6, 12, 12)
+        page_layout.setSpacing(4)
+        page_layout.setAlignment(Qt.AlignTop)
+        label = QLabel('<style>p { margin:0 0 5px 0; }</style>' + text)
+        label.setWordWrap(True)
+        label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        label.setFocusPolicy(Qt.StrongFocus)
+        label.linkActivated.connect(lambda link: QDesktopServices.openUrl(QUrl(link))
+            if QUrl(link).scheme().lower() in ('https', 'mailto') else None)
+        page_layout.addWidget(label)
+        row = QHBoxLayout()
+        for title, action in actions:
+            button = QPushButton(title)
+            button.clicked.connect(action)
+            row.addWidget(button)
+        row.addStretch(1)
+        page_layout.addLayout(row)
+        scroll.setWidget(body)
+        self.stack.addWidget(scroll)
+
+    def open_document(self, name, *, third_party=False, contacts=False):
+        if self.viewer is not None and self.viewer.isVisible():
+            activate_owned_dialog(self.viewer)
+            return self.viewer
+        if self.viewer is not None:
+            self.viewer.deleteLater()
+        previous = QApplication.focusWidget()
+        self.viewer = DocumentDialog(self, name, third_party=third_party, contacts=contacts)
+        def finished(_result):
+            if self.isVisible():
+                activate_owned_dialog(self)
+                _restore_focus(previous)
+        self.viewer.finished.connect(finished)
+        self.viewer.open()
+        return self.viewer
+
+    def open_citations(self):
+        from .citation_ui import CitationDialog
+        if self.citations_viewer is not None and self.citations_viewer.isVisible():
+            activate_owned_dialog(self.citations_viewer)
+            return self.citations_viewer
+        previous = QApplication.focusWidget()
+        if self.citations_viewer is not None:
+            self.citations_viewer.deleteLater()
+        self.citations_viewer = CitationDialog(self)
+        def finished(_result):
+            if self.isVisible():
+                activate_owned_dialog(self)
+                _restore_focus(previous)
+        self.citations_viewer.finished.connect(finished)
+        self.citations_viewer.open()
+        return self.citations_viewer
 
     def _fit(self):
         self.layout().activate()
-        fit_dialog_to_available_screen(self, QSize(460, 510 if self.credits.isVisible() else 360))
+        fit_dialog_to_available_screen(self, QSize(720, 390))
+        self.setMinimumSize(min(430, self.width()), min(330, self.height()))
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -90,8 +564,13 @@ def show_about_dialog(parent, *, jana: bool = False):
         return dialog
     if dialog is not None:
         dialog.deleteLater()
+    previous = QApplication.focusWidget()
     dialog = AboutDialog(parent, jana=jana)
     parent._phase_studio_about = dialog
-    dialog.finished.connect(lambda _result: activate_owned_dialog(parent) if parent.isVisible() else None)
+    def finished(_result):
+        if parent.isVisible():
+            activate_owned_dialog(parent)
+            _restore_focus(previous)
+    dialog.finished.connect(finished)
     dialog.open()
     return dialog

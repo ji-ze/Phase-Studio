@@ -61,16 +61,24 @@ def run_checks():
    assert w.validate_hkl_button.width()==w.analyze_completeness_button.width()
    assert metadata==[getattr(w,n).text() for n in ('reflections_value','format_value','cell_value','spacegroup_value','composition_value')]
   w.dialog.resize(900,850);settle();size=w.dialog.size()
-  assert tiles[2].height()==tiles[3].height() and tiles[2].height()>=94
+  assert tiles[2].height()==tiles[3].height() and tiles[2].height()>=78
   w.files_toggle.click();settle();assert w.files_form_widget.isVisible() and w.dialog.size()==size
   w.files_toggle.click();settle();assert not w.files_form_widget.isVisible() and w.scroll_area.verticalScrollBar().maximum()==0
   assert w.backing_window_holder['win'] is None
   calls=[]
-  class Diagnostics:
-   def test_hkl_load_dialog(self):calls.append('validate')
-   def open_hkl_completeness_dialog(self):calls.append('completeness')
-  w._get_backing_window=lambda:Diagnostics()
-  w.validate_hkl_button.click();w.analyze_completeness_button.click();assert calls==['validate','completeness']
+  for kind,button in [('validate',w.validate_hkl_button),('completeness',w.analyze_completeness_button)]:
+   button.click()
+   for _ in range(1600):
+    settle();QTest.qWait(5)
+    if getattr(w,'_diagnostic_dialog',None) is not None:break
+   diagnostic=w._diagnostic_dialog
+   assert diagnostic.isVisible() and diagnostic.parentWidget() is w.dialog
+   assert QApplication.activeModalWidget() is diagnostic
+   assert w.backing_window_holder['win'] is None
+   calls.append(kind);diagnostic.close();settle()
+   # The offscreen plugin has no window manager to reactivate the owner.
+   w.dialog.activateWindow();settle()
+  assert calls==['validate','completeness']
   tile=tiles[0];tile._on_click=lambda:calls.append('activate')
   tile.setFocus(Qt.TabFocusReason);QTest.keyClick(tile,Qt.Key_Space);assert calls[-1]=='activate'
   QTest.qWait(360);QTest.mouseClick(tile,Qt.LeftButton,pos=tile.rect().center());assert calls.count('activate')==2

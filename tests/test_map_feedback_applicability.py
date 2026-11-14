@@ -55,6 +55,39 @@ class FeedbackTests(unittest.TestCase):
         self.assertTrue(all(r.sigma is None for r in out))
         self.assertAlmostEqual(change, (0+50+100/3)/3)
 
+    def test_actual_preparation_holdout_cannot_restore_invalid_fwhm_records(self):
+        from test_jana_completion import make_run_config,CIF
+        a=self.a
+        with patch.multiple(a.IterativeSuperflipPipelineQtGUI,load_settings=lambda self:None,
+                save_settings=lambda self:None,refresh_sharped_models=lambda self:None):
+            window=a.IterativeSuperflipPipelineQtGUI()
+        self.addCleanup(window.close);window.timer.stop()
+        run=self.root/'run';run.mkdir()
+        cfg=make_run_config(a,run,self.root/'unused.inflip')
+        source=self.root/'observations.hkl'
+        source.write_text(''.join(f'{h} 0 0 10 0.1\n' for h in range(1,101))+
+            '1001 0 0 -1 0.1\n1002 0 0 nan 0.1\n1003 0 0 10 0\n1004 0 0 10 ?\n')
+        before=source.read_bytes()
+        reference=self.root/'reference.cif';reference.write_text(CIF)
+        cfg.hkl=source;cfg.reference_cif=reference;cfg.input_source_mode=a.INPUT_MODE_EXTERNAL
+        cfg.reflection_data_mode=a.REFLECTION_DATA_MODE_INTENSITY_FWHM
+        cfg.i_over_sigma_min=0;cfg.resolution_d_min=0;cfg.powder_wavelength=1
+        cfg.powder_separation_factor=.2
+        cfg.compute_omit_maps=True;cfg.reconstruction_mode='superflip';cfg.modelfile_source='none'
+        cfg.referencefile_mode='omit';cfg.map_export_format='xplor';cfg.randomseed='12345'
+        cfg.cycles=1;cfg.sharped_map_value_exponent=1
+        captured=[]
+        with patch.object(window,'_run_pipeline_cycles',side_effect=lambda state:captured.append(state)),patch.object(
+                a,'run_command',side_effect=AssertionError('No native process may run in this preparation test')):
+            window.pipeline_worker(cfg)
+        self.assertEqual(len(captured),1,list(window.msg_queue.queue))
+        state=captured[0]
+        self.assertEqual(len(state.validation_context.original_measured_reflections),100)
+        self.assertEqual(len(state.current_reflections)+len(state.omit_test_hkls),100)
+        self.assertTrue(state.omit_test_hkls)
+        self.assertTrue(all(1<=r.h<=100 and math.isfinite(r.value) and r.sigma==.1 for r in state.current_reflections))
+        self.assertEqual(source.read_bytes(),before)
+
     def test_measured_intensity_significance(self):
         rows = [self.a.Reflection(i,0,0,v,s) for i,(v,s) in enumerate([(10,1),(20,10),(30,1)],1)]
         out,_ = self.feedback(rows, self.a.REFLECTION_DATA_MODE_INTENSITY, 2.5)
@@ -107,6 +140,38 @@ class FeedbackTests(unittest.TestCase):
         new=ast.parse(Path(self.a.__file__).read_text(encoding='utf-8'))
         find=lambda tree:next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='apply_map_feedback_to_reflections')
         original,current=find(old),find(new)
+        # The missing-completion orbit/extinction fix is independently checked
+        # with real maps. Pin the complete corrected function, then normalize
+        # only that reviewed branch for the historical correction-formula guard.
+        reviewed=ast.parse(subprocess.check_output(['git','show','5d75bbf:phase_studio/app.py']).decode('utf8'))
+        self.assertEqual(ast.dump(current),ast.dump(find(reviewed)))
+        self.assertEqual(current.args.args[-1].arg,'spacegroup')
+        self.assertEqual(ast.dump(current.args.defaults[-1]),ast.dump(ast.Constant(None)))
+        current.args.args.pop();current.args.defaults.pop()
+        missing_test=ast.dump(ast.parse('add_missing and missing_percent_limit > 0',mode='eval').body)
+        old_missing=next(n for n in original.body if isinstance(n,ast.If) and ast.dump(n.test)==missing_test)
+        new_missing=next(n for n in current.body if isinstance(n,ast.If) and ast.dump(n.test)==missing_test)
+        restored=ast.parse(ast.unparse(old_missing)).body[0]
+        sigma_nodes=[n for n in ast.walk(restored) if isinstance(n,ast.Assign) and
+                     any(isinstance(t,ast.Name) and t.id=='sigma' for t in n.targets)]
+        self.assertEqual(len(sigma_nodes),1)
+        sigma_nodes[0].value=ast.Constant(None)
+        current.body[current.body.index(new_missing)]=restored
+        # Authorised FWHM correction: permit exactly the new refusal to invent
+        # peak widths, and exactly removal of estimated measurement uncertainty.
+        # Every existing correction formula/control-flow node remains pinned.
+        width_guard=ast.parse("if reflection_mode_has_fwhm(mode) and add_missing:\n    raise ValueError('Missing-reflection completion cannot assign measured FWHM to new HKL. Disable completion for FWHM input; no widths or uncertainties are invented.')").body[0]
+        width_nodes=[node for node in current.body if ast.dump(node)==ast.dump(width_guard)]
+        self.assertEqual(len(width_nodes),1)
+        current.body.remove(width_nodes[0])
+        estimated=[node for node in ast.walk(current) if isinstance(node,ast.Assign) and any(isinstance(target,ast.Name) and target.id=='sigma' for target in node.targets)]
+        self.assertEqual(len(estimated),1)
+        self.assertEqual(ast.dump(estimated[0].value),ast.dump(ast.Constant(None)))
+        estimated[0].value=ast.parse('estimate_sigma_for_reflection_value(current, value)',mode='eval').body
+        hooks=[n for n in current.body if isinstance(n,ast.Expr) and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name) and n.value.func.id=='record_feedback_observation']
+        self.assertEqual(len(hooks),1)
+        self.assertEqual(ast.dump(hooks[0]),ast.dump(ast.parse("record_feedback_observation('map', locals())").body[0]))
+        current.body.remove(hooks[0])  # Only the exact read-only observer is exempt; every calculation remains pinned.
         gates=[n for n in ast.walk(current) if isinstance(n,ast.If) and
             ast.dump(n.test)==ast.dump(ast.parse('max_i_over_sigma > 0',mode='eval').body)]
         self.assertEqual(len(gates),1)
@@ -170,6 +235,10 @@ class FeedbackTests(unittest.TestCase):
         from PySide6.QtWidgets import QDialog
         w = self.j._JanaWorkflowWizard([],self.input_file(powder))
         with patch.object(QDialog,'exec',return_value=QDialog.Rejected): w.run()
+        # The user-authorized simple path has no significance editor and
+        # always bypasses observed filtering; Full Configuration owns it.
+        self.assertFalse(hasattr(w,'observed_threshold'))
+        self.assertEqual(w._observed_filter_threshold(), 0.0)
         w.dialog.show()
         for _ in range(20): self.qtapp.processEvents()
         w.cycles.setValue(3)
@@ -189,7 +258,7 @@ class FeedbackTests(unittest.TestCase):
         w=self.wizard(powder=False)
         w.intensity_enabled_checkbox.setChecked(True)
         self.assertEqual(w.intensity_damping_spin.value(),0)
-        self.assertIn('No intensity correction',w.intensity_effective_note.text())
+        self.assertIn('Intensity correction configured but inactive',w.intensity_effective_note.text())
         w.intensity_damping_spin.setValue(.3)
         self.assertIn('positive damping',w.intensity_effective_note.text())
         w.missing_enabled_checkbox.setChecked(True)
@@ -218,7 +287,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn('cycles 2–3', w.feedback_cycle_summary.text())
         self.assertNotIn('powder repartitioning', w.feedback_cycle_summary.text())
         w.powder_enabled_checkbox.setChecked(True)
-        self.assertIn('no effect: Powder repartitioning', w.map_feedback_warning_text.text())
+        self.assertIn('Configured but inactive: Powder repartitioning', w.map_feedback_warning_text.text())
         w.powder_wavelength_spin.setValue(1.541866)
         self.assertEqual(w.powder_wavelength_spin.value(), 1.541866)
         self.assertIn('intensity correction → powder repartitioning → next cycle', w.feedback_cycle_summary.text())
@@ -229,7 +298,7 @@ class FeedbackTests(unittest.TestCase):
         self.assertIn('subsequent cycle', w._check_page3_validity())
         w.cycles.setValue(1)
         self.assertIn('Map Feedback disabled', w.map_feedback_warning_text.text())
-        self.assertIn('at least 2 cycles', w.feedback_applicability_note.text())
+        self.assertIn('no subsequent cycle', w.feedback_applicability_note.text())
         w.cycles.setValue(3)
         self.assertEqual(w.powder_start_cycle_spin.value(), 2)
         self.assertEqual(w.intensity_damping_spin.value(), .4)
@@ -241,6 +310,7 @@ class FeedbackTests(unittest.TestCase):
 
     def test_powder_panels_independent_and_no_fake_sigma(self):
         w = self.wizard()
+        self.assertEqual(w._observed_filter_threshold(),0.0)
         self.assertTrue(w.intensity_group.isVisible() and w.powder_group.isVisible())
         self.assertFalse(w.feedback_has_uncertainty)
         w.intensity_enabled_checkbox.setChecked(True)
@@ -258,6 +328,13 @@ class FeedbackTests(unittest.TestCase):
         w = self.wizard(False)
         self.assertTrue(w.missing_group.isVisible() and w.intensity_group.isVisible())
         self.assertFalse(w.powder_group.isVisible())
+        self.assertFalse(w.feedback_has_uncertainty)  # Native trailing numbers are not sigma.
+        self.assertFalse(w.intensity_sigma_spin.isEnabled())
+        external=self.root/'explicit-measured-F-sigma.hkl'
+        external.write_text('# h k l F sigma(F)\n1 0 0 12 .1\n',encoding='utf8')
+        w.input_reflections=self.a.read_hkl(external,4,5)
+        w._detect_reflection_data_mode = lambda: self.a.REFLECTION_DATA_MODE_AMPLITUDE_MEASURED_SIGMA
+        w._sync_page3_for_data_type()
         self.assertTrue(w.feedback_has_uncertainty)
         w.intensity_enabled_checkbox.setChecked(True)
         self.assertTrue(w.intensity_sigma_spin.isEnabled())
@@ -311,6 +388,13 @@ class FeedbackTests(unittest.TestCase):
         w.powder_enabled_checkbox.setChecked(True)
         options = w._build_options('recycle')
         self.assertEqual(options.intensity_sigma_threshold, 0.0)
+        self.assertEqual(options.observed_filter_threshold, 0.0)
+        self.assertNotIn('FWHM', w._check_page3_validity() or '')
+        options = w._build_options('recycle')
+        self.assertEqual(options.observed_filter_threshold,0.0)
+        handoff=self.j.build_jana_handoff_import(path,options,self.a.parse_inflip_settings(path))
+        self.assertEqual(handoff.values['i_over_sigma_min'],'0.0')
+        self.assertTrue(any('no filtering' in message for message in handoff.limitations))
         self.assertTrue(options.enable_powder_repartition)
         w.dialog.close()
 
@@ -498,6 +582,9 @@ class FeedbackTests(unittest.TestCase):
                 cfg.modelfile_source='none';cfg.map_export_format='xplor';cfg.structure_export_format='cif'
                 cfg.reflection_data_mode=a.REFLECTION_DATA_MODE_INTENSITY_FWHM
                 cfg.run_sharped=False;cfg.run_edma_superflip=False;cfg.run_edma_deblurred=False
+                cfg.run_superflip=True
+                cfg.superflip_exe=work/'controlled-native-executable.fixture'
+                cfg.superflip_exe.write_text('Unit-test stub only; no native execution claimed.')
                 cfg.map_feedback_intensity_enabled=intensity;cfg.map_feedback_intensity_from_cycle=start
                 cfg.map_feedback_intensity_damping=.5;cfg.map_feedback_intensity_max_i_over_sigma=0
                 cfg.redistribute_overlaps=powder;cfg.powder_redistribution_from_cycle=start
@@ -522,11 +609,19 @@ class FeedbackTests(unittest.TestCase):
                 real_intensity=a.apply_map_feedback_to_reflections;real_powder=a.redistribute_overlap_reflections
                 def flip(directory,prefix,_context,input_hkl,*args,**kwargs):
                     inputs.append((prefix,Path(input_hkl)))
-                    path=Path(directory)/(prefix+'.xplor');a.write_xplor_map(path,xmap);return path
+                    directory=Path(directory);directory.mkdir(parents=True,exist_ok=True)
+                    # The mocked native producer must supply the same strict
+                    # input/log protocol as production; do not bypass capture.
+                    from phase_studio.native_overlap import native_powder_keywords
+                    header='cell 10 10 10 90 90 90\nspacegroup P 1\ncomposition C1\n'
+                    (directory/(prefix+'.inflip')).write_text(header+native_powder_keywords('',1,.2)+'\ndataformat intensity fwhm\nfbegin\n'+Path(input_hkl).read_text()+'\nendf\n')
+                    (directory/(prefix+'.sflog')).write_text('Number of reflections in the input file: 2\nNumber of overlapping reflections: 2\nNumber of overlap groups: 1\nReflections read from the input file and averaged:\nN H K L F ArrayLocation Group\n1: 1 0 0 1 1 1\n2: 0 1 0 1 2 1\nMaximum indices in expanded reflection set:\n')
+                    path=directory/(prefix+'.xplor');a.write_xplor_map(path,xmap);return path
                 def correct(*args,**kwargs):
                     calls.append('intensity');return real_intensity(*args,**kwargs)
                 def repartition(*args,**kwargs):
                     calls.append('powder');powder_calls[0]+=1
+                    self.assertFalse(kwargs['native_grouping'].provenance()['estimate_used'])
                     if fail_powder and powder_calls[0]==1: raise RuntimeError('controlled powder failure')
                     return real_powder(*args,**kwargs)
                 def structure(path,*args,**kwargs):

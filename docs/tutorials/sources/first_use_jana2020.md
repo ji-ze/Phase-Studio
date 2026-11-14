@@ -51,14 +51,14 @@ The displayed cell and space group come from the interpreted input context. Sear
 Expand **Show optional reference and initial model** only when needed. Reference and initial model have different roles. A reference aids metadata/evaluation; an explicit first-cycle model can supply a seed. Do not infer random phases merely from the phrase cycle 1.
 
 <!-- PAGE {"title": "4 · Validate the reflections", "image": "screenshots/workflow/hkl-validation.png", "crop": "validation"} -->
-Click **Validate HKL** and check the interpreted columns and counts. Successful parsing is a format/context check, not an experimental validation certificate.
+Click **View data** and check the interpreted columns and counts. Successful parsing is a format/context check, not an experimental validation certificate.
 
 **h k l · F · σ(F):** amplitude and amplitude uncertainty. **h k l · I · σ(I):** intensity and intensity uncertainty. **h k l · I · FWHM:** intensity and peak width. FWHM is not σ(I), so I/FWHM must not be interpreted as a significance ratio.
 
 Phase columns use the selected displayed convention; the client converts degrees for its generated Superflip representation. Do not guess a phase/uncertainty column from its numerical size.
 
-<!-- PAGE {"title": "5 · Analyze completeness", "image": "screenshots/workflow/hkl-completeness.png"} -->
-Click **Analyze completeness**. Inspect resolution bins, completeness versus sinθ/λ, dmin, observed/theoretical unique-reflection counts and available intensity/uncertainty statistics.
+<!-- PAGE {"title": "5 · Analyze data", "image": "screenshots/workflow/hkl-completeness.png"} -->
+Click **Analyze data**. Inspect resolution bins, completeness versus sinθ/λ, dmin, observed/theoretical unique-reflection counts and available intensity/uncertainty statistics.
 
 The calculation depends on the selected cell, symmetry, observed bounds and resolution range. High completeness over that range does not establish correct measurements, correct symmetry or a correct model. Check bin coverage, not only one total percentage.
 

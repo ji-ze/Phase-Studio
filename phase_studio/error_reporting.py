@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
+from phase_studio.validation_issues import ValidationIssue
 
 try:
     from phase_studio.version import VERSION as __version__
@@ -14,7 +15,8 @@ except Exception:
 _SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)(\b(?:api[_ -]?token|access[_ -]?token|authorization[_ -]?token|"
     r"bearer[_ -]?token|job[_ -]?token|download[_ -]?token|api[_ -]?key|access[_ -]?key|"
-    r"authorization[_ -]?code|code[_ -]?verifier|pkce[_ -]?verifier|token)\b[\"']?\s*[:=]\s*)"
+    r"authorization[_ -]?code|code[_ -]?verifier|pkce[_ -]?verifier|refresh[_ -]?token|"
+    r"password|passwd|client[_ -]?secret|signing[_ -]?key|private[_ -]?key|authorization|token)\b[\"']?\s*[:=]\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)(\bBearer\s+)[^\s,;]+")
@@ -38,6 +40,9 @@ def sanitize_error_details(value: object) -> str:
     for private in sorted(tuple(_PRIVATE_VALUES), key=len, reverse=True):
         text = text.replace(private, "[REDACTED]")
     text = _BEARER_RE.sub(r"\1[REDACTED]", text)
+    text = re.sub(r'(?im)(\bAuthorization\s*:\s*)(?:Basic|Token)\s+[^\r\n,;]+',r'\1[REDACTED]',text)
+    text = re.sub(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----','[REDACTED PRIVATE KEY]',text,flags=re.DOTALL)
+    text = re.sub(r'(https?://)[^/\s:@]+:[^@\s/]+@',r'\1[REDACTED]@',text)
     text = _SECRET_ASSIGNMENT_RE.sub(r"\1[REDACTED]", text)
     text = _TOKEN_URL_RE.sub(r"\1[REDACTED]", text)
     return _TOKEN_QUERY_RE.sub(r"\1[REDACTED]", text)
@@ -53,6 +58,7 @@ class ErrorReport:
     technical_details: str
     operation: str = ""
     severity: str = "error"
+    issues: tuple[ValidationIssue, ...] = ()
 
     def diagnostic_block(self) -> str:
         lines = [
@@ -62,6 +68,8 @@ class ErrorReport:
         ]
         if self.operation:
             lines.append(f"Operation: {self.operation}")
+        for issue in self.issues:
+            lines.append(f'Validation: {issue.code} · {issue.page} · {issue.setting}')
         lines.extend((f"Summary: {self.summary}", "", self.technical_details.strip()))
         return sanitize_error_details("\n".join(lines).strip())
 
@@ -99,6 +107,13 @@ def build_error_report(
 ) -> ErrorReport:
     """Map an existing exception/message to a concise user-facing category."""
     message = sanitize_error_details(error).strip() or "The operation failed without an error message."
+    from .reflection_readiness import ReflectionReadinessError
+    if isinstance(error, ReflectionReadinessError) or 'significance filtering requires genuine finite positive measurement uncertainties' in message.casefold():
+        issue = error.issue if isinstance(error, ReflectionReadinessError) else ValidationIssue(
+            message, 'significance_unavailable', 'i_over_sigma_min', 'Superflip', True)
+        report = build_validation_report([issue], technical_details=extra_details or message)
+        from dataclasses import replace
+        return replace(report, operation=operation or 'Reflection validation')
     lower = message.lower()
     resolved_subsystem = "EDMA" if subsystem == "EDMA" else _subsystem_from_message(message, subsystem)
     category = "internal"
@@ -106,7 +121,34 @@ def build_error_report(
     summary = "The current operation could not be completed."
     guidance = "Review the Execution Log and copy the technical details if you need to report the problem."
 
-    if "immediate stop requested" in lower or "cancelled by the user" in lower or "canceled by the user" in lower:
+    from urllib.error import HTTPError, URLError
+    remote_error = isinstance(error, (HTTPError, URLError)) or type(error).__module__ == 'phase_studio.sharped_server_client'
+    local_handoff = 'jana2020 handoff' in operation.casefold() and not remote_error
+    if remote_error:
+        resolved_subsystem = 'SharpED'
+    if local_handoff:
+        from .jana_handoff_io import JanaProjectMetadataError
+        resolved_subsystem = 'Jana2020 handoff'
+        title = 'Jana2020 handoff could not complete'
+        summary = 'The selected result could not be transferred locally to Jana2020.'
+        guidance = 'The completed prediction is retained. Review the local project and technical details, then retry the same selected result; no new prediction is needed.'
+        if isinstance(error, JanaProjectMetadataError):
+            category = 'jana_handoff_metadata'
+            summary = 'The original Jana project .m50 context is missing or invalid.'
+            guidance = 'Restore the original project context using Jana2020. The searched paths are in Technical details. Do not create an empty .m50 or substitute another project.'
+        elif isinstance(error, FileNotFoundError):
+            category = 'jana_handoff_missing'
+            summary = 'A required local handoff path could not be opened.'
+        elif isinstance(error, PermissionError):
+            category = 'jana_handoff_permission'
+            summary = 'Windows denied access to a local handoff file or folder.'
+            guidance = 'Close applications locking the project files and check folder permissions, then retry the retained result.'
+        elif isinstance(error, OSError):
+            category = 'jana_handoff_filesystem'
+            summary = 'A local filesystem operation failed during Jana2020 handoff.'
+        else:
+            category = 'jana_handoff'
+    elif "immediate stop requested" in lower or "cancelled by the user" in lower or "canceled by the user" in lower:
         category = "cancelled"
         title = "Operation stopped"
         summary = "The current operation was stopped at your request."
@@ -332,6 +374,26 @@ def build_error_report(
 
 
 def build_validation_report(issues: Sequence[str], *, technical_details: str = "") -> ErrorReport:
+    structured = tuple(dict.fromkeys(issue for issue in issues if isinstance(issue, ValidationIssue)))
+    if structured:
+        bullets = '\n'.join('• ' + sanitize_error_details(issue) for issue in dict.fromkeys(issues))
+        if len(issues) == 1 and structured[0].code == 'significance_unavailable':
+            return ErrorReport('input_validation', 'Input', 'Reflection significance filter unavailable',
+                str(structured[0]), 'Review the reflection filtering threshold or select input containing genuine measured uncertainties. '
+                'A zero threshold bypasses significance filtering. Your configuration has not been changed.',
+                sanitize_error_details(technical_details or bullets), 'Pre-run validation', issues=structured)
+        significance = len(issues) == 1 and structured[0].code == 'significance_fwhm'
+        return ErrorReport(
+            category='input_validation', subsystem='Input',
+            title='Invalid reflection significance threshold' if significance else 'Cannot start workflow',
+            summary=('FWHM is a peak-width measurement, not an intensity or amplitude uncertainty. '
+                     'A positive significance threshold cannot be applied to this input format.'
+                     if significance else 'Please review the following settings:\n' + bullets),
+            guidance=('Set the significance threshold to zero to disable significance filtering. '
+                      'Your parameters have not been changed.' if significance else
+                      'Use the issue-specific actions to review the affected settings.\n' + bullets),
+            technical_details=sanitize_error_details(technical_details or bullets),
+            operation='Pre-run validation', issues=structured)
     unique = list(dict.fromkeys(str(issue).strip() for issue in issues if str(issue).strip()))
     bullets = "\n".join(f"• {issue}" for issue in unique)
     wavelength_issue = next((issue for issue in unique if "wavelength" in issue.casefold()
@@ -345,6 +407,7 @@ def build_validation_report(issues: Sequence[str], *, technical_details: str = "
                      "Zero requests automatic detection; no wavelength was found.\n" + bullets,
             technical_details=sanitize_error_details(technical_details or bullets),
             operation="Pre-run validation", severity="error",
+            issues=(ValidationIssue(wavelength_issue, 'powder_wavelength', 'powder_wavelength', 'Map feedback'),),
         )
     if len(unique) == 1:
         issue = unique[0]
@@ -391,7 +454,7 @@ def show_phase_studio_error(
     actions: Sequence[ErrorAction] = (),
 ) -> str:
     """Show one compact, expandable, cross-platform Phase Studio error dialog."""
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QSize
     from PySide6.QtGui import QFont
     from PySide6.QtWidgets import (
         QApplication,
@@ -400,6 +463,7 @@ def show_phase_studio_error(
         QLabel,
         QPlainTextEdit,
         QPushButton,
+        QMenu,
         QVBoxLayout,
         QWidget,
     )
@@ -482,22 +546,32 @@ def show_phase_studio_error(
         details_button.setText("Hide details" if expanded else "Show details")
         dialog.adjustSize()
         target_height = min(610, dialog.sizeHint().height()) if expanded else max(250, dialog.minimumSizeHint().height())
-        dialog.resize(max(520, min(700, dialog.width())), target_height)
+        from .ui_branding import fit_dialog_to_available_screen
+        fit_dialog_to_available_screen(dialog, QSize(max(420, min(700, dialog.width())), target_height))
 
     details_button.clicked.connect(toggle_details)
     copy_button.clicked.connect(lambda: QApplication.clipboard().setText(report.diagnostic_block()))
 
-    for action in actions:
-        button = QPushButton(action.label)
-        button.setObjectName("errorPrimaryAction" if action.primary else "errorAction")
-        button.setMinimumHeight(30)
+    def choose_action(action):
+        selected['label'] = action.label
+        dialog.accept()
 
-        def choose(_checked: bool = False, selected_action: ErrorAction = action) -> None:
-            selected["label"] = selected_action.label
-            dialog.accept()
-
-        button.clicked.connect(choose)
+    if len(actions) > 1:
+        button = QPushButton('Review affected settings…')
+        button.setObjectName('errorPrimaryAction')
+        menu = QMenu(button)
+        for action in actions:
+            item = menu.addAction(action.label)
+            item.triggered.connect(lambda _checked=False, action=action: choose_action(action))
+        button.setMenu(menu)
         button_row.addWidget(button)
+    else:
+        for action in actions:
+            button = QPushButton(action.label)
+            button.setObjectName('errorPrimaryAction' if action.primary else 'errorAction')
+            button.setMinimumHeight(30)
+            button.clicked.connect(lambda _checked=False, action=action: choose_action(action))
+            button_row.addWidget(button)
 
     close_button = QPushButton("Close")
     close_button.setObjectName("errorCloseButton")
@@ -510,6 +584,10 @@ def show_phase_studio_error(
     body_layout.addLayout(button_row)
     root.addWidget(body)
 
+    from .ui_branding import fit_dialog_to_available_screen
+    dialog.setMinimumWidth(0)
+    fit_dialog_to_available_screen(dialog, QSize(620, max(280, dialog.minimumSizeHint().height())))
+    dialog.setMinimumWidth(min(420, dialog.width()))
     dialog.exec()
     chosen = selected["label"]
     if chosen:

@@ -74,16 +74,16 @@ REFERENCE_PHASE = MetricDefinition("reference_phase_agreement", "Reference phase
 AMPLITUDE_RF = MetricDefinition("amplitude_rf", "Amplitude agreement R factor", False)
 AMPLITUDE_CC = MetricDefinition("amplitude_cc", "Amplitude CC", True)
 AMPLITUDE_SCALE = MetricDefinition("amplitude_scale", "Amplitude scale", True)
-R_WORK = MetricDefinition("r_work", "R_work", False)
+R_WORK = MetricDefinition("r_work", "Work-set amplitude R", False)
 R_FREE = MetricDefinition("r_free", "R_free", False)
-CC_WORK = MetricDefinition("cc_work", "CC_work", True)
+CC_WORK = MetricDefinition("cc_work", "Work-set amplitude CC", True)
 CC_FREE = MetricDefinition("cc_free", "CC_free", True)
 OMIT_CC = MetricDefinition("omit_map_correlation", "OMIT map correlation", True)
 TRIPLET_C3 = MetricDefinition("triplet_c3", "Weighted triplet C3", True)
 ENTROPY = MetricDefinition("entropy_normalized", "Normalized map entropy", False)
 CONCENTRATION = MetricDefinition("map_concentration", "Map concentration", True)
 PEAKINESS = MetricDefinition("standardized_peakiness", "Standardized peakiness", True)
-NEGATIVE_MASS = MetricDefinition("negative_density_mass", "Negative-density mass fraction", False)
+NEGATIVE_MASS = MetricDefinition("negative_density_mass", "Centered negative-mass fraction (0.5 by construction)", False)
 
 COMMON_REPORT_METRICS = (
     REFERENCE_PRECISION, REFERENCE_RECALL, REFERENCE_TP, REFERENCE_FP,
@@ -103,14 +103,14 @@ PROFILE_DEFINITIONS = {
     ValidationProfile.REFERENCE_ONLY: ValidationProfileDefinition(
         ValidationProfile.REFERENCE_ONLY,
         "Reference-backed",
-        "Agreement with a supplied reference structure using measured reflections.",
+        "Reference-dependent assessment without an independent holdout. Recommendation is not independent validation or a refined structure.",
         (REFERENCE_F05, REFERENCE_RMSD, REFERENCE_PHASE),
         COMMON_REPORT_METRICS,
     ),
     ValidationProfile.HOLDOUT_ONLY: ValidationProfileDefinition(
         ValidationProfile.HOLDOUT_ONLY,
         "Cross-validation",
-        "Independent assessment against a frozen 5% experimental holdout.",
+        "Agreement against a frozen 5% experimental holdout. Independence depends on observation correlations and prior-model provenance; selecting a candidate reuses this validation set.",
         (R_FREE, CC_FREE, OMIT_CC),
         COMMON_REPORT_METRICS,
     ),
@@ -261,16 +261,45 @@ def scaled_amplitude_metrics(observed: Sequence[float], calculated: Sequence[flo
         return ScaledAmplitudeMetrics(None, None, None, 0)
     fo = np.asarray([pair[0] for pair in pairs], dtype=np.float64)
     fc = np.asarray([pair[1] for pair in pairs], dtype=np.float64)
-    denominator = float(np.dot(fc, fc))
-    fo_sum = float(np.sum(fo))
-    if denominator <= 1.0e-15 or fo_sum <= 1.0e-15:
+    fo_max, fc_max = float(np.max(fo)), float(np.max(fc))
+    if fo_max == 0 or fc_max == 0:
         return ScaledAmplitudeMetrics(None, None, None, len(pairs))
-    scale = max(0.0, float(np.dot(fo, fc)) / denominator)
-    r_factor = float(np.sum(np.abs(fo - scale * fc)) / fo_sum)
+    # Normalize separately before products: common units must not change R,
+    # and finite input amplitudes need not have representable squares.
+    fo, fc = fo / fo_max, fc / fc_max
+    normalized_scale = float(np.dot(fo, fc) / np.dot(fc, fc))
+    scale = normalized_scale * (fo_max / fc_max)
+    if not math.isfinite(scale):
+        return ScaledAmplitudeMetrics(None, None, None, len(pairs))
+    r_factor = float(np.sum(np.abs(fo - normalized_scale * fc)) / np.sum(fo))
     correlation = None
-    if len(pairs) >= 2 and float(np.std(fo)) > 1.0e-15 and float(np.std(fc)) > 1.0e-15:
+    if len(pairs) >= 2 and float(np.std(fo)) > 0 and float(np.std(fc)) > 0:
         correlation = float(np.corrcoef(fo, fc)[0, 1])
     return ScaledAmplitudeMetrics(r_factor, correlation, scale, len(pairs))
+
+
+def amplitude_r_factor_at_scale(observed, calculated, scale):
+    """Evaluate held-out amplitudes without fitting parameters to the free set."""
+    if scale is None or not np.isfinite(scale) or scale < 0:
+        return None
+    pairs=[(float(fo),float(fc)) for fo,fc in zip(observed,calculated)
+           if np.isfinite(fo) and np.isfinite(fc) and fo>=0 and fc>=0]
+    if not pairs:
+        return None
+    fo=np.asarray([p[0] for p in pairs],dtype=np.float64)
+    fc=np.asarray([p[1] for p in pairs],dtype=np.float64)
+    maximum=float(np.max(fo))
+    if maximum==0:
+        return None
+    fo=fo/maximum
+    fc_max=float(np.max(fc))
+    if fc_max==0 or scale==0:
+        return 1.0
+    factor=float(scale)*(fc_max/maximum)
+    if not math.isfinite(factor):
+        return None
+    residual=float(np.sum(np.abs(fo-factor*(fc/fc_max)))/np.sum(fo))
+    return residual if math.isfinite(residual) else None
 
 
 @dataclass(frozen=True)
@@ -482,7 +511,11 @@ def compute_map_quality(
         amplitude_scale=measured_metrics.scale,
         r_work=work_metrics.r_factor,
         # Preserve the existing R_free minimum-sample rule.
-        r_free=free_metrics.r_factor if free_metrics.count >= 3 else None,
+        r_free=amplitude_r_factor_at_scale(
+            [r.amplitude for r in context.free_reflections if r.hkl in amplitudes],
+            [amplitudes[r.hkl] for r in context.free_reflections if r.hkl in amplitudes],
+            work_metrics.scale,
+        ) if free_metrics.count >= 3 else None,
         cc_work=work_metrics.correlation,
         cc_free=free_metrics.correlation,
         triplet_c3=triplet_c3,
@@ -541,6 +574,8 @@ class ResultCandidate:
     # Fresh-run ownership. Empty remains valid for imported/legacy fixtures;
     # production workflows stamp every completed candidate.
     run_id: str = ""
+    # Historical cycle-input diagnostic only; never a recommendation metric.
+    powder_feedback_change_percent: Optional[float] = None
 
     @property
     def label(self) -> str:

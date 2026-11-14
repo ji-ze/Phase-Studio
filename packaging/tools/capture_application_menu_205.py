@@ -179,7 +179,7 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
         def inspect_about():
             dialog=app.activeModalWidget()
             assert isinstance(dialog,AboutDialog) and dialog.parentWidget() is w.dialog
-            assert VERSION in dialog.version_label.text() and dialog.isVisible()
+            assert VERSION in dialog.citation and dialog.isVisible()
             capture('09-about-dialog',dialog);dialog.accept()
         menu.actions()[-1].trigger();settle();inspect_about()
         assert w.dialog.geometry()==initial
@@ -193,7 +193,7 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
             assert main.version_menu.accessibleName()=='Phase Studio menu'
             main.version_menu.menu().actions()[-1].trigger();settle()
             assert isinstance(main._phase_studio_about,AboutDialog)
-            assert main._phase_studio_about.mode_label.text()=='Standalone application'
+            assert any('Standalone application' in label.text() for label in main._phase_studio_about.findChildren(QLabel))
             main._phase_studio_about.accept();settle()
             capture('06-standalone-header',main.header_controls)
             main.timer.stop();main.close();main.deleteLater();settle()

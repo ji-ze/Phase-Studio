@@ -53,7 +53,9 @@ def check_ui():
             vp = w.scroll_area.viewport()
             rect = control.rect().translated(control.mapTo(vp, QPoint()))
             assert vp.rect().contains(rect), (control.objectName(), rect, vp.rect())
-            assert rect.top() >= 5 and rect.bottom() < vp.height()-5
+            # Compact pages may meet the viewport edge; every pixel of the
+            # control must remain visible above the independently fixed footer.
+            assert rect.top() >= 0 and rect.bottom() < vp.height()
 
         for width, height in [(821,780), (821,580), (640,700), (900,850)]:
             w.dialog.resize(width,height)
@@ -123,12 +125,16 @@ def check_ui():
         assert tooltip_text(w.validate_hkl_button) == 'Check reflection data and input format.'
         assert tooltip_text(w.analyze_completeness_button) == 'Show reflection completeness and intensity statistics.'
         calls = []
-        class Diagnostics:
-            def test_hkl_load_dialog(self): calls.append('validate')
-            def open_hkl_completeness_dialog(self): calls.append('analyze')
-        w._get_backing_window = lambda: Diagnostics()
-        for button in [w.validate_hkl_button,w.analyze_completeness_button]:
+        for kind,button in [('validate',w.validate_hkl_button),('analyze',w.analyze_completeness_button)]:
             button.click()
+            for _ in range(1600):
+                settle();QTest.qWait(5)
+                if getattr(w,'_diagnostic_dialog',None) is not None:break
+            diagnostic=w._diagnostic_dialog
+            assert diagnostic.isVisible() and diagnostic.parentWidget() is w.dialog
+            assert QApplication.activeModalWidget() is diagnostic
+            assert w.backing_window_holder['win'] is None
+            calls.append(kind);diagnostic.close();settle()
             size = button.size()
             button.setFocus(Qt.TabFocusReason)
             QTest.mouseMove(button, button.rect().center())
@@ -140,6 +146,9 @@ def check_ui():
             assert QToolTip.isVisible()
             tooltip = next(t for t in app.topLevelWidgets() if t.windowType() == Qt.ToolTip and t.isVisible())
             assert tooltip.height() < 45 and tooltip.width() < 500, tooltip.size().toTuple()
+            # End the synthetic hover before requesting hide: otherwise Qt may
+            # deliver its pending hover-tooltip event during the hide wait.
+            QTest.mouseMove(w.dialog,QPoint(2,2))
             QToolTip.hideText()
             QTest.qWait(350)
             assert not QToolTip.isVisible()

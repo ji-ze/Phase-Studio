@@ -83,7 +83,7 @@ def layout_metrics_figure(self, key: str) -> None:
     legend_gap_pixels = 8.0
     left_pixels = 86.0 if has_data else 70.0
     left = min(0.18, max(0.07, left_pixels / width))
-    bottom = min(0.22, max(0.12, 34.0 / height))
+    bottom = min(0.30, max(0.12, 50.0 / height))
     if has_data:
         top = 1.0 - min(0.08, max(0.035, 10.0 / height))
         if has_legend:
@@ -160,7 +160,7 @@ def render_metrics_tab(
         elif status in {"ERROR", "CANCELLED", "STOPPED"}:
             empty_message = "No workflow metrics available."
         else:
-            empty_message = "Run phasing to display workflow metrics."
+            empty_message = "Metrics will appear as phasing cycles complete."
         ax.set_axis_off()
         ax.text(
             0.5,
@@ -406,13 +406,14 @@ def update_metrics_plot(self) -> None:
     feedback_key = "map_feedback_change"
     feedback_index = self._metrics_tab_keys.index(feedback_key) if feedback_key in self._metrics_tab_keys else -1
     if feedback_index >= 0:
-        feedback_enabled = bool(self._check_value("map_feedback_intensity_enabled"))
+        feedback_enabled = bool(self._check_value("map_feedback_intensity_enabled") or self._check_value("redistribute_overlaps") or any(r.powder_repartition_avg_change_percent is not None or r.intensity_correction_avg_change_percent is not None for r in self.results))
         self.metrics_tabs.setTabVisible(feedback_index, feedback_enabled)
         if feedback_enabled:
             feedback_values = [result.intensity_correction_avg_change_percent for result in self.results]
             self._render_metrics_tab(
                 feedback_key,
-                [("Map Feedback change (%)", feedback_values, False, "#001170", "o", "-")],
+                [("Intensity correction · legacy mean (%)", feedback_values, False, "#001170", "o", "-"),
+                 ("Powder repartitioning · legacy group mean (%)", [r.powder_repartition_avg_change_percent for r in self.results], False, "#44b7ff", "^", "--")],
                 raw=True,
-                raw_ylabel="Mean intensity change (%)",
+                raw_ylabel="Legacy operation-specific change (%) · input cycle",
             )

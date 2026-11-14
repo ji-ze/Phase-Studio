@@ -1,0 +1,14 @@
+{
+  "static_literal_occurrences": 14526,
+  "static_user_facing_candidates": 2036,
+  "runtime_text_observations": 1103,
+  "unique_candidate_texts": 1711,
+  "registered_configuration_settings": 87,
+  "registered_dropdown_options": 52,
+  "runtime_tooltips": 363,
+  "secondary_runtime_control_occurrences": 5,
+  "static_warning_error_candidates": 270,
+  "individually_unverified_static_candidates": 2036,
+  "individually_unverified_registered_settings": 87,
+  "completeness": "NOT certified exhaustive: all Python string literals retained for residual review; runtime branch and external/native text gaps documented"
+}

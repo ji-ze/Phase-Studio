@@ -58,11 +58,11 @@ def check_cancelled():
 def cached_load_result(request):
     from . import app as a
     companion = a.resolve_jana_m90_path(Path(request.jana_text)) if request.jana_text else None
-    files = tuple(source_identity(p) for p in (request.hkl_text,request.jana_text,companion)
+    files = tuple(source_identity(p) for p in (request.hkl_text,request.jana_text,request.ref_text,companion)
                   if p and Path(p).is_file())
     metadata = request.metadata
     crystal = (tuple(metadata.cell.parameters),metadata.spacegroup.xhm(),metadata.source,str(metadata.source_path)) if metadata is not None else None
-    key = (files,request.mode,request.hkl_text,request.jana_text,request.ref_text,request.work_text,request.configured_mode,crystal)
+    key = (files,request.mode,request.hkl_text,request.jana_text,request.ref_text,request.work_text,request.configured_mode,crystal,request.powder_wavelength)
     with _cache_lock:
         if key not in _load_cache:
             result = a._build_uncached_hkl_load_result(request)
@@ -163,10 +163,12 @@ def _read_cached(identity, mode):
     records = []
     rejected = invalid = zeros = 0
     examples = []
+    phase_in_turns=False
     with Path(identity[0]).open(encoding='utf8', errors='replace') as stream:
         for number, line in enumerate(stream, 1):
             if number % 4096 == 0: check_cancelled()
             text = line.strip()
+            if text.startswith('#') and 'phase(turns)' in text:phase_in_turns=True
             if not text or text.startswith(a.COMMENT_PREFIXES):
                 continue
             parts = text.split()
@@ -185,6 +187,9 @@ def _read_cached(identity, mode):
             except ValueError:
                 bad_index = True
             reflection = None if bad_index else a.parse_reflection_line(line,value_col,sigma_col)
+            if reflection is not None and phase_in_turns and reflection.phase is not None:
+                from dataclasses import replace
+                reflection=replace(reflection,phase=reflection.phase*360.)
             if reflection is None:
                 rejected += 1
                 invalid += int(bad_index)
@@ -252,7 +257,8 @@ def build_diagnostics(result, *, observation_kind='unknown', friedel_policy='mer
         orbits = len({key for key,nz in zip(canonical,nonzero) if nz})
     finite = np.isfinite(values)
     good_aux = np.isfinite(auxiliary) & (auxiliary > 0)
-    uncertainty = verified and not powder and not dummy and bool(np.any(good_aux & finite & nonzero))
+    from .reflection_readiness import genuine_uncertainties
+    uncertainty = genuine_uncertainties(mode, raw, verified=verified and not dummy) and not powder
     significance = np.full(len(raw),np.nan)
     if uncertainty:
         ok = good_aux & finite & nonzero

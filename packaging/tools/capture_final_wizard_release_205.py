@@ -191,14 +191,18 @@ with tempfile.TemporaryDirectory() as temporary, patch.object(QScreen, 'availabl
             dialog.close()
             return QDialog.Rejected
 
-        with patch.object(QDialog, 'exec', capture_child):
-            w.validate_hkl_button.click()
-            deadline = time.monotonic() + 8
-            while '14-child-hkl-analysis' not in records:
-                settle()
-                w.backing_window_holder['win']._poll_queue()
-                QTest.qWait(5)
-                assert time.monotonic() < deadline
+        w.validate_hkl_button.click()
+        deadline = time.monotonic() + 8
+        while getattr(w, '_diagnostic_dialog', None) is None:
+            settle()
+            QTest.qWait(5)
+            assert time.monotonic() < deadline
+        diagnostic = w._diagnostic_dialog
+        assert diagnostic.isVisible() and diagnostic.parentWidget() is w.dialog
+        assert QApplication.activeModalWidget() is diagnostic
+        assert w.backing_window_holder['win'] is None
+        capture('14-child-hkl-analysis', diagnostic, w)
+        diagnostic.close()
         stable()
         configured = (w.cycles.value(), w.model.currentText(), w.model_user_picked['value'])
         with patch.object(QDialog, 'exec', capture_child):

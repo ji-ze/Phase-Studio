@@ -123,7 +123,7 @@ class UpdateState:
 
 
 class UpdateNotice(QDialog):
-    def __init__(self, parent, *, release=None, mode='standalone', failed=False, browser=None, error=''):
+    def __init__(self, parent, *, release=None, mode='standalone', failed=False, browser=None, error='', latest_stable=None):
         super().__init__(parent)
         self.setObjectName('phaseStudioUpdateNotice')
         self.setWindowTitle('Phase Studio updates')
@@ -136,7 +136,8 @@ class UpdateNotice(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
         layout.setSpacing(12)
-        title = QLabel('A new Phase Studio version is available' if release else 'Unable to check for updates' if failed else 'Phase Studio is up to date')
+        ahead = bool(latest_stable and parse_version(VERSION) and latest_stable.version < parse_version(VERSION))
+        title = QLabel('A new Phase Studio version is available' if release else 'Unable to check for updates' if failed else 'Development version installed' if ahead else 'Phase Studio is up to date')
         self.title = title
         title.setWordWrap(True)
         title.setStyleSheet('font-weight:600; color:#001170; border-bottom:2px solid #36b5ed; padding-bottom:8px;')
@@ -145,6 +146,7 @@ class UpdateNotice(QDialog):
                    else 'GitHub is temporarily unavailable. Please try again later.' if failed and error in {'service','rate-limit'}
                    else 'GitHub returned incomplete release information. Please try again later.' if failed and error.startswith('metadata')
                    else 'Check your internet connection and try again.' if failed
+                   else f'Installed development version: {VERSION}. Latest published stable: {latest_stable.label}.' if ahead
                    else f'Installed version: {VERSION}. No newer stable release is available.')
         self.message = QLabel(message)
         self.message.setTextFormat(Qt.PlainText)
@@ -189,7 +191,7 @@ class UpdateNotice(QDialog):
         layout.invalidate()
         layout.activate()
         from .ui_branding import apply_safe_dialog_geometry
-        apply_safe_dialog_geometry(self, 500, max(180, layout.sizeHint().height(), layout.totalHeightForWidth(500)))
+        apply_safe_dialog_geometry(self, 500, max(140, layout.sizeHint().height(), layout.totalHeightForWidth(500)))
 
     def _open_release(self):
         self.browser(QUrl(validated_release_url(self.release.url,version=self.release.version)))
@@ -327,7 +329,7 @@ class UpdateService(QObject):
         if release is not None and is_newer(release):
             self._offer(window, mode, release, manual=manual)
         elif manual:
-            self._show(window, mode, failed=bool(result.error),error=result.error)
+            self._show(window, mode, failed=bool(result.error),error=result.error, latest_stable=release)
 
     def _offer(self, window, mode, release, manual=False):
         if not is_newer(release) or not window.isVisible():

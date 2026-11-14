@@ -82,8 +82,8 @@ https://jana.fzu.cz/
 2. Configure the Superflip and EDMA executable paths if necessary.
 3. Choose an input mode.
 4. Select the source of crystallographic metadata.
-5. Use **Validate HKL** to verify the reflection-data interpretation.
-6. Use **Analyze completeness** to inspect resolution-dependent data quality.
+5. Use **View data** to verify the reflection-data interpretation.
+6. Use **Analyze data** to inspect resolution-dependent data quality.
 7. Configure the reconstruction workflow and optional processing steps.
 8. If SharpED is enabled, enter an API token and select a model.
 9. Click **Run phasing**.
@@ -157,26 +157,31 @@ powder repartitioning or suspect-intensity correction in result provenance.
 
 ## Monitoring and diagnostics
 
-### HKL Validation
+### View data
 
-**Validate HKL** checks how the selected reflection file is parsed and reports, among other items:
+**View data** checks how the selected reflection file is parsed and reports, among other items:
 
 - parsed and unique reflection counts,
-- σ(Fobs) availability,
+- actual auxiliary-column semantics (measured uncertainty, FWHM, dummy or absent),
 - phase-value coverage,
 - unit cell and space group,
-- a reflection sample with derived quantities.
+- original parsed records with incremental HKL search, sorting, copy/export and applicable derived quantities.
 
-### HKL Completeness
+### Analyze data
 
-**Analyze completeness** provides:
+**Analyze data** provides:
 
-- completeness vs. `sinθ/λ`,
-- mean `I/σ(I)` vs. `sinθ/λ`,
-- reflection-distribution statistics,
-- `d_min`,
-- the resolution at 98% cumulative completeness,
-- resolution-bin statistics.
+- seven coherent scientific categories, with detailed original diagnostics retained,
+- separate reflection-frequency-versus-resolution and Iobs/Fobs distribution plots,
+- indexed/symmetry-allowed coverage and cumulative counts,
+- genuine-uncertainty signal statistics, explicitly unavailable for FWHM/dummy sigma,
+- separate `d_min`, cumulative ≥98% `d98` and strict 100% `d_full` boundaries,
+- conservatively supported significance cutoffs and provenance-gated external CC1/2 statistics,
+- powder width/overlap diagnostics and read-only group inspection,
+- full-precision shell tables, JSON/CSV exports and interactive PNG/SVG plots.
+
+See [definitions, cutoff rules and capability limits](ABOUT_DATA_ANALYSIS_2_0_7.md).
+Opening either tool does not filter or modify reconstruction inputs.
 
 ### Run monitoring
 
