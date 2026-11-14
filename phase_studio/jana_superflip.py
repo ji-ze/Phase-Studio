@@ -1472,15 +1472,15 @@ class _JanaWorkflowWizard:
 
     @staticmethod
     def _diagnostic_request_key(request):
-        from .hkl_diagnostics import source_identity
+        from phase_studio.hkl_diagnostics import source_identity
         sources = tuple(source_identity(Path(value)) if Path(value).is_file() else value
                         for value in (request.hkl_text, request.jana_text, request.ref_text) if value)
         return request.mode, request.configured_mode, request.powder_wavelength, sources
 
     def _open_input_diagnostic(self, kind):
-        from .error_reporting import build_error_report, show_phase_studio_error
-        from .app import build_hkl_load_result
-        from .hkl_diagnostics import cached_analysis
+        from phase_studio.error_reporting import build_error_report, show_phase_studio_error
+        from phase_studio.app import build_hkl_load_result
+        from phase_studio.hkl_diagnostics import cached_analysis
         from shiboken6 import isValid
         existing = getattr(self, '_diagnostic_dialog', None)
         if existing is not None and isValid(existing) and existing.isVisible():
@@ -1498,15 +1498,15 @@ class _JanaWorkflowWizard:
 
     def _input_diagnostic_failed(self, error):
         import traceback
-        from .error_reporting import build_error_report, show_phase_studio_error
+        from phase_studio.error_reporting import build_error_report, show_phase_studio_error
         self._refresh_input_summary_and_refit()
         show_phase_studio_error(self.dialog, build_error_report(error, subsystem='HKL',
             operation='Wizard input diagnostics', extra_details=''.join(traceback.format_exception(error))))
 
     def _input_diagnostic_ready(self, payload):
         from PySide6.QtCore import Qt
-        from .input_analysis_ui import analyze_data_dialog
-        from .diagnostic_presenter import DiagnosticPresenter
+        from phase_studio.input_analysis_ui import analyze_data_dialog
+        from phase_studio.diagnostic_presenter import DiagnosticPresenter
         from shiboken6 import isValid
         if not isValid(self.dialog) or not self.dialog.isVisible():
             return
@@ -1572,7 +1572,7 @@ class _JanaWorkflowWizard:
         return 0.0
 
     def _scientific_input_issue(self):
-        from .validation_issues import ValidationIssue
+        from phase_studio.validation_issues import ValidationIssue
         if self.inflip_path is None:
             return None
         state = getattr(self, 'input_readiness', 'Loading')
@@ -1582,8 +1582,8 @@ class _JanaWorkflowWizard:
         if self._current_workflow() == WORKFLOW_SUPERFLIP_ONLY:
             return None  # Native original-input launch does not apply the Phase Studio filter.
         result = self.hkl_load_result
-        from .app import validate_reflection_filter_policy, REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
-        from .reflection_readiness import genuine_uncertainties, significance_issue
+        from phase_studio.app import validate_reflection_filter_policy, REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA
+        from phase_studio.reflection_readiness import genuine_uncertainties, significance_issue
         try:
             validate_reflection_filter_policy(result.data_mode, self._observed_filter_threshold())
         except ValueError as error:
@@ -1605,7 +1605,7 @@ class _JanaWorkflowWizard:
         self.feedback_is_powder = is_powder
         self.reflection_type_value.setText("Powder / polycrystalline" if is_powder else "Single crystal" if verified else "Not verified")
         self.reflection_format_value.setText(format_reflection_data_mode(mode) if verified else "Not yet determined")
-        from .reflection_readiness import genuine_uncertainties
+        from phase_studio.reflection_readiness import genuine_uncertainties
         self.feedback_has_uncertainty = genuine_uncertainties(mode, getattr(self, 'input_reflections', ()), verified=verified and mode != REFLECTION_DATA_MODE_AMPLITUDE_DUMMY_SIGMA)
         self.page3_description.setText(
             "FWHM: peak width in degrees 2θ · σ(I) unavailable. FWHM is not measurement uncertainty."
@@ -2206,7 +2206,7 @@ class _JanaWorkflowWizard:
         self.input_loader = InputReadinessLoader(self.dialog)
         self.dialog.finished.connect(lambda _result:self.input_loader.cancel())
         def input_is_current():
-            from .hkl_diagnostics import source_identity
+            from phase_studio.hkl_diagnostics import source_identity
             try:
                 return self.inflip_path is not None and self.input_loader.key[0] == source_identity(self.inflip_path)
             except (OSError, TypeError):
@@ -4173,7 +4173,7 @@ class _JanaWorkflowWizard:
             if not navigating:
                 issue = self._scientific_input_issue()
                 if issue:
-                    from .error_reporting import build_validation_report, ErrorAction
+                    from phase_studio.error_reporting import build_validation_report, ErrorAction
                     def review_reflections():
                         go_to_page1()
                         self.validate_hkl_button.setFocus()

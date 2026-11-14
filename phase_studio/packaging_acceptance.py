@@ -11,6 +11,9 @@ from unittest.mock import patch
 
 
 def run(directory):
+    if os.environ.get('PHASE_STUDIO_INTERACTIVE_GUI_ACCEPTANCE') == '1':
+        from .interactive_gui_acceptance import run as run_interactive
+        return run_interactive(directory)
     if os.environ.get('PHASE_STUDIO_NATIVE_HANDOFF_ACCEPTANCE') == '1':
         from .handoff_acceptance import run as run_handoff
         return run_handoff(directory)
